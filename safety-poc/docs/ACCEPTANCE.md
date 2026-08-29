@@ -1,120 +1,137 @@
-# Offline acceptance contract
+# Safety and readiness acceptance contract
+
+## Core invariants
 
 All items are mandatory:
 
-1. Success path emits exactly: `PREPARED, SEND_ARMED, SENT, ACKED`.
+1. Success path emits exactly `PREPARED, SEND_ARMED, SENT, ACKED`.
 2. One `operation_id` can cause at most one transport invocation.
 3. `DefinitelyNotSent` terminates `FAILED_SAFE`.
 4. Timeout/ambiguous send terminates `UNKNOWN_OUTCOME`.
 5. Accepted send without acknowledgement terminates `UNKNOWN_OUTCOME`.
 6. Crash in `PREPARED` recovers `FAILED_SAFE`, with zero sends.
-7. Crash in `SEND_ARMED` recovers `UNKNOWN_OUTCOME`, with zero automatic retries.
-8. Crash in `SENT` recovers `UNKNOWN_OUTCOME`, with zero automatic retries.
-9. Rate limit blocks before transport invocation.
-10. Real transport remains unimplemented and performs no network I/O.
-11. Test suite prints `OFFLINE_SUITE=PASS`.
-12. A typed boundary request fixes `attempt_number=1`; other values are rejected.
-13. Boundary outcome mapping preserves the existing executor state semantics.
-14. Boundary evidence cannot assert a physical actuator effect.
-15. Duplicate `operation_id` cannot invoke the typed boundary twice.
-16. Static safety scanning covers every Python source module in the package.
+7. Crash in `SEND_ARMED` or `SENT` recovers `UNKNOWN_OUTCOME`, with zero automatic retries.
+8. Rate limit blocks before transport invocation.
+9. Boundary request fixes `attempt_number=1`.
+10. Boundary evidence cannot assert a physical actuator effect.
+11. Duplicate operation ids cannot invoke the boundary twice.
+12. Static safety scanning covers every Python source module in the package.
+13. Protocol acknowledgement is never proof of physical relay movement.
 
-## v0.3
+## v0.3–v0.5 completed offline gates
 
-- canonical eight-file `comelit_vip` source hashes must match the pinned contract;
-- full fixture stack must construct;
-- exactly one synthetic fixture write must map to `ACCEPTED_NO_ACK`;
-- executor state must be `UNKNOWN_OUTCOME`;
-- duplicate operation id must not produce a second write;
-- no network or physical action is permitted.
-
-## v0.4
-
-- research source hash and canonical ViP source hashes must remain pinned;
-- the fixed semantic plan has 9 ordered steps: 1 channel precondition, 6 synthetic writes, 2 optional waits;
-- the canonical channel-open primitive is not executed in v0.4;
-- a complete six-write semantic fixture emission maps to `ACCEPTED_NO_ACK -> UNKNOWN_OUTCOME`;
-- a fault after any partial write maps to `AMBIGUOUS`;
-- a fault before the first write maps to `PROVEN_NOT_SENT`;
-- duplicate operation id cannot execute the semantic plan twice;
-- no credential-bearing payload, network transport, protocol ACK, or physical effect is permitted.
-
-## v0.5 acceptance
-
-- pinned canonical and legacy source hashes must match;
-- six synthetic write steps use one CTPP channel id (`7449`);
+- canonical ViP source hashes are pinned;
+- canonical fixture bridge is offline-only;
+- fixed Door semantic plan contains six synthetic writes and two optional waits;
+- all six v0.5 synthetic writes use one CTPP channel id (`7449`);
 - legacy framing and canonical fixture output are byte-exact equal for all six writes;
-- measured framing delta is 8 bytes;
-- double-framing negative control adds exactly one additional 8-byte header;
-- no real Door payload is present;
-- no canonical channel open is executed;
-- complete fixture reconciliation maps to `UNKNOWN_OUTCOME` through the executor;
-- failure after the third write maps to `AMBIGUOUS`;
-- duplicate `operation_id` does not invoke the reconciliation boundary twice;
-- no network or physical action occurs.
+- framing delta is 8 bytes and the double-framing negative control adds exactly one extra header;
+- no real Door payload, network action or physical effect is part of these releases.
 
-## v0.6 repository acceptance
+## v0.6 completed acceptance
 
-- public-safe collectors contain no secret/capture-content reads or active Comelit probes;
-- qualified `IconaBridgeClient` method selection is mandatory;
-- pinned legacy structure contains exactly six Door writes in order: binary, message, message, binary, message, message;
-- the two binary writes each contain 10 source components and use the opened channel id as ViP request id;
-- structural fingerprints never embed real Door payload values;
-- CTPP model allows at most one open and one close attempt;
-- only a failure before any control/boundary attempt may be `PROVEN_NOT_SENT`;
-- explicit rejected/not-opened control result may fail safe before Door data;
-- ambiguous CTPP open is `AMBIGUOUS -> UNKNOWN_OUTCOME` even when zero Door data frames were emitted;
-- any failure after a Door write is ambiguous;
-- complete synthetic transaction without Door-specific ACK remains `UNKNOWN_OUTCOME`;
-- repository readiness and live-test readiness are separate fail-closed gates;
-- HA contract requires `operation_id`, forbids automatic retry, exposes `UNKNOWN_OUTCOME`, and cannot assert physical Door state;
-- deployment refuses development versions, non-main branches, origin/main divergence, incomplete runtime readiness, or runtime reports for a different Git tree/version.
+Public-safe structural evidence and CT120 runtime gates established:
 
-## v0.6 source/evidence inputs
+- qualified legacy method selection;
+- exactly six Door writes in source order;
+- synthetic byte-oracle reconciliation for all six writes;
+- canonical CTPP open/close fixture reconciliation;
+- full offline transaction with exactly eight fixture writes = two control + six Door data;
+- conservative CTPP-open ambiguity handling;
+- repository readiness separated from live-test readiness;
+- fail-safe HA service contract;
+- Git-tree/version-bound immutable deployment.
 
-Corrected public-safe structural evidence commit `db92d166a5c63aebe6f58b186cb5ab32baea5d96` establishes the pinned structural inputs used by runtime gates.
+Final v0.6.0 runtime evidence was collected on Git tree `66539b16552725943c3a5577640fd327c86e744a`. PR #2 was squash-merged to `main` commit `f01d8c610daf6fe8d8fc9c02200726f684f39145` with that exact tree preserved.
 
-Development-candidate runtime evidence commit `8abec1e5c5dfe8759764fbd59296027039865d21`, from Git tree `7c30d9fd09a991f9a6946537423068991ef3cb25` and version `0.6.0.dev0`, established:
+CT120 immutable deployment completed to:
 
-- repository offline suite PASS (79 tests);
-- canonical capture-based session suite PASS (13 tests);
-- `CTPP_BODY_LAYOUT_RECONCILIATION=PASS` with exactly six legacy synthetic writes and six byte-exact canonical reframes;
-- `CTPP_CONTROL_PLANE_RECONCILIATION=PASS` with exactly two typed control writes and CTPP channel binding `7449`;
-- `FULL_OFFLINE_DOOR_TRANSACTION=PASS` with exactly eight fixture writes = two control + six Door data;
-- `CT120_RUNTIME_GATES=PASS`;
-- `REPOSITORY_READY=true`;
+`/opt/comelit-door-safety-poc/releases/2026-08-29-v0.6.0-f01d8c610daf`
+
+with rollback retained at:
+
+`/opt/comelit-door-safety-poc/releases/2026-08-29-v0.5-eba2900dc82e`.
+
+Staged and promoted offline suites and release-content hashes passed. The deployed release still records:
+
 - `REAL_TRANSPORT_IMPLEMENTED=false`;
 - `LIVE_TEST_READY=false`;
-- no secrets read, network action or physical Door action.
-
-That development evidence proves the implementation path but is not deploy evidence for the final tree.
-
-## v0.6 final CT120/runtime acceptance required
-
-Repository CI must not fabricate CT120 markers. Before PR merge/deploy, `scripts/run_ct120_runtime_gates.sh` must run on the exact final `0.6.0` tree and emit a new public-safe evidence branch containing:
-
-- `RUNTIME_GATE_VERSION=0.6.0`;
-- `CTPP_BODY_LAYOUT_RECONCILIATION=PASS`;
-- `CTPP_CONTROL_PLANE_RECONCILIATION=PASS`;
-- `FULL_OFFLINE_DOOR_TRANSACTION=PASS`;
-- `CT120_RUNTIME_GATES=PASS`;
-- `REPOSITORY_READY=true`;
-- `REAL_TRANSPORT_IMPLEMENTED=false`;
-- `LIVE_TEST_READY=false`;
-- `SECRETS_READ=false`;
-- `NETWORK_ACTION_PERFORMED=false`;
 - `PHYSICAL_DOOR_ACTION=false`.
 
-The evidence `RUNTIME_GATE_TREE_SHA` must equal the final feature-tree SHA. No repository content may change after this final runtime PASS and before merge.
+## P12-A repository acceptance — real transport read-only contract
 
-## v0.6 release/deploy acceptance
+Repository-only P12 work must prove all of the following without a network action:
 
-- package version is exactly `0.6.0`;
-- deployment is permitted only from clean `main == origin/main`;
-- merged `main` tree SHA must equal the final tested runtime tree SHA (squash-merge commit identity may differ, tree content may not);
-- deployed version must equal tested runtime version;
-- release files are produced from `git archive HEAD:safety-poc`, not untracked/ignored working-tree content;
-- staged and promoted releases both pass the offline suite and release-content hashes;
-- v0.5 remains rollback target until v0.6 post-promotion acceptance completes.
+- readiness is split into `REPOSITORY_READY`, `READONLY_TRANSPORT_READY`, and `LIVE_TEST_READY`;
+- `READONLY_TRANSPORT_READY` cannot become true unless repository readiness is already true;
+- `LIVE_TEST_READY` cannot become true unless read-only readiness is already true;
+- fixed read-only application plan is exactly `CONNECT -> AUTHENTICATE -> LOAD_CONFIGURATION -> DISCOVER_TARGETS -> CLOSE`;
+- session-control/query I/O is allowed, but actuator-command capability is forbidden;
+- credential export is forbidden;
+- automatic retry is forbidden;
+- physical-effect assertion is forbidden;
+- a complete read-only session proof becomes false if any actuator attempt, credential emission, automatic retry or physical-effect assertion is observed;
+- no real network backend is introduced during P12-A.
 
-Live transport and physical Door actions are outside v0.6 offline acceptance and require separate later P12/P13 gates.
+Expected repository markers:
+
+- `P12_READONLY_SESSION_CONTRACT_TESTS=PASS`;
+- `P12_READONLY_SOURCE_INVENTORY_TESTS=PASS`;
+- `REAL_TRANSPORT_IMPLEMENTED=false`;
+- `READONLY_TRANSPORT_READY=false`;
+- `ACTUATION_TRANSPORT_IMPLEMENTED=false`;
+- `LIVE_TEST_READY=false`.
+
+## P12-B CT120 source-evidence acceptance — no network
+
+Before implementing a real backend, `scripts/collect_p12_readonly_evidence.sh` must run on CT120 and publish a public-safe evidence branch.
+
+It must inventory only source/runtime metadata for:
+
+- legacy connect/preflight/shutdown/auth/configuration/target-discovery methods;
+- the top-level read-only discovery wrapper;
+- canonical transport/session/channel/application interfaces;
+- selected statically visible timeout values;
+- current immutable release identity;
+- credential-directory metadata only (presence, mode and file count).
+
+Mandatory evidence markers:
+
+- `P12_READONLY_SOURCE_INVENTORY=PASS`;
+- `PUBLIC_SAFE_EVIDENCE=PASS`;
+- `SECRETS_CONTENT_READ=false`;
+- `CREDENTIAL_VALUES_COLLECTED=false`;
+- `REAL_DOOR_PAYLOAD_VALUES_COLLECTED=false`;
+- `ACTIVE_COMELIT_NETWORK_PROBES=false`;
+- `ACTUATOR_COMMAND_ATTEMPTED=false`;
+- `PHYSICAL_DOOR_ACTION=false`.
+
+Literal endpoint values, credential filenames/content, tokens and real Door payload bytes must not be emitted.
+
+## P12-C/D real read-only session acceptance — later explicit stage
+
+Only after P12-B evidence is reviewed may a real network backend/probe be implemented. Its public application surface must remain limited to the fixed five-step read-only plan.
+
+Read-only readiness requires all of:
+
+- `REAL_TRANSPORT_IMPLEMENTED=true`;
+- `REAL_TRANSPORT_READONLY_SESSION_PROOF=PASS`;
+- `READONLY_SCOPE_ENFORCED=PASS`;
+- `TARGET_BINDING_VERIFIED=PASS`;
+- `AUTH_SESSION_LIFETIME_VERIFIED=PASS`;
+- `TIMEOUT_MAPPING_VERIFIED=PASS`;
+- `CREDENTIAL_MATERIAL_EMITTED=false`;
+- `ACTUATOR_COMMAND_ATTEMPTED=false`.
+
+A successful P12 read-only proof still requires `LIVE_TEST_READY=false` unless the independent P13 live-only gates are also satisfied.
+
+## P13 live-only acceptance
+
+A physical Door test is outside P12. It additionally requires:
+
+- `ACTUATION_TRANSPORT_IMPLEMENTED=true` from a separately reviewed implementation;
+- `AUDIT_SINK_VERIFIED=PASS`;
+- `EXPLICIT_LIVE_TEST_APPROVAL=true` from the operator;
+- exact target, one-shot semantics, no automatic retry, timeout handling and abort conditions.
+
+No repository-only commit or read-only probe may set the explicit approval marker on behalf of the operator.
