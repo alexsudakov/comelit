@@ -1,0 +1,7 @@
+=== GIT STATE ===
+REPO_ROOT=/root/comelit-git
+ORIGINAL_BRANCH=feat/v0.6-ctpp-body-layout
+ORIGINAL_HEAD=b0ca76d0a8b463994ec4ca6726f486e1506b2b25
+REMOTE_HOST=github.com
+REMOTE_REPO_PATH=alexsudakov/comelit.git
+WORKTREE_WAS_CLEAN=true

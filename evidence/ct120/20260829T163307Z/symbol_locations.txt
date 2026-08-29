@@ -1,0 +1,19 @@
+=== SYMBOL LOCATIONS ===
+SYMBOL name=open_door kind=async path=/root/comelit-poc/comelit_client.py line=566
+SYMBOL name=connect kind=async path=/root/comelit-poc/comelit_client.py line=78
+SYMBOL name=_create_binary_packet_from_buffers kind=sync path=/root/comelit-poc/comelit_client.py line=168
+SYMBOL name=_write_packet kind=async path=/root/comelit-poc/comelit_client.py line=222
+SYMBOL name=_read_response kind=async path=/root/comelit-poc/comelit_client.py line=228
+SYMBOL name=authenticate kind=async path=/root/comelit-poc/comelit_client.py line=348
+SYMBOL name=_open_door_init kind=async path=/root/comelit-poc/comelit_client.py line=424
+SYMBOL name=open_door kind=async path=/root/comelit-poc/comelit_client.py line=464
+SYMBOL name=create_door_message kind=sync path=/root/comelit-poc/comelit_client.py line=482
+SYMBOL name=authenticate kind=async path=/root/comelit-vip-poc/comelit_vip/application_session.py line=213
+SYMBOL name=close_channel kind=async path=/root/comelit-vip-poc/comelit_vip/application_session.py line=322
+SYMBOL name=recv_event kind=async path=/root/comelit-vip-poc/comelit_vip/channel_session.py line=260
+SYMBOL name=open_channel kind=async path=/root/comelit-vip-poc/comelit_vip/channel_session.py line=271
+SYMBOL name=close_channel kind=async path=/root/comelit-vip-poc/comelit_vip/channel_session.py line=339
+SYMBOL name=send_frame kind=async path=/root/comelit-vip-poc/comelit_vip/vip_session.py line=51
+SOURCE_EXECUTED=false
+SOURCE_LINES_EMITTED=false
+LITERAL_VALUES_EMITTED=false

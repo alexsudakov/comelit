@@ -1,0 +1,7 @@
+=== ARTIFACT METADATA ===
+ARTIFACT path=apk/comelit-arm64.apk bytes=121496968
+ARTIFACT path=apk/comelit-base.apk bytes=144367733
+ARTIFACT path=p2p_rtsp.pcap bytes=1926582
+ARTIFACT path=self_activation.pcap bytes=1762038
+ARTIFACT_CONTENT_READ=false
+CAPTURE_PACKET_CONTENT_READ=false

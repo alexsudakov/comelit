@@ -1,0 +1,23 @@
+=== PASSIVE NETWORK SHAPE ===
+INTERFACE name=bonding_masters state=unknown
+INTERFACE name=eth0 state=up
+INTERFACE name=lo state=unknown
+SOCKET proto=tcp state=LISTEN local_port=25 peer_port=*
+SOCKET proto=tcp state=LISTEN local_port=18081 peer_port=*
+SOCKET proto=tcp state=LISTEN local_port=39759 peer_port=*
+SOCKET proto=tcp state=LISTEN local_port=53 peer_port=*
+SOCKET proto=tcp state=LISTEN local_port=22 peer_port=*
+SOCKET proto=tcp state=LISTEN local_port=53 peer_port=*
+SOCKET proto=tcp state=LISTEN local_port=11434 peer_port=*
+SOCKET proto=tcp state=LISTEN local_port=8090 peer_port=*
+SOCKET proto=tcp state=LISTEN local_port=22 peer_port=*
+SOCKET proto=tcp state=LISTEN local_port=25 peer_port=*
+SOCKET proto=udp state=UNCONN local_port=53 peer_port=*
+SOCKET proto=udp state=UNCONN local_port=53 peer_port=*
+SOCKET proto=udp state=UNCONN local_port=68 peer_port=*
+SOCKET proto=udp state=UNCONN local_port=39759 peer_port=*
+IPV4_DEFAULT_ROUTE_COUNT=1
+IP_ADDRESSES_EMITTED=false
+MAC_ADDRESSES_EMITTED=false
+ACTIVE_NETWORK_PROBES=false
+PASSIVE_NETWORK_SHAPE=PASS

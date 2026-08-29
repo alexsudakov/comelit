@@ -1,0 +1,598 @@
+=== SAFE SOURCE TOPOLOGY ===
+SOURCE_EXECUTED=false
+LITERAL_VALUES_PRINTED=false
+SECRETS_READ=false
+NETWORK_ACTION_PERFORMED=false
+PHYSICAL_DOOR_ACTION=false
+
+=== FILE /root/comelit-poc/comelit_client.py ===
+SHA256=03ea7d012587d8751eddfd5fa531d244abddc047c3a69d8ce27986c1e2768d42
+BYTES=23175
+LINES=597
+IMPORT_ROOTS=asyncio,dataclasses,enum,json,logging,struct,subprocess,typing
+CLASS_COUNT=5
+FUNCTION_COUNT=21
+SOURCE_EXECUTED=false
+LITERAL_VALUES_PRINTED=false
+CLASS line=18 name=MessageType bases=IntEnum
+CLASS line=28 name=ViperChannelType bases=IntEnum
+CLASS line=39 name=Channel bases=-
+CLASS line=51 name=ChannelData bases=-
+CLASS line=59 name=IconaBridgeClient bases=-
+FUNCTION line=62 kind=sync name=__init__ args=self:none,host:str,port:int,logger:BinOp returns=none
+FUNCTION line=78 kind=async name=connect args=self:none returns=none
+FUNCTION line=124 kind=async name=_test_nc_connection args=self:none returns=bool
+FUNCTION line=136 kind=async name=shutdown args=self:none returns=none
+FUNCTION line=143 kind=sync name=_create_header args=self:none,body_length:int,request_id:int returns=bytes
+FUNCTION line=161 kind=sync name=_create_json_packet args=self:none,request_id:int,data:dict returns=bytes
+FUNCTION line=168 kind=sync name=_create_binary_packet_from_buffers args=self:none,request_id:int,*buffers:bytes returns=bytes
+FUNCTION line=176 kind=sync name=_create_command_packet args=self:none,request_id:int,seq:int,msg_type:int,channel:BinOp,additional_data:BinOp returns=bytes
+FUNCTION line=222 kind=async name=_write_packet args=self:none,packet:bytes returns=none
+FUNCTION line=228 kind=async name=_read_response args=self:none returns=BinOp
+FUNCTION line=302 kind=async name=_open_channel args=self:none,channel:str,additional_data:BinOp returns=ChannelData
+FUNCTION line=333 kind=async name=_close_channel args=self:none,channel_data:ChannelData returns=bool
+FUNCTION line=348 kind=async name=authenticate args=self:none,token:str returns=int
+FUNCTION line=382 kind=async name=get_config args=self:none,addressbooks:str returns=BinOp
+FUNCTION line=406 kind=async name=list_doors args=self:none returns=list[...]
+FUNCTION line=417 kind=sync name=_string_to_buffer args=self:none,s:str,null_terminated:bool returns=bytes
+FUNCTION line=424 kind=async name=_open_door_init args=self:none,vip:dict returns=none
+FUNCTION line=464 kind=async name=open_door args=self:none,vip:dict,door_item:dict returns=none
+FUNCTION line=482 kind=sync name=create_door_message args=confirm:bool returns=bytes
+FUNCTION line=552 kind=async name=list_doors args=host:str,token:str returns=list[...]
+FUNCTION line=566 kind=async name=open_door args=host:str,token:str,door_name:str returns=bool
+CALL name=Call.get count=2
+CALL name=Call.time count=1
+CALL name=ChannelData count=1
+CALL name=ConnectionError count=3
+CALL name=Constant.join count=2
+CALL name=Dict.get count=1
+CALL name=Exception count=5
+CALL name=IconaBridgeClient count=2
+CALL name=Subscript.get count=2
+CALL name=additional_data.encode count=1
+CALL name=asyncio.get_event_loop count=1
+CALL name=asyncio.open_connection count=1
+CALL name=asyncio.wait_for count=5
+CALL name=body.decode count=1
+CALL name=body.hex count=1
+CALL name=bytearray count=1
+CALL name=bytes count=15
+CALL name=channel.encode count=1
+CALL name=client.authenticate count=2
+CALL name=client.connect count=2
+CALL name=client.get_config count=1
+CALL name=client.list_doors count=1
+CALL name=client.open_door count=1
+CALL name=client.shutdown count=2
+CALL name=create_door_message count=4
+CALL name=d.get count=2
+CALL name=door_item.get count=1
+CALL name=hasattr count=1
+CALL name=int count=2
+CALL name=json.dumps count=1
+CALL name=json.loads count=1
+CALL name=json_str.encode count=1
+CALL name=len count=7
+CALL name=logging.getLogger count=1
+CALL name=next count=1
+CALL name=packet.hex count=1
+CALL name=s.encode count=1
+CALL name=self._close_channel count=4
+CALL name=self._create_binary_packet_from_buffers count=3
+CALL name=self._create_command_packet count=2
+CALL name=self._create_header count=3
+CALL name=self._create_json_packet count=2
+CALL name=self._open_channel count=3
+CALL name=self._open_door_init count=1
+CALL name=self._read_response count=8
+CALL name=self._string_to_buffer count=8
+CALL name=self._test_nc_connection count=1
+CALL name=self._write_packet count=10
+CALL name=self.get_config count=1
+CALL name=self.logger.debug count=4
+CALL name=self.logger.error count=5
+CALL name=self.logger.info count=4
+CALL name=self.logger.warning count=3
+CALL name=self.reader.readexactly count=2
+CALL name=self.writer.close count=1
+CALL name=self.writer.drain count=1
+CALL name=self.writer.wait_closed count=1
+CALL name=self.writer.write count=1
+CALL name=str count=1
+CALL name=struct.pack count=7
+CALL name=struct.unpack count=5
+CALL name=subprocess.run count=1
+CALL name=vip.get count=2
+LITERAL_SHAPE type=bool count=19
+LITERAL_SHAPE type=bytes(len=0) count=1
+LITERAL_SHAPE type=bytes(len=1) count=1
+LITERAL_SHAPE type=bytes(len=2) count=2
+LITERAL_SHAPE type=float count=5
+LITERAL_SHAPE type=int count=116
+LITERAL_SHAPE type=none count=18
+LITERAL_SHAPE type=str(utf8_len=0) count=1
+LITERAL_SHAPE type=str(utf8_len=1) count=13
+LITERAL_SHAPE type=str(utf8_len=10) count=13
+LITERAL_SHAPE type=str(utf8_len=11) count=9
+LITERAL_SHAPE type=str(utf8_len=12) count=8
+LITERAL_SHAPE type=str(utf8_len=13) count=4
+LITERAL_SHAPE type=str(utf8_len=14) count=2
+LITERAL_SHAPE type=str(utf8_len=15) count=3
+LITERAL_SHAPE type=str(utf8_len=162) count=1
+LITERAL_SHAPE type=str(utf8_len=17) count=2
+LITERAL_SHAPE type=str(utf8_len=19) count=1
+LITERAL_SHAPE type=str(utf8_len=2) count=17
+LITERAL_SHAPE type=str(utf8_len=20) count=1
+LITERAL_SHAPE type=str(utf8_len=21) count=4
+LITERAL_SHAPE type=str(utf8_len=22) count=2
+LITERAL_SHAPE type=str(utf8_len=23) count=3
+LITERAL_SHAPE type=str(utf8_len=239) count=1
+LITERAL_SHAPE type=str(utf8_len=24) count=2
+LITERAL_SHAPE type=str(utf8_len=25) count=1
+LITERAL_SHAPE type=str(utf8_len=255) count=1
+LITERAL_SHAPE type=str(utf8_len=264) count=1
+LITERAL_SHAPE type=str(utf8_len=27) count=2
+LITERAL_SHAPE type=str(utf8_len=28) count=4
+LITERAL_SHAPE type=str(utf8_len=29) count=1
+LITERAL_SHAPE type=str(utf8_len=3) count=8
+LITERAL_SHAPE type=str(utf8_len=30) count=1
+LITERAL_SHAPE type=str(utf8_len=32) count=2
+LITERAL_SHAPE type=str(utf8_len=33) count=1
+LITERAL_SHAPE type=str(utf8_len=34) count=1
+LITERAL_SHAPE type=str(utf8_len=36) count=2
+LITERAL_SHAPE type=str(utf8_len=392) count=1
+LITERAL_SHAPE type=str(utf8_len=4) count=32
+LITERAL_SHAPE type=str(utf8_len=41) count=1
+LITERAL_SHAPE type=str(utf8_len=43) count=1
+LITERAL_SHAPE type=str(utf8_len=46) count=1
+LITERAL_SHAPE type=str(utf8_len=5) count=7
+LITERAL_SHAPE type=str(utf8_len=52) count=2
+LITERAL_SHAPE type=str(utf8_len=54) count=1
+LITERAL_SHAPE type=str(utf8_len=59) count=2
+LITERAL_SHAPE type=str(utf8_len=6) count=7
+LITERAL_SHAPE type=str(utf8_len=7) count=6
+LITERAL_SHAPE type=str(utf8_len=71) count=1
+LITERAL_SHAPE type=str(utf8_len=8) count=8
+LITERAL_SHAPE type=str(utf8_len=83) count=1
+LITERAL_SHAPE type=str(utf8_len=88) count=1
+LITERAL_SHAPE type=str(utf8_len=9) count=1
+TOP_CONSTANT COMMAND:int
+TOP_CONSTANT CSPB:int
+TOP_CONSTANT CSPB:str(utf8_len=4)
+TOP_CONSTANT CTPP:int
+TOP_CONSTANT CTPP:str(utf8_len=4)
+TOP_CONSTANT END:int
+TOP_CONSTANT HEADER_MAGIC:bytes(len=2)
+TOP_CONSTANT HEADER_SIZE:int
+TOP_CONSTANT ICONA_BRIDGE_PORT:int
+TOP_CONSTANT INFO:str(utf8_len=4)
+TOP_CONSTANT NULL:bytes(len=1)
+TOP_CONSTANT OPEN_DOOR:int
+TOP_CONSTANT OPEN_DOOR_CONFIRM:int
+TOP_CONSTANT OPEN_DOOR_INIT:int
+TOP_CONSTANT PUSH:int
+TOP_CONSTANT PUSH:str(utf8_len=4)
+TOP_CONSTANT SERVER_INFO:int
+TOP_CONSTANT UAUT:int
+TOP_CONSTANT UAUT:str(utf8_len=4)
+TOP_CONSTANT UCFG:int
+TOP_CONSTANT UCFG:str(utf8_len=4)
+STRUCT_PACK line=154 literal_format_len=2 value_argc=1
+STRUCT_PACK line=157 literal_format_len=2 value_argc=1
+STRUCT_PACK line=186 literal_format_len=3 value_argc=2
+STRUCT_PACK line=202 literal_format_len=2 value_argc=1
+STRUCT_PACK line=206 literal_format_len=2 value_argc=1
+STRUCT_PACK line=214 literal_format_len=2 value_argc=1
+STRUCT_PACK line=489 literal_format_len=2 value_argc=1
+
+=== FILE /root/comelit-vip-poc/comelit_vip/application_session.py ===
+SHA256=7c30aab9bd03917e0e84fb9b31f924f95eabeb8edd6a1fe74d4e4f012c2145fd
+BYTES=7362
+LINES=329
+IMPORT_ROOTS=__future__,channel_session,collections,dataclasses,json,typing,vip_codec
+CLASS_COUNT=3
+FUNCTION_COUNT=11
+SOURCE_EXECUTED=false
+LITERAL_VALUES_PRINTED=false
+CLASS line=20 name=ApplicationSessionError bases=RuntimeError
+CLASS line=25 name=JsonChannelResponse bases=-
+CLASS line=35 name=VipApplicationSession bases=-
+FUNCTION line=36 kind=sync name=__init__ args=self:none,channels:VipChannelSession returns=Constant
+FUNCTION line=45 kind=sync name=pending_events args=self:none returns=int
+FUNCTION line=50 kind=async name=_recv_new_event args=self:none returns=ChannelEvent
+FUNCTION line=55 kind=sync name=_decode_matching_json args=self:none,event:ChannelEvent,channel_id:int,expected_message:str returns=BinOp
+FUNCTION line=126 kind=sync name=_take_pending_match args=self:none,channel_id:int,expected_message:str returns=BinOp
+FUNCTION line=165 kind=async name=_wait_json_response args=self:none,channel_id:int,expected_message:str returns=JsonChannelResponse
+FUNCTION line=195 kind=async name=_send_json_line args=self:none,request_id:int,data:dict[...] returns=Constant
+FUNCTION line=213 kind=async name=authenticate args=self:none,token:str,message_id:int,channel_id:BinOp returns=JsonChannelResponse
+FUNCTION line=265 kind=async name=open_ucfg args=self:none,channel_id:BinOp returns=ChannelState
+FUNCTION line=276 kind=async name=get_configuration args=self:none,channel:ChannelState,message_id:int,addressbooks:str returns=JsonChannelResponse
+FUNCTION line=322 kind=async name=close_channel args=self:none,channel:ChannelState returns=none
+CALL name=ApplicationSessionError count=2
+CALL name=Call.encode count=1
+CALL name=JsonChannelResponse count=1
+CALL name=TypeError count=3
+CALL name=dataclass count=1
+CALL name=decode_json_body count=1
+CALL name=deque count=2
+CALL name=field count=1
+CALL name=isinstance count=7
+CALL name=json.dumps count=1
+CALL name=len count=1
+CALL name=obj.get count=3
+CALL name=retained.append count=1
+CALL name=self._decode_matching_json count=2
+CALL name=self._pending_events.append count=1
+CALL name=self._pending_events.popleft count=1
+CALL name=self._recv_new_event count=1
+CALL name=self._send_json_line count=2
+CALL name=self._take_pending_match count=1
+CALL name=self._wait_json_response count=2
+CALL name=self.channels.close_channel count=2
+CALL name=self.channels.get_channel count=1
+CALL name=self.channels.open_channel count=2
+CALL name=self.channels.recv_event count=1
+CALL name=self.channels.session.send_frame count=1
+LITERAL_SHAPE type=bool count=3
+LITERAL_SHAPE type=bytes(len=1) count=1
+LITERAL_SHAPE type=int count=2
+LITERAL_SHAPE type=none count=26
+LITERAL_SHAPE type=str(utf8_len=1) count=2
+LITERAL_SHAPE type=str(utf8_len=10) count=3
+LITERAL_SHAPE type=str(utf8_len=12) count=4
+LITERAL_SHAPE type=str(utf8_len=13) count=1
+LITERAL_SHAPE type=str(utf8_len=17) count=3
+LITERAL_SHAPE type=str(utf8_len=19) count=1
+LITERAL_SHAPE type=str(utf8_len=22) count=2
+LITERAL_SHAPE type=str(utf8_len=26) count=1
+LITERAL_SHAPE type=str(utf8_len=3) count=1
+LITERAL_SHAPE type=str(utf8_len=4) count=3
+LITERAL_SHAPE type=str(utf8_len=5) count=1
+LITERAL_SHAPE type=str(utf8_len=6) count=2
+LITERAL_SHAPE type=str(utf8_len=7) count=5
+LITERAL_SHAPE type=str(utf8_len=8) count=1
+
+=== FILE /root/comelit-vip-poc/comelit_vip/channel_session.py ===
+SHA256=b34d87c382ea601d96761f59a31e62aa2d1e959ea9c24e99a63964e1c033e1d1
+BYTES=8720
+LINES=388
+IMPORT_ROOTS=__future__,collections,control_codec,dataclasses,typing,vip_codec,vip_session
+CLASS_COUNT=6
+FUNCTION_COUNT=13
+SOURCE_EXECUTED=false
+LITERAL_VALUES_PRINTED=false
+CLASS line=21 name=ChannelSessionError bases=RuntimeError
+CLASS line=26 name=ChannelState bases=-
+CLASS line=35 name=PeerOpenEvent bases=-
+CLASS line=40 name=PeerCloseEvent bases=-
+CLASS line=46 name=DataFrameEvent bases=-
+CLASS line=59 name=VipChannelSession bases=-
+FUNCTION line=60 kind=sync name=__init__ args=self:none,session:VipSession,next_channel_id:int,ack_response_word:int returns=Constant
+FUNCTION line=95 kind=sync name=channels args=self:none returns=tuple[...]
+FUNCTION line=103 kind=sync name=pending_events args=self:none returns=int
+FUNCTION line=108 kind=sync name=get_channel args=self:none,channel_id:int returns=BinOp
+FUNCTION line=116 kind=sync name=allocate_channel_id args=self:none returns=int
+FUNCTION line=142 kind=async name=_send_control args=self:none,message:ControlMessage returns=Constant
+FUNCTION line=155 kind=async name=_ack_peer_open args=self:none,request:OpenChannelRequest returns=ChannelState
+FUNCTION line=190 kind=async name=_ack_peer_close args=self:none,request:CloseChannelRequest returns=PeerCloseEvent
+FUNCTION line=220 kind=async name=_recv_event_raw args=self:none returns=ChannelEvent
+FUNCTION line=260 kind=async name=recv_event args=self:none returns=ChannelEvent
+FUNCTION line=271 kind=async name=open_channel args=self:none,channel_name:str,channel_flag:int,extension:BinOp,channel_id:BinOp returns=ChannelState
+FUNCTION line=339 kind=async name=close_channel args=self:none,channel_id:int returns=CloseChannelResponse
+FUNCTION line=386 kind=async name=close args=self:none returns=Constant
+CALL name=ChannelSessionError count=4
+CALL name=ChannelState count=2
+CALL name=CloseChannelRequest count=1
+CALL name=CloseChannelResponse count=1
+CALL name=DataFrameEvent count=1
+CALL name=OpenChannelRequest count=1
+CALL name=OpenChannelResponse count=1
+CALL name=PeerCloseEvent count=1
+CALL name=PeerOpenEvent count=1
+CALL name=ValueError count=2
+CALL name=dataclass count=4
+CALL name=decode_control_body count=1
+CALL name=deque count=1
+CALL name=encode_control_message count=1
+CALL name=isinstance count=4
+CALL name=len count=1
+CALL name=self._ack_peer_close count=1
+CALL name=self._ack_peer_open count=1
+CALL name=self._channels.get count=1
+CALL name=self._channels.pop count=2
+CALL name=self._channels.values count=1
+CALL name=self._pending_events.append count=2
+CALL name=self._pending_events.popleft count=1
+CALL name=self._recv_event_raw count=3
+CALL name=self._send_control count=4
+CALL name=self.allocate_channel_id count=1
+CALL name=self.session.close count=1
+CALL name=self.session.recv_frame count=1
+CALL name=self.session.send_frame count=1
+CALL name=tuple count=1
+LITERAL_SHAPE type=bool count=7
+LITERAL_SHAPE type=ellipsis count=1
+LITERAL_SHAPE type=int count=12
+LITERAL_SHAPE type=none count=14
+LITERAL_SHAPE type=str(utf8_len=11) count=2
+LITERAL_SHAPE type=str(utf8_len=14) count=1
+LITERAL_SHAPE type=str(utf8_len=15) count=2
+LITERAL_SHAPE type=str(utf8_len=24) count=1
+LITERAL_SHAPE type=str(utf8_len=35) count=2
+LITERAL_SHAPE type=str(utf8_len=37) count=1
+LITERAL_SHAPE type=str(utf8_len=4) count=1
+LITERAL_SHAPE type=str(utf8_len=5) count=1
+
+=== FILE /root/comelit-vip-poc/comelit_vip/control_codec.py ===
+SHA256=e89e3fe20b24ef2f22ceaa15b186b4db7f71f5f48c7f5aeaf6a07f38bea854a2
+BYTES=10587
+LINES=531
+IMPORT_ROOTS=__future__,dataclasses,struct,typing
+CLASS_COUNT=7
+FUNCTION_COUNT=10
+SOURCE_EXECUTED=false
+LITERAL_VALUES_PRINTED=false
+CLASS line=17 name=ControlProtocolError bases=RuntimeError
+CLASS line=22 name=OpenRequestExtension bases=-
+CLASS line=28 name=OpenResponseExtension bases=-
+CLASS line=33 name=OpenChannelRequest bases=-
+CLASS line=41 name=OpenChannelResponse bases=-
+CLASS line=48 name=CloseChannelRequest bases=-
+CLASS line=53 name=CloseChannelResponse bases=-
+FUNCTION line=66 kind=sync name=_validate_u8 args=value:int,name:str returns=Constant
+FUNCTION line=76 kind=sync name=_validate_u16 args=value:int,name:str returns=Constant
+FUNCTION line=86 kind=sync name=_pack_header args=message_type:int,sequence:int,primary_length:int returns=bytes
+FUNCTION line=99 kind=sync name=_decode_envelope args=body:bytes returns=tuple[...]
+FUNCTION line=142 kind=sync name=_decode_open_request args=primary:bytes,extension:bytes returns=OpenChannelRequest
+FUNCTION line=204 kind=sync name=_decode_open_response args=primary:bytes,extension:bytes returns=OpenChannelResponse
+FUNCTION line=251 kind=sync name=_decode_close_request args=primary:bytes,extension:bytes returns=CloseChannelRequest
+FUNCTION line=275 kind=sync name=_decode_close_response args=primary:bytes,extension:bytes returns=CloseChannelResponse
+FUNCTION line=302 kind=sync name=decode_control_body args=body:bytes returns=ControlMessage
+FUNCTION line=355 kind=sync name=encode_control_message args=message:ControlMessage returns=bytes
+CALL name=CloseChannelRequest count=1
+CALL name=CloseChannelResponse count=1
+CALL name=ControlProtocolError count=14
+CALL name=OpenChannelRequest count=1
+CALL name=OpenChannelResponse count=1
+CALL name=OpenRequestExtension count=1
+CALL name=OpenResponseExtension count=1
+CALL name=TypeError count=1
+CALL name=ValueError count=4
+CALL name=_decode_close_request count=1
+CALL name=_decode_close_response count=1
+CALL name=_decode_envelope count=1
+CALL name=_decode_open_request count=1
+CALL name=_decode_open_response count=1
+CALL name=_pack_header count=4
+CALL name=_validate_u16 count=6
+CALL name=_validate_u8 count=2
+CALL name=bytes count=6
+CALL name=dataclass count=6
+CALL name=field count=2
+CALL name=isinstance count=4
+CALL name=len count=17
+CALL name=message.channel_name.encode count=1
+CALL name=raw_name.decode count=1
+CALL name=struct.pack count=7
+CALL name=struct.unpack count=7
+LITERAL_SHAPE type=bool count=8
+LITERAL_SHAPE type=bytes(len=0) count=2
+LITERAL_SHAPE type=int count=35
+LITERAL_SHAPE type=none count=10
+LITERAL_SHAPE type=str(utf8_len=10) count=5
+LITERAL_SHAPE type=str(utf8_len=12) count=1
+LITERAL_SHAPE type=str(utf8_len=13) count=3
+LITERAL_SHAPE type=str(utf8_len=19) count=1
+LITERAL_SHAPE type=str(utf8_len=2) count=8
+LITERAL_SHAPE type=str(utf8_len=20) count=1
+LITERAL_SHAPE type=str(utf8_len=26) count=1
+LITERAL_SHAPE type=str(utf8_len=3) count=5
+LITERAL_SHAPE type=str(utf8_len=32) count=1
+LITERAL_SHAPE type=str(utf8_len=33) count=1
+LITERAL_SHAPE type=str(utf8_len=34) count=2
+LITERAL_SHAPE type=str(utf8_len=35) count=2
+LITERAL_SHAPE type=str(utf8_len=37) count=2
+LITERAL_SHAPE type=str(utf8_len=38) count=4
+LITERAL_SHAPE type=str(utf8_len=39) count=2
+LITERAL_SHAPE type=str(utf8_len=4) count=2
+LITERAL_SHAPE type=str(utf8_len=41) count=1
+LITERAL_SHAPE type=str(utf8_len=46) count=1
+LITERAL_SHAPE type=str(utf8_len=5) count=2
+TOP_CONSTANT COMMAND:int
+TOP_CONSTANT END:int
+TOP_CONSTANT SEQ_CLOSE_REQUEST:int
+TOP_CONSTANT SEQ_CLOSE_RESPONSE:int
+TOP_CONSTANT SEQ_OPEN_REQUEST:int
+TOP_CONSTANT SEQ_OPEN_RESPONSE:int
+STRUCT_PACK line=91 literal_format_len=4 value_argc=3
+STRUCT_PACK line=445 literal_format_len=3 value_argc=2
+STRUCT_PACK line=485 literal_format_len=2 value_argc=1
+STRUCT_PACK line=513 literal_format_len=3 value_argc=2
+STRUCT_PACK line=389 literal_format_len=2 value_argc=1
+STRUCT_PACK line=459 literal_format_len=2 value_argc=1
+STRUCT_PACK line=414 literal_format_len=2 value_argc=1
+
+=== FILE /root/comelit-vip-poc/comelit_vip/fixture_transport.py ===
+SHA256=5a4ee43dcb934512728c3cae899bceb56e651a5908699338aa8d3de2064a34d2
+BYTES=2403
+LINES=117
+IMPORT_ROOTS=__future__,collections,typing
+CLASS_COUNT=1
+FUNCTION_COUNT=8
+SOURCE_EXECUTED=false
+LITERAL_VALUES_PRINTED=false
+CLASS line=7 name=FixtureTransport bases=-
+FUNCTION line=8 kind=sync name=__init__ args=self:none,inbound:bytes,chunk_sizes:BinOp returns=Constant
+FUNCTION line=28 kind=sync name=pending_inbound_bytes args=self:none returns=int
+FUNCTION line=32 kind=sync name=writes args=self:none returns=tuple[...]
+FUNCTION line=36 kind=sync name=written_bytes args=self:none returns=bytes
+FUNCTION line=39 kind=sync name=append_inbound args=self:none,data:bytes returns=Constant
+FUNCTION line=50 kind=async name=read args=self:none,max_bytes:int returns=bytes
+FUNCTION line=94 kind=async name=write args=self:none,data:bytes returns=Constant
+FUNCTION line=115 kind=async name=close args=self:none returns=Constant
+CALL name=Constant.join count=1
+CALL name=RuntimeError count=2
+CALL name=TypeError count=1
+CALL name=ValueError count=2
+CALL name=bytearray count=1
+CALL name=bytes count=2
+CALL name=deque count=1
+CALL name=int count=1
+CALL name=isinstance count=1
+CALL name=len count=3
+CALL name=min count=2
+CALL name=self._chunk_sizes.popleft count=1
+CALL name=self._inbound.extend count=1
+CALL name=self._writes.append count=1
+CALL name=tuple count=1
+LITERAL_SHAPE type=bool count=2
+LITERAL_SHAPE type=bytes(len=0) count=4
+LITERAL_SHAPE type=ellipsis count=1
+LITERAL_SHAPE type=int count=3
+LITERAL_SHAPE type=none count=6
+LITERAL_SHAPE type=str(utf8_len=19) count=2
+LITERAL_SHAPE type=str(utf8_len=23) count=1
+LITERAL_SHAPE type=str(utf8_len=26) count=1
+LITERAL_SHAPE type=str(utf8_len=27) count=1
+
+=== FILE /root/comelit-vip-poc/comelit_vip/transport.py ===
+SHA256=21ce339f15d44216baecdeefa19490a5d5632f689155d628b76d4abb7872a0d4
+BYTES=321
+LINES=21
+IMPORT_ROOTS=__future__,typing
+CLASS_COUNT=1
+FUNCTION_COUNT=3
+SOURCE_EXECUTED=false
+LITERAL_VALUES_PRINTED=false
+CLASS line=6 name=VipTransport bases=Protocol
+FUNCTION line=7 kind=async name=read args=self:none,max_bytes:int returns=bytes
+FUNCTION line=13 kind=async name=write args=self:none,data:bytes returns=Constant
+FUNCTION line=19 kind=async name=close args=self:none returns=Constant
+LITERAL_SHAPE type=ellipsis count=3
+LITERAL_SHAPE type=int count=1
+LITERAL_SHAPE type=none count=2
+
+=== FILE /root/comelit-vip-poc/comelit_vip/vip_codec.py ===
+SHA256=4ebf41833977e198b1ef94f4aace37f86dad9fbaec08c716242b9ee40437859a
+BYTES=6162
+LINES=269
+IMPORT_ROOTS=__future__,dataclasses,json,struct,typing
+CLASS_COUNT=3
+FUNCTION_COUNT=12
+SOURCE_EXECUTED=false
+LITERAL_VALUES_PRINTED=false
+CLASS line=14 name=VipProtocolError bases=RuntimeError
+CLASS line=19 name=VipFrame bases=-
+CLASS line=88 name=VipStreamDecoder bases=-
+FUNCTION line=24 kind=sync name=body_length args=self:none returns=int
+FUNCTION line=27 kind=sync name=__repr__ args=self:none returns=str
+FUNCTION line=36 kind=sync name=encode_frame args=request_id:int,body:bytes returns=bytes
+FUNCTION line=61 kind=sync name=decode_json_body args=body:bytes returns=BinOp
+FUNCTION line=99 kind=sync name=__init__ args=self:none,sync_on_first_frame:bool returns=Constant
+FUNCTION line=109 kind=sync name=synced args=self:none returns=bool
+FUNCTION line=113 kind=sync name=discarded_prefix args=self:none returns=int
+FUNCTION line=117 kind=sync name=buffered_bytes args=self:none returns=int
+FUNCTION line=120 kind=sync name=_find_initial_candidate args=self:none returns=BinOp
+FUNCTION line=140 kind=sync name=_discard_unsynchronised_prefix args=self:none returns=bool
+FUNCTION line=172 kind=sync name=feed args=self:none,data:bytes returns=list[...]
+FUNCTION line=258 kind=sync name=finish args=self:none returns=Constant
+CALL name=TypeError count=2
+CALL name=ValueError count=2
+CALL name=VipFrame count=1
+CALL name=VipProtocolError count=4
+CALL name=body.decode count=1
+CALL name=bytearray count=1
+CALL name=bytes count=2
+CALL name=dataclass count=1
+CALL name=field count=1
+CALL name=frames.append count=1
+CALL name=isinstance count=3
+CALL name=json.loads count=1
+CALL name=len count=13
+CALL name=max count=1
+CALL name=min count=1
+CALL name=range count=1
+CALL name=self._buffer.extend count=1
+CALL name=self._discard_unsynchronised_prefix count=1
+CALL name=self._find_initial_candidate count=1
+CALL name=struct.pack count=2
+CALL name=struct.unpack count=2
+CALL name=text.endswith count=1
+CALL name=text.startswith count=1
+CALL name=text.strip count=1
+LITERAL_SHAPE type=bool count=8
+LITERAL_SHAPE type=bytes(len=2) count=4
+LITERAL_SHAPE type=int count=23
+LITERAL_SHAPE type=none count=10
+LITERAL_SHAPE type=str(utf8_len=1) count=3
+LITERAL_SHAPE type=str(utf8_len=14) count=1
+LITERAL_SHAPE type=str(utf8_len=17) count=1
+LITERAL_SHAPE type=str(utf8_len=18) count=1
+LITERAL_SHAPE type=str(utf8_len=2) count=4
+LITERAL_SHAPE type=str(utf8_len=20) count=1
+LITERAL_SHAPE type=str(utf8_len=23) count=2
+LITERAL_SHAPE type=str(utf8_len=26) count=1
+LITERAL_SHAPE type=str(utf8_len=27) count=1
+LITERAL_SHAPE type=str(utf8_len=299) count=1
+LITERAL_SHAPE type=str(utf8_len=30) count=1
+LITERAL_SHAPE type=str(utf8_len=39) count=1
+LITERAL_SHAPE type=str(utf8_len=40) count=1
+LITERAL_SHAPE type=str(utf8_len=5) count=1
+TOP_CONSTANT HEADER_SIZE:int
+TOP_CONSTANT MAGIC:bytes(len=2)
+TOP_CONSTANT MAX_BODY_LENGTH:int
+STRUCT_PACK line=54 literal_format_len=2 value_argc=1
+STRUCT_PACK line=53 literal_format_len=2 value_argc=1
+
+=== FILE /root/comelit-vip-poc/comelit_vip/vip_session.py ===
+SHA256=35b604372e9bd42a6631d0c923ac99d49e02e4b7c8892360633eedc23425dc39
+BYTES=2755
+LINES=136
+IMPORT_ROOTS=__future__,collections,json,transport,typing,vip_codec
+CLASS_COUNT=1
+FUNCTION_COUNT=8
+SOURCE_EXECUTED=false
+LITERAL_VALUES_PRINTED=false
+CLASS line=17 name=VipSession bases=-
+FUNCTION line=18 kind=sync name=__init__ args=self:none,transport:VipTransport,read_size:int,sync_on_first_frame:bool returns=Constant
+FUNCTION line=42 kind=sync name=discarded_prefix args=self:none returns=int
+FUNCTION line=46 kind=sync name=pending_frames args=self:none returns=int
+FUNCTION line=51 kind=async name=send_frame args=self:none,request_id:int,body:bytes returns=Constant
+FUNCTION line=65 kind=async name=send_json args=self:none,request_id:int,data:dict[...] returns=Constant
+FUNCTION line=80 kind=async name=recv_frame args=self:none returns=VipFrame
+FUNCTION line=115 kind=async name=recv_json args=self:none returns=tuple[...]
+FUNCTION line=134 kind=async name=close args=self:none returns=Constant
+CALL name=Call.encode count=1
+CALL name=EOFError count=1
+CALL name=ValueError count=1
+CALL name=VipProtocolError count=1
+CALL name=VipStreamDecoder count=1
+CALL name=decode_json_body count=1
+CALL name=deque count=1
+CALL name=encode_frame count=1
+CALL name=json.dumps count=1
+CALL name=len count=2
+CALL name=self._pending_frames.extend count=1
+CALL name=self._pending_frames.popleft count=1
+CALL name=self.decoder.feed count=1
+CALL name=self.decoder.finish count=1
+CALL name=self.recv_frame count=1
+CALL name=self.send_frame count=1
+CALL name=self.transport.close count=1
+CALL name=self.transport.read count=1
+CALL name=self.transport.write count=1
+LITERAL_SHAPE type=bool count=2
+LITERAL_SHAPE type=int count=5
+LITERAL_SHAPE type=none count=5
+LITERAL_SHAPE type=str(utf8_len=1) count=2
+LITERAL_SHAPE type=str(utf8_len=22) count=1
+LITERAL_SHAPE type=str(utf8_len=25) count=1
+LITERAL_SHAPE type=str(utf8_len=26) count=1
+LITERAL_SHAPE type=str(utf8_len=5) count=1
+
+SAFE_SOURCE_TOPOLOGY=PASS
+SOURCE_EXECUTED=false
+LITERAL_VALUES_PRINTED=false
+SECRETS_READ=false
+NETWORK_ACTION_PERFORMED=false
+PHYSICAL_DOOR_ACTION=false

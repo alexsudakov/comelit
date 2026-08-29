@@ -1,0 +1,5 @@
+=== RUNTIME RELEASE ===
+CURRENT_PRESENT=true
+CURRENT_TARGET=/opt/comelit-door-safety-poc/releases/2026-08-29-v0.5-eba2900dc82e
+PYPROJECT_VERSION=0.5.0
+RUNTIME_TREE_CONTENT_READ=false_except_version_metadata
