@@ -81,6 +81,10 @@ class DoorBodyShapeInventory:
 
 
 _KEY_VALUE = re.compile(r"^([A-Z0-9_]+)=(.*)$")
+_TARGET_FUNCTIONS = (
+    "IconaBridgeClient._open_door_init",
+    "IconaBridgeClient.open_door",
+)
 
 
 def _parse_key_values(text: str) -> dict[str, str]:
@@ -100,6 +104,8 @@ def parse_legacy_body_shape_inventory(text: str) -> DoorBodyShapeInventory:
     values = _parse_key_values(text)
     if values.get("LEGACY_DOOR_BODY_SHAPE_INVENTORY") != "PASS":
         raise ValueError("inventory PASS marker missing")
+    if values.get("METHOD_SELECTION") != "QUALIFIED_CLASS_METHOD":
+        raise ValueError("qualified legacy method-selection marker missing")
     required_false = {
         "PAYLOAD_LITERAL_VALUES_EXTRACTED": "false",
         "SOURCE_EXECUTED": "false",
@@ -115,7 +121,7 @@ def parse_legacy_body_shape_inventory(text: str) -> DoorBodyShapeInventory:
     writes: list[DoorWriteShape] = []
     ordinal = 0
 
-    for function_name in ("_open_door_init", "open_door"):
+    for function_name in _TARGET_FUNCTIONS:
         block_pattern = re.compile(
             rf"FUNCTION={re.escape(function_name)}\n(?P<body>.*?)(?=\nFUNCTION=|\nLEGACY_DOOR_BODY_SHAPE_INVENTORY=PASS|\Z)",
             re.S,
