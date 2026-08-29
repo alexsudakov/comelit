@@ -25,6 +25,13 @@ jobs:
           python-version: '3.12'
       - name: Static safety scan
         run: python3 scripts/static_safety_check.py
+      - name: Compile Python scripts
+        run: python3 -m py_compile scripts/*.py
+      - name: Parse shell entrypoints
+        run: |
+          for script in scripts/*.sh deploy/*.sh; do
+            bash -n "$script"
+          done
       - name: Repository-only unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}/safety-poc/src
