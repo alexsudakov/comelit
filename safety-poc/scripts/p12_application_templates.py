@@ -54,7 +54,7 @@ def predicted_control_packet(*, opcode: int, channel_id: int, channel_name: byte
         body[14] = 0
     elif opcode == 3:
         body = bytearray(10)
-        body[0:2] = (0xABCD).to_bytes(2, "little")
+        body[0:2] = (0x01EF).to_bytes(2, "little")
         body[2:4] = (3).to_bytes(2, "little")
         body[4:8] = (2).to_bytes(4, "little")
         body[8:10] = channel_id.to_bytes(2, "little")
