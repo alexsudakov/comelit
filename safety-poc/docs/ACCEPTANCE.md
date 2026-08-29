@@ -19,7 +19,6 @@ All items are mandatory:
 15. Duplicate `operation_id` cannot invoke the typed boundary twice.
 16. Static safety scanning covers every Python source module in the package.
 
-
 ## v0.3
 
 - canonical eight-file `comelit_vip` source hashes must match the pinned contract;
@@ -53,3 +52,32 @@ All items are mandatory:
 - failure after the third write maps to `AMBIGUOUS`;
 - duplicate `operation_id` does not invoke the reconciliation boundary twice;
 - no network or physical action occurs.
+
+## v0.6 repository-only acceptance
+
+The following may be proven without CT120 runtime execution:
+
+- the public-safe evidence collector contains no secret/capture-content reads or active Comelit probes;
+- a redacted legacy inventory can be parsed into exactly six typed write shapes;
+- the structural builder order is exactly binary, message, message, binary, message, message;
+- those six writes map deterministically to the fixed Door semantic sequence;
+- structural fingerprints never embed real Door payload values;
+- the CTPP control-plane model allows at most one open and one close attempt;
+- a synthetic full transaction contains one open, six Door writes, two optional waits and one close;
+- failures before the first Door write are provably not sent; failures after a Door write are ambiguous;
+- a complete synthetic transaction without Door-specific ACK remains `UNKNOWN_OUTCOME`;
+- repository readiness and live-test readiness are separate, fail-closed gates;
+- the HA service contract requires `operation_id`, forbids automatic retry, exposes `UNKNOWN_OUTCOME`, and cannot assert physical Door state;
+- Git-native deployment refuses development versions and incomplete repository readiness.
+
+## v0.6 CT120/runtime acceptance still required
+
+Repository-only tests must **not** claim these markers. They remain pending until independent evidence is produced:
+
+- `CTPP_BODY_LAYOUT_RECONCILIATION=PASS` — synthetic byte-exact CTPP body oracle over the pinned source layout;
+- `CTPP_CONTROL_PLANE_RECONCILIATION=PASS` — canonical fixture open/close request-response contract and channel binding;
+- `FULL_OFFLINE_DOOR_TRANSACTION=PASS` — canonical fixture transaction using reconciled body/control-plane models;
+- final v0.6 version promotion from development version;
+- immutable CT120 release install and post-promotion acceptance.
+
+Live transport and physical Door actions are outside v0.6 offline acceptance and require separate later gates.
