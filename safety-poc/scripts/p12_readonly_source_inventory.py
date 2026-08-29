@@ -47,6 +47,7 @@ class MethodShape:
     async_method: bool
     positional_args: tuple[str, ...]
     call_counts: tuple[tuple[str, int], ...]
+    timeout_values: tuple[str, ...]
     await_count: int
     try_count: int
     except_count: int
@@ -70,32 +71,57 @@ def _call_name(node: ast.Call) -> str:
     return ".".join(reversed(parts))
 
 
-def method_shape(source: str, class_name: str, method_name: str) -> MethodShape:
-    tree = ast.parse(source)
-    selected: ast.FunctionDef | ast.AsyncFunctionDef | None = None
-    for node in tree.body:
-        if not isinstance(node, ast.ClassDef) or node.name != class_name:
+def _timeout_values(selected: ast.AST) -> tuple[str, ...]:
+    values: list[str] = []
+    for node in ast.walk(selected):
+        if not isinstance(node, ast.Call) or _call_name(node) != "asyncio.wait_for":
             continue
-        for child in node.body:
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == method_name:
-                selected = child
-                break
-    if selected is None:
-        raise ValueError(f"qualified method not found: {class_name}.{method_name}")
+        timeout_node: ast.AST | None = None
+        for keyword in node.keywords:
+            if keyword.arg == "timeout":
+                timeout_node = keyword.value
+        if timeout_node is None and len(node.args) >= 2:
+            timeout_node = node.args[1]
+        if isinstance(timeout_node, ast.Constant) and isinstance(timeout_node.value, (int, float)):
+            values.append(str(timeout_node.value))
+        else:
+            values.append("dynamic_or_redacted")
+    return tuple(values)
 
+
+def _shape(selected: ast.FunctionDef | ast.AsyncFunctionDef, qualified_name: str) -> MethodShape:
     calls = Counter(_call_name(node) for node in ast.walk(selected) if isinstance(node, ast.Call))
-    args = tuple(arg.arg for arg in selected.args.args)
     return MethodShape(
-        qualified_name=f"{class_name}.{method_name}",
+        qualified_name=qualified_name,
         line=selected.lineno,
         async_method=isinstance(selected, ast.AsyncFunctionDef),
-        positional_args=args,
+        positional_args=tuple(arg.arg for arg in selected.args.args),
         call_counts=tuple(sorted(calls.items())),
+        timeout_values=_timeout_values(selected),
         await_count=sum(isinstance(node, ast.Await) for node in ast.walk(selected)),
         try_count=sum(isinstance(node, ast.Try) for node in ast.walk(selected)),
         except_count=sum(isinstance(node, ast.ExceptHandler) for node in ast.walk(selected)),
         return_count=sum(isinstance(node, ast.Return) for node in ast.walk(selected)),
     )
+
+
+def method_shape(source: str, class_name: str, method_name: str) -> MethodShape:
+    tree = ast.parse(source)
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef) or node.name != class_name:
+            continue
+        for child in node.body:
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == method_name:
+                return _shape(child, f"{class_name}.{method_name}")
+    raise ValueError(f"qualified method not found: {class_name}.{method_name}")
+
+
+def top_level_function_shape(source: str, function_name: str) -> MethodShape:
+    tree = ast.parse(source)
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function_name:
+            return _shape(node, f"module.{function_name}")
+    raise ValueError(f"top-level function not found: {function_name}")
 
 
 def render_shape(shape: MethodShape) -> list[str]:
@@ -108,6 +134,7 @@ def render_shape(shape: MethodShape) -> list[str]:
         f"TRY_COUNT={shape.try_count}",
         f"EXCEPT_COUNT={shape.except_count}",
         f"RETURN_COUNT={shape.return_count}",
+        f"WAIT_FOR_TIMEOUT_VALUES={','.join(shape.timeout_values) if shape.timeout_values else 'none'}",
     ]
     for name, count in shape.call_counts:
         lines.append(f"CALL name={name} count={count}")
@@ -141,6 +168,10 @@ def main() -> int:
         for line in render_shape(method_shape(legacy_source, "IconaBridgeClient", method_name)):
             print(line)
 
+    print()
+    for line in render_shape(top_level_function_shape(legacy_source, "list_doors")):
+        print(line)
+
     for filename, (class_name, methods) in CANONICAL_TARGETS.items():
         source = canonical_paths[filename].read_text(encoding="utf-8")
         for method_name in methods:
@@ -150,8 +181,9 @@ def main() -> int:
 
     print()
     print("P12_READONLY_SOURCE_INVENTORY=PASS")
+    print("READONLY_WRAPPER_INVENTORIED=true")
     print("SELECTED_METHODS_ONLY=true")
-    print("LITERAL_VALUES_EMITTED=false")
+    print("NON_TIMEOUT_LITERAL_VALUES_EMITTED=false")
     print("SOURCE_EXECUTED=false")
     print("SECRETS_READ=false")
     print("CREDENTIAL_MATERIAL_EMITTED=false")
