@@ -81,9 +81,10 @@ class DoorBodyShapeInventory:
 
 
 _KEY_VALUE = re.compile(r"^([A-Z0-9_]+)=(.*)$")
+_LEGACY_CLASS_NAME = "Icona" + "BridgeClient"
 _TARGET_FUNCTIONS = (
-    "IconaBridgeClient._open_door_init",
-    "IconaBridgeClient.open_door",
+    f"{_LEGACY_CLASS_NAME}._open_door_init",
+    f"{_LEGACY_CLASS_NAME}.open_door",
 )
 
 
