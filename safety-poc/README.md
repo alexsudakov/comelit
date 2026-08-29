@@ -1,4 +1,4 @@
-# Comelit Door Safety PoC — offline package (v0.6-dev)
+# Comelit Door Safety PoC — offline package (v0.6)
 
 This package proves the **safety semantics** required before any physical door action is considered:
 
@@ -22,7 +22,7 @@ The purpose is to validate persistence, idempotency, crash recovery, rate limiti
 ./scripts/run_offline_suite.sh
 ```
 
-The suite reports repository-model PASS markers separately from runtime reconciliation gates. During v0.6 development the body/control-plane/full-transaction runtime gates intentionally remain `PENDING_*` until CT120 evidence is collected and reconciled.
+Repository CI proves portable safety semantics only. CT120-specific body/control-plane/full-transaction reconciliation is performed separately by `scripts/run_ct120_runtime_gates.sh` against pinned read-only research sources and canonical fixture transports.
 
 ## Manual scenarios
 
@@ -63,16 +63,21 @@ v0.4 adds a symbolic Door semantic plan derived from the pinned research call gr
 
 v0.5 adds an offline wire-shape reconciliation gate. Six synthetic Door-semantic bodies are framed both by the pinned legacy research helper and by canonical `VipSession.send_frame()` through `FixtureTransport`; all match byte-exactly. A negative control proves an already-framed legacy packet would be double-framed by canonical `send_frame()`.
 
-## v0.6 development
+## v0.6 offline reconciliation
 
-The v0.6 branch adds:
+v0.6 adds:
 
 - public-safe CT120 evidence collection with automatic Git branch/commit/push;
 - payload-redacted CTPP body-shape parsing and six-write structural reconciliation;
-- deterministic synthetic placeholders for statically-sized structural components;
-- an offline CTPP open/close state model;
-- a full ten-step synthetic Door transaction model;
+- a pinned legacy synthetic byte oracle proving six generated Door frames reframe byte-exactly through canonical `VipSession + FixtureTransport`;
+- canonical capture-based ViP session/control tests;
+- canonical `open_channel("CTPP") -> close_channel(same id)` fixture reconciliation;
+- a full canonical offline `OPEN_CTPP -> six synthetic Door frames -> CLOSE_CTPP` transaction with exactly eight fixture writes;
+- conservative CTPP ambiguity handling and one-shot/no-retry invariants;
 - explicit repository-vs-live readiness gates;
-- a fail-safe `comelit.open_door` Home Assistant service contract.
+- a fail-safe `comelit.open_door` Home Assistant service contract;
+- Git-tree/version-bound immutable deployment with v0.5 rollback.
 
-These repository models **do not** claim byte-exact Door body reconciliation, canonical CTPP control-plane reconciliation, real transport readiness, or authorization for a physical Door test. Those remain evidence/runtime gates.
+The CT120 development-candidate runtime suite established `CTPP_BODY_LAYOUT_RECONCILIATION=PASS`, `CTPP_CONTROL_PLANE_RECONCILIATION=PASS`, `FULL_OFFLINE_DOOR_TRANSACTION=PASS`, and `REPOSITORY_READY=true` using synthetic/fixture-only execution. The final `0.6.0` Git tree must be runtime-tested again before merge/deploy.
+
+These proofs **do not** implement or authorize real transport, credential-bearing Door payloads, active Comelit network actions, physical relay claims, or a live Door test. `LIVE_TEST_READY=false` remains the required state for v0.6.
