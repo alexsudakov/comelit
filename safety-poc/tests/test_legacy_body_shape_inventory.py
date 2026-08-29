@@ -27,7 +27,7 @@ class IconaBridgeClient:
 
     async def open_door(self, channel, item):
         def create_door_message(confirm: bool):
-            return struct.pack('>I', 123456)
+            return struct.pack('>Q', 123456)
 
         await self._open_door_init(item)
         await self._write_packet(create_door_message(False))
@@ -83,7 +83,8 @@ class LegacyBodyShapeInventoryTests(unittest.TestCase):
         block = text.split("FUNCTION=IconaBridgeClient.open_door", 1)[1]
         self.assertIn("DOOR_MESSAGE_BUILDER_CALLS=4", block)
         self.assertIn("WRITE_PACKET_CALLS=5", block)
-        self.assertNotIn("STRUCT_PACK(fmt='>I',argc=1)", block.split("DOOR_MESSAGE_CALL_1_LINE", 1)[0])
+        self.assertIn("STRUCT_PACK(fmt='>I',argc=1)", block)
+        self.assertNotIn("STRUCT_PACK(fmt='>Q',argc=1)", block)
 
     def test_hash_mismatch_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
