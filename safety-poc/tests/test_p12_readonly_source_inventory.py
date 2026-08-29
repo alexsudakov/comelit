@@ -1,5 +1,6 @@
 import importlib.util
 import pathlib
+import sys
 import unittest
 
 
@@ -7,6 +8,7 @@ SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "p12_readonly
 spec = importlib.util.spec_from_file_location("p12_readonly_source_inventory", SCRIPT)
 module = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
+sys.modules[spec.name] = module
 spec.loader.exec_module(module)
 
 
