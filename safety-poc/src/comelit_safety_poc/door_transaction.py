@@ -49,7 +49,9 @@ class SyntheticDoorTransactionBoundary:
     """Full offline transaction model with one typed boundary invocation.
 
     The model is intentionally incapable of network I/O. Channel open/close and
-    six Door writes are symbolic fixture events only.
+    six Door writes are symbolic fixture events only. Conservative boundary
+    semantics are preserved even for control-plane uncertainty: an ambiguous
+    channel-open attempt is never downgraded to PROVEN_NOT_SENT.
     """
 
     fail_before_open: bool = False
@@ -91,15 +93,15 @@ class SyntheticDoorTransactionBoundary:
             if open_evidence.outcome in {ControlOutcome.PROVEN_NOT_OPENED, ControlOutcome.REJECTED}:
                 self._snapshot(completed, writes, control, protocol_ack)
                 return BoundaryEvidence(
-                    outcome=BoundaryOutcome.PROVEN_NOT_SENT,
-                    detail="CTPP channel was not opened; no Door payload emitted",
+                    outcome=BoundaryOutcome.REJECTED,
+                    detail="CTPP open was rejected/not-opened before any Door payload emission",
                     protocol_acknowledged=False,
                 )
             if open_evidence.outcome == ControlOutcome.AMBIGUOUS:
                 self._snapshot(completed, writes, control, protocol_ack)
                 return BoundaryEvidence(
-                    outcome=BoundaryOutcome.PROVEN_NOT_SENT,
-                    detail="CTPP open outcome ambiguous, but fixture proves no Door payload emitted",
+                    outcome=BoundaryOutcome.AMBIGUOUS,
+                    detail="CTPP open attempt is ambiguous; retry is unsafe even though no Door payload was emitted",
                     protocol_acknowledged=False,
                 )
 
@@ -123,8 +125,15 @@ class SyntheticDoorTransactionBoundary:
             )
         except Exception as exc:
             self._snapshot(completed, writes, control, protocol_ack)
+            # Only a failure before open_once() is provably pre-send. Once a
+            # control-plane attempt has occurred, generic failure is conservative.
+            outcome = (
+                BoundaryOutcome.PROVEN_NOT_SENT
+                if control.open_calls == 0 and writes == 0
+                else BoundaryOutcome.AMBIGUOUS
+            )
             return BoundaryEvidence(
-                outcome=BoundaryOutcome.AMBIGUOUS if writes else BoundaryOutcome.PROVEN_NOT_SENT,
+                outcome=outcome,
                 detail=f"synthetic transaction failed: {type(exc).__name__}",
                 protocol_acknowledged=False,
             )
