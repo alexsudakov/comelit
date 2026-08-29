@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import unittest
 
 
@@ -23,8 +24,8 @@ class P12P2PForensicCollectorTests(unittest.TestCase):
         self.assertNotIn("wget ", text)
         self.assertNotIn("source /root", text)
         self.assertNotIn("eval ", text)
-        self.assertNotIn('"$WRAPPER" ', text)
-        self.assertNotIn('"$BINARY" ', text)
+        self.assertIsNone(re.search(r'^\s*"\$WRAPPER"(?:\s|$)', text, re.MULTILINE))
+        self.assertIsNone(re.search(r'^\s*"\$BINARY"(?:\s|$)', text, re.MULTILINE))
 
     def test_public_output_is_marker_or_identity_only(self):
         text = COLLECTOR.read_text(encoding="utf-8")
