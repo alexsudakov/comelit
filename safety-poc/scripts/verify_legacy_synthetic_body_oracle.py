@@ -22,12 +22,19 @@ CHANNEL_ID = 7449
 
 
 class SyntheticScalar:
-    """Deterministic non-secret value usable as text or an integer field."""
+    """Deterministic non-secret value usable as text or an integer field.
+
+    The legacy Door builder uses some integer-like fields directly inside
+    ``bytes([value])`` while other fields are packed into wider integers.  Keep
+    the synthetic integer representation in the positive one-byte range so the
+    same deterministic value is valid for both shapes without learning or
+    copying any real Door value.
+    """
 
     def __init__(self, label: str) -> None:
         self.label = label
         digest = hashlib.sha256(label.encode('utf-8')).digest()
-        self._integer = 1 + int.from_bytes(digest[:2], 'big') % 20000
+        self._integer = 1 + int.from_bytes(digest[:2], 'big') % 250
         self._text = f'SYNTH-{digest[:6].hex()}'
 
     def __str__(self) -> str:
@@ -188,6 +195,7 @@ def main() -> int:
         print(f'WRITE_{index}_BODY_SHA256={hashlib.sha256(body).hexdigest()}')
     print('CTPP_BODY_LAYOUT_RECONCILIATION=PASS')
     print('SYNTHETIC_INPUTS_ONLY=true')
+    print('SYNTHETIC_INTEGER_RANGE=1..250')
     print('SYNTHETIC_CTPP_CHANNEL_BINDING=true')
     print('LEGACY_SOURCE_EXECUTED_OFFLINE=true')
     print('SECRETS_READ=false')
