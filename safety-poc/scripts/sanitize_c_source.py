@@ -120,7 +120,13 @@ def sanitize_c_source(text: str) -> tuple[str, dict[str, int], int]:
         out.append(ch)
         i += 1
 
-    return "".join(out), literal_counts, string_count
+    sanitized = "".join(out)
+    # Comment redaction intentionally preserves newlines but can leave spaces on otherwise
+    # blank lines. Strip only horizontal whitespace immediately before a newline so the
+    # structural line map remains intact while generated evidence passes git diff --check.
+    sanitized = re.sub(r"[ \t]+(?=\n)", "", sanitized)
+    sanitized = re.sub(r"[ \t]+\Z", "", sanitized)
+    return sanitized, literal_counts, string_count
 
 
 def discover_function_names(sanitized: str) -> list[str]:
@@ -157,6 +163,7 @@ def main() -> int:
         [
             "COMMENTS_EMITTED=false",
             "STRING_LITERAL_VALUES_EMITTED=false",
+            "TRAILING_WHITESPACE_EMITTED=false",
             "SOURCE_EXECUTED=false",
             "SECRETS_READ=false",
             "NETWORK_ACTION_PERFORMED=false",
