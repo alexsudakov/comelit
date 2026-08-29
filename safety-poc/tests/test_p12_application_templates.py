@@ -38,11 +38,18 @@ class P12ApplicationTemplateTests(unittest.TestCase):
             "00060a0000000000cdab0300020000001a1d",
         )
 
+    def test_application_request_arguments_match_canonical_capture_contract(self):
+        self.assertEqual(module.AUTH_MESSAGE_ID, 5)
+        self.assertEqual(module.UCFG_MESSAGE_ID, 6)
+        self.assertEqual(module.UCFG_ADDRESSBOOKS, "none")
+
     def test_auth_contract_has_real_lf_and_expected_length(self):
         body = (
             '{"message":"access","user-token":"'
             + module.SYNTHETIC_TOKEN
-            + '","message-type":"request","message-id":5}\n'
+            + '","message-type":"request","message-id":'
+            + str(module.AUTH_MESSAGE_ID)
+            + "}\n"
         ).encode()
         self.assertEqual(len(body), 109)
         self.assertTrue(body.endswith(b"\n"))
