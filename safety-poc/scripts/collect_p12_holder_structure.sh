@@ -75,7 +75,7 @@ BINARY_EXECUTED=false
 EOF
 
 # Fail closed if the sanitized structural output still contains common sensitive literal shapes.
-if grep -Eiq 'https?://|Authorization:[[:space:]]|Bearer[[:space:]]|ccstoken[[:space:]]|github_pat_|ghp_|-----BEGIN .*PRIVATE KEY-----' "$EVIDENCE_DIR"; then
+if grep -RIEiq 'https?://|Authorization:[[:space:]]|Bearer[[:space:]]|ccstoken[[:space:]]|github_pat_|ghp_|-----BEGIN .*PRIVATE KEY-----' "$EVIDENCE_DIR"; then
     echo "P12_HOLDER_STRUCTURE_SECRET_SCAN=FAIL"
     exit 1
 fi
