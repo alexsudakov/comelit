@@ -1,0 +1,2428 @@
+#include <nice/agent.h>
+#include <nice/pseudotcp.h>
+#include <glib.h>
+#include <glib/gstdio.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#define RUN_DIR     "<REDACTED_STRING bytes=18 sha256=c5d2a976fcc8e76d>"
+#define OFFER_FILE  RUN_DIR "<REDACTED_STRING bytes=12 sha256=5e8db96aca13bb3d>"
+#define REMOTE_FILE RUN_DIR "<REDACTED_STRING bytes=13 sha256=d22eac09a7410386>"
+#define STOP_FILE   RUN_DIR "<REDACTED_STRING bytes=7 sha256=3506e5fdc134f3ed>"
+
+#define STUN_SERVER "<REDACTED_STRING bytes=17 sha256=4f3145f77ede42a2>"
+#define STUN_PORT   3478
+
+#define PSEUDOTCP_CONVERSATION 0
+#define PSEUDOTCP_MTU          1320
+
+static GMainLoop *loop = NULL;
+static NiceAgent *agent = NULL;
+
+static guint stream_id = 0;
+
+static gboolean ready = FALSE;
+static gboolean failed = FALSE;
+
+static gboolean remote_loaded = FALSE;
+static gboolean ice_connected = FALSE;
+static gboolean ice_ready = FALSE;
+static gboolean selected_pair_present = FALSE;
+
+static PseudoTcpSocket *pseudo_tcp = NULL;
+
+static gboolean pseudotcp_started = FALSE;
+static gboolean pseudotcp_open = FALSE;
+
+static guint pseudotcp_packets_in = 0;
+static guint pseudotcp_packets_out = 0;
+static guint pseudotcp_max_wire_out = 0;
+static guint64 pseudotcp_app_bytes_in = 0;
+
+#define APP_CAPTURE_MAX 64
+
+static guint8 app_capture[APP_CAPTURE_MAX];
+static guint app_capture_len = 0;
+
+#define VIP_BOOTSTRAP_MAX 128
+#define POST_ACK_CAPTURE_MAX 256
+
+static guint8 vip_bootstrap[VIP_BOOTSTRAP_MAX];
+static guint vip_bootstrap_len = 0;
+
+static gboolean echo_open_seen = FALSE;
+static gboolean echo_ack_sent = FALSE;
+static guint16 echo_channel_id = 0;
+
+static guint8 echo_ack[20];
+static guint echo_ack_offset = 0;
+
+static guint8 post_ack_capture[POST_ACK_CAPTURE_MAX];
+static guint post_ack_capture_len = 0;
+
+static gboolean uaut_open_started = FALSE;
+static gboolean uaut_open_sent = FALSE;
+static gboolean uaut_response_seen = FALSE;
+
+static guint16 uaut_channel_id = 0;
+static guint16 uaut_response_word = 0;
+
+static guint8 uaut_open[23];
+static guint uaut_open_offset = 0;
+
+static gboolean
+pseudotcp_success_quit_cb(gpointer data);
+
+static goffset remote_last_size = -1;
+static guint remote_stable_ticks = 0;
+
+
+
+
+
+
+
+
+
+static void
+recv_cb(
+    NiceAgent *nice_agent,
+    guint sid,
+    guint component_id,
+    guint len,
+    gchar *buf,
+    gpointer data)
+{
+    (void)nice_agent;
+    (void)data;
+
+    if (sid != stream_id ||
+        component_id != 1) {
+        return;
+    }
+
+
+
+
+
+
+    if (!pseudo_tcp) {
+        printf(
+            "<REDACTED_STRING bytes=32 sha256=4d865c274c531629>",
+            len
+        );
+
+        fflush(stdout);
+        return;
+    }
+
+    pseudotcp_packets_in++;
+
+    gboolean ok =
+        pseudo_tcp_socket_notify_packet(
+            pseudo_tcp,
+            buf,
+            len
+        );
+
+    if (!ok) {
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=31 sha256=38ec4127dbaec6b1>"
+            "<REDACTED_STRING bytes=10 sha256=bce8da386b0059a9>",
+            len
+        );
+
+        failed = TRUE;
+
+        if (loop)
+            g_main_loop_quit(loop);
+    }
+}
+
+
+static gboolean
+absolute_timeout_cb(gpointer data)
+{
+    (void)data;
+
+    if (ice_ready &&
+        pseudotcp_started &&
+        !pseudotcp_open) {
+
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=26 sha256=e35571009980e6ed>"
+        );
+    } else {
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=27 sha256=fa861eeb02d87291>"
+        );
+    }
+
+    failed = TRUE;
+
+    if (loop)
+        g_main_loop_quit(loop);
+
+    return G_SOURCE_REMOVE;
+}
+
+
+static gboolean
+stop_check_cb(gpointer data)
+{
+    (void)data;
+
+    if (g_file_test(STOP_FILE, G_FILE_TEST_EXISTS)) {
+        printf("<REDACTED_STRING bytes=24 sha256=4050f1b1f8faf735>");
+
+        if (loop)
+            g_main_loop_quit(loop);
+
+        return G_SOURCE_REMOVE;
+    }
+
+    return G_SOURCE_CONTINUE;
+}
+
+
+static guint16
+read_le16(
+    const guint8 *p)
+{
+    return
+        (guint16)p[0] |
+        ((guint16)p[1] << 8);
+}
+
+
+static guint32
+read_le32(
+    const guint8 *p)
+{
+    return
+        (guint32)p[0] |
+        ((guint32)p[1] << 8) |
+        ((guint32)p[2] << 16) |
+        ((guint32)p[3] << 24);
+}
+
+
+static void
+write_le16(
+    guint8 *p,
+    guint16 value)
+{
+    p[0] =
+        (guint8)(value & 0xff);
+
+    p[1] =
+        (guint8)((value >> 8) & 0xff);
+}
+
+
+static void
+write_le32(
+    guint8 *p,
+    guint32 value)
+{
+    p[0] =
+        (guint8)(value & 0xff);
+
+    p[1] =
+        (guint8)((value >> 8) & 0xff);
+
+    p[2] =
+        (guint8)((value >> 16) & 0xff);
+
+    p[3] =
+        (guint8)((value >> 24) & 0xff);
+}
+
+
+static gboolean
+uaut_response_timeout_cb(gpointer data)
+{
+    (void)data;
+
+    if (!uaut_response_seen) {
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=39 sha256=abd677c858a9ca08>"
+        );
+
+        failed = TRUE;
+
+        if (loop)
+            g_main_loop_quit(loop);
+    }
+
+    return G_SOURCE_REMOVE;
+}
+
+
+static gboolean
+try_parse_uaut_response(void)
+{
+    if (uaut_response_seen)
+        return TRUE;
+
+    if (!uaut_open_sent)
+        return TRUE;
+
+    if (post_ack_capture_len < 8)
+        return TRUE;
+
+    if (post_ack_capture[0] != 0x00 ||
+        post_ack_capture[1] != 0x06) {
+
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=32 sha256=30070953baa7a4c1>"
+        );
+
+        return FALSE;
+    }
+
+    guint16 body_len =
+        read_le16(
+            post_ack_capture + 2
+        );
+
+    guint frame_len =
+        8u + (guint)body_len;
+
+    if (frame_len >
+        POST_ACK_CAPTURE_MAX) {
+
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=30 sha256=51daf08f6216250d>"
+            "<REDACTED_STRING bytes=11 sha256=59b500820e7e3199>",
+            (unsigned)body_len
+        );
+
+        return FALSE;
+    }
+
+    if (post_ack_capture_len <
+        frame_len) {
+
+        return TRUE;
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    if (body_len != 12 ||
+        read_le16(post_ack_capture + 4) != 0 ||
+        read_le16(post_ack_capture + 6) != 0 ||
+        read_le16(post_ack_capture + 8) != 0xABCD ||
+        read_le16(post_ack_capture + 10) != 2 ||
+        read_le32(post_ack_capture + 12) != 4) {
+
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=33 sha256=79aa170bf702b0a6>"
+        );
+
+        return FALSE;
+    }
+
+    guint16 response_channel_id =
+        read_le16(
+            post_ack_capture + 16
+        );
+
+    if (response_channel_id !=
+        uaut_channel_id) {
+
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=36 sha256=8972da143c61b1af>"
+            "<REDACTED_STRING bytes=25 sha256=90e4fa6ccbe3c783>",
+            (unsigned)uaut_channel_id,
+            (unsigned)response_channel_id
+        );
+
+        return FALSE;
+    }
+
+    uaut_response_word =
+        read_le16(
+            post_ack_capture + 18
+        );
+
+    uaut_response_seen = TRUE;
+
+    printf(
+        "<REDACTED_STRING bytes=40 sha256=b4c2df2e10863f84>",
+        (unsigned)response_channel_id
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=34 sha256=13ec8130fe26c306>",
+        (unsigned)uaut_response_word
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=31 sha256=4b5564c9d128b6bb>"
+    );
+
+    fflush(stdout);
+
+
+
+
+
+    g_timeout_add(
+        250,
+        pseudotcp_success_quit_cb,
+        NULL
+    );
+
+    return TRUE;
+}
+
+
+static gboolean
+try_send_uaut_open(void)
+{
+    if (!echo_ack_sent ||
+        uaut_open_sent ||
+        !pseudo_tcp) {
+
+        return TRUE;
+    }
+
+    if (!uaut_open_started) {
+
+
+
+
+
+
+
+        uaut_channel_id =
+            echo_channel_id == 7449 ?
+                7450 :
+                7449;
+
+        memset(
+            uaut_open,
+            0,
+            sizeof(uaut_open)
+        );
+
+
+
+
+        uaut_open[0] = 0x00;
+        uaut_open[1] = 0x06;
+
+        write_le16(
+            uaut_open + 2,
+            15
+        );
+
+        write_le16(
+            uaut_open + 4,
+            0
+        );
+
+        write_le16(
+            uaut_open + 6,
+            0
+        );
+
+
+
+
+        write_le16(
+            uaut_open + 8,
+            0xABCD
+        );
+
+        write_le16(
+            uaut_open + 10,
+            1
+        );
+
+        write_le32(
+            uaut_open + 12,
+            7
+        );
+
+        memcpy(
+            uaut_open + 16,
+            "<REDACTED_STRING bytes=6 sha256=5e12f89fbeec3a79>",
+            4
+        );
+
+        write_le16(
+            uaut_open + 20,
+            uaut_channel_id
+        );
+
+        uaut_open[22] = 0;
+
+        uaut_open_offset = 0;
+        uaut_open_started = TRUE;
+
+        printf(
+            "<REDACTED_STRING bytes=31 sha256=b6ea71db30fd8b63>",
+            (unsigned)uaut_channel_id
+        );
+
+        printf("<REDACTED_STRING bytes=24 sha256=34ad7b7e4ef2e356>");
+
+        fflush(stdout);
+    }
+
+    while (uaut_open_offset <
+           sizeof(uaut_open)) {
+
+        gint n =
+            pseudo_tcp_socket_send(
+                pseudo_tcp,
+                (const gchar *)uaut_open +
+                    uaut_open_offset,
+                (guint32)(
+                    sizeof(uaut_open) -
+                    uaut_open_offset
+                )
+            );
+
+        if (n > 0) {
+            uaut_open_offset +=
+                (guint)n;
+
+            continue;
+        }
+
+        if (n < 0) {
+            gint err =
+                pseudo_tcp_socket_get_error(
+                    pseudo_tcp
+                );
+
+            if (err == EWOULDBLOCK)
+                return TRUE;
+
+            fprintf(
+                stderr,
+                "<REDACTED_STRING bytes=26 sha256=5c43a6c8885fa0de>"
+                "<REDACTED_STRING bytes=12 sha256=102be216ee409059>",
+                err
+            );
+
+            return FALSE;
+        }
+
+        return TRUE;
+    }
+
+    uaut_open_sent = TRUE;
+
+    printf(
+        "<REDACTED_STRING bytes=27 sha256=b709bb0facc999a6>",
+        sizeof(uaut_open)
+    );
+
+    printf("<REDACTED_STRING bytes=20 sha256=1715e0b0a7f202db>");
+
+    for (guint i = 0;
+         i < sizeof(uaut_open);
+         i++) {
+
+        printf(
+            "<REDACTED_STRING bytes=6 sha256=5fb182dc58c0a60c>",
+            (unsigned)uaut_open[i]
+        );
+    }
+
+    printf("<REDACTED_STRING bytes=4 sha256=d7a5e915306d21dc>");
+    printf("<REDACTED_STRING bytes=27 sha256=5d68d8641ace469c>");
+
+    fflush(stdout);
+
+
+
+
+
+    g_timeout_add(
+        3000,
+        uaut_response_timeout_cb,
+        NULL
+    );
+
+
+
+
+    return try_parse_uaut_response();
+}
+
+
+static gboolean
+try_send_echo_ack(void)
+{
+    if (!echo_open_seen ||
+        echo_ack_sent ||
+        !pseudo_tcp) {
+
+        return TRUE;
+    }
+
+    while (echo_ack_offset <
+           sizeof(echo_ack)) {
+
+        gint n =
+            pseudo_tcp_socket_send(
+                pseudo_tcp,
+                (const gchar *)echo_ack +
+                    echo_ack_offset,
+                (guint32)(
+                    sizeof(echo_ack) -
+                    echo_ack_offset
+                )
+            );
+
+        if (n > 0) {
+            echo_ack_offset +=
+                (guint)n;
+
+            continue;
+        }
+
+        if (n < 0) {
+            gint err =
+                pseudo_tcp_socket_get_error(
+                    pseudo_tcp
+                );
+
+            if (err == EWOULDBLOCK)
+                return TRUE;
+
+            fprintf(
+                stderr,
+                "<REDACTED_STRING bytes=25 sha256=eb0ee2f9c3a9a18b>"
+                "<REDACTED_STRING bytes=12 sha256=102be216ee409059>",
+                err
+            );
+
+            return FALSE;
+        }
+
+        return TRUE;
+    }
+
+    echo_ack_sent = TRUE;
+
+    printf(
+        "<REDACTED_STRING bytes=30 sha256=15fab66a5fefee0c>",
+        (unsigned)echo_channel_id
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=26 sha256=6339bd51106ee460>",
+        sizeof(echo_ack)
+    );
+
+    printf("<REDACTED_STRING bytes=19 sha256=262808fd2f84a76c>");
+
+    for (guint i = 0;
+         i < sizeof(echo_ack);
+         i++) {
+
+        printf(
+            "<REDACTED_STRING bytes=6 sha256=5fb182dc58c0a60c>",
+            (unsigned)echo_ack[i]
+        );
+    }
+
+    printf("<REDACTED_STRING bytes=4 sha256=d7a5e915306d21dc>");
+    printf("<REDACTED_STRING bytes=21 sha256=4582a72834826da4>");
+
+    fflush(stdout);
+
+
+
+
+
+    return try_send_uaut_open();
+}
+
+
+static gboolean
+try_parse_initial_echo(void)
+{
+    if (echo_open_seen)
+        return TRUE;
+
+    if (vip_bootstrap_len < 8)
+        return TRUE;
+
+    if (vip_bootstrap[0] != 0x00 ||
+        vip_bootstrap[1] != 0x06) {
+
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=30 sha256=143f5bec5eb21cf3>"
+        );
+
+        return FALSE;
+    }
+
+    guint16 body_len =
+        read_le16(
+            vip_bootstrap + 2
+        );
+
+    guint frame_len =
+        8u + (guint)body_len;
+
+    if (frame_len >
+        VIP_BOOTSTRAP_MAX) {
+
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=28 sha256=a558ec4220b38bc8>"
+            "<REDACTED_STRING bytes=11 sha256=59b500820e7e3199>",
+            (unsigned)body_len
+        );
+
+        return FALSE;
+    }
+
+    if (vip_bootstrap_len <
+        frame_len) {
+
+        return TRUE;
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    if (body_len != 15 ||
+        read_le16(vip_bootstrap + 4) != 0 ||
+        read_le16(vip_bootstrap + 6) != 0 ||
+        read_le16(vip_bootstrap + 8) != 0xABCD ||
+        read_le16(vip_bootstrap + 10) != 1 ||
+        read_le32(vip_bootstrap + 12) != 7 ||
+        memcmp(
+            vip_bootstrap + 16,
+            "<REDACTED_STRING bytes=6 sha256=10cc0cdc6fbd1524>",
+            4
+        ) != 0 ||
+        vip_bootstrap[22] != 0) {
+
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=38 sha256=55cda2a52c2c91ee>"
+        );
+
+        return FALSE;
+    }
+
+    echo_channel_id =
+        read_le16(
+            vip_bootstrap + 20
+        );
+
+    echo_open_seen = TRUE;
+
+    printf("<REDACTED_STRING bytes=22 sha256=4c91c328b4ed5927>");
+    printf("<REDACTED_STRING bytes=25 sha256=6fd39542564193c9>");
+
+    printf(
+        "<REDACTED_STRING bytes=31 sha256=9164d465bca3b376>",
+        (unsigned)echo_channel_id
+    );
+
+    printf("<REDACTED_STRING bytes=24 sha256=00477282cb0be432>");
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    memset(
+        echo_ack,
+        0,
+        sizeof(echo_ack)
+    );
+
+    echo_ack[0] = 0x00;
+    echo_ack[1] = 0x06;
+
+    write_le16(
+        echo_ack + 2,
+        12
+    );
+
+    write_le16(
+        echo_ack + 4,
+        0
+    );
+
+    write_le16(
+        echo_ack + 6,
+        0
+    );
+
+    write_le16(
+        echo_ack + 8,
+        0xABCD
+    );
+
+    write_le16(
+        echo_ack + 10,
+        2
+    );
+
+    write_le32(
+        echo_ack + 12,
+        4
+    );
+
+    write_le16(
+        echo_ack + 16,
+        echo_channel_id
+    );
+
+    write_le16(
+        echo_ack + 18,
+        0
+    );
+
+    echo_ack_offset = 0;
+
+    fflush(stdout);
+
+    return try_send_echo_ack();
+}
+
+
+static gboolean
+pseudotcp_success_quit_cb(gpointer data)
+{
+    (void)data;
+
+    printf("<REDACTED_STRING bytes=34 sha256=042a610addd987c4>");
+
+    printf(
+        "<REDACTED_STRING bytes=27 sha256=7068847b56c52dc3>",
+        pseudotcp_packets_in
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=28 sha256=f021a742fc4e7bb8>",
+        pseudotcp_packets_out
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=29 sha256=e0fc9df83edb98a4>",
+        pseudotcp_max_wire_out
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=26 sha256=36b194b0db28dabe>" G_GUINT64_FORMAT "<REDACTED_STRING bytes=4 sha256=d7a5e915306d21dc>",
+        pseudotcp_app_bytes_in
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=32 sha256=e9fb2729638f85d4>",
+        app_capture_len
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=25 sha256=649244fe47212e7e>",
+        echo_open_seen ? "<REDACTED_STRING bytes=6 sha256=18d10c7d2b4b04aa>" : "<REDACTED_STRING bytes=7 sha256=076de6e730df0b4c>"
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=24 sha256=fd3e408983b74864>",
+        echo_ack_sent ? "<REDACTED_STRING bytes=6 sha256=18d10c7d2b4b04aa>" : "<REDACTED_STRING bytes=7 sha256=076de6e730df0b4c>"
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=31 sha256=a2be3a6d70afd432>",
+        uaut_open_sent ? "<REDACTED_STRING bytes=6 sha256=18d10c7d2b4b04aa>" : "<REDACTED_STRING bytes=7 sha256=076de6e730df0b4c>"
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=35 sha256=c6638d64f5f04e21>",
+        uaut_response_seen ? "<REDACTED_STRING bytes=6 sha256=18d10c7d2b4b04aa>" : "<REDACTED_STRING bytes=7 sha256=076de6e730df0b4c>"
+    );
+
+    if (uaut_open_started) {
+        printf(
+            "<REDACTED_STRING bytes=32 sha256=18bfa1b4b744ea8f>",
+            (unsigned)uaut_channel_id
+        );
+    }
+
+    if (uaut_response_seen) {
+        printf(
+            "<REDACTED_STRING bytes=35 sha256=d31a8374dad03b6a>",
+            (unsigned)uaut_response_word
+        );
+    }
+
+    printf(
+        "<REDACTED_STRING bytes=31 sha256=967980cd8da58971>",
+        post_ack_capture_len
+    );
+
+    printf("<REDACTED_STRING bytes=27 sha256=fc0875471b09f2d5>");
+
+    for (guint i = 0;
+         i < post_ack_capture_len;
+         i++) {
+
+        printf(
+            "<REDACTED_STRING bytes=6 sha256=5fb182dc58c0a60c>",
+            (unsigned)
+                post_ack_capture[i]
+        );
+    }
+
+    printf("<REDACTED_STRING bytes=4 sha256=d7a5e915306d21dc>");
+
+    printf("<REDACTED_STRING bytes=28 sha256=5a8a4b11b6113e01>");
+
+    for (guint i = 0;
+         i < app_capture_len;
+         i++) {
+
+        printf(
+            "<REDACTED_STRING bytes=6 sha256=5fb182dc58c0a60c>",
+            (unsigned)app_capture[i]
+        );
+    }
+
+    printf("<REDACTED_STRING bytes=4 sha256=d7a5e915306d21dc>");
+
+    fflush(stdout);
+
+    if (loop)
+        g_main_loop_quit(loop);
+
+    return G_SOURCE_REMOVE;
+}
+
+
+static void
+pseudotcp_opened_cb(
+    PseudoTcpSocket *tcp,
+    gpointer data)
+{
+    (void)tcp;
+    (void)data;
+
+    if (pseudotcp_open)
+        return;
+
+    pseudotcp_open = TRUE;
+
+    printf("<REDACTED_STRING bytes=23 sha256=8d51ab850be2da41>");
+    fflush(stdout);
+
+
+
+
+
+
+}
+
+
+static void
+pseudotcp_readable_cb(
+    PseudoTcpSocket *tcp,
+    gpointer data)
+{
+    (void)data;
+
+    gchar buf[4096];
+
+    while (TRUE) {
+        gint n =
+            pseudo_tcp_socket_recv(
+                tcp,
+                buf,
+                sizeof(buf)
+            );
+
+        if (n > 0) {
+            pseudotcp_app_bytes_in +=
+                (guint64)n;
+
+            if (app_capture_len <
+                APP_CAPTURE_MAX) {
+
+                guint remaining =
+                    APP_CAPTURE_MAX -
+                    app_capture_len;
+
+                guint copy_len =
+                    (guint)n < remaining ?
+                        (guint)n :
+                        remaining;
+
+                memcpy(
+                    app_capture +
+                        app_capture_len,
+                    buf,
+                    copy_len
+                );
+
+                app_capture_len +=
+                    copy_len;
+            }
+
+            printf(
+                "<REDACTED_STRING bytes=25 sha256=2c31f1f9c4fafc74>"
+                "<REDACTED_STRING bytes=21 sha256=422b328f6b732980>",
+                n,
+                pseudotcp_open ?
+                    "<REDACTED_STRING bytes=6 sha256=18d10c7d2b4b04aa>" :
+                    "<REDACTED_STRING bytes=7 sha256=076de6e730df0b4c>",
+                echo_ack_sent ?
+                    "<REDACTED_STRING bytes=6 sha256=18d10c7d2b4b04aa>" :
+                    "<REDACTED_STRING bytes=7 sha256=076de6e730df0b4c>"
+            );
+
+            if (!echo_ack_sent) {
+                guint available =
+                    VIP_BOOTSTRAP_MAX -
+                    vip_bootstrap_len;
+
+                guint copy_len =
+                    (guint)n < available ?
+                        (guint)n :
+                        available;
+
+                if (copy_len > 0) {
+                    memcpy(
+                        vip_bootstrap +
+                            vip_bootstrap_len,
+                        buf,
+                        copy_len
+                    );
+
+                    vip_bootstrap_len +=
+                        copy_len;
+                }
+
+                if (!try_parse_initial_echo()) {
+                    failed = TRUE;
+
+                    if (loop)
+                        g_main_loop_quit(loop);
+
+                    return;
+                }
+            } else {
+                guint available =
+                    POST_ACK_CAPTURE_MAX -
+                    post_ack_capture_len;
+
+                guint copy_len =
+                    (guint)n < available ?
+                        (guint)n :
+                        available;
+
+                if (copy_len > 0) {
+                    memcpy(
+                        post_ack_capture +
+                            post_ack_capture_len,
+                        buf,
+                        copy_len
+                    );
+
+                    post_ack_capture_len +=
+                        copy_len;
+                }
+
+                if (!try_parse_uaut_response()) {
+                    failed = TRUE;
+
+                    if (loop)
+                        g_main_loop_quit(loop);
+
+                    return;
+                }
+            }
+
+            fflush(stdout);
+
+            continue;
+        }
+
+        if (n == 0)
+            break;
+
+        gint err =
+            pseudo_tcp_socket_get_error(
+                tcp
+            );
+
+        if (err == EWOULDBLOCK)
+            break;
+
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=32 sha256=49f1b440779c43df>",
+            err
+        );
+
+        failed = TRUE;
+
+        if (loop)
+            g_main_loop_quit(loop);
+
+        break;
+    }
+}
+
+
+static void
+pseudotcp_writable_cb(
+    PseudoTcpSocket *tcp,
+    gpointer data)
+{
+    (void)tcp;
+    (void)data;
+
+    if (!try_send_echo_ack() ||
+        !try_send_uaut_open()) {
+
+        failed = TRUE;
+
+        if (loop)
+            g_main_loop_quit(loop);
+    }
+}
+
+
+static void
+pseudotcp_closed_cb(
+    PseudoTcpSocket *tcp,
+    guint32 error,
+    gpointer data)
+{
+    (void)tcp;
+    (void)data;
+
+    printf(
+        "<REDACTED_STRING bytes=33 sha256=4086acb735a85dbe>"
+        "<REDACTED_STRING bytes=12 sha256=8d7edb35bfe65590>",
+        error
+    );
+
+    if (!pseudotcp_open) {
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=37 sha256=cd513b0a0779f22f>"
+        );
+
+        failed = TRUE;
+
+        if (loop)
+            g_main_loop_quit(loop);
+    }
+
+    fflush(stdout);
+}
+
+
+static PseudoTcpWriteResult
+pseudotcp_write_packet_cb(
+    PseudoTcpSocket *tcp,
+    const gchar *buffer,
+    guint32 len,
+    gpointer data)
+{
+    (void)tcp;
+    (void)data;
+
+
+
+
+
+
+
+    if (len < 4 ||
+        buffer[0] != 0 ||
+        buffer[1] != 0 ||
+        buffer[2] != 0 ||
+        buffer[3] != 0) {
+
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=36 sha256=d6426890b988b34a>"
+        );
+
+        failed = TRUE;
+        return WR_FAIL;
+    }
+
+    gint sent =
+        nice_agent_send(
+            agent,
+            stream_id,
+            1,
+            len,
+            buffer
+        );
+
+    if (sent != (gint)len) {
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=30 sha256=fce67ddb928917a3>"
+            "<REDACTED_STRING bytes=21 sha256=22bf4fe7578da46e>",
+            len,
+            sent
+        );
+
+        failed = TRUE;
+        return WR_FAIL;
+    }
+
+    pseudotcp_packets_out++;
+
+    if (len > pseudotcp_max_wire_out)
+        pseudotcp_max_wire_out = len;
+
+    return WR_SUCCESS;
+}
+
+
+static gboolean
+pseudotcp_clock_cb(gpointer data)
+{
+    (void)data;
+
+    if (!pseudo_tcp)
+        return G_SOURCE_REMOVE;
+
+    pseudo_tcp_socket_notify_clock(
+        pseudo_tcp
+    );
+
+    if (!pseudotcp_open &&
+        pseudo_tcp_socket_is_closed(
+            pseudo_tcp
+        )) {
+
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=37 sha256=cd513b0a0779f22f>"
+        );
+
+        failed = TRUE;
+
+        if (loop)
+            g_main_loop_quit(loop);
+
+        return G_SOURCE_REMOVE;
+    }
+
+    return G_SOURCE_CONTINUE;
+}
+
+
+static gboolean
+start_pseudotcp(void)
+{
+    if (pseudotcp_started)
+        return TRUE;
+
+    PseudoTcpCallbacks callbacks = {
+        .user_data = NULL,
+        .PseudoTcpOpened =
+            pseudotcp_opened_cb,
+        .PseudoTcpReadable =
+            pseudotcp_readable_cb,
+        .PseudoTcpWritable =
+            pseudotcp_writable_cb,
+        .PseudoTcpClosed =
+            pseudotcp_closed_cb,
+        .WritePacket =
+            pseudotcp_write_packet_cb
+    };
+
+    pseudo_tcp =
+        pseudo_tcp_socket_new(
+            PSEUDOTCP_CONVERSATION,
+            &callbacks
+        );
+
+    if (!pseudo_tcp) {
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=25 sha256=1685a69c2a0e42c1>"
+        );
+
+        return FALSE;
+    }
+
+    guint conversation = 999;
+
+    g_object_get(
+        pseudo_tcp,
+        "<REDACTED_STRING bytes=14 sha256=71584965a493f60e>",
+        &conversation,
+        NULL
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=29 sha256=33fcecee3bba6752>",
+        conversation
+    );
+
+    if (conversation !=
+        PSEUDOTCP_CONVERSATION) {
+
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=31 sha256=8ac1867ed3b97be7>"
+        );
+
+        return FALSE;
+    }
+
+    pseudo_tcp_socket_notify_mtu(
+        pseudo_tcp,
+        PSEUDOTCP_MTU
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=20 sha256=a0450b1b960a1ec5>",
+        (unsigned)PSEUDOTCP_MTU
+    );
+
+    pseudotcp_started = TRUE;
+
+
+
+
+
+
+    g_timeout_add(
+        1,
+        pseudotcp_clock_cb,
+        NULL
+    );
+
+
+
+
+
+    if (!pseudo_tcp_socket_connect(
+            pseudo_tcp)) {
+
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=31 sha256=0cb5c28be75d845d>"
+            "<REDACTED_STRING bytes=12 sha256=102be216ee409059>",
+            pseudo_tcp_socket_get_error(
+                pseudo_tcp
+            )
+        );
+
+        return FALSE;
+    }
+
+    printf(
+        "<REDACTED_STRING bytes=32 sha256=b339b991906d5ad1>"
+    );
+
+    fflush(stdout);
+
+    return TRUE;
+}
+
+
+static const char *
+component_state_name(
+    NiceComponentState state)
+{
+    switch (state) {
+        case NICE_COMPONENT_STATE_DISCONNECTED:
+            return "<REDACTED_STRING bytes=14 sha256=b0231e12f673fa15>";
+
+        case NICE_COMPONENT_STATE_GATHERING:
+            return "<REDACTED_STRING bytes=11 sha256=9fbf1605bb43e9d9>";
+
+        case NICE_COMPONENT_STATE_CONNECTING:
+            return "<REDACTED_STRING bytes=12 sha256=d4ef080b81d93fc9>";
+
+        case NICE_COMPONENT_STATE_CONNECTED:
+            return "<REDACTED_STRING bytes=11 sha256=64a117658687895b>";
+
+        case NICE_COMPONENT_STATE_READY:
+            return "<REDACTED_STRING bytes=7 sha256=f4fc3d96f56f82a6>";
+
+        case NICE_COMPONENT_STATE_FAILED:
+            return "<REDACTED_STRING bytes=8 sha256=7e8a57fe6936f927>";
+
+        default:
+            return "<REDACTED_STRING bytes=9 sha256=0f15dc23249e5ae4>";
+    }
+}
+
+
+static gboolean
+report_selected_pair(void)
+{
+    NiceCandidate *local = NULL;
+    NiceCandidate *remote = NULL;
+
+    gboolean ok =
+        nice_agent_get_selected_pair(
+            agent,
+            stream_id,
+            1,
+            &local,
+            &remote
+        );
+
+    if (!ok || !local || !remote) {
+        printf("<REDACTED_STRING bytes=24 sha256=c5f43ce7e5d30b5f>");
+        fflush(stdout);
+
+        return FALSE;
+    }
+
+    selected_pair_present = TRUE;
+
+    printf("<REDACTED_STRING bytes=22 sha256=79cde6d0d10b6a2b>");
+
+
+
+
+
+    printf(
+        "<REDACTED_STRING bytes=26 sha256=d99d21852d6fb843>",
+        (int)local->type
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=31 sha256=55bd7c91874a7d3c>",
+        (int)local->transport
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=27 sha256=8d1634640eaeb32d>",
+        (int)remote->type
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=32 sha256=b33acbb1b21d598d>",
+        (int)remote->transport
+    );
+
+    fflush(stdout);
+
+    return TRUE;
+}
+
+
+static void
+component_state_changed_cb(
+    NiceAgent *nice_agent,
+    guint sid,
+    guint component_id,
+    guint state_value,
+    gpointer data)
+{
+    (void)nice_agent;
+    (void)data;
+
+    if (sid != stream_id ||
+        component_id != 1) {
+        return;
+    }
+
+    NiceComponentState state =
+        (NiceComponentState)state_value;
+
+    printf(
+        "<REDACTED_STRING bytes=26 sha256=f0b822154582437d>",
+        component_state_name(state)
+    );
+
+    if (state ==
+        NICE_COMPONENT_STATE_CONNECTED) {
+
+        if (!ice_connected) {
+            ice_connected = TRUE;
+            printf("<REDACTED_STRING bytes=22 sha256=e15866e48ae84b93>");
+        }
+    }
+
+    if (state ==
+        NICE_COMPONENT_STATE_READY) {
+
+        ice_connected = TRUE;
+        ice_ready = TRUE;
+
+        printf("<REDACTED_STRING bytes=22 sha256=e15866e48ae84b93>");
+        printf("<REDACTED_STRING bytes=18 sha256=aeac502d0d8aa081>");
+
+        if (!report_selected_pair()) {
+            fprintf(
+                stderr,
+                "<REDACTED_STRING bytes=22 sha256=63437f8fd730ddac>"
+            );
+
+            failed = TRUE;
+
+            if (loop)
+                g_main_loop_quit(loop);
+
+            return;
+        }
+
+        if (!start_pseudotcp()) {
+            fprintf(
+                stderr,
+                "<REDACTED_STRING bytes=24 sha256=40e106ba6dfdaee9>"
+            );
+
+            failed = TRUE;
+
+            if (loop)
+                g_main_loop_quit(loop);
+
+            return;
+        }
+
+        fflush(stdout);
+
+        return;
+    }
+
+    if (state ==
+        NICE_COMPONENT_STATE_FAILED) {
+
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=25 sha256=db33e17edf84e84b>"
+        );
+
+        failed = TRUE;
+
+        if (loop)
+            g_main_loop_quit(loop);
+
+        return;
+    }
+
+    fflush(stdout);
+}
+
+
+static gboolean
+import_remote_primitives(
+    const gchar *remote_sdp)
+{
+    const gchar *ufrag_prefix =
+        "<REDACTED_STRING bytes=14 sha256=6ee1a7f1ae6061f5>";
+
+    const gchar *pwd_prefix =
+        "<REDACTED_STRING bytes=12 sha256=7d2d0e9916f4f622>";
+
+    const gchar *cand_prefix =
+        "<REDACTED_STRING bytes=14 sha256=d049e372d33f95de>";
+
+    gchar **lines =
+        g_strsplit_set(
+            remote_sdp,
+            "<REDACTED_STRING bytes=6 sha256=645e13cf9b57d854>",
+            -1
+        );
+
+    gchar *ufrag = NULL;
+    gchar *pwd = NULL;
+
+    guint ufrag_count = 0;
+    guint pwd_count = 0;
+    guint candidate_lines = 0;
+
+    for (guint i = 0;
+         lines[i] != NULL;
+         i++) {
+
+        const gchar *line = lines[i];
+
+        if (!line[0])
+            continue;
+
+        if (g_str_has_prefix(
+                line,
+                ufrag_prefix)) {
+
+            ufrag_count++;
+
+            if (!ufrag) {
+                ufrag =
+                    g_strdup(
+                        line +
+                        strlen(
+                            ufrag_prefix
+                        )
+                    );
+            }
+
+            continue;
+        }
+
+        if (g_str_has_prefix(
+                line,
+                pwd_prefix)) {
+
+            pwd_count++;
+
+            if (!pwd) {
+                pwd =
+                    g_strdup(
+                        line +
+                        strlen(
+                            pwd_prefix
+                        )
+                    );
+            }
+
+            continue;
+        }
+
+        if (g_str_has_prefix(
+                line,
+                cand_prefix)) {
+
+            candidate_lines++;
+        }
+    }
+
+    printf(
+        "<REDACTED_STRING bytes=25 sha256=bc1e40bd450468a2>",
+        ufrag_count
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=23 sha256=ccf37da51ee40770>",
+        pwd_count
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=29 sha256=0290cc4c7bb154d5>",
+        candidate_lines
+    );
+
+    if (ufrag_count != 1 ||
+        pwd_count != 1 ||
+        candidate_lines == 0 ||
+        !ufrag ||
+        !pwd) {
+
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=34 sha256=f3438d8e528f699a>"
+        );
+
+        g_free(ufrag);
+        g_free(pwd);
+        g_strfreev(lines);
+
+        return FALSE;
+    }
+
+    printf("<REDACTED_STRING bytes=34 sha256=c862b9cc92c47418>");
+
+    printf(
+        "<REDACTED_STRING bytes=27 sha256=7e47e5789ef2bc23>",
+        strlen(ufrag)
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=25 sha256=31b7884577df2dc7>",
+        strlen(pwd)
+    );
+
+    GSList *candidates = NULL;
+
+    guint parsed = 0;
+    guint parse_failed = 0;
+
+    guint host = 0;
+    guint srflx = 0;
+    guint prflx = 0;
+    guint relay = 0;
+    guint non_udp = 0;
+
+    for (guint i = 0;
+         lines[i] != NULL;
+         i++) {
+
+        const gchar *line = lines[i];
+
+        if (!g_str_has_prefix(
+                line,
+                cand_prefix)) {
+
+            continue;
+        }
+
+        NiceCandidate *candidate =
+            nice_agent_parse_remote_candidate_sdp(
+                agent,
+                stream_id,
+                line
+            );
+
+        if (!candidate) {
+            parse_failed++;
+            continue;
+        }
+
+        if (candidate->component_id != 1) {
+            fprintf(
+                stderr,
+                "<REDACTED_STRING bytes=34 sha256=1c16c9aafb3e7c47>",
+                candidate->component_id
+            );
+
+            nice_candidate_free(
+                candidate
+            );
+
+            parse_failed++;
+            continue;
+        }
+
+        if (candidate->transport !=
+            NICE_CANDIDATE_TRANSPORT_UDP) {
+
+            non_udp++;
+        }
+
+        switch (candidate->type) {
+            case NICE_CANDIDATE_TYPE_HOST:
+                host++;
+                break;
+
+            case NICE_CANDIDATE_TYPE_SERVER_REFLEXIVE:
+                srflx++;
+                break;
+
+            case NICE_CANDIDATE_TYPE_PEER_REFLEXIVE:
+                prflx++;
+                break;
+
+            case NICE_CANDIDATE_TYPE_RELAYED:
+                relay++;
+                break;
+
+            default:
+                break;
+        }
+
+        candidates =
+            g_slist_prepend(
+                candidates,
+                candidate
+            );
+
+        parsed++;
+    }
+
+    candidates =
+        g_slist_reverse(
+            candidates
+        );
+
+    printf(
+        "<REDACTED_STRING bytes=31 sha256=c28acc33c0761dd1>",
+        parsed
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=31 sha256=71f2adc7009d9122>",
+        parse_failed
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=29 sha256=9aba6e32c00824ee>",
+        host
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=30 sha256=f152e48f4d74049f>",
+        srflx
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=30 sha256=87dda146bef8e9e4>",
+        prflx
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=30 sha256=febe66e0288eb00c>",
+        relay
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=32 sha256=3d441a6eb06eaff6>",
+        non_udp
+    );
+
+    if (parse_failed != 0 ||
+        parsed != candidate_lines) {
+
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=31 sha256=df5f4cce591a2222>"
+        );
+
+        g_slist_free_full(
+            candidates,
+            (GDestroyNotify)
+                nice_candidate_free
+        );
+
+        g_free(ufrag);
+        g_free(pwd);
+        g_strfreev(lines);
+
+        return FALSE;
+    }
+
+    printf("<REDACTED_STRING bytes=31 sha256=3139dee039a9275a>");
+
+    gboolean credentials_ok =
+        nice_agent_set_remote_credentials(
+            agent,
+            stream_id,
+            ufrag,
+            pwd
+        );
+
+    printf(
+        "<REDACTED_STRING bytes=29 sha256=da7ac768dc472b14>",
+        credentials_ok ?
+            "<REDACTED_STRING bytes=6 sha256=727e9bd17b077ba1>" :
+            "<REDACTED_STRING bytes=6 sha256=8dda96cc06ec8a54>"
+    );
+
+    int added = -1;
+
+    if (credentials_ok) {
+        added =
+            nice_agent_set_remote_candidates(
+                agent,
+                stream_id,
+                1,
+                candidates
+            );
+    }
+
+    printf(
+        "<REDACTED_STRING bytes=31 sha256=4902cd7ddc0f50c0>",
+        added
+    );
+
+    gboolean ok =
+        credentials_ok &&
+        added == (int)parsed;
+
+    g_slist_free_full(
+        candidates,
+        (GDestroyNotify)
+            nice_candidate_free
+    );
+
+    g_free(ufrag);
+    g_free(pwd);
+    g_strfreev(lines);
+
+    return ok;
+}
+
+
+static gboolean
+remote_sdp_check_cb(gpointer data)
+{
+    (void)data;
+
+    if (!ready || remote_loaded)
+        return G_SOURCE_CONTINUE;
+
+    GStatBuf st;
+
+    if (g_stat(REMOTE_FILE, &st) != 0 ||
+        st.st_size <= 0) {
+
+        remote_last_size = -1;
+        remote_stable_ticks = 0;
+
+        return G_SOURCE_CONTINUE;
+    }
+
+
+
+
+
+
+    if (remote_last_size != st.st_size) {
+        remote_last_size = st.st_size;
+        remote_stable_ticks = 0;
+
+        return G_SOURCE_CONTINUE;
+    }
+
+    remote_stable_ticks++;
+
+    if (remote_stable_ticks < 2)
+        return G_SOURCE_CONTINUE;
+
+    gchar *remote_sdp = NULL;
+    gsize remote_len = 0;
+    GError *error = NULL;
+
+    if (!g_file_get_contents(
+            REMOTE_FILE,
+            &remote_sdp,
+            &remote_len,
+            &error)) {
+
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=24 sha256=4faf81c9366ff088>"
+        );
+
+        if (error)
+            g_error_free(error);
+
+        failed = TRUE;
+
+        if (loop)
+            g_main_loop_quit(loop);
+
+        return G_SOURCE_REMOVE;
+    }
+
+    chmod(
+        REMOTE_FILE,
+        0600
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=24 sha256=2b5b663bd5640ca4>",
+        (size_t)remote_len
+    );
+
+
+
+
+
+
+
+
+    gboolean import_ok =
+        import_remote_primitives(
+            remote_sdp
+        );
+
+    g_free(remote_sdp);
+
+    if (!import_ok) {
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=33 sha256=ec3b945c0e75c669>"
+        );
+
+        failed = TRUE;
+
+        if (loop)
+            g_main_loop_quit(loop);
+
+        return G_SOURCE_REMOVE;
+    }
+
+    remote_loaded = TRUE;
+
+    printf(
+        "<REDACTED_STRING bytes=33 sha256=f1a546e5820d281c>"
+    );
+
+    fflush(stdout);
+
+    return G_SOURCE_REMOVE;
+}
+
+
+
+static void
+candidate_gathering_done_cb(
+    NiceAgent *nice_agent,
+    guint sid,
+    gpointer data)
+{
+    (void)data;
+
+    if (sid != stream_id)
+        return;
+
+    gchar *ufrag = NULL;
+    gchar *pwd = NULL;
+
+    gboolean credentials_ok =
+        nice_agent_get_local_credentials(
+            nice_agent,
+            sid,
+            &ufrag,
+            &pwd
+        );
+
+    GSList *candidates =
+        nice_agent_get_local_candidates(
+            nice_agent,
+            sid,
+            1
+        );
+
+    guint total = 0;
+    guint host = 0;
+    guint srflx = 0;
+    guint prflx = 0;
+    guint relay = 0;
+
+    for (GSList *it = candidates;
+         it != NULL;
+         it = it->next) {
+
+        NiceCandidate *candidate =
+            (NiceCandidate *)it->data;
+
+        total++;
+
+        switch (candidate->type) {
+            case NICE_CANDIDATE_TYPE_HOST:
+                host++;
+                break;
+
+            case NICE_CANDIDATE_TYPE_SERVER_REFLEXIVE:
+                srflx++;
+                break;
+
+            case NICE_CANDIDATE_TYPE_PEER_REFLEXIVE:
+                prflx++;
+                break;
+
+            case NICE_CANDIDATE_TYPE_RELAYED:
+                relay++;
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    gchar *sdp =
+        nice_agent_generate_local_sdp(
+            nice_agent
+        );
+
+    if (!credentials_ok ||
+        !ufrag ||
+        !pwd ||
+        !sdp ||
+        total == 0) {
+
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=19 sha256=9057ee75e3e3f265>"
+        );
+
+        failed = TRUE;
+
+        if (sdp)
+            g_free(sdp);
+
+        if (ufrag)
+            g_free(ufrag);
+
+        if (pwd)
+            g_free(pwd);
+
+        g_slist_free_full(
+            candidates,
+            (GDestroyNotify)nice_candidate_free
+        );
+
+        g_main_loop_quit(loop);
+        return;
+    }
+
+    GError *error = NULL;
+
+    if (!g_file_set_contents(
+            OFFER_FILE,
+            sdp,
+            -1,
+            &error)) {
+
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=20 sha256=dcaa7150692f2fc4>"
+        );
+
+        if (error) {
+            g_error_free(error);
+        }
+
+        failed = TRUE;
+
+        g_free(sdp);
+        g_free(ufrag);
+        g_free(pwd);
+
+        g_slist_free_full(
+            candidates,
+            (GDestroyNotify)nice_candidate_free
+        );
+
+        g_main_loop_quit(loop);
+        return;
+    }
+
+    chmod(OFFER_FILE, 0600);
+
+    printf("<REDACTED_STRING bytes=19 sha256=29b6878e723ef508>");
+    printf("<REDACTED_STRING bytes=23 sha256=a85ed513c3f9913d>");
+    printf("<REDACTED_STRING bytes=20 sha256=b56b036a6ea68968>");
+
+    printf(
+        "<REDACTED_STRING bytes=29 sha256=492e24d835f74ba9>",
+        total
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=28 sha256=394baa81390181bb>",
+        host
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=29 sha256=24cef9016ae5a07a>",
+        srflx
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=29 sha256=3d6965bad034a812>",
+        prflx
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=29 sha256=dc8b5ab36ec9ab9f>",
+        relay
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=26 sha256=5c066205444fb09b>",
+        strlen(ufrag)
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=24 sha256=3bb04f3d6af6373b>",
+        strlen(pwd)
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=23 sha256=8f63cf9f2ccbe19a>",
+        strlen(sdp)
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=23 sha256=3852fdab149dc804>"
+    );
+
+    fflush(stdout);
+
+    ready = TRUE;
+
+    g_free(sdp);
+    g_free(ufrag);
+    g_free(pwd);
+
+    g_slist_free_full(
+        candidates,
+        (GDestroyNotify)nice_candidate_free
+    );
+}
+
+
+int
+main(void)
+{
+    if (g_mkdir_with_parents(
+            RUN_DIR,
+            0700) != 0) {
+
+        perror("<REDACTED_STRING bytes=7 sha256=c5fa18354f741bb3>");
+
+        return 2;
+    }
+
+    chmod(RUN_DIR, 0700);
+
+    unlink(OFFER_FILE);
+    unlink(REMOTE_FILE);
+    unlink(STOP_FILE);
+
+    loop =
+        g_main_loop_new(
+            NULL,
+            FALSE
+        );
+
+    agent =
+        nice_agent_new(
+            g_main_loop_get_context(loop),
+            NICE_COMPATIBILITY_RFC5245
+        );
+
+    if (!agent) {
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=26 sha256=5e47be2ba1574a93>"
+        );
+
+        return 3;
+    }
+
+
+
+
+
+
+
+    g_object_set(
+        G_OBJECT(agent),
+
+        "<REDACTED_STRING bytes=18 sha256=0c88989146ffd223>",
+        FALSE,
+
+        "<REDACTED_STRING bytes=9 sha256=c250fc0e9df0947e>",
+        TRUE,
+
+        "<REDACTED_STRING bytes=9 sha256=f4e15ce16ba73951>",
+        FALSE,
+
+        "<REDACTED_STRING bytes=6 sha256=65c5cbb77bc80045>",
+        FALSE,
+
+        "<REDACTED_STRING bytes=13 sha256=baeadbe3b1424b74>",
+        STUN_SERVER,
+
+        "<REDACTED_STRING bytes=18 sha256=bc4fb2be32a2e39f>",
+        STUN_PORT,
+
+        NULL
+    );
+
+    stream_id =
+        nice_agent_add_stream(
+            agent,
+            1
+        );
+
+    if (stream_id == 0) {
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=26 sha256=a3418726fda7b71a>"
+        );
+
+        g_object_unref(agent);
+        g_main_loop_unref(loop);
+
+        return 4;
+    }
+
+    nice_agent_set_stream_name(
+        agent,
+        stream_id,
+        "<REDACTED_STRING bytes=7 sha256=53b773b65438e16d>"
+    );
+
+    if (!nice_agent_attach_recv(
+            agent,
+            stream_id,
+            1,
+            g_main_loop_get_context(loop),
+            recv_cb,
+            NULL)) {
+
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=24 sha256=e95041fc3804b292>"
+        );
+
+        g_object_unref(agent);
+        g_main_loop_unref(loop);
+
+        return 5;
+    }
+
+    printf("<REDACTED_STRING bytes=24 sha256=f91c180c3f81612f>");
+    fflush(stdout);
+
+    g_signal_connect(
+        agent,
+        "<REDACTED_STRING bytes=26 sha256=c006bc5a6ad66b73>",
+        G_CALLBACK(
+            candidate_gathering_done_cb
+        ),
+        NULL
+    );
+
+    g_signal_connect(
+        agent,
+        "<REDACTED_STRING bytes=25 sha256=a63e197134371656>",
+        G_CALLBACK(
+            component_state_changed_cb
+        ),
+        NULL
+    );
+
+    if (!nice_agent_gather_candidates(
+            agent,
+            stream_id)) {
+
+        fprintf(
+            stderr,
+            "<REDACTED_STRING bytes=25 sha256=42188142a6f08ba9>"
+        );
+
+        g_object_unref(agent);
+        g_main_loop_unref(loop);
+
+        return 5;
+    }
+
+    printf("<REDACTED_STRING bytes=25 sha256=1ed7360535db8df1>");
+    fflush(stdout);
+
+    g_timeout_add(
+        100,
+        stop_check_cb,
+        NULL
+    );
+
+    g_timeout_add(
+        100,
+        remote_sdp_check_cb,
+        NULL
+    );
+
+    g_timeout_add_seconds(
+        60,
+        absolute_timeout_cb,
+        NULL
+    );
+
+    g_main_loop_run(loop);
+
+    if (ready)
+        printf("<REDACTED_STRING bytes=23 sha256=e691031a71ac9b4c>");
+
+    printf(
+        "<REDACTED_STRING bytes=24 sha256=1b4d542fe32b6557>",
+        remote_loaded ? "<REDACTED_STRING bytes=6 sha256=18d10c7d2b4b04aa>" : "<REDACTED_STRING bytes=7 sha256=076de6e730df0b4c>"
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=26 sha256=b5ff94e685c6e14d>",
+        ice_connected ? "<REDACTED_STRING bytes=6 sha256=18d10c7d2b4b04aa>" : "<REDACTED_STRING bytes=7 sha256=076de6e730df0b4c>"
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=22 sha256=0e063dbe2b99aec8>",
+        ice_ready ? "<REDACTED_STRING bytes=6 sha256=18d10c7d2b4b04aa>" : "<REDACTED_STRING bytes=7 sha256=076de6e730df0b4c>"
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=26 sha256=c097a219d9f8d461>",
+        selected_pair_present ? "<REDACTED_STRING bytes=6 sha256=18d10c7d2b4b04aa>" : "<REDACTED_STRING bytes=7 sha256=076de6e730df0b4c>"
+    );
+
+    fflush(stdout);
+
+    printf(
+        "<REDACTED_STRING bytes=30 sha256=896b621c282653b3>",
+        pseudotcp_started ? "<REDACTED_STRING bytes=6 sha256=18d10c7d2b4b04aa>" : "<REDACTED_STRING bytes=7 sha256=076de6e730df0b4c>"
+    );
+
+    printf(
+        "<REDACTED_STRING bytes=27 sha256=c29ad8738f725bed>",
+        pseudotcp_open ? "<REDACTED_STRING bytes=6 sha256=18d10c7d2b4b04aa>" : "<REDACTED_STRING bytes=7 sha256=076de6e730df0b4c>"
+    );
+
+    fflush(stdout);
+
+    if (pseudo_tcp)
+        g_object_unref(pseudo_tcp);
+
+    g_object_unref(agent);
+    g_main_loop_unref(loop);
+
+    return failed ? 6 : 0;
+}
