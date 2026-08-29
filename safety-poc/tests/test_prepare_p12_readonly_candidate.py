@@ -32,6 +32,12 @@ class PrepareP12ReadonlyCandidateTests(unittest.TestCase):
         self.assertIn("P12_CANDIDATE_BINARY_ACTUATOR_SCAN=PASS", text)
         self.assertIn("P12_CANDIDATE_WRAPPER_ACTUATOR_SCAN=PASS", text)
 
+    def test_wrapper_binding_matches_real_base_variable_invocation(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("needle = '\"$BASE/bin/comelit_ice_offer_holder\"'", text)
+        self.assertIn("P12_CANDIDATE_WRAPPER_BINDING=PASS", text)
+        self.assertIn("P12_CANDIDATE_WRAPPER_BASELINE_HOLDER_REMAINS=true", text)
+
 
 if __name__ == "__main__":
     unittest.main()
