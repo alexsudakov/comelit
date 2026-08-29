@@ -93,11 +93,11 @@ src = Path(sys.argv[1])
 out = Path(sys.argv[2])
 candidate = sys.argv[3]
 text = src.read_text(encoding="utf-8")
-needle = "/root/comelit-vip-poc/bin/comelit_ice_offer_holder"
+needle = '"$BASE/bin/comelit_ice_offer_holder"'
 count = text.count(needle)
 if count != 1:
     raise SystemExit(f"P12_WRAPPER_HOLDER_PATH_COUNT={count}")
-text = text.replace(needle, candidate, 1)
+text = text.replace(needle, f'"{candidate}"', 1)
 out.write_text(text, encoding="utf-8")
 PY
 
@@ -110,10 +110,12 @@ if grep -Eq 'CTPP|OPEN_DOOR|open_door|create_door_message' "$CANDIDATE_WRAPPER";
 fi
 
 grep -Fq "$CANDIDATE_BINARY" "$CANDIDATE_WRAPPER"
-if grep -Fq "$BASE_BINARY" "$CANDIDATE_WRAPPER"; then
-    echo "P12_CANDIDATE_WRAPPER_BASELINE_PATH_REMAINS=true"
+if grep -Fq '"$BASE/bin/comelit_ice_offer_holder"' "$CANDIDATE_WRAPPER"; then
+    echo "P12_CANDIDATE_WRAPPER_BASELINE_HOLDER_REMAINS=true"
     exit 1
 fi
+
+echo "P12_CANDIDATE_WRAPPER_BINDING=PASS"
 
 # Build stage must never touch credential contents or execute a Comelit network probe.
 if grep -RIEq 'SECRETS_READ=true|NETWORK_ACTION_PERFORMED=true|ACTUATOR_COMMAND_ATTEMPTED=true|PHYSICAL_DOOR_ACTION=true' "$BUILD_DIR"; then
@@ -155,6 +157,7 @@ P12_HOLDER_TRANSFORM_SAFE=PASS
 P12_CANDIDATE_SOURCE_ACTUATOR_SCAN=PASS
 P12_CANDIDATE_BINARY_ACTUATOR_SCAN=PASS
 P12_CANDIDATE_WRAPPER_ACTUATOR_SCAN=PASS
+P12_CANDIDATE_WRAPPER_BINDING=PASS
 BASELINE_FILES_MUTATED=false
 SECRETS_READ=false
 NETWORK_ACTION_PERFORMED=false
@@ -185,6 +188,7 @@ echo "P12_BASELINE_WRAPPER_PIN=PASS"
 echo "P12_CANONICAL_TEMPLATE_DERIVATION=PASS"
 echo "P12_CONTROL_TEMPLATE_EQUIVALENCE=PASS"
 echo "P12_HOLDER_TRANSFORM_SAFE=PASS"
+echo "P12_CANDIDATE_WRAPPER_BINDING=PASS"
 echo "P12_CANDIDATE_SOURCE_SHA256=$candidate_source_sha"
 echo "P12_CANDIDATE_BINARY_SHA256=$candidate_binary_sha"
 echo "P12_CANDIDATE_WRAPPER_SHA256=$candidate_wrapper_sha"
