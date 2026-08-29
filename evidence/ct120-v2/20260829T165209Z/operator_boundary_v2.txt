@@ -1,0 +1,7 @@
+=== OPERATOR BOUNDARY V2 ===
+FILE=/usr/local/sbin/comelit-smoke mode=755 sha256=407176f0546489bb4c9d179454263c8a0ef847476e02237371e88e428fb4d3df
+FILE=/usr/local/sbin/comelit-p2p-readiness mode=755 sha256=b5dddec0d41b6574e6b2ce9ec4c173b55a3db68ac1ac0992dca9151f846cf450
+FILE=/usr/local/sbin/hermes-comelit-dispatch mode=755 sha256=e4bb63d7939a67344eedbfaf9f01a8a0a9e1578a74665e4b84f169466eb62e63
+FILE=/usr/local/sbin/hermes-comelit-dispatch.pre-door-poc-v1 mode=755 sha256=29ae6f035bb1fec7613b836d8bc3425c214171b38b582f291cc16e2a8b096ffa
+SECRETS_CONTENT_READ=false
+GIT_CREDENTIAL_FILE_READ=false

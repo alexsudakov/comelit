@@ -1,0 +1,226 @@
+=== CANONICAL CONTROL SHAPE INVENTORY ===
+SOURCE_EXECUTED=false
+LITERAL_VALUES_PRINTED=false
+SECRETS_READ=false
+NETWORK_ACTION_PERFORMED=false
+PHYSICAL_DOOR_ACTION=false
+SOURCE path=comelit_vip/application_session.py sha256=7c30aab9bd03917e0e84fb9b31f924f95eabeb8edd6a1fe74d4e4f012c2145fd hash_pin=PASS
+FIELD path=comelit_vip/application_session.py class=JsonChannelResponse name=channel_id annotation=int default_shape=none
+FIELD path=comelit_vip/application_session.py class=JsonChannelResponse name=message annotation=str|None default_shape=none
+FIELD path=comelit_vip/application_session.py class=JsonChannelResponse name=message_type annotation=str|None default_shape=none
+FIELD path=comelit_vip/application_session.py class=JsonChannelResponse name=response_code annotation=int|None default_shape=none
+FIELD path=comelit_vip/application_session.py class=JsonChannelResponse name=data annotation=dict[str,Any] default_shape=CALL(field,argc=0,kw=1)
+SOURCE path=comelit_vip/channel_session.py sha256=b34d87c382ea601d96761f59a31e62aa2d1e959ea9c24e99a63964e1c033e1d1 hash_pin=PASS
+FIELD path=comelit_vip/channel_session.py class=ChannelState name=channel_name annotation=str default_shape=none
+FIELD path=comelit_vip/channel_session.py class=ChannelState name=channel_id annotation=int default_shape=none
+FIELD path=comelit_vip/channel_session.py class=ChannelState name=channel_flag annotation=int default_shape=none
+FIELD path=comelit_vip/channel_session.py class=ChannelState name=origin annotation=str default_shape=none
+FIELD path=comelit_vip/channel_session.py class=ChannelState name=open_response_word annotation=int|None default_shape=CONST_NONE
+FIELD path=comelit_vip/channel_session.py class=PeerOpenEvent name=channel annotation=ChannelState default_shape=none
+FIELD path=comelit_vip/channel_session.py class=PeerCloseEvent name=channel_id annotation=int default_shape=none
+FIELD path=comelit_vip/channel_session.py class=PeerCloseEvent name=existed annotation=bool default_shape=none
+FIELD path=comelit_vip/channel_session.py class=DataFrameEvent name=frame annotation=VipFrame default_shape=none
+SOURCE path=comelit_vip/control_codec.py sha256=e89e3fe20b24ef2f22ceaa15b186b4db7f71f5f48c7f5aeaf6a07f38bea854a2 hash_pin=PASS
+FIELD path=comelit_vip/control_codec.py class=OpenRequestExtension name=tag annotation=int default_shape=none
+FIELD path=comelit_vip/control_codec.py class=OpenRequestExtension name=payload annotation=bytes default_shape=CALL(field,argc=0,kw=1)
+FIELD path=comelit_vip/control_codec.py class=OpenResponseExtension name=payload annotation=bytes default_shape=CALL(field,argc=0,kw=1)
+FIELD path=comelit_vip/control_codec.py class=OpenChannelRequest name=channel_name annotation=str default_shape=none
+FIELD path=comelit_vip/control_codec.py class=OpenChannelRequest name=channel_id annotation=int default_shape=none
+FIELD path=comelit_vip/control_codec.py class=OpenChannelRequest name=channel_flag annotation=int default_shape=none
+FIELD path=comelit_vip/control_codec.py class=OpenChannelRequest name=extension annotation=OpenRequestExtension|None default_shape=CONST_NONE
+FIELD path=comelit_vip/control_codec.py class=OpenChannelResponse name=channel_id annotation=int default_shape=none
+FIELD path=comelit_vip/control_codec.py class=OpenChannelResponse name=response_word annotation=int default_shape=none
+FIELD path=comelit_vip/control_codec.py class=OpenChannelResponse name=extension annotation=OpenResponseExtension|None default_shape=CONST_NONE
+FIELD path=comelit_vip/control_codec.py class=CloseChannelRequest name=channel_id annotation=int default_shape=none
+FIELD path=comelit_vip/control_codec.py class=CloseChannelResponse name=channel_id annotation=int default_shape=none
+FIELD path=comelit_vip/control_codec.py class=CloseChannelResponse name=response_word annotation=int default_shape=none
+SOURCE path=comelit_vip/vip_session.py sha256=35b604372e9bd42a6631d0c923ac99d49e02e4b7c8892360633eedc23425dc39 hash_pin=PASS
+
+METHOD=VipChannelSession.open_channel
+METHOD_PATH=comelit_vip/channel_session.py
+METHOD_LINE=271
+METHOD_ARGS=self:none,channel_name:str,channel_flag:int,extension:OpenRequestExtension|None,channel_id:int|None
+METHOD_CALL_COUNT=8
+METHOD_CALL_1_LINE=281
+METHOD_CALL_1_NAME=self.allocate_channel_id
+METHOD_CALL_1_ARGC=0
+METHOD_CALL_1_ARG_SHAPES=
+METHOD_CALL_2_LINE=285
+METHOD_CALL_2_NAME=ChannelSessionError
+METHOD_CALL_2_ARGC=1
+METHOD_CALL_2_ARG_SHAPES=JOINEDSTR
+METHOD_CALL_3_LINE=289
+METHOD_CALL_3_NAME=OpenChannelRequest
+METHOD_CALL_3_ARGC=0
+METHOD_CALL_3_ARG_SHAPES=
+METHOD_CALL_4_LINE=296
+METHOD_CALL_4_NAME=self._send_control
+METHOD_CALL_4_ARGC=1
+METHOD_CALL_4_ARG_SHAPES=NAME(request)
+METHOD_CALL_5_LINE=302
+METHOD_CALL_5_NAME=self._recv_event_raw
+METHOD_CALL_5_ARGC=0
+METHOD_CALL_5_ARG_SHAPES=
+METHOD_CALL_6_LINE=306
+METHOD_CALL_6_NAME=isinstance
+METHOD_CALL_6_ARGC=2
+METHOD_CALL_6_ARG_SHAPES=NAME(event)|NAME(OpenChannelResponse)
+METHOD_CALL_7_LINE=313
+METHOD_CALL_7_NAME=ChannelState
+METHOD_CALL_7_ARGC=0
+METHOD_CALL_7_ARG_SHAPES=
+METHOD_CALL_8_LINE=335
+METHOD_CALL_8_NAME=self._pending_events.append
+METHOD_CALL_8_ARGC=1
+METHOD_CALL_8_ARG_SHAPES=NAME(event)
+
+METHOD=VipChannelSession.close_channel
+METHOD_PATH=comelit_vip/channel_session.py
+METHOD_LINE=339
+METHOD_ARGS=self:none,channel_id:int
+METHOD_CALL_COUNT=8
+METHOD_CALL_1_LINE=344
+METHOD_CALL_1_NAME=ChannelSessionError
+METHOD_CALL_1_ARGC=1
+METHOD_CALL_1_ARG_SHAPES=JOINEDSTR
+METHOD_CALL_2_LINE=348
+METHOD_CALL_2_NAME=self._send_control
+METHOD_CALL_2_ARGC=1
+METHOD_CALL_2_ARG_SHAPES=CALL(CloseChannelRequest,argc=0,kw=1)
+METHOD_CALL_3_LINE=349
+METHOD_CALL_3_NAME=CloseChannelRequest
+METHOD_CALL_3_ARGC=0
+METHOD_CALL_3_ARG_SHAPES=
+METHOD_CALL_4_LINE=356
+METHOD_CALL_4_NAME=self._recv_event_raw
+METHOD_CALL_4_ARGC=0
+METHOD_CALL_4_ARG_SHAPES=
+METHOD_CALL_5_LINE=360
+METHOD_CALL_5_NAME=isinstance
+METHOD_CALL_5_ARGC=2
+METHOD_CALL_5_ARG_SHAPES=NAME(event)|NAME(CloseChannelResponse)
+METHOD_CALL_6_LINE=368
+METHOD_CALL_6_NAME=ChannelSessionError
+METHOD_CALL_6_ARGC=1
+METHOD_CALL_6_ARG_SHAPES=JOINEDSTR
+METHOD_CALL_7_LINE=375
+METHOD_CALL_7_NAME=self._channels.pop
+METHOD_CALL_7_ARGC=2
+METHOD_CALL_7_ARG_SHAPES=NAME(channel_id)|CONST_NONE
+METHOD_CALL_8_LINE=382
+METHOD_CALL_8_NAME=self._pending_events.append
+METHOD_CALL_8_ARGC=1
+METHOD_CALL_8_ARG_SHAPES=NAME(event)
+
+METHOD=VipChannelSession._send_control
+METHOD_PATH=comelit_vip/channel_session.py
+METHOD_LINE=142
+METHOD_ARGS=self:none,message:ControlMessage
+METHOD_CALL_COUNT=2
+METHOD_CALL_1_LINE=146
+METHOD_CALL_1_NAME=encode_control_message
+METHOD_CALL_1_ARGC=1
+METHOD_CALL_1_ARG_SHAPES=NAME(message)
+METHOD_CALL_2_LINE=150
+METHOD_CALL_2_NAME=self.session.send_frame
+METHOD_CALL_2_ARGC=2
+METHOD_CALL_2_ARG_SHAPES=CONST_INT|NAME(body)
+
+METHOD=VipChannelSession.recv_event
+METHOD_PATH=comelit_vip/channel_session.py
+METHOD_LINE=260
+METHOD_ARGS=self:none
+METHOD_CALL_COUNT=2
+METHOD_CALL_1_LINE=265
+METHOD_CALL_1_NAME=self._pending_events.popleft
+METHOD_CALL_1_ARGC=0
+METHOD_CALL_1_ARG_SHAPES=
+METHOD_CALL_2_LINE=269
+METHOD_CALL_2_NAME=self._recv_event_raw
+METHOD_CALL_2_ARGC=0
+METHOD_CALL_2_ARG_SHAPES=
+
+METHOD=VipSession.send_frame
+METHOD_PATH=comelit_vip/vip_session.py
+METHOD_LINE=51
+METHOD_ARGS=self:none,request_id:int,body:bytes
+METHOD_CALL_COUNT=2
+METHOD_CALL_1_LINE=56
+METHOD_CALL_1_NAME=encode_frame
+METHOD_CALL_1_ARGC=2
+METHOD_CALL_1_ARG_SHAPES=NAME(request_id)|NAME(body)
+METHOD_CALL_2_LINE=61
+METHOD_CALL_2_NAME=self.transport.write
+METHOD_CALL_2_ARGC=1
+METHOD_CALL_2_ARG_SHAPES=NAME(packet)
+
+TEST_FILE=tests/test_channel_session.py
+TEST_SHA256=65c45151e0da1a083ddf81bce43af270c97ada68938f914e697510b15766fa96
+TEST=test_local_open_matches_capture line=124 selected_calls=4
+TEST_CALL index=1 line=139 name=FixtureTransport argc=1 arg_shapes=CALL(self.control_packet,argc=1,kw=0)
+TEST_CALL index=2 line=145 name=VipSession argc=1 arg_shapes=NAME(transport)
+TEST_CALL index=3 line=150 name=VipChannelSession argc=1 arg_shapes=NAME(vip)
+TEST_CALL index=4 line=155 name=session.open_channel argc=1 arg_shapes=CONST_STR(utf8_len=4)
+TEST=test_nonzero_open_response_word_is_preserved line=177 selected_calls=4
+TEST_CALL index=1 line=193 name=FixtureTransport argc=1 arg_shapes=CALL(self.control_packet,argc=1,kw=0)
+TEST_CALL index=2 line=199 name=VipSession argc=1 arg_shapes=NAME(transport)
+TEST_CALL index=3 line=204 name=VipChannelSession argc=1 arg_shapes=NAME(vip)
+TEST_CALL index=4 line=209 name=session.open_channel argc=1 arg_shapes=CONST_STR(utf8_len=4)
+TEST=test_peer_open_ack_matches_capture line=236 selected_calls=4
+TEST_CALL index=1 line=251 name=FixtureTransport argc=1 arg_shapes=CALL(self.control_packet,argc=1,kw=0)
+TEST_CALL index=2 line=257 name=VipSession argc=1 arg_shapes=NAME(transport)
+TEST_CALL index=3 line=262 name=VipChannelSession argc=1 arg_shapes=NAME(vip)
+TEST_CALL index=4 line=267 name=session.recv_event argc=0 arg_shapes=
+TEST=test_local_open_and_close_match_capture line=296 selected_calls=5
+TEST_CALL index=1 line=315 name=FixtureTransport argc=1 arg_shapes=BINOP(Add)
+TEST_CALL index=2 line=324 name=VipSession argc=1 arg_shapes=NAME(transport)
+TEST_CALL index=3 line=329 name=VipChannelSession argc=1 arg_shapes=NAME(vip)
+TEST_CALL index=4 line=334 name=session.open_channel argc=1 arg_shapes=CONST_STR(utf8_len=4)
+TEST_CALL index=5 line=340 name=session.close_channel argc=1 arg_shapes=ATTR(channel.channel_id)
+TEST=test_peer_close_ack_matches_capture line=368 selected_calls=4
+TEST_CALL index=1 line=383 name=FixtureTransport argc=1 arg_shapes=CALL(self.control_packet,argc=1,kw=0)
+TEST_CALL index=2 line=389 name=VipSession argc=1 arg_shapes=NAME(transport)
+TEST_CALL index=3 line=394 name=VipChannelSession argc=1 arg_shapes=NAME(vip)
+TEST_CALL index=4 line=399 name=session.recv_event argc=0 arg_shapes=
+
+TEST_FILE=tests/test_vip_session.py
+TEST_SHA256=7b4e0cf12bb048fed5b44228ef02c938ba8f39ae9a4376991da05e755cb1cdb9
+TEST=test_fragmented_inbound_stream line=15 selected_calls=2
+TEST_CALL index=1 line=38 name=FixtureTransport argc=1 arg_shapes=BINOP(Add)
+TEST_CALL index=2 line=51 name=VipSession argc=1 arg_shapes=NAME(transport)
+TEST=test_send_json line=89 selected_calls=2
+TEST_CALL index=1 line=90 name=FixtureTransport argc=0 arg_shapes=
+TEST_CALL index=2 line=92 name=VipSession argc=1 arg_shapes=NAME(transport)
+TEST=test_multiple_frames_single_read line=139 selected_calls=2
+TEST_CALL index=1 line=150 name=FixtureTransport argc=1 arg_shapes=BINOP(Add)
+TEST_CALL index=2 line=154 name=VipSession argc=1 arg_shapes=NAME(transport)
+
+TEST_FILE=tests/test_application_session.py
+TEST_SHA256=cfdb22664b9c267ec409a9926ad3940a9504a174a6aea361542ca127ba183a8a
+TEST=test_authenticate_byte_exact_capture line=85 selected_calls=4
+TEST_CALL index=1 line=104 name=FixtureTransport argc=1 arg_shapes=NAME(inbound)
+TEST_CALL index=2 line=117 name=VipSession argc=1 arg_shapes=NAME(transport)
+TEST_CALL index=3 line=122 name=VipChannelSession argc=1 arg_shapes=NAME(vip)
+TEST_CALL index=4 line=127 name=VipApplicationSession argc=1 arg_shapes=NAME(channels)
+TEST=test_second_authenticate_byte_exact_capture line=172 selected_calls=4
+TEST_CALL index=1 line=195 name=FixtureTransport argc=1 arg_shapes=NAME(inbound)
+TEST_CALL index=2 line=207 name=VipSession argc=1 arg_shapes=NAME(transport)
+TEST_CALL index=3 line=212 name=VipChannelSession argc=1 arg_shapes=NAME(vip)
+TEST_CALL index=4 line=217 name=VipApplicationSession argc=1 arg_shapes=NAME(channels)
+TEST=test_ucfg_first_request_byte_exact_capture line=266 selected_calls=4
+TEST_CALL index=1 line=278 name=FixtureTransport argc=1 arg_shapes=NAME(inbound)
+TEST_CALL index=2 line=282 name=VipSession argc=1 arg_shapes=NAME(transport)
+TEST_CALL index=3 line=287 name=VipChannelSession argc=1 arg_shapes=NAME(vip)
+TEST_CALL index=4 line=292 name=VipApplicationSession argc=1 arg_shapes=NAME(channels)
+TEST=test_ucfg_channel_reused_for_second_request line=334 selected_calls=4
+TEST_CALL index=1 line=349 name=FixtureTransport argc=1 arg_shapes=NAME(inbound)
+TEST_CALL index=2 line=361 name=VipSession argc=1 arg_shapes=NAME(transport)
+TEST_CALL index=3 line=366 name=VipChannelSession argc=1 arg_shapes=NAME(vip)
+TEST_CALL index=4 line=371 name=VipApplicationSession argc=1 arg_shapes=NAME(channels)
+
+CANONICAL_CONTROL_SHAPE_INVENTORY=PASS
+SOURCE_EXECUTED=false
+LITERAL_VALUES_PRINTED=false
+SECRETS_READ=false
+NETWORK_ACTION_PERFORMED=false
+PHYSICAL_DOOR_ACTION=false

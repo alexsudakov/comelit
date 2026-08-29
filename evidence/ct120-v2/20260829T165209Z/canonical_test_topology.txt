@@ -1,0 +1,164 @@
+=== SAFE SOURCE TOPOLOGY ===
+SOURCE_EXECUTED=false
+LITERAL_VALUES_PRINTED=false
+SECRETS_READ=false
+NETWORK_ACTION_PERFORMED=false
+PHYSICAL_DOOR_ACTION=false
+
+=== FILE /root/comelit-vip-poc/tests/test_channel_session.py ===
+SHA256=65c45151e0da1a083ddf81bce43af270c97ada68938f914e697510b15766fa96
+BYTES=8582
+LINES=425
+IMPORT_ROOTS=comelit_vip,tests,unittest
+CLASS_COUNT=1
+FUNCTION_COUNT=9
+SOURCE_EXECUTED=false
+LITERAL_VALUES_PRINTED=false
+CLASS line=36 name=ChannelSessionTests bases=unittest.IsolatedAsyncioTestCase
+FUNCTION line=29 kind=sync name=decode_stream args=stream:none returns=none
+FUNCTION line=40 kind=sync name=setUpClass args=cls:none returns=none
+FUNCTION line=61 kind=sync name=control_packet args=self:none,frame:none returns=none
+FUNCTION line=70 kind=async name=test_capture_response_word_distribution args=self:none returns=none
+FUNCTION line=124 kind=async name=test_local_open_matches_capture args=self:none returns=none
+FUNCTION line=177 kind=async name=test_nonzero_open_response_word_is_preserved args=self:none returns=none
+FUNCTION line=236 kind=async name=test_peer_open_ack_matches_capture args=self:none returns=none
+FUNCTION line=296 kind=async name=test_local_open_and_close_match_capture args=self:none returns=none
+FUNCTION line=368 kind=async name=test_peer_close_ack_matches_capture args=self:none returns=none
+CALL name=FixtureTransport count=5
+CALL name=VipChannelSession count=5
+CALL name=VipSession count=5
+CALL name=VipStreamDecoder count=1
+CALL name=build_pseudotcp_streams count=1
+CALL name=close_words.append count=1
+CALL name=decode_control_body count=1
+CALL name=decode_stream count=2
+CALL name=decoder.feed count=1
+CALL name=decoder.finish count=1
+CALL name=encode_frame count=1
+CALL name=isinstance count=2
+CALL name=len count=1
+CALL name=open_words.append count=1
+CALL name=open_words.count count=2
+CALL name=self.assertEqual count=19
+CALL name=self.assertFalse count=1
+CALL name=self.assertIsInstance count=2
+CALL name=self.assertIsNone count=1
+CALL name=self.control_packet count=12
+CALL name=session.close_channel count=1
+CALL name=session.get_channel count=1
+CALL name=session.open_channel count=3
+CALL name=session.recv_event count=2
+CALL name=unittest.main count=1
+LITERAL_SHAPE type=bool count=5
+LITERAL_SHAPE type=int count=40
+LITERAL_SHAPE type=str(utf8_len=12) count=1
+LITERAL_SHAPE type=str(utf8_len=15) count=1
+LITERAL_SHAPE type=str(utf8_len=2) count=1
+LITERAL_SHAPE type=str(utf8_len=3) count=1
+LITERAL_SHAPE type=str(utf8_len=4) count=5
+LITERAL_SHAPE type=str(utf8_len=44) count=1
+LITERAL_SHAPE type=str(utf8_len=5) count=2
+LITERAL_SHAPE type=str(utf8_len=8) count=1
+TOP_CONSTANT PCAP:str(utf8_len=44)
+
+=== FILE /root/comelit-vip-poc/tests/test_vip_session.py ===
+SHA256=7b4e0cf12bb048fed5b44228ef02c938ba8f39ae9a4376991da05e755cb1cdb9
+BYTES=3689
+LINES=200
+IMPORT_ROOTS=comelit_vip,unittest
+CLASS_COUNT=1
+FUNCTION_COUNT=3
+SOURCE_EXECUTED=false
+LITERAL_VALUES_PRINTED=false
+CLASS line=12 name=VipSessionTests bases=unittest.IsolatedAsyncioTestCase
+FUNCTION line=15 kind=async name=test_fragmented_inbound_stream args=self:none returns=none
+FUNCTION line=89 kind=async name=test_send_json args=self:none returns=none
+FUNCTION line=139 kind=async name=test_multiple_frames_single_read args=self:none returns=none
+CALL name=FixtureTransport count=3
+CALL name=VipSession count=3
+CALL name=VipStreamDecoder count=1
+CALL name=bytes count=1
+CALL name=decode_json_body count=1
+CALL name=decoder.feed count=1
+CALL name=decoder.finish count=1
+CALL name=encode_frame count=4
+CALL name=len count=1
+CALL name=self.assertEqual count=15
+CALL name=session.recv_json count=4
+CALL name=session.send_json count=1
+CALL name=unittest.main count=1
+LITERAL_SHAPE type=bool count=3
+LITERAL_SHAPE type=bytes(len=17) count=2
+LITERAL_SHAPE type=bytes(len=19) count=1
+LITERAL_SHAPE type=bytes(len=20) count=1
+LITERAL_SHAPE type=int count=31
+LITERAL_SHAPE type=str(utf8_len=12) count=2
+LITERAL_SHAPE type=str(utf8_len=3) count=2
+LITERAL_SHAPE type=str(utf8_len=4) count=2
+LITERAL_SHAPE type=str(utf8_len=5) count=1
+LITERAL_SHAPE type=str(utf8_len=6) count=1
+LITERAL_SHAPE type=str(utf8_len=7) count=8
+LITERAL_SHAPE type=str(utf8_len=8) count=1
+
+=== FILE /root/comelit-vip-poc/tests/test_application_session.py ===
+SHA256=cfdb22664b9c267ec409a9926ad3940a9504a174a6aea361542ca127ba183a8a
+BYTES=8385
+LINES=423
+IMPORT_ROOTS=comelit_vip,tests,unittest
+CLASS_COUNT=1
+FUNCTION_COUNT=8
+SOURCE_EXECUTED=false
+LITERAL_VALUES_PRINTED=false
+CLASS line=34 name=ApplicationSessionTests bases=unittest.IsolatedAsyncioTestCase
+FUNCTION line=24 kind=sync name=decode_stream args=stream:none returns=none
+FUNCTION line=38 kind=sync name=setUpClass args=cls:none returns=none
+FUNCTION line=55 kind=sync name=packet args=self:none,frame:none returns=none
+FUNCTION line=61 kind=sync name=captured_auth_token args=self:none returns=none
+FUNCTION line=85 kind=async name=test_authenticate_byte_exact_capture args=self:none returns=none
+FUNCTION line=172 kind=async name=test_second_authenticate_byte_exact_capture args=self:none returns=none
+FUNCTION line=266 kind=async name=test_ucfg_first_request_byte_exact_capture args=self:none returns=none
+FUNCTION line=334 kind=async name=test_ucfg_channel_reused_for_second_request args=self:none returns=none
+CALL name=FixtureTransport count=4
+CALL name=VipApplicationSession count=4
+CALL name=VipChannelSession count=4
+CALL name=VipSession count=4
+CALL name=VipStreamDecoder count=1
+CALL name=app.authenticate count=2
+CALL name=app.get_configuration count=3
+CALL name=app.open_ucfg count=2
+CALL name=build_pseudotcp_streams count=1
+CALL name=channels.get_channel count=4
+CALL name=decode_json_body count=1
+CALL name=decode_stream count=2
+CALL name=decoder.feed count=1
+CALL name=decoder.finish count=1
+CALL name=encode_frame count=1
+CALL name=len count=1
+CALL name=obj.get count=1
+CALL name=self.assertEqual count=15
+CALL name=self.assertIsInstance count=1
+CALL name=self.assertIsNone count=2
+CALL name=self.assertIsNotNone count=3
+CALL name=self.captured_auth_token count=2
+CALL name=self.packet count=22
+CALL name=unittest.main count=1
+LITERAL_SHAPE type=bool count=4
+LITERAL_SHAPE type=int count=65
+LITERAL_SHAPE type=str(utf8_len=10) count=1
+LITERAL_SHAPE type=str(utf8_len=12) count=1
+LITERAL_SHAPE type=str(utf8_len=15) count=1
+LITERAL_SHAPE type=str(utf8_len=17) count=1
+LITERAL_SHAPE type=str(utf8_len=2) count=1
+LITERAL_SHAPE type=str(utf8_len=3) count=2
+LITERAL_SHAPE type=str(utf8_len=4) count=2
+LITERAL_SHAPE type=str(utf8_len=44) count=1
+LITERAL_SHAPE type=str(utf8_len=6) count=2
+LITERAL_SHAPE type=str(utf8_len=8) count=3
+TOP_CONSTANT PCAP:str(utf8_len=44)
+
+SAFE_SOURCE_TOPOLOGY=PASS
+SOURCE_EXECUTED=false
+LITERAL_VALUES_PRINTED=false
+SECRETS_READ=false
+NETWORK_ACTION_PERFORMED=false
+PHYSICAL_DOOR_ACTION=false
