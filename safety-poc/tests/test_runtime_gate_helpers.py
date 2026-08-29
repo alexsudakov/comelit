@@ -5,6 +5,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
 if str(SCRIPTS) not in sys.path:
@@ -26,6 +27,34 @@ class RuntimeGateHelperTests(unittest.TestCase):
             path = Path(tmp) / 'channel_session.py'
             path.write_text(source, encoding='utf-8')
             self.assertEqual(common.extract_control_request_id(path), 17)
+
+    def test_decode_frames_accepts_finish_returning_none(self):
+        sentinel = object()
+
+        class Decoder:
+            def feed(self, stream):
+                self.stream = stream
+                return [sentinel]
+
+            def finish(self):
+                return None
+
+        codec = SimpleNamespace(VipStreamDecoder=Decoder)
+        self.assertEqual(common.decode_frames(codec, b'fixture-stream'), (sentinel,))
+
+    def test_decode_frames_appends_iterable_finish_tail(self):
+        first = object()
+        second = object()
+
+        class Decoder:
+            def feed(self, stream):
+                return [first]
+
+            def finish(self):
+                return [second]
+
+        codec = SimpleNamespace(VipStreamDecoder=Decoder)
+        self.assertEqual(common.decode_frames(codec, b'fixture-stream'), (first, second))
 
     def test_synthetic_scalar_is_text_integer_and_one_byte_compatible(self):
         for label in ('unit-test', 'door:output-index', 'door:number', 'vip:alpha'):
