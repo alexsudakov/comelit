@@ -1,0 +1,14 @@
+=== TOOLCHAIN / LINKAGE METADATA ===
+CC_PRESENT=true
+PKG_CONFIG_PRESENT=true
+BINARY_FILE_TYPE=ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=678d1525956288b1247f9768b526005cebc77ab0, for GNU/Linux 3.2.0, not stripped
+LINKED_LIBRARY_NAME=libc.so.6
+LINKED_LIBRARY_NAME=libcom_err.so.2
+LINKED_LIBRARY_NAME=libgio-2.0.so.0
+LINKED_LIBRARY_NAME=libglib-2.0.so.0
+LINKED_LIBRARY_NAME=libgobject-2.0.so.0
+LINKED_LIBRARY_NAME=libm.so.6
+LINKED_LIBRARY_NAME=libmount.so.1
+LINKED_LIBRARY_NAME=libnice.so.10
+LINKED_LIBRARY_NAME=linux-vdso.so.1
+TOOLCHAIN_COMMANDS_NETWORKED=false
