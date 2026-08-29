@@ -34,14 +34,18 @@ class RuntimeGateHelperTests(unittest.TestCase):
         self.assertEqual(len(packed), 4)
         self.assertEqual(bytes(value), value.encode('ascii'))
 
-    def test_sandboxed_legacy_capture_produces_exactly_six_frames(self):
+    def test_sandboxed_legacy_capture_produces_exactly_six_frames_with_prebound_ctpp_lookup(self):
         source = textwrap.dedent('''
             import struct
+
+            class Channel:
+                CTPP = 'CTPP'
 
             class IconaBridgeClient:
                 def __init__(self, host, port):
                     self.host = host
                     self.port = port
+                    self.open_channels = {}
 
                 def _string_to_buffer(self, value, null_terminated=True):
                     data = value.encode('utf-8')
@@ -63,7 +67,8 @@ class RuntimeGateHelperTests(unittest.TestCase):
                     return channel
 
                 async def open_door(self, vip, door_item):
-                    channel = await self._open_door_init(vip)
+                    channel = self.open_channels[Channel.CTPP]
+                    await self._open_door_init(vip)
 
                     def create_door_message(confirm):
                         body = struct.pack('>I', int(door_item.get('number')))
@@ -96,6 +101,25 @@ class RuntimeGateHelperTests(unittest.TestCase):
         self.assertEqual(len(packets), 6)
         self.assertTrue(all(packet.startswith(b'HEADER00') for packet in packets))
         self.assertTrue(all(len(packet) > 8 for packet in packets))
+
+    def test_ctpp_binding_uses_string_and_legacy_channel_key(self):
+        class Channel:
+            CTPP = object()
+
+        class Legacy:
+            pass
+
+        Legacy.Channel = Channel
+
+        class Client:
+            def __init__(self):
+                self.open_channels = {}
+
+        client = Client()
+        channel = object()
+        oracle._seed_synthetic_ctpp_binding(client, Legacy, channel)
+        self.assertIs(client.open_channels['CTPP'], channel)
+        self.assertIs(client.open_channels[Channel.CTPP], channel)
 
 
 if __name__ == '__main__':
