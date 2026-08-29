@@ -17,7 +17,7 @@ class P12ApplicationTemplateTests(unittest.TestCase):
         packet = module.predicted_control_packet(opcode=3, channel_id=7449)
         self.assertEqual(
             packet.hex(),
-            "00060a0000000000cdab030002000000191d",
+            "00060a0000000000ef01030002000000191d",
         )
 
     def test_open_ucfg_predicted_shape(self):
@@ -35,7 +35,7 @@ class P12ApplicationTemplateTests(unittest.TestCase):
         packet = module.predicted_control_packet(opcode=3, channel_id=7450)
         self.assertEqual(
             packet.hex(),
-            "00060a0000000000cdab0300020000001a1d",
+            "00060a0000000000ef010300020000001a1d",
         )
 
     def test_application_request_arguments_match_canonical_capture_contract(self):
