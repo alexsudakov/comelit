@@ -1,4 +1,4 @@
-# Comelit Door Safety PoC — offline package (v0.3)
+# Comelit Door Safety PoC — offline package (v0.5)
 
 This package proves the **safety semantics** required before any physical door action is considered:
 
