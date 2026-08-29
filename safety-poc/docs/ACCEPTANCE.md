@@ -58,7 +58,7 @@ Staged and promoted offline suites and release-content hashes passed. The deploy
 - `LIVE_TEST_READY=false`;
 - `PHYSICAL_DOOR_ACTION=false`.
 
-## P12-A repository acceptance — real transport read-only contract
+## P12-A repository acceptance — read-only contract
 
 Repository-only P12 work must prove all of the following without a network action:
 
@@ -71,22 +71,28 @@ Repository-only P12 work must prove all of the following without a network actio
 - automatic retry is forbidden;
 - physical-effect assertion is forbidden;
 - a complete read-only session proof becomes false if any actuator attempt, credential emission, automatic retry or physical-effect assertion is observed;
-- no real network backend is introduced during P12-A.
+- no new real network backend is introduced during P12-A.
+
+The transport architecture is independently constrained to the already proven P2P stack:
+
+`cloud signaling -> same-agent ICE -> PseudoTCP -> ViP -> UAUT -> UCFG -> clean teardown`.
+
+Direct TCP may not be promoted to the primary P12 path. Media activation and CTPP/Door actuation are outside this proof.
 
 Expected repository markers:
 
 - `P12_READONLY_SESSION_CONTRACT_TESTS=PASS`;
 - `P12_READONLY_SOURCE_INVENTORY_TESTS=PASS`;
+- `P12_P2P_TRANSPORT_CONTRACT_TESTS=PASS`;
+- `P12_TRANSPORT_PRIMARY_PATH=CLOUD_P2P_ICE_PSEUDOTCP_VIP`;
 - `REAL_TRANSPORT_IMPLEMENTED=false`;
 - `READONLY_TRANSPORT_READY=false`;
 - `ACTUATION_TRANSPORT_IMPLEMENTED=false`;
 - `LIVE_TEST_READY=false`.
 
-## P12-B CT120 source-evidence acceptance — no network
+## P12-B CT120 source-evidence acceptance — completed no-network inventory
 
-Before implementing a real backend, `scripts/collect_p12_readonly_evidence.sh` must run on CT120 and publish a public-safe evidence branch.
-
-It must inventory only source/runtime metadata for:
+`scripts/collect_p12_readonly_evidence.sh` must publish a public-safe evidence branch and inventory only source/runtime metadata for:
 
 - legacy connect/preflight/shutdown/auth/configuration/target-discovery methods;
 - the top-level read-only discovery wrapper;
@@ -108,22 +114,42 @@ Mandatory evidence markers:
 
 Literal endpoint values, credential filenames/content, tokens and real Door payload bytes must not be emitted.
 
-## P12-C/D real read-only session acceptance — later explicit stage
+## P12-C CT120 P2P-holder forensic acceptance — no network
 
-Only after P12-B evidence is reviewed may a real network backend/probe be implemented. Its public application surface must remain limited to the fixed five-step read-only plan.
+Before any credential-bearing probe, `scripts/collect_p12_p2p_forensic.sh` must establish the current research-runtime state without executing the holder or wrapper.
 
-Read-only readiness requires all of:
+It must collect only hashes/metadata and boolean marker presence for:
 
-- `REAL_TRANSPORT_IMPLEMENTED=true`;
-- `REAL_TRANSPORT_READONLY_SESSION_PROOF=PASS`;
-- `READONLY_SCOPE_ENFORCED=PASS`;
-- `TARGET_BINDING_VERIFIED=PASS`;
-- `AUTH_SESSION_LIFETIME_VERIFIED=PASS`;
-- `TIMEOUT_MAPPING_VERIFIED=PASS`;
-- `CREDENTIAL_MATERIAL_EMITTED=false`;
-- `ACTUATOR_COMMAND_ATTEMPTED=false`.
+- current P2P holder C source;
+- current holder binary;
+- current P2P wrapper;
+- historical holder source/binary backups;
+- toolchain/linkage names;
+- active-holder process count without process arguments.
 
-A successful P12 read-only proof still requires `LIVE_TEST_READY=false` unless the independent P13 live-only gates are also satisfied.
+It must answer whether the current holder/wrapper includes the previously proven P2P/ICE/PseudoTCP/ECHO/UAUT-open stages, whether incomplete UAUT-auth/UCFG work is already present, and whether CTPP/Door actuator symbols have entered that path.
+
+Mandatory safety markers:
+
+- `PUBLIC_SAFE_EVIDENCE=PASS`;
+- `SOURCE_EXECUTED=false`;
+- `BINARY_EXECUTED=false`;
+- `WRAPPER_EXECUTED=false`;
+- `SECRETS_CONTENT_READ=false`;
+- `ACTIVE_COMELIT_NETWORK_PROBES=false`;
+- `ACTUATOR_COMMAND_ATTEMPTED=false`;
+- `PHYSICAL_DOOR_ACTION=false`;
+- `P12_P2P_FORENSIC_COLLECTION=PASS`.
+
+No source line, binary string, wrapper line, process argument, endpoint value or credential value may be published.
+
+## P12-D real read-only session acceptance — later explicit stage
+
+Only after P12-C forensic evidence is reviewed may a controlled real read-only probe be prepared. The accepted sequence is fixed as:
+
+`cloud signaling -> ICE -> PseudoTCP -> ECHO ACK -> UAUT OPEN -> UAUT access=200 -> UCFG read -> clean teardown`.
+
+Read-only readiness requires independently verified markers for the session proof, read-only scope, target discovery/binding semantics, authentication/session lifetime and timeout mapping. No successful P12 result may set `LIVE_TEST_READY=true` by itself.
 
 ## P13 live-only acceptance
 
