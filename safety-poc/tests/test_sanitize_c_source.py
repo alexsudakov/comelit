@@ -38,6 +38,13 @@ static int probe(const char *token) {
         sanitized, _, _ = module.sanitize_c_source(source)
         self.assertEqual(source.count("\n"), sanitized.count("\n"))
 
+    def test_comment_redaction_does_not_leave_trailing_whitespace(self):
+        source = "int a;  // comment\n    /* block\n       comment */\nint b;\t\n"
+        sanitized, _, _ = module.sanitize_c_source(source)
+        self.assertEqual(source.count("\n"), sanitized.count("\n"))
+        for line in sanitized.splitlines():
+            self.assertEqual(line, line.rstrip(" \t"))
+
     def test_safe_control_char_literals_can_remain(self):
         source = "int f(void) { return '\\n' == '\\n'; }\n"
         sanitized, _, _ = module.sanitize_c_source(source)
