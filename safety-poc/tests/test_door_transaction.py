@@ -32,16 +32,25 @@ class DoorTransactionTests(unittest.TestCase):
         self.assertEqual(boundary.last_snapshot.channel_close_calls, 1)
         self.assertFalse(boundary.last_snapshot.physical_effect_asserted)
 
-    def test_failure_before_any_door_write_is_failed_safe(self):
+    def test_failure_before_any_control_attempt_is_failed_safe(self):
         boundary = SyntheticDoorTransactionBoundary(fail_before_open=True)
         op = self.execute(boundary, "tx-before")
         self.assertEqual(op.state, State.FAILED_SAFE)
+        self.assertEqual(boundary.last_snapshot.channel_open_calls, 0)
         self.assertEqual(boundary.last_snapshot.door_write_count, 0)
 
-    def test_ambiguous_channel_open_is_still_proven_no_door_payload(self):
+    def test_explicit_open_rejection_is_failed_safe_without_door_payload(self):
+        boundary = SyntheticDoorTransactionBoundary(control_open_outcome=ControlOutcome.REJECTED)
+        op = self.execute(boundary, "tx-open-reject")
+        self.assertEqual(op.state, State.FAILED_SAFE)
+        self.assertEqual(boundary.last_snapshot.channel_open_calls, 1)
+        self.assertEqual(boundary.last_snapshot.door_write_count, 0)
+
+    def test_ambiguous_channel_open_is_unknown_and_not_retryable(self):
         boundary = SyntheticDoorTransactionBoundary(control_open_outcome=ControlOutcome.AMBIGUOUS)
         op = self.execute(boundary, "tx-open-amb")
-        self.assertEqual(op.state, State.FAILED_SAFE)
+        self.assertEqual(op.state, State.UNKNOWN_OUTCOME)
+        self.assertEqual(boundary.last_snapshot.channel_open_calls, 1)
         self.assertEqual(boundary.last_snapshot.door_write_count, 0)
 
     def test_failure_after_partial_door_write_is_unknown(self):
