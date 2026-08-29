@@ -21,6 +21,9 @@ PINNED = {
 SYNTHETIC_TOKEN = "0123456789abcdef0123456789abcdef"
 UAUT_REQUESTED_CHANNEL = 7449
 UCFG_REQUESTED_CHANNEL = 7450
+AUTH_MESSAGE_ID = 5
+UCFG_MESSAGE_ID = 6
+UCFG_ADDRESSBOOKS = "none"
 
 
 def sha256_file(path: Path) -> str:
@@ -120,7 +123,10 @@ async def capture_application_requests(root: Path) -> tuple[bytes, bytes]:
     app = VipApplicationSession(channels)
 
     try:
-        await app.authenticate(SYNTHETIC_TOKEN)
+        await app.authenticate(
+            SYNTHETIC_TOKEN,
+            message_id=AUTH_MESSAGE_ID,
+        )
     except CapturedWrite as exc:
         auth_packet = exc.packet
     else:
@@ -136,7 +142,11 @@ async def capture_application_requests(root: Path) -> tuple[bytes, bytes]:
     channels.states[UCFG_REQUESTED_CHANNEL] = ucfg_state
 
     try:
-        await app.get_configuration(ucfg_state)
+        await app.get_configuration(
+            ucfg_state,
+            message_id=UCFG_MESSAGE_ID,
+            addressbooks=UCFG_ADDRESSBOOKS,
+        )
     except CapturedWrite as exc:
         ucfg_packet = exc.packet
     else:
@@ -172,7 +182,9 @@ async def derive(root: Path) -> dict[str, object]:
     expected_auth = (
         '{"message":"access","user-token":"'
         + SYNTHETIC_TOKEN
-        + '","message-type":"request","message-id":5}\n'
+        + '","message-type":"request","message-id":'
+        + str(AUTH_MESSAGE_ID)
+        + "}\n"
     ).encode("utf-8")
     if auth_request_id != UAUT_REQUESTED_CHANNEL:
         raise RuntimeError("canonical authenticate request_id mismatch")
