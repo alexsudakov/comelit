@@ -37,7 +37,7 @@ class CanonicalControlShapeInventoryTests(unittest.TestCase):
                 "comelit_vip/channel_session.py": textwrap.dedent("""
                     class VipChannelSession:
                         async def _send_control(self, message):
-                            await self.session.send_frame(1, b'SECRET')
+                            await self.session.send_frame(1, b'SENSITIVE-PAYLOAD')
                         async def recv_event(self):
                             return await self._recv_event_raw()
                         async def open_channel(self, channel_name: str, channel_flag: int, extension=None, channel_id=None):
@@ -59,7 +59,7 @@ class CanonicalControlShapeInventoryTests(unittest.TestCase):
             try:
                 module.PINNED = {relative: self._write(root, relative, text) for relative, text in files.items()}
                 for relative in module.TEST_FILES:
-                    self._write(root, relative, "def test_open():\n    x = FixtureTransport(b'SECRET')\n    return x\n")
+                    self._write(root, relative, "def test_open():\n    x = FixtureTransport(b'SENSITIVE-PAYLOAD')\n    return x\n")
                 text = "\n".join(module.analyze(root))
             finally:
                 module.PINNED = old_pinned
@@ -68,9 +68,10 @@ class CanonicalControlShapeInventoryTests(unittest.TestCase):
         self.assertIn("METHOD=VipChannelSession.open_channel", text)
         self.assertIn("METHOD=VipChannelSession.close_channel", text)
         self.assertIn("FIELD path=comelit_vip/control_codec.py class=OpenChannelRequest name=channel_name", text)
-        self.assertIn("CONST_BYTES(len=6)", text)
-        self.assertNotIn("SECRET", text)
+        self.assertIn("CONST_BYTES(len=17)", text)
+        self.assertNotIn("SENSITIVE-PAYLOAD", text)
         self.assertIn("SOURCE_EXECUTED=false", text)
+        self.assertIn("SECRETS_READ=false", text)
         self.assertIn("NETWORK_ACTION_PERFORMED=false", text)
 
 
