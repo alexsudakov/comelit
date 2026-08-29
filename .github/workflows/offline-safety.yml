@@ -1,0 +1,57 @@
+name: offline-safety
+
+on:
+  push:
+    branches:
+      - main
+      - 'feat/**'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-safety:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: safety-poc
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Static safety scan
+        run: python3 scripts/static_safety_check.py
+      - name: Compile Python scripts
+        run: python3 -m py_compile scripts/*.py
+      - name: Parse shell entrypoints
+        run: |
+          for script in scripts/*.sh deploy/*.sh; do
+            bash -n "$script"
+          done
+      - name: Repository-only unit tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}/safety-poc/src
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 -m unittest discover -s tests -v
+      - name: Repository-only CLI safety scenarios
+        env:
+          PYTHONPATH: ${{ github.workspace }}/safety-poc/src
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          TMP="$(mktemp -d)"
+          trap 'rm -rf "$TMP"' EXIT
+          DB="$TMP/poc.sqlite3"
+          python3 -m comelit_safety_poc.cli --db "$DB" run --operation-id ci-ack --target demo-door --scenario ack --min-interval-seconds 0 >/dev/null
+          python3 -m comelit_safety_poc.cli --db "$DB" run --operation-id ci-amb --target demo-door-2 --scenario timeout_after_accept --min-interval-seconds 0 >/dev/null
+          set +e
+          python3 -m comelit_safety_poc.cli --db "$DB" run --operation-id ci-crash --target demo-door-3 --scenario ack --fault crash_after_arm --min-interval-seconds 0 >/dev/null
+          rc=$?
+          set -e
+          test "$rc" -eq 75
+          python3 -m comelit_safety_poc.cli --db "$DB" recover >/dev/null
+          state="$(python3 -m comelit_safety_poc.cli --db "$DB" show --operation-id ci-crash | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')"
+          test "$state" = UNKNOWN_OUTCOME
