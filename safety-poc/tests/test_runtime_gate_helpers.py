@@ -27,12 +27,16 @@ class RuntimeGateHelperTests(unittest.TestCase):
             path.write_text(source, encoding='utf-8')
             self.assertEqual(common.extract_control_request_id(path), 17)
 
-    def test_synthetic_scalar_is_text_and_integer_compatible(self):
-        value = oracle.SyntheticScalar('unit-test')
-        self.assertTrue(value.encode().startswith(b'SYNTH-'))
-        packed = struct.pack('>I', value)
-        self.assertEqual(len(packed), 4)
-        self.assertEqual(bytes(value), value.encode('ascii'))
+    def test_synthetic_scalar_is_text_integer_and_one_byte_compatible(self):
+        for label in ('unit-test', 'door:output-index', 'door:number', 'vip:alpha'):
+            value = oracle.SyntheticScalar(label)
+            self.assertTrue(value.encode().startswith(b'SYNTH-'))
+            self.assertGreaterEqual(int(value), 1)
+            self.assertLessEqual(int(value), 250)
+            self.assertEqual(bytes([int(value)]), bytes([int(value)]))
+            packed = struct.pack('>I', value)
+            self.assertEqual(len(packed), 4)
+            self.assertEqual(bytes(value), value.encode('ascii'))
 
     def test_sandboxed_legacy_capture_produces_exactly_six_frames_with_prebound_ctpp_lookup(self):
         source = textwrap.dedent('''
@@ -72,7 +76,7 @@ class RuntimeGateHelperTests(unittest.TestCase):
 
                     def create_door_message(confirm):
                         body = struct.pack('>I', int(door_item.get('number')))
-                        body += bytes([1 if confirm else 0])
+                        body += bytes([int(door_item['output-index']), 1 if confirm else 0])
                         return self._create_binary_packet_from_buffers(channel.id, body)
 
                     await self._write_packet(create_door_message(False))
