@@ -1,0 +1,286 @@
+=== P12 READ-ONLY SOURCE INVENTORY ===
+LEGACY_SOURCE_HASH=PASS
+CANONICAL_SOURCE_HASHES=PASS
+
+METHOD=IconaBridgeClient.connect
+LINE=78
+ASYNC=true
+POSITIONAL_ARG_NAMES=self
+AWAIT_COUNT=2
+TRY_COUNT=1
+EXCEPT_COUNT=3
+RETURN_COUNT=0
+WAIT_FOR_TIMEOUT_VALUES=10.0
+CALL name=ConnectionError count=3
+CALL name=asyncio.open_connection count=1
+CALL name=asyncio.wait_for count=1
+CALL name=hasattr count=1
+CALL name=self._test_nc_connection count=1
+CALL name=self.logger.error count=5
+CALL name=self.logger.info count=2
+CALL name=self.logger.warning count=1
+
+METHOD=IconaBridgeClient._test_nc_connection
+LINE=124
+ASYNC=true
+POSITIONAL_ARG_NAMES=self
+AWAIT_COUNT=0
+TRY_COUNT=1
+EXCEPT_COUNT=1
+RETURN_COUNT=2
+WAIT_FOR_TIMEOUT_VALUES=none
+CALL name=str count=1
+CALL name=subprocess.run count=1
+
+METHOD=IconaBridgeClient.shutdown
+LINE=136
+ASYNC=true
+POSITIONAL_ARG_NAMES=self
+AWAIT_COUNT=1
+TRY_COUNT=0
+EXCEPT_COUNT=0
+RETURN_COUNT=0
+WAIT_FOR_TIMEOUT_VALUES=none
+CALL name=self.logger.info count=1
+CALL name=self.writer.close count=1
+CALL name=self.writer.wait_closed count=1
+
+METHOD=IconaBridgeClient.authenticate
+LINE=348
+ASYNC=true
+POSITIONAL_ARG_NAMES=self,token
+AWAIT_COUNT=5
+TRY_COUNT=0
+EXCEPT_COUNT=0
+RETURN_COUNT=2
+WAIT_FOR_TIMEOUT_VALUES=none
+CALL name=get count=1
+CALL name=self._close_channel count=2
+CALL name=self._create_json_packet count=1
+CALL name=self._open_channel count=1
+CALL name=self._read_response count=1
+CALL name=self._write_packet count=1
+
+METHOD=IconaBridgeClient.get_config
+LINE=382
+ASYNC=true
+POSITIONAL_ARG_NAMES=self,addressbooks
+AWAIT_COUNT=5
+TRY_COUNT=0
+EXCEPT_COUNT=0
+RETURN_COUNT=2
+WAIT_FOR_TIMEOUT_VALUES=none
+CALL name=self._close_channel count=2
+CALL name=self._create_json_packet count=1
+CALL name=self._open_channel count=1
+CALL name=self._read_response count=1
+CALL name=self._write_packet count=1
+
+METHOD=IconaBridgeClient.list_doors
+LINE=406
+ASYNC=true
+POSITIONAL_ARG_NAMES=self
+AWAIT_COUNT=1
+TRY_COUNT=0
+EXCEPT_COUNT=0
+RETURN_COUNT=2
+WAIT_FOR_TIMEOUT_VALUES=none
+CALL name=get count=2
+CALL name=self.get_config count=1
+
+METHOD=module.list_doors
+LINE=552
+ASYNC=true
+POSITIONAL_ARG_NAMES=host,token
+AWAIT_COUNT=4
+TRY_COUNT=1
+EXCEPT_COUNT=0
+RETURN_COUNT=1
+WAIT_FOR_TIMEOUT_VALUES=none
+CALL name=Exception count=1
+CALL name=IconaBridgeClient count=1
+CALL name=client.authenticate count=1
+CALL name=client.connect count=1
+CALL name=client.list_doors count=1
+CALL name=client.shutdown count=1
+
+METHOD=VipTransport.read
+LINE=7
+ASYNC=true
+POSITIONAL_ARG_NAMES=self,max_bytes
+AWAIT_COUNT=0
+TRY_COUNT=0
+EXCEPT_COUNT=0
+RETURN_COUNT=0
+WAIT_FOR_TIMEOUT_VALUES=none
+
+METHOD=VipTransport.write
+LINE=13
+ASYNC=true
+POSITIONAL_ARG_NAMES=self,data
+AWAIT_COUNT=0
+TRY_COUNT=0
+EXCEPT_COUNT=0
+RETURN_COUNT=0
+WAIT_FOR_TIMEOUT_VALUES=none
+
+METHOD=VipTransport.close
+LINE=19
+ASYNC=true
+POSITIONAL_ARG_NAMES=self
+AWAIT_COUNT=0
+TRY_COUNT=0
+EXCEPT_COUNT=0
+RETURN_COUNT=0
+WAIT_FOR_TIMEOUT_VALUES=none
+
+METHOD=VipSession.send_frame
+LINE=51
+ASYNC=true
+POSITIONAL_ARG_NAMES=self,request_id,body
+AWAIT_COUNT=1
+TRY_COUNT=0
+EXCEPT_COUNT=0
+RETURN_COUNT=0
+WAIT_FOR_TIMEOUT_VALUES=none
+CALL name=encode_frame count=1
+CALL name=self.transport.write count=1
+
+METHOD=VipSession.recv_frame
+LINE=80
+ASYNC=true
+POSITIONAL_ARG_NAMES=self
+AWAIT_COUNT=1
+TRY_COUNT=0
+EXCEPT_COUNT=0
+RETURN_COUNT=2
+WAIT_FOR_TIMEOUT_VALUES=none
+CALL name=EOFError count=1
+CALL name=len count=1
+CALL name=self._pending_frames.extend count=1
+CALL name=self._pending_frames.popleft count=1
+CALL name=self.decoder.feed count=1
+CALL name=self.decoder.finish count=1
+CALL name=self.transport.read count=1
+
+METHOD=VipSession.close
+LINE=134
+ASYNC=true
+POSITIONAL_ARG_NAMES=self
+AWAIT_COUNT=1
+TRY_COUNT=0
+EXCEPT_COUNT=0
+RETURN_COUNT=0
+WAIT_FOR_TIMEOUT_VALUES=none
+CALL name=self.transport.close count=1
+
+METHOD=VipChannelSession.open_channel
+LINE=271
+ASYNC=true
+POSITIONAL_ARG_NAMES=self,channel_name
+AWAIT_COUNT=2
+TRY_COUNT=0
+EXCEPT_COUNT=0
+RETURN_COUNT=1
+WAIT_FOR_TIMEOUT_VALUES=none
+CALL name=ChannelSessionError count=1
+CALL name=ChannelState count=1
+CALL name=OpenChannelRequest count=1
+CALL name=isinstance count=1
+CALL name=self._pending_events.append count=1
+CALL name=self._recv_event_raw count=1
+CALL name=self._send_control count=1
+CALL name=self.allocate_channel_id count=1
+
+METHOD=VipChannelSession.close_channel
+LINE=339
+ASYNC=true
+POSITIONAL_ARG_NAMES=self,channel_id
+AWAIT_COUNT=2
+TRY_COUNT=0
+EXCEPT_COUNT=0
+RETURN_COUNT=1
+WAIT_FOR_TIMEOUT_VALUES=none
+CALL name=ChannelSessionError count=2
+CALL name=CloseChannelRequest count=1
+CALL name=isinstance count=1
+CALL name=self._channels.pop count=1
+CALL name=self._pending_events.append count=1
+CALL name=self._recv_event_raw count=1
+CALL name=self._send_control count=1
+
+METHOD=VipChannelSession.close
+LINE=386
+ASYNC=true
+POSITIONAL_ARG_NAMES=self
+AWAIT_COUNT=1
+TRY_COUNT=0
+EXCEPT_COUNT=0
+RETURN_COUNT=0
+WAIT_FOR_TIMEOUT_VALUES=none
+CALL name=self.session.close count=1
+
+METHOD=VipApplicationSession.authenticate
+LINE=213
+ASYNC=true
+POSITIONAL_ARG_NAMES=self,token
+AWAIT_COUNT=4
+TRY_COUNT=0
+EXCEPT_COUNT=0
+RETURN_COUNT=1
+WAIT_FOR_TIMEOUT_VALUES=none
+CALL name=TypeError count=2
+CALL name=isinstance count=2
+CALL name=self._send_json_line count=1
+CALL name=self._wait_json_response count=1
+CALL name=self.channels.close_channel count=1
+CALL name=self.channels.open_channel count=1
+
+METHOD=VipApplicationSession.open_ucfg
+LINE=265
+ASYNC=true
+POSITIONAL_ARG_NAMES=self
+AWAIT_COUNT=1
+TRY_COUNT=0
+EXCEPT_COUNT=0
+RETURN_COUNT=1
+WAIT_FOR_TIMEOUT_VALUES=none
+CALL name=self.channels.open_channel count=1
+
+METHOD=VipApplicationSession.get_configuration
+LINE=276
+ASYNC=true
+POSITIONAL_ARG_NAMES=self,channel
+AWAIT_COUNT=2
+TRY_COUNT=0
+EXCEPT_COUNT=0
+RETURN_COUNT=1
+WAIT_FOR_TIMEOUT_VALUES=none
+CALL name=ApplicationSessionError count=2
+CALL name=TypeError count=1
+CALL name=isinstance count=1
+CALL name=self._send_json_line count=1
+CALL name=self._wait_json_response count=1
+CALL name=self.channels.get_channel count=1
+
+METHOD=VipApplicationSession.close_channel
+LINE=322
+ASYNC=true
+POSITIONAL_ARG_NAMES=self,channel
+AWAIT_COUNT=1
+TRY_COUNT=0
+EXCEPT_COUNT=0
+RETURN_COUNT=1
+WAIT_FOR_TIMEOUT_VALUES=none
+CALL name=self.channels.close_channel count=1
+
+P12_READONLY_SOURCE_INVENTORY=PASS
+READONLY_WRAPPER_INVENTORIED=true
+SELECTED_METHODS_ONLY=true
+NON_TIMEOUT_LITERAL_VALUES_EMITTED=false
+SOURCE_EXECUTED=false
+SECRETS_READ=false
+CREDENTIAL_MATERIAL_EMITTED=false
+ACTUATOR_COMMAND_ATTEMPTED=false
+NETWORK_ACTION_PERFORMED=false
+PHYSICAL_DOOR_ACTION=false
