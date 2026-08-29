@@ -72,6 +72,16 @@ class P12HolderTransformSafeTests(unittest.TestCase):
         self.assertIn("P12_READONLY_TRANSACTION=PASS", out)
         self.assertIn("ACTUATOR_COMMAND_ATTEMPTED=false", out)
 
+    def test_close_path_uses_end_magic_and_close_response_parser(self):
+        ucfg = b'{"message":"get-configuration","message-type":"request"}\n'
+        out = module.transform(BASELINE, ucfg)
+        self.assertEqual(out.count("write_le16(body + 0, 0x01EF);"), 1)
+        self.assertIn("expected_opcode == 4 ? 0x01EF : 0xABCD", out)
+        self.assertNotIn(
+            "write_le16(body + 0, 0xABCD);\n    write_le16(body + 2, 3);",
+            out,
+        )
+
     def test_ucfg_template_requires_real_lf(self):
         with self.assertRaises(RuntimeError):
             module.transform(BASELINE, b'{"message":"get-configuration"}\\n')
