@@ -91,7 +91,9 @@ def extract_control_request_id(channel_session_source: Path) -> int:
 def decode_frames(vip_codec: ModuleType, stream: bytes) -> tuple[object, ...]:
     decoder = vip_codec.VipStreamDecoder()
     frames = list(decoder.feed(stream))
-    frames.extend(decoder.finish())
+    tail = decoder.finish()
+    if tail is not None:
+        frames.extend(tail)
     return tuple(frames)
 
 
