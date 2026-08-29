@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
-import sys
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 
@@ -22,14 +21,7 @@ CHANNEL_ID = 7449
 
 
 class SyntheticScalar:
-    """Deterministic non-secret value usable as text or an integer field.
-
-    The legacy Door builder uses some integer-like fields directly inside
-    ``bytes([value])`` while other fields are packed into wider integers. Keep
-    the synthetic integer representation in the positive one-byte range so the
-    same deterministic value is valid for both shapes without learning or
-    copying any real Door value.
-    """
+    """Deterministic non-secret value usable as text or an integer field."""
 
     def __init__(self, label: str) -> None:
         self.label = label
@@ -85,15 +77,30 @@ class SyntheticResponse:
         yield self.body
 
 
-def _bind_synthetic_ctpp_channel(client: object, legacy: object, channel: object) -> None:
-    """Reproduce only the in-memory side effect of a successful channel open.
+class SyntheticOpenChannels(dict):
+    """In-memory channel view that does not pre-open CTPP.
 
-    The production `_open_channel` implementation owns this mapping. The
-    runtime oracle replaces `_open_channel` to guarantee zero network I/O, so
-    the fake must reproduce that local side effect *when it is called*, not
-    pre-seed the channel before `_open_door_init()`. Pre-seeding can change the
-    legacy control flow and suppress the first INIT write.
+    A direct lookup may be performed by legacy open_door before/after its init
+    helper. Before fake open, ``get`` and membership still report the channel as
+    absent so the init path is not suppressed. The fake open then binds the
+    channel normally. No transport state is represented here.
     """
+
+    def __init__(self, fallback_channel: object, ctpp_keys: tuple[object, ...]) -> None:
+        super().__init__()
+        self._fallback_channel = fallback_channel
+        self._ctpp_keys = ctpp_keys
+
+    def __getitem__(self, key: object) -> object:
+        if key in self:
+            return super().__getitem__(key)
+        if key in self._ctpp_keys:
+            return self._fallback_channel
+        raise KeyError(key)
+
+
+def _bind_synthetic_ctpp_channel(client: object, legacy: object, channel: object) -> None:
+    """Reproduce only the in-memory side effect of a successful fake open."""
 
     open_channels = getattr(client, "open_channels", None)
     if open_channels is None:
@@ -110,6 +117,19 @@ def _bind_synthetic_ctpp_channel(client: object, legacy: object, channel: object
 
     for key in keys:
         open_channels[key] = channel
+
+
+# Backward-compatible helper name retained for repository tests.
+_seed_synthetic_ctpp_binding = _bind_synthetic_ctpp_channel
+
+
+def _ctpp_keys(legacy: object) -> tuple[object, ...]:
+    keys: list[object] = ["CTPP"]
+    channel_type = getattr(legacy, "Channel", None)
+    enum_key = getattr(channel_type, "CTPP", None) if channel_type is not None else None
+    if enum_key is not None and enum_key not in keys:
+        keys.append(enum_key)
+    return tuple(keys)
 
 
 async def _capture_legacy_packets(source: Path = LEGACY_SOURCE) -> tuple[bytes, ...]:
@@ -137,6 +157,7 @@ async def _capture_legacy_packets(source: Path = LEGACY_SOURCE) -> tuple[bytes, 
         name="CTPP",
         channel="CTPP",
     )
+    client.open_channels = SyntheticOpenChannels(synthetic_channel, _ctpp_keys(legacy))
 
     async def fake_open_channel(self, *args, **kwargs):
         _bind_synthetic_ctpp_channel(self, legacy, synthetic_channel)
