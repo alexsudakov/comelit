@@ -9,7 +9,10 @@ from pathlib import Path
 
 DEFAULT_SOURCE = Path('/root/comelit-poc/comelit_client.py')
 EXPECTED_SHA256 = '03ea7d012587d8751eddfd5fa531d244abddc047c3a69d8ce27986c1e2768d42'
-TARGET_FUNCTIONS = ('_open_door_init', 'open_door')
+TARGET_METHODS = (
+    ('IconaBridgeClient', '_open_door_init'),
+    ('IconaBridgeClient', 'open_door'),
+)
 
 
 def callee_name(node: ast.AST) -> str:
@@ -21,24 +24,58 @@ def callee_name(node: ast.AST) -> str:
     return type(node).__name__
 
 
-def find_function(tree: ast.AST, name: str) -> ast.AST:
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
-            return node
-    raise ValueError(f'required function missing: {name}')
+def find_method(tree: ast.AST, class_name: str, method_name: str) -> ast.AST:
+    for node in getattr(tree, 'body', ()):
+        if not isinstance(node, ast.ClassDef) or node.name != class_name:
+            continue
+        for child in node.body:
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == method_name:
+                return child
+        raise ValueError(f'required method missing: {class_name}.{method_name}')
+    raise ValueError(f'required class missing: {class_name}')
+
+
+class _OuterBodyVisitor(ast.NodeVisitor):
+    """Walk one method body without descending into nested functions/lambdas."""
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        return None
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:  # noqa: N802
+        return None
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:  # noqa: N802
+        return None
+
+
+def outer_nodes(function: ast.AST) -> list[ast.AST]:
+    visitor = _OuterBodyVisitor()
+    found: list[ast.AST] = []
+
+    original_generic_visit = visitor.generic_visit
+
+    def collect(node: ast.AST) -> None:
+        found.append(node)
+        original_generic_visit(node)
+
+    visitor.generic_visit = collect  # type: ignore[method-assign]
+    for statement in getattr(function, 'body', ()):
+        found.append(statement)
+        visitor.visit(statement)
+    return found
 
 
 def calls_named(function: ast.AST, leaf: str) -> list[ast.Call]:
-    found = []
-    for node in ast.walk(function):
-        if isinstance(node, ast.Call) and callee_name(node.func).split('.')[-1] == leaf:
-            found.append(node)
+    found = [
+        node for node in outer_nodes(function)
+        if isinstance(node, ast.Call) and callee_name(node.func).split('.')[-1] == leaf
+    ]
     return sorted(found, key=lambda n: (n.lineno, n.col_offset))
 
 
 def assignment_index(function: ast.AST) -> dict[str, list[tuple[int, ast.AST]]]:
     result: dict[str, list[tuple[int, ast.AST]]] = {}
-    for node in ast.walk(function):
+    for node in outer_nodes(function):
         if isinstance(node, ast.Assign):
             value = node.value
             targets = node.targets
@@ -64,7 +101,23 @@ def prior_assignment(name: str, line: int, assignments: dict[str, list[tuple[int
     return result
 
 
+def resolve_name(node: ast.AST, line: int, assignments: dict[str, list[tuple[int, ast.AST]]]) -> ast.AST:
+    seen: set[str] = set()
+    current = node
+    while isinstance(current, ast.Name) and current.id not in seen:
+        seen.add(current.id)
+        assigned = prior_assignment(current.id, line, assignments)
+        if assigned is None:
+            break
+        current = assigned
+    return current
+
+
 def shape(node: ast.AST, line: int, assignments: dict[str, list[tuple[int, ast.AST]]], seen: frozenset[str] = frozenset()) -> tuple[str, int | None]:
+    if isinstance(node, ast.Starred):
+        nested, size = shape(node.value, line, assignments, seen)
+        return f'STARRED({nested})', size
+
     if isinstance(node, ast.Constant):
         if isinstance(node.value, bytes):
             return f'CONST_BYTES(len={len(node.value)})', len(node.value)
@@ -119,9 +172,22 @@ def shape(node: ast.AST, line: int, assignments: dict[str, list[tuple[int, ast.A
         return f'SUBSCRIPT({callee_name(node.value)})', None
 
     if isinstance(node, (ast.List, ast.Tuple)):
-        return f'{type(node).__name__.upper()}(items={len(node.elts)})', None
+        rendered = [shape(item, line, assignments, seen)[0] for item in node.elts]
+        return f'{type(node).__name__.upper()}(items={len(node.elts)};shapes={";".join(rendered)})', None
 
     return type(node).__name__.upper(), None
+
+
+def expand_body_components(call: ast.Call, assignments: dict[str, list[tuple[int, ast.AST]]]) -> list[ast.AST]:
+    expanded: list[ast.AST] = []
+    for argument in call.args[1:]:
+        if isinstance(argument, ast.Starred):
+            resolved = resolve_name(argument.value, call.lineno, assignments)
+            if isinstance(resolved, (ast.List, ast.Tuple)):
+                expanded.extend(resolved.elts)
+                continue
+        expanded.append(argument)
+    return expanded
 
 
 def analyze_source(source: Path, expected_sha256: str) -> list[str]:
@@ -135,6 +201,7 @@ def analyze_source(source: Path, expected_sha256: str) -> list[str]:
         '=== LEGACY DOOR BODY SHAPE INVENTORY ===',
         f'SOURCE_SHA256={actual}',
         'SOURCE_HASH_PIN=PASS',
+        'METHOD_SELECTION=QUALIFIED_CLASS_METHOD',
         'SOURCE_EXECUTED=false',
         'LITERAL_PAYLOAD_VALUES_PRINTED=false',
         'SECRETS_READ=false',
@@ -142,30 +209,42 @@ def analyze_source(source: Path, expected_sha256: str) -> list[str]:
         'PHYSICAL_DOOR_ACTION=false',
     ]
 
-    for function_name in TARGET_FUNCTIONS:
-        function = find_function(tree, function_name)
+    for class_name, method_name in TARGET_METHODS:
+        qualified_name = f'{class_name}.{method_name}'
+        function = find_method(tree, class_name, method_name)
         assignments = assignment_index(function)
         binary_calls = calls_named(function, '_create_binary_packet_from_buffers')
         message_calls = calls_named(function, 'create_door_message')
         write_calls = calls_named(function, '_write_packet')
         read_calls = calls_named(function, '_read_response')
+        open_channel_calls = calls_named(function, '_open_channel')
+        close_channel_calls = calls_named(function, '_close_channel')
+        wait_for_calls = calls_named(function, 'wait_for')
+        open_init_calls = calls_named(function, '_open_door_init')
+
         lines += [
             '',
-            f'FUNCTION={function_name}',
+            f'FUNCTION={qualified_name}',
+            f'FUNCTION_LEAF={method_name}',
+            f'FUNCTION_LINE={function.lineno}',
             f'BINARY_BODY_BUILDER_CALLS={len(binary_calls)}',
             f'DOOR_MESSAGE_BUILDER_CALLS={len(message_calls)}',
             f'WRITE_PACKET_CALLS={len(write_calls)}',
             f'READ_RESPONSE_CALLS={len(read_calls)}',
+            f'OPEN_CHANNEL_CALLS={len(open_channel_calls)}',
+            f'CLOSE_CHANNEL_CALLS={len(close_channel_calls)}',
+            f'WAIT_FOR_CALLS={len(wait_for_calls)}',
+            f'OPEN_DOOR_INIT_CALLS={len(open_init_calls)}',
         ]
 
         for index, call in enumerate(binary_calls, 1):
             if not call.args:
-                raise ValueError(f'{function_name}:{call.lineno} binary builder has no request id')
-            body_args = call.args[1:]
+                raise ValueError(f'{qualified_name}:{call.lineno} binary builder has no request id')
+            body_args = expand_body_components(call, assignments)
             lines += [
                 f'BODY_CALL_{index}_LINE={call.lineno}',
                 f'BODY_CALL_{index}_COMPONENTS={len(body_args)}',
-                f'BODY_CALL_{index}_REQUEST_ID_KIND={type(call.args[0]).__name__}',
+                f'BODY_CALL_{index}_REQUEST_ID_SHAPE={shape(call.args[0], call.lineno, assignments)[0]}',
             ]
             for component_index, component in enumerate(body_args, 1):
                 component_shape, static_bytes = shape(component, call.lineno, assignments)
@@ -179,6 +258,13 @@ def analyze_source(source: Path, expected_sha256: str) -> list[str]:
                 f'DOOR_MESSAGE_CALL_{index}_LINE={call.lineno}',
                 f'DOOR_MESSAGE_CALL_{index}_ARGC={len(call.args)}',
                 f'DOOR_MESSAGE_CALL_{index}_ARG_SHAPES=' + '|'.join(arg_shapes),
+            ]
+
+        for index, call in enumerate(write_calls, 1):
+            argument_shape = 'NO_POSITIONAL_ARG' if not call.args else shape(call.args[0], call.lineno, assignments)[0]
+            lines += [
+                f'WRITE_CALL_{index}_LINE={call.lineno}',
+                f'WRITE_CALL_{index}_ARG_SHAPE={argument_shape}',
             ]
 
     lines += [
