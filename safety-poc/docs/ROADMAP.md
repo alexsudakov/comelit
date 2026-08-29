@@ -1,6 +1,6 @@
 # Comelit Door Safety PoC roadmap
 
-This roadmap separates repository-only proofs, CT120 read-only evidence, runtime fixture acceptance, and any future live action.
+This roadmap separates repository-only proofs, CT120 runtime fixture acceptance, release/deploy, and any future live action.
 
 ## Completed baseline
 
@@ -11,73 +11,74 @@ This roadmap separates repository-only proofs, CT120 read-only evidence, runtime
 - P4 ViP outer-framing reconciliation: completed in v0.5.
 - P5 Git canonicalization: completed; GitHub `main` is the canonical source.
 
-## P6 — CTPP body layout reconciliation
+## P6 — CTPP body layout reconciliation — completed offline
 
-Repository-only work:
+Repository structural inventory and CT120 synthetic byte-oracle acceptance are complete. The pinned legacy methods produce exactly six synthetic Door writes, and all six reframe byte-exactly through canonical `VipSession + FixtureTransport`.
 
-- parse the public-safe legacy AST inventory into six typed write shapes;
-- map the fixed builder order to `INIT_A`, primary command/confirm, `INIT_B`, final command/confirm;
-- generate deterministic placeholders only where static lengths are known;
-- maintain structural fingerprints without storing real Door bytes.
+Development-candidate runtime proof emitted `CTPP_BODY_LAYOUT_RECONCILIATION=PASS` without secrets, real Door payload values, network action or physical action.
 
-CT120 evidence still required:
+## P7/P8 — synthetic body model and body reconciliation — completed offline
 
-- exact structural inventory from pinned legacy source;
-- source topology for the Door message builder and dependencies;
-- a later synthetic byte-oracle proof before `CTPP_BODY_LAYOUT_RECONCILIATION=PASS` may be emitted.
+The six-write body model and reconciliation are complete for synthetic/offline inputs. The proof intentionally does not store or claim real credential-bearing Door payload bytes.
 
-## P7/P8 — Synthetic body model and body reconciliation
+## P9 — acceptance and immutable v0.6 release — current
 
-The repository model deliberately stops at structural reconciliation. It must not claim byte-exact body equivalence until CT120 evidence establishes every dynamic/opaque component shape using synthetic values only.
+Development-candidate runtime gates passed. The repository is now versioned `0.6.0`; the exact final Git tree must be runtime-tested again because the version/documentation finalization changed the tree.
 
-## P9 — acceptance and immutable release
+After final-tree PASS:
 
-A final v0.6 release requires the full offline suite, static safety scan, CT120 source pins, runtime fixture gates, PR review, immutable release creation, and retained v0.5 rollback.
+1. open/review PR without modifying the tested tree;
+2. merge while preserving the tested tree content;
+3. synchronize CT120 `main == origin/main`;
+4. deploy the immutable offline v0.6 release using matching runtime evidence;
+5. retain v0.5 rollback until post-promotion acceptance completes.
 
-## P10 — CTPP control plane
+## P10 — CTPP control plane — completed offline
 
-Repository-only model implemented:
+The state model remains:
 
 `CLOSED -> OPEN_REQUESTED -> OPENED -> CLOSE_REQUESTED -> CLOSED/UNKNOWN`.
 
-It enforces one open and one close attempt, carries a typed CTPP channel binding, and never asserts a physical effect.
+CT120 canonical fixture acceptance proved one typed `open_channel("CTPP")`, channel binding `7449`, and one typed close bound to the same channel, with exactly two control writes. `CTPP_CONTROL_PLANE_RECONCILIATION=PASS`.
 
-Still required from CT120:
+Ambiguous control-plane send is never downgraded to `PROVEN_NOT_SENT`.
 
-- canonical `open_channel`/`close_channel` request-response evidence;
-- channel-id binding proof;
-- fixture-only ACK/rejection/ambiguity reconciliation.
+## P11 — full offline Door transaction — completed offline
 
-## P11 — full offline Door transaction
-
-Repository-only transaction model implemented:
+The transaction model is:
 
 `OPEN_CTPP -> INIT_A -> WAIT_A -> COMMAND_PRIMARY -> CONFIRM_PRIMARY -> INIT_B -> WAIT_B -> COMMAND_FINAL -> CONFIRM_FINAL -> CLOSE_CTPP`.
 
-Six Door writes are counted separately from control-plane actions. A failure before the first Door write can be proven not sent; any failure after a Door write is ambiguous. A complete transaction without Door-specific acknowledgement remains `UNKNOWN_OUTCOME`.
+CT120 fixture acceptance proved exactly 8 writes = 2 control + 6 Door data frames, all six Door frames on one CTPP channel, and matching open/close transaction boundaries. `FULL_OFFLINE_DOOR_TRANSACTION=PASS`.
 
-Runtime fixture reconciliation is still required before `FULL_OFFLINE_DOOR_TRANSACTION=PASS`.
+Safety semantics remain conservative:
 
-## P12 — real transport readiness
+- only a failure before any control/boundary attempt may be `PROVEN_NOT_SENT`;
+- explicit control rejection before Door data can fail safe;
+- ambiguous CTPP open is `UNKNOWN_OUTCOME` even with zero Door data frames;
+- any failure after a Door write is ambiguous;
+- a complete transaction without Door-specific acknowledgement remains `UNKNOWN_OUTCOME`.
 
-The repository contains an explicit readiness evaluator. Live readiness remains closed until all repository gates and all live gates are independently proven, including read-only session establishment, target binding, authentication/session lifetime, timeout mapping, audit sink, and explicit live-test approval.
+## P12 — real transport readiness — next after v0.6 deploy
 
-No real transport implementation is added by repository-only work.
+The repository contains an explicit readiness evaluator. Live readiness remains closed until all live gates are independently proven, including read-only session establishment, target binding, authentication/session lifetime, timeout mapping and audit sink.
+
+No real transport implementation is part of v0.6.
 
 ## P13 — explicit live-test gate
 
-No live Door action is authorized by this roadmap. A future physical test requires a separate explicit decision and evidence for exact target, one-shot operation, no retry, audit, timeout handling, and abort conditions.
+No live Door action is authorized by this roadmap. A future physical test requires a separate explicit decision and evidence for exact target, one-shot operation, no retry, audit, timeout handling and abort conditions.
 
 ## P14 — Home Assistant integration
 
-Repository-only service contract implemented for `comelit.open_door`:
+Repository-only service contract is implemented for `comelit.open_door`:
 
 - `operation_id` is mandatory;
 - automatic retry is forbidden;
 - `UNKNOWN_OUTCOME` must be surfaced;
 - protocol acknowledgement cannot be promoted to a physical Door-state claim.
 
-Actual Home Assistant wiring is blocked until the real transport/live gates are completed.
+Actual Home Assistant wiring to real transport is blocked until P12/P13 are completed.
 
 ## Global invariants
 
@@ -87,4 +88,4 @@ Actual Home Assistant wiring is blocked until the real transport/live gates are 
 - protocol ACK is not proof of relay movement;
 - `physical_effect_asserted=True` is forbidden;
 - fixture fault injection must never result in repeated physical sends;
-- repository evidence must not contain credentials, real Door payload values, or capture packet contents.
+- repository/runtime evidence must not contain credentials, real Door payload values, or capture packet contents.
