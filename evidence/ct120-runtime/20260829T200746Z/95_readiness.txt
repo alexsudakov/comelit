@@ -1,0 +1,20 @@
+GATE marker=CANONICAL_VIP_SOURCE_HASHES status=PASS expected=PASS actual=PASS
+GATE marker=LEGACY_RESEARCH_SOURCE_HASH status=PASS expected=PASS actual=PASS
+GATE marker=CTPP_BODY_LAYOUT_RECONCILIATION status=PASS expected=PASS actual=PASS
+GATE marker=CTPP_CONTROL_PLANE_RECONCILIATION status=PASS expected=PASS actual=PASS
+GATE marker=FULL_OFFLINE_DOOR_TRANSACTION status=PASS expected=PASS actual=PASS
+GATE marker=TRANSPORT_BOUNDARY_CONTRACT status=PASS expected=PASS actual=PASS
+GATE marker=BOUNDARY_ATTEMPT_NUMBER_FIXED status=PASS expected=1 actual=1
+GATE marker=AUTO_RETRY_IMPLEMENTED status=PASS expected=false actual=false
+GATE marker=PHYSICAL_EFFECT_ASSERTION_ALLOWED status=PASS expected=false actual=false
+GATE marker=REAL_TRANSPORT_IMPLEMENTED status=FAIL expected=true actual=false
+GATE marker=REAL_TRANSPORT_READONLY_SESSION_PROOF status=MISSING expected=PASS actual=missing
+GATE marker=TARGET_BINDING_VERIFIED status=MISSING expected=PASS actual=missing
+GATE marker=AUTH_SESSION_LIFETIME_VERIFIED status=MISSING expected=PASS actual=missing
+GATE marker=TIMEOUT_MAPPING_VERIFIED status=MISSING expected=PASS actual=missing
+GATE marker=AUDIT_SINK_VERIFIED status=MISSING expected=PASS actual=missing
+GATE marker=EXPLICIT_LIVE_TEST_APPROVAL status=MISSING expected=true actual=missing
+REPOSITORY_READY=true
+LIVE_TEST_READY=false
+REAL_TRANSPORT_ACTION_PERFORMED=false
+PHYSICAL_DOOR_ACTION=false

@@ -1,0 +1,22 @@
+test_fragmented_inbound_stream (tests.test_vip_session.VipSessionTests.test_fragmented_inbound_stream) ... ok
+test_multiple_frames_single_read (tests.test_vip_session.VipSessionTests.test_multiple_frames_single_read) ... ok
+test_send_json (tests.test_vip_session.VipSessionTests.test_send_json) ... ok
+test_capture_response_word_distribution (tests.test_channel_session.ChannelSessionTests.test_capture_response_word_distribution) ... ok
+test_local_open_and_close_match_capture (tests.test_channel_session.ChannelSessionTests.test_local_open_and_close_match_capture) ... ok
+test_local_open_matches_capture (tests.test_channel_session.ChannelSessionTests.test_local_open_matches_capture) ... ok
+test_nonzero_open_response_word_is_preserved (tests.test_channel_session.ChannelSessionTests.test_nonzero_open_response_word_is_preserved) ... ok
+test_peer_close_ack_matches_capture (tests.test_channel_session.ChannelSessionTests.test_peer_close_ack_matches_capture) ... ok
+test_peer_open_ack_matches_capture (tests.test_channel_session.ChannelSessionTests.test_peer_open_ack_matches_capture) ... ok
+test_authenticate_byte_exact_capture (tests.test_application_session.ApplicationSessionTests.test_authenticate_byte_exact_capture) ... ok
+test_second_authenticate_byte_exact_capture (tests.test_application_session.ApplicationSessionTests.test_second_authenticate_byte_exact_capture) ... ok
+test_ucfg_channel_reused_for_second_request (tests.test_application_session.ApplicationSessionTests.test_ucfg_channel_reused_for_second_request) ... ok
+test_ucfg_first_request_byte_exact_capture (tests.test_application_session.ApplicationSessionTests.test_ucfg_first_request_byte_exact_capture) ... ok
+
+----------------------------------------------------------------------
+Ran 13 tests in 0.791s
+
+OK
+CANONICAL_VIP_CAPTURE_TESTS=PASS
+CANONICAL_VIP_SOURCE_HASHES=PASS
+NETWORK_ACTION_PERFORMED=false
+PHYSICAL_DOOR_ACTION=false

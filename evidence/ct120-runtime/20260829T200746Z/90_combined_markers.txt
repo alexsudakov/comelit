@@ -1,0 +1,137 @@
+STATIC_SAFETY_CHECK=PASS
+NETWORK_IMPORTS_PRESENT=false
+COMELIT_ENDPOINTS_PRESENT=false
+SOURCE_FILES_SCANNED=17
+OFFLINE_SUITE=PASS
+VIP_FIXTURE_ADAPTER_TESTS=PASS
+DOOR_SEMANTIC_ADAPTER_TESTS=PASS
+WIRE_RECONCILIATION_TESTS=PASS
+LEGACY_BODY_SHAPE_INVENTORY_TESTS=PASS
+LEGACY_BODY_METHOD_SELECTION=QUALIFIED_CLASS_METHOD
+CANONICAL_CONTROL_SHAPE_INVENTORY_TESTS=PASS
+CTPP_BODY_STRUCTURAL_MODEL_TESTS=PASS
+CTPP_CONTROL_PLANE_MODEL_TESTS=PASS
+OFFLINE_DOOR_TRANSACTION_MODEL_TESTS=PASS
+READINESS_GATE_TESTS=PASS
+HA_SERVICE_CONTRACT_TESTS=PASS
+SAFE_SOURCE_TOPOLOGY_TESTS=PASS
+CTPP_BODY_LAYOUT_RECONCILIATION=PENDING_RUNTIME_BYTE_ORACLE
+CTPP_CONTROL_PLANE_RECONCILIATION=PENDING_RUNTIME_FIXTURE
+FULL_OFFLINE_DOOR_TRANSACTION=PENDING_RUNTIME_FIXTURE
+TRANSPORT_BOUNDARY_CONTRACT=PASS
+BOUNDARY_ATTEMPT_NUMBER_FIXED=1
+PHYSICAL_EFFECT_ASSERTION_ALLOWED=false
+REAL_TRANSPORT_IMPLEMENTED=false
+AUTO_RETRY_IMPLEMENTED=false
+LIVE_TEST_READY=false
+RUNTIME_GATE_GIT_SHA=ec2622ca70ae352b4d090025f6dbee67fc965bbc
+RUNTIME_GATE_TREE_SHA=66539b16552725943c3a5577640fd327c86e744a
+RUNTIME_GATE_VERSION=0.6.0
+RUNTIME_GATE_SOURCE_BRANCH=feat/v0.6-ctpp-body-layout
+=== LEGACY SYNTHETIC BODY ORACLE ===
+LEGACY_RESEARCH_SOURCE_HASH=PASS
+CANONICAL_VIP_SOURCE_HASHES=PASS
+LEGACY_SYNTHETIC_WRITE_COUNT=6
+CANONICAL_FRAME_EQUIVALENCE_COUNT=6
+WRITE_1_BODY_BYTES=116
+WRITE_1_BODY_SHA256=120fa11dad36fb69846e6c5815bb119e9855d0e3a8924c9d42488a08605e4585
+WRITE_2_BODY_BYTES=69
+WRITE_2_BODY_SHA256=80cea21d2ae945c604b74199affc96a4fea59db8ae54d6348dba08d55515f0fe
+WRITE_3_BODY_BYTES=69
+WRITE_3_BODY_SHA256=84d7897fa78ca6171fc17adbf17f377940aab4da164f4e253a1674683bec3971
+WRITE_4_BODY_BYTES=95
+WRITE_4_BODY_SHA256=dcf39b9fc769d4555ccf8829cea64fb08752dac3be4c687e635b9eaae24fc668
+WRITE_5_BODY_BYTES=69
+WRITE_5_BODY_SHA256=80cea21d2ae945c604b74199affc96a4fea59db8ae54d6348dba08d55515f0fe
+WRITE_6_BODY_BYTES=69
+WRITE_6_BODY_SHA256=84d7897fa78ca6171fc17adbf17f377940aab4da164f4e253a1674683bec3971
+CTPP_BODY_LAYOUT_RECONCILIATION=PASS
+SYNTHETIC_INPUTS_ONLY=true
+SYNTHETIC_INTEGER_RANGE=1..250
+SYNTHETIC_CTPP_CHANNEL_BINDING=ON_FAKE_OPEN
+LEGACY_SOURCE_EXECUTED_OFFLINE=true
+SECRETS_READ=false
+REAL_DOOR_PAYLOAD_VALUES_COLLECTED=false
+NETWORK_ACTION_PERFORMED=false
+PHYSICAL_DOOR_ACTION=false
+test_fragmented_inbound_stream (tests.test_vip_session.VipSessionTests.test_fragmented_inbound_stream) ... ok
+test_multiple_frames_single_read (tests.test_vip_session.VipSessionTests.test_multiple_frames_single_read) ... ok
+test_send_json (tests.test_vip_session.VipSessionTests.test_send_json) ... ok
+test_capture_response_word_distribution (tests.test_channel_session.ChannelSessionTests.test_capture_response_word_distribution) ... ok
+test_local_open_and_close_match_capture (tests.test_channel_session.ChannelSessionTests.test_local_open_and_close_match_capture) ... ok
+test_local_open_matches_capture (tests.test_channel_session.ChannelSessionTests.test_local_open_matches_capture) ... ok
+test_nonzero_open_response_word_is_preserved (tests.test_channel_session.ChannelSessionTests.test_nonzero_open_response_word_is_preserved) ... ok
+test_peer_close_ack_matches_capture (tests.test_channel_session.ChannelSessionTests.test_peer_close_ack_matches_capture) ... ok
+test_peer_open_ack_matches_capture (tests.test_channel_session.ChannelSessionTests.test_peer_open_ack_matches_capture) ... ok
+test_authenticate_byte_exact_capture (tests.test_application_session.ApplicationSessionTests.test_authenticate_byte_exact_capture) ... ok
+test_second_authenticate_byte_exact_capture (tests.test_application_session.ApplicationSessionTests.test_second_authenticate_byte_exact_capture) ... ok
+test_ucfg_channel_reused_for_second_request (tests.test_application_session.ApplicationSessionTests.test_ucfg_channel_reused_for_second_request) ... ok
+test_ucfg_first_request_byte_exact_capture (tests.test_application_session.ApplicationSessionTests.test_ucfg_first_request_byte_exact_capture) ... ok
+
+----------------------------------------------------------------------
+Ran 13 tests in 0.791s
+
+OK
+CANONICAL_VIP_CAPTURE_TESTS=PASS
+CANONICAL_VIP_SOURCE_HASHES=PASS
+NETWORK_ACTION_PERFORMED=false
+PHYSICAL_DOOR_ACTION=false
+=== CANONICAL CTPP CONTROL FIXTURE ===
+CANONICAL_VIP_SOURCE_HASHES=PASS
+CTPP_CONTROL_WRITE_COUNT=2
+CTPP_BOUND_CHANNEL_ID=7449
+CTPP_CLOSE_RESPONSE_WORD=0
+CTPP_OPEN_REQUEST_TYPE=PASS
+CTPP_CLOSE_REQUEST_TYPE=PASS
+CTPP_CHANNEL_BINDING=PASS
+CTPP_CONTROL_PLANE_RECONCILIATION=PASS
+FIXTURE_ONLY=true
+SECRETS_READ=false
+NETWORK_ACTION_PERFORMED=false
+PHYSICAL_DOOR_ACTION=false
+=== FULL OFFLINE DOOR TRANSACTION FIXTURE ===
+CANONICAL_VIP_SOURCE_HASHES=PASS
+TOTAL_FIXTURE_WRITE_COUNT=8
+CONTROL_WRITE_COUNT=2
+DOOR_FIXTURE_WRITE_COUNT=6
+DOOR_REQUEST_IDS_SINGLE_CHANNEL=true
+DOOR_CHANNEL_ID=7449
+DOOR_SYNTHETIC_BODY_UNIQUE_COUNT=6
+TRANSACTION_BEGINS_OPEN_CTPP=PASS
+TRANSACTION_ENDS_CLOSE_CTPP=PASS
+DOOR_PROTOCOL_ACK_PROVEN=false
+FULL_OFFLINE_DOOR_TRANSACTION=PASS
+FIXTURE_ONLY=true
+AUTO_RETRY_IMPLEMENTED=false
+PHYSICAL_EFFECT_ASSERTED=false
+SECRETS_READ=false
+NETWORK_ACTION_PERFORMED=false
+PHYSICAL_DOOR_ACTION=false
+GATE marker=CANONICAL_VIP_SOURCE_HASHES status=PASS expected=PASS actual=PASS
+GATE marker=LEGACY_RESEARCH_SOURCE_HASH status=PASS expected=PASS actual=PASS
+GATE marker=CTPP_BODY_LAYOUT_RECONCILIATION status=PASS expected=PASS actual=PASS
+GATE marker=CTPP_CONTROL_PLANE_RECONCILIATION status=PASS expected=PASS actual=PASS
+GATE marker=FULL_OFFLINE_DOOR_TRANSACTION status=PASS expected=PASS actual=PASS
+GATE marker=TRANSPORT_BOUNDARY_CONTRACT status=PASS expected=PASS actual=PASS
+GATE marker=BOUNDARY_ATTEMPT_NUMBER_FIXED status=PASS expected=1 actual=1
+GATE marker=AUTO_RETRY_IMPLEMENTED status=PASS expected=false actual=false
+GATE marker=PHYSICAL_EFFECT_ASSERTION_ALLOWED status=PASS expected=false actual=false
+GATE marker=REAL_TRANSPORT_IMPLEMENTED status=FAIL expected=true actual=false
+GATE marker=REAL_TRANSPORT_READONLY_SESSION_PROOF status=MISSING expected=PASS actual=missing
+GATE marker=TARGET_BINDING_VERIFIED status=MISSING expected=PASS actual=missing
+GATE marker=AUTH_SESSION_LIFETIME_VERIFIED status=MISSING expected=PASS actual=missing
+GATE marker=TIMEOUT_MAPPING_VERIFIED status=MISSING expected=PASS actual=missing
+GATE marker=AUDIT_SINK_VERIFIED status=MISSING expected=PASS actual=missing
+GATE marker=EXPLICIT_LIVE_TEST_APPROVAL status=MISSING expected=true actual=missing
+REPOSITORY_READY=true
+LIVE_TEST_READY=false
+REAL_TRANSPORT_ACTION_PERFORMED=false
+PHYSICAL_DOOR_ACTION=false
+CT120_RUNTIME_GATES=PASS
+REPOSITORY_READY=true
+REAL_TRANSPORT_IMPLEMENTED=false
+LIVE_TEST_READY=false
+SECRETS_READ=false
+REAL_DOOR_PAYLOAD_VALUES_COLLECTED=false
+NETWORK_ACTION_PERFORMED=false
+PHYSICAL_DOOR_ACTION=false
