@@ -78,6 +78,32 @@ class SyntheticResponse:
         yield self.body
 
 
+def _seed_synthetic_ctpp_binding(client: object, legacy: object, channel: object) -> None:
+    """Populate only the in-memory channel lookup required by legacy open_door().
+
+    The production `_open_channel` implementation normally owns this mapping.
+    The runtime oracle replaces `_open_channel` to guarantee zero network I/O, so
+    the harness must reproduce that one local side effect explicitly.  No
+    credentials, endpoints, sockets or real channel state are used.
+    """
+
+    open_channels = getattr(client, 'open_channels', None)
+    if open_channels is None:
+        open_channels = {}
+        setattr(client, 'open_channels', open_channels)
+    if not hasattr(open_channels, '__setitem__'):
+        raise RuntimeError('legacy open_channels is not a mutable mapping')
+
+    keys: list[object] = ['CTPP']
+    channel_type = getattr(legacy, 'Channel', None)
+    enum_key = getattr(channel_type, 'CTPP', None) if channel_type is not None else None
+    if enum_key is not None and enum_key not in keys:
+        keys.append(enum_key)
+
+    for key in keys:
+        open_channels[key] = channel
+
+
 async def _capture_legacy_packets(source: Path = LEGACY_SOURCE) -> tuple[bytes, ...]:
     require_legacy_pin(source)
     legacy = load_module_from_path('_comelit_legacy_synthetic_oracle', source)
@@ -93,9 +119,10 @@ async def _capture_legacy_packets(source: Path = LEGACY_SOURCE) -> tuple[bytes, 
     client = client_cls(*args)
 
     captured: list[bytes] = []
+    synthetic_channel = SimpleNamespace(id=CHANNEL_ID, channel_id=CHANNEL_ID, name='CTPP', channel='CTPP')
 
     async def fake_open_channel(self, *args, **kwargs):
-        return SimpleNamespace(id=CHANNEL_ID, channel_id=CHANNEL_ID, name='CTPP', channel='CTPP')
+        return synthetic_channel
 
     async def fake_write_packet(self, packet):
         captured.append(bytes(packet))
@@ -110,6 +137,7 @@ async def _capture_legacy_packets(source: Path = LEGACY_SOURCE) -> tuple[bytes, 
     client._write_packet = MethodType(fake_write_packet, client)
     client._read_response = MethodType(fake_read_response, client)
     client._close_channel = MethodType(fake_close_channel, client)
+    _seed_synthetic_ctpp_binding(client, legacy, synthetic_channel)
 
     vip = SyntheticMapping('vip')
     door = SyntheticMapping('door')
@@ -160,6 +188,7 @@ def main() -> int:
         print(f'WRITE_{index}_BODY_SHA256={hashlib.sha256(body).hexdigest()}')
     print('CTPP_BODY_LAYOUT_RECONCILIATION=PASS')
     print('SYNTHETIC_INPUTS_ONLY=true')
+    print('SYNTHETIC_CTPP_CHANNEL_BINDING=true')
     print('LEGACY_SOURCE_EXECUTED_OFFLINE=true')
     print('SECRETS_READ=false')
     print('REAL_DOOR_PAYLOAD_VALUES_COLLECTED=false')
