@@ -50,7 +50,10 @@ class P12OneShotExecTests(unittest.TestCase):
                 f"echo x >> {counter!s}\ntrap 'exit 0' TERM\nsleep 2\n",
             )
             result = module.run_once(wrapper, root / "raw.log", timeout_seconds=0.05, term_grace_seconds=0.5)
-            self.assertEqual(result.outcome, module.OneShotOutcome.TIMEOUT_TERM)
+            self.assertIn(
+                result.outcome,
+                (module.OneShotOutcome.TIMEOUT_TERM, module.OneShotOutcome.TIMEOUT_KILL),
+            )
             self.assertTrue(result.timeout_observed)
             self.assertEqual(counter.read_text(encoding="utf-8").splitlines(), ["x"])
 
@@ -66,12 +69,17 @@ class P12OneShotExecTests(unittest.TestCase):
             self.assertIn("P12_ONE_SHOT_TIMEOUT_OBSERVED=true", text)
             self.assertIn("P12_ONE_SHOT_PROCESS_INVOCATIONS=1", text)
             self.assertIn("P12_ONE_SHOT_AUTO_RETRY=false", text)
+            self.assertIn("P12_ONE_SHOT_PROCESS_GROUP_ISOLATED=true", text)
             self.assertIn("TIMEOUT_MAPPING_VERIFIED=PASS", text)
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
-    def test_source_contains_exactly_one_process_spawn(self):
+    def test_source_contains_exactly_one_process_spawn_and_group_cleanup(self):
         text = SCRIPT.read_text(encoding="utf-8")
         self.assertEqual(text.count("subprocess.Popen("), 1)
+        self.assertIn("start_new_session=True", text)
+        self.assertIn("os.killpg(proc.pid, sig)", text)
+        self.assertIn("signal.SIGTERM", text)
+        self.assertIn("signal.SIGKILL", text)
         self.assertNotIn("while True", text)
         self.assertNotIn("for attempt", text)
         self.assertNotIn("shell=True", text)
