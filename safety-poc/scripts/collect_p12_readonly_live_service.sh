@@ -20,9 +20,18 @@ UNIT="$(awk -F= '$1 == "P12_LIVE_SERVICE_UNIT" {print substr($0, index($0,"=")+1
 
 case "$LOG" in "$RUN_ROOT"/*.log) ;; *) echo "P12_LIVE_LOG_PATH=FAIL"; exit 1 ;; esac
 case "$RCFILE" in "$RUN_ROOT"/*.rc) ;; *) echo "P12_LIVE_RC_PATH=FAIL"; exit 1 ;; esac
+[[ -n "$UNIT" ]] || { echo "P12_LIVE_UNIT_METADATA=FAIL"; exit 1; }
+
+# Wait only for the local result file. This never starts or retries the live
+# operation; the systemd unit owns the single network-capable invocation.
+echo "P12_LIVE_COLLECT_WAIT_ONLY=true"
+for _ in $(seq 1 130); do
+    [[ -s "$RCFILE" ]] && break
+    sleep 1
+done
+
 [[ -s "$LOG" ]] || { echo "P12_LIVE_LOG_NONEMPTY=false"; exit 1; }
 [[ -s "$RCFILE" ]] || { echo "P12_LIVE_RC_NONEMPTY=false"; exit 1; }
-[[ -n "$UNIT" ]] || { echo "P12_LIVE_UNIT_METADATA=FAIL"; exit 1; }
 
 [[ "$(grep -Fxc 'P12_LIVE_SERVICE_PAYLOAD_START=true' "$LOG")" -eq 1 ]] || {
     echo "P12_LIVE_SERVICE_START_MARKER=FAIL"
