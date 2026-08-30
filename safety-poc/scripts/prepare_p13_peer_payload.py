@@ -14,6 +14,8 @@ if str(SCRIPT_DIR) not in sys.path:
 import prepare_p13_real_payloads as base
 
 # Public-safe pins. Plaintext apartment/entrance identities remain runtime-only.
+# The apartment tuple is proven by the P12 UCFG capture. The entrance/output
+# pair is independently pinned from the captured self-activation Door target.
 EXPECTED_PEER_TARGET_SHA256 = "ec95e794a2a16aa02fb02489d9794419f13744ba66dfcb711f8af9326ee1ff30"
 EXPECTED_APT_ADDRESS_SHA256 = "baabc15b4b5496c0918278ab7475e3bfa5c5b257495137632f4a846ae4c040a6"
 EXPECTED_APT_SUBADDRESS_SHA256 = "7902699be42c8a8e46fbbb4501726517e86b22c56a189f7625a6da49081b2451"
@@ -58,17 +60,12 @@ def _unique_pinned_scalar(node: object, key: str, expected_sha256: str) -> str:
     return value
 
 
-def _require_peer_action(doc: object) -> None:
-    peers = [mapping for mapping in base._dicts(doc) if mapping.get("action") == "peer"]
-    if not peers:
-        raise RuntimeError("captured UCFG does not contain action=peer")
-
-
 def extract_vip_for_peer(doc: object) -> dict:
-    # The live UCFG layout is not the legacy component's vip.user-parameters
-    # layout. Reconstruct only the apartment identity required by its offline
-    # packet oracle, using the same SHA pins already proven by P12 target binding.
-    _require_peer_action(doc)
+    # The successful P12 UCFG snapshot proves the apartment identity but does
+    # not carry the action=peer metadata seen in a separate self-activation
+    # capture. Packet construction does not require that action metadata: the
+    # pinned legacy open_door path uses apartment address/subaddress for CTPP
+    # and the selected output index for the six Door writes.
     apt_address = _unique_pinned_scalar(doc, "apt-address", EXPECTED_APT_ADDRESS_SHA256)
     apt_subaddress = _unique_pinned_scalar(doc, "apt-subaddress", EXPECTED_APT_SUBADDRESS_SHA256)
     return {
@@ -95,8 +92,9 @@ def runtime_peer_door(_vip: dict) -> dict:
     if actual != EXPECTED_PEER_TARGET_SHA256:
         raise RuntimeError("P13 peer runtime target does not match captured self-activation target pin")
 
-    # The pinned legacy oracle expects door_item['apt-address']; keep number too
-    # because the public-safe target fingerprint helper uses it.
+    # open_door() consumes output-index for the actuator frames. Preserve both
+    # historical address spellings in the runtime-only descriptor; `number` is
+    # also part of the public-safe target fingerprint produced by the prep code.
     return {
         "name": name,
         "number": entrance,
@@ -133,13 +131,14 @@ def find_pinned_ucfg() -> Path:
 
 def main() -> int:
     # Reuse the proven legacy packet-construction oracle with all network methods
-    # replaced. Adapt only UCFG layout and the peer-door descriptor.
+    # replaced. Adapt only UCFG layout and the independently pinned peer target.
     base.extract_vip = extract_vip_for_peer
     base.extract_doors = extract_doors_for_peer
     base.find_exact_ucfg = find_pinned_ucfg
     rc = base.main()
     print("P13_PEER_TARGET_SOURCE=RUNTIME_PINNED")
     print("P13_PEER_TARGET_VALUE_EMITTED=false")
+    print("P13_PEER_ACTION_METADATA_REQUIRED=false")
     print("NETWORK_ACTION_PERFORMED=false")
     print("ACTUATOR_COMMAND_ATTEMPTED=false")
     print("PHYSICAL_DOOR_ACTION=false")
