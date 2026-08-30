@@ -78,7 +78,12 @@ echo "P13_ONE_SHOT_APPROVAL=GRANTED"
 
 # -- preflight gate (identity, audit, no conflict) ------------------------
 STEP=PREFLIGHT
-if ! bash "$SCRIPT_DIR/p13_actuation_preflight.sh" >/dev/null 2>&1; then
+# The live approval belongs only to this outer physical runner.  The preflight
+# is non-actuating and includes negative approval tests, so it must run in a
+# child environment where live execution identity is absent.  env -u affects
+# only the preflight child; P13_APPROVAL remains available below for EXECUTE.
+if ! env -u P13_APPROVAL -u P13_OPERATION_ID \
+    bash "$SCRIPT_DIR/p13_actuation_preflight.sh" >/dev/null 2>&1; then
     echo "P13_ONE_SHOT_PREFLIGHT=FAIL"
     exit 1
 fi
