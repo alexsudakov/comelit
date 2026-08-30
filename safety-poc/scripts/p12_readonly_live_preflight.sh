@@ -2,11 +2,16 @@
 set -Eeuo pipefail
 umask 077
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR=/root/comelit-p12-readonly-candidate
 SOURCE="$BUILD_DIR/comelit_ice_offer_holder.p12-readonly.c"
 BINARY="$BUILD_DIR/comelit_ice_offer_holder.p12-readonly"
 WRAPPER="$BUILD_DIR/comelit-p2p-cloud-probe-p12-readonly"
 MANIFEST="$BUILD_DIR/MANIFEST.txt"
+ONE_SHOT_EXEC="$SCRIPT_DIR/p12_one_shot_exec.py"
+TARGET_VERIFY="$SCRIPT_DIR/p12_verify_target_binding.py"
+LIVE_RUNNER="$SCRIPT_DIR/run_p12_readonly_live_once.sh"
+FINALIZER="$SCRIPT_DIR/p12_finalize_readonly_readiness.py"
 SECRETS_DIR=/root/.config/comelit
 SECRETS_FILE=/root/.config/comelit/secrets.env
 
@@ -19,6 +24,10 @@ EXPECTED_WRAPPER_SHA=7eb9c4e8999dc6c6f15ac03344abd155a042482158352fadbca58a3f4fd
 [[ "${EUID}" -eq 0 ]] || { echo "P12_PREFLIGHT_REQUIRES_ROOT=true"; exit 1; }
 [[ -f "$SOURCE" && -f "$BINARY" && -f "$WRAPPER" && -f "$MANIFEST" ]] || {
     echo "P12_CANDIDATE_ARTIFACTS_PRESENT=false"
+    exit 1
+}
+[[ -f "$ONE_SHOT_EXEC" && -f "$TARGET_VERIFY" && -f "$LIVE_RUNNER" && -f "$FINALIZER" ]] || {
+    echo "P12_PREFLIGHT_CONTROL_PLANE_FILES_PRESENT=false"
     exit 1
 }
 
@@ -86,6 +95,75 @@ if grep -Eq '(^|[[:space:]])set[[:space:]]+-[^#\n]*x|bash[[:space:]]+-x|printenv
 fi
 echo "P12_PREFLIGHT_WRAPPER_BINDING=PASS"
 
+# Parse repository control-plane sources only. This does not execute the
+# supervisor, candidate, wrapper, finalizer, or any network-capable code.
+python3 - "$ONE_SHOT_EXEC" "$TARGET_VERIFY" "$LIVE_RUNNER" "$FINALIZER" <<'PY'
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+import re
+import sys
+
+one_shot, target, runner, finalizer = [Path(value) for value in sys.argv[1:]]
+texts = {path: path.read_text(encoding="utf-8") for path in (one_shot, target, runner, finalizer)}
+for path, text in texts.items():
+    ast.parse(text, filename=str(path)) if path.suffix == ".py" else None
+    if re.search(r"CTPP|OPEN_DOOR|open_door|create_door_message", text):
+        raise SystemExit(f"P12_PREFLIGHT_CONTROL_ACTUATOR_SURFACE={path.name}")
+
+one = texts[one_shot]
+if one.count("subprocess.Popen(") != 1:
+    raise SystemExit("P12_PREFLIGHT_ONE_SHOT_SPAWN_COUNT_FAIL")
+for required in ("start_new_session=True", "os.killpg(proc.pid, sig)", "P12_ONE_SHOT_AUTO_RETRY=false"):
+    if required not in one:
+        raise SystemExit("P12_PREFLIGHT_ONE_SHOT_PROCESS_GROUP_FAIL")
+if "shell=True" in one or "for attempt" in one or "while True" in one:
+    raise SystemExit("P12_PREFLIGHT_ONE_SHOT_RETRY_SURFACE=true")
+
+tree = ast.parse(texts[target], filename=str(target))
+expected = None
+for node in tree.body:
+    if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "EXPECTED_VALUE_SHA256" for t in node.targets):
+        expected = ast.literal_eval(node.value)
+        break
+if not isinstance(expected, dict) or set(expected) != {"model", "version", "apt-address", "apt-subaddress"}:
+    raise SystemExit("P12_PREFLIGHT_TARGET_HASH_SET=FAIL")
+if any(not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None for value in expected.values()):
+    raise SystemExit("P12_PREFLIGHT_TARGET_HASH_FORMAT=FAIL")
+
+run = texts[runner]
+for required in (
+    "APPROVAL_EXPECTED=I_APPROVE_P12_READONLY_LIVE_ONCE",
+    "UCFG_CAPTURE=/run/comelit-p2p/p12-ucfg-response.json",
+    'rm -f -- "$UCFG_CAPTURE"',
+    'python3 "$SCRIPT_DIR/p12_one_shot_exec.py"',
+    'python3 "$SCRIPT_DIR/p12_verify_target_binding.py"',
+    "P12_READONLY_LIVE_GATES=PASS",
+    'echo "READONLY_TRANSPORT_READY=false"',
+):
+    if required not in run:
+        raise SystemExit("P12_PREFLIGHT_LIVE_RUNNER_CONTRACT=FAIL")
+if 'echo "READONLY_TRANSPORT_READY=true"' in run:
+    raise SystemExit("P12_PREFLIGHT_LIVE_RUNNER_OVERCLAIMS_READINESS=true")
+
+final = texts[finalizer]
+for required in (
+    "REPOSITORY_GATES",
+    "READONLY_GATES",
+    "ACTUATION_TRANSPORT_IMPLEMENTED",
+    "P12_READONLY_FINALIZATION=PASS",
+):
+    if required not in final:
+        raise SystemExit("P12_PREFLIGHT_FINALIZER_CONTRACT=FAIL")
+
+print("P12_PREFLIGHT_ONE_SHOT_CONTROL=PASS")
+print("P12_PREFLIGHT_TARGET_HASH_PROFILE=PASS")
+print("P12_PREFLIGHT_LIVE_RUNNER_CONTRACT=PASS")
+print("P12_PREFLIGHT_FINALIZER_CONTRACT=PASS")
+PY
+echo "P12_PREFLIGHT_CONTROL_PLANE=PASS"
+
 [[ -d "$SECRETS_DIR" && -f "$SECRETS_FILE" ]] || {
     echo "P12_PREFLIGHT_CREDENTIAL_CONTAINER_PRESENT=false"
     exit 1
@@ -113,6 +191,7 @@ echo "CANDIDATE_EXECUTED=false"
 echo "WRAPPER_EXECUTED=false"
 echo "SECRETS_CONTENT_READ=false"
 echo "CREDENTIAL_MATERIAL_EMITTED=false"
+echo "TARGET_IDENTITY_VALUES_EMITTED=false"
 echo "ACTIVE_COMELIT_NETWORK_PROBES=false"
 echo "ACTUATOR_COMMAND_ATTEMPTED=false"
 echo "PHYSICAL_DOOR_ACTION=false"
