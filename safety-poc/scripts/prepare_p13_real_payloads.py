@@ -7,7 +7,12 @@ import inspect
 import json
 import os
 from pathlib import Path
+import sys
 from types import MethodType, SimpleNamespace
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
 from runtime_gate_common import (
     LEGACY_SOURCE,
@@ -117,7 +122,7 @@ def select_door(doors: list[dict], requested: str | None) -> tuple[int, dict]:
         return index, doors[index]
     if len(doors) == 1:
         return 0, doors[0]
-    print(f"P13_TARGET_SELECTION_REQUIRED=true")
+    print("P13_TARGET_SELECTION_REQUIRED=true")
     print(f"P13_TARGET_COUNT={len(doors)}")
     for i, (door, fp) in enumerate(zip(doors, fingerprints), 1):
         name = str(door.get("name", ""))
