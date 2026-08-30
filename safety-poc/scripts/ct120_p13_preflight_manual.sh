@@ -70,9 +70,16 @@ POC_ROOT="$REPO_ROOT/safety-poc"
 
 # Runtime identity (PoC): live artifacts must match the identity captured once
 # by p13_capture_runtime_identity.sh.  This is runtime identity validation,
-# not reproducible provenance (per P13_POC_DIRECT_PATH.md).
+# not reproducible provenance (per P13_POC_DIRECT_PATH.md).  If the identity
+# file is absent, capture it now (non-actuating) so this remains ONE command.
 IDENTITY_FILE=/root/comelit-p13-runtime-identity.json
-[[ -f "$IDENTITY_FILE" ]] || { echo "P13_RUNTIME_IDENTITY_ABSENT=true"; exit 1; }
+if [[ ! -f "$IDENTITY_FILE" ]]; then
+    echo "P13_RUNTIME_IDENTITY_ABSENT=true"
+    echo "P13_RUNTIME_IDENTITY_CAPTURING=true"
+    bash "$SCRIPT_DIR/p13_capture_runtime_identity.sh"
+    [[ -f "$IDENTITY_FILE" ]] || { echo "P13_RUNTIME_IDENTITY_CAPTURE=FAIL"; exit 1; }
+    echo "P13_RUNTIME_IDENTITY_CAPTURE=PASS"
+fi
 EXPECTED_WRAPPER_SHA256="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["wrapper"]["sha256"])' "$IDENTITY_FILE")"
 EXPECTED_HOLDER_PATH="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["holder"]["path"])' "$IDENTITY_FILE")"
 echo "P13_RUNTIME_IDENTITY_FILE=$IDENTITY_FILE"
