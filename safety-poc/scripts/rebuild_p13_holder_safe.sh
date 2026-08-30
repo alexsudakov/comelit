@@ -19,7 +19,8 @@ PAYLOAD=/root/comelit-p13-actuator-prep/real-door-payloads.json
 NATIVE_DIR=/root/comelit-p13-native
 HOLDER_SOURCE="$NATIVE_DIR/comelit_p13_holder.c"
 HOLDER_TMP="$NATIVE_DIR/comelit_p13_holder.safe.tmp"
-HOLDER="$NATIVE_DIR/comelit_p13_holder"
+HOLDER="$NATIVE_DIR/comelit_p13-native-holder-unused"
+HOLDER=/root/comelit-p13-native/comelit_p13_holder
 WRAPPER=/usr/local/sbin/comelit-p13-door-wrapper
 BUILD_LOG="$NATIVE_DIR/rebuild-safe.log"
 EXPECTED_BASE_SOURCE_SHA=d8c3bd50c33d702699b96c24f08363bb06f3b5312b3033aceead9ed67a6ce9d9
@@ -96,7 +97,15 @@ assert 'write_le32(body + 4, 7);' in text
 assert 'body[15] = 0;' in text
 assert 'write_le32(body + 16, (guint32)sizeof(ctpp_extension_payload));' in text
 assert 'extension_len != body_len - 16u' in text
+assert 'P13_DOOR_WRITE_%u_ACKED=true' not in text
+assert 'P13_DOOR_WRITE_REQUEST_ID=FAIL' not in text
+assert text.count('g_timeout_add(200, p13_register_settle_cb, NULL);') == 1
+assert text.count('g_timeout_add(1000, p13_post_writes_settle_cb, NULL);') == 1
+assert 'P13_DOOR_INBOUND_FRAME_OBSERVED=true' in text
+assert 'p13_writes_sent = p13_write_index;' in text
 print('P13_SAFE_GENERATED_SOURCE_CONTRACT=PASS')
+print('P13_PEER_TAP_WRITE_TIMING=PASS')
+print('P13_DOOR_WRITE_ACK_REQUIRED=false')
 PY
 
 STEP=COMPILE
@@ -133,6 +142,8 @@ STEP=COMPLETE
 printf '%s\n' \
     'P13_UAUT_AUTH_HANDOFF=PASS' \
     'P13_CTPP_OPEN_EXTENSION=PASS' \
+    'P13_PEER_TAP_WRITE_TIMING=PASS' \
+    'P13_DOOR_WRITE_ACK_REQUIRED=false' \
     'P13_CTPP_ADDRESS_UCFG_BINDING=PASS' \
     'P13_CTPP_ADDRESS_VALUE_EMITTED=false' \
     'P13_NETWORK_ACTION_PERFORMED=false' \
