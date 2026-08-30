@@ -50,11 +50,12 @@ class P13InstallScriptTests(unittest.TestCase):
         self.assertIn('cc -O2 -Wall -Wextra', self.text)
         self.assertIn("pkg-config --cflags --libs nice glib-2.0 gio-2.0 gobject-2.0", self.text)
 
-    def test_install_validates_holder_markers_statically(self):
-        self.assertIn("strings -a \"$HOLDER\" | grep -q 'P13_CTPP_OPEN_OUTCOME'", self.text)
-        self.assertIn("strings -a \"$HOLDER\" | grep -q 'P13_DOOR_WRITE_COUNT'", self.text)
-        self.assertIn("strings -a \"$HOLDER\" | grep -q 'P13_TEARDOWN=PASS'", self.text)
+    def test_install_validates_holder_markers_statically_without_pipefail_sigpipe(self):
+        self.assertIn("grep -aFq 'P13_CTPP_OPEN_OUTCOME' \"$HOLDER\"", self.text)
+        self.assertIn("grep -aFq 'P13_DOOR_WRITE_COUNT' \"$HOLDER\"", self.text)
+        self.assertIn("grep -aFq 'P13_TEARDOWN=PASS' \"$HOLDER\"", self.text)
         self.assertIn("P13_HOLDER_BUILD=PASS", self.text)
+        self.assertNotIn('strings -a "$HOLDER" | grep -q', self.text)
 
     def test_install_binds_wrapper_to_holder(self):
         self.assertIn("P13_WRAPPER_HOLDER_BIND=FAIL", self.text)
