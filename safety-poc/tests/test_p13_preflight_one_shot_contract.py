@@ -29,6 +29,20 @@ class P13PreflightOneShotContractTests(unittest.TestCase):
         self.assertNotIn('pgrep -x "comelit_ice_offer_holder"', self.text)
         self.assertNotIn('pgrep -x "comelit-p13-door-wrapper"', self.text)
 
+    def test_ct120_suite_is_scoped_to_physical_runtime_path(self):
+        self.assertIn("P13_RUNTIME_RELEVANT_UNIT_SUITE=PASS", self.text)
+        self.assertIn("P13_FULL_REPOSITORY_UNIT_SUITE_SOURCE=GITHUB_CI_EXACT_HEAD", self.text)
+        self.assertNotIn('python3 -m unittest discover -s "$POC_ROOT/tests" >/dev/null', self.text)
+        for pattern in (
+            "test_executor.py",
+            "test_ct120_real_session.py",
+            "test_p13_actuation.py",
+            "test_p13_one_shot_physical.py",
+            "test_p13_real_door_blockers.py",
+            "test_p13_wrapper_entrypoint.py",
+        ):
+            self.assertIn(pattern, self.text)
+
 
 if __name__ == "__main__":
     unittest.main()
