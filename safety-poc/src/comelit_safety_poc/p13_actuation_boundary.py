@@ -87,8 +87,8 @@ class P13DoorSession(Protocol):
         """Close the CTPP channel. Returns True on clean close."""
         ...
 
-    def teardown(self) -> None:
-        """Clean ViP session teardown."""
+    def teardown(self) -> bool:
+        """Teardown the ViP session. Returns True only when the wrapper proved a clean teardown."""
         ...
 
 
@@ -128,8 +128,9 @@ class FixtureP13DoorSession:
             raise RuntimeError("fixture session close outcome ambiguous")
         return self.close_ok
 
-    def teardown(self) -> None:
+    def teardown(self) -> bool:
         self.teardown_called = True
+        return True
 
 
 class RealDoorActuationBoundary:
@@ -228,7 +229,18 @@ class RealDoorActuationBoundary:
                 writes += 1
 
             close_ok = self.session.close_ctpp()
-            self.session.teardown()
+            clean_teardown = self.session.teardown()
+            if not close_ok or not clean_teardown:
+                # A missing/failed close or teardown proof after Door writes is
+                # conservative: the physical outcome cannot be established.
+                return BoundaryEvidence(
+                    outcome=BoundaryOutcome.AMBIGUOUS,
+                    detail=(
+                        "P13 close/teardown not proven by wrapper; "
+                        f"close_ok={close_ok} clean_teardown={clean_teardown}"
+                    ),
+                    protocol_acknowledged=False,
+                )
             protocol_ack = close_ok
 
             evidence = P13ActuationEvidence(
@@ -241,7 +253,7 @@ class RealDoorActuationBoundary:
                 ctpp_open=True,
                 door_write_count=writes,
                 ctpp_close=close_ok,
-                clean_teardown=True,
+                clean_teardown=clean_teardown,
                 protocol_acknowledged=protocol_ack,
                 actuator_command_attempted=True,
             )

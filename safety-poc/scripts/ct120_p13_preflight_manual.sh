@@ -7,8 +7,11 @@
 # mode, runs the non-actuating P13 preflight, records public-safe evidence, and
 # pushes a dedicated evidence branch when Git credentials are available.
 #
-# Required runtime input:
-#   P13_EXPECTED_WRAPPER_SHA256=<sha256 of /usr/local/sbin/comelit-p13-door-wrapper>
+# Required runtime input (independent pin, NOT derived from the installed file):
+#   none — the expected wrapper SHA-256 is read from the Git-reviewed build
+#   manifest deploy/p13_wrapper_manifest.json (status=BUILT).  The manifest is
+#   produced by scripts/build_p13_wrapper.sh from the reviewed template and
+#   pinned native holder, then committed and reviewed in Git before preflight.
 #
 # Optional push input:
 #   GITHUB_TOKEN_COMELIT=<repo-write token>
@@ -39,8 +42,6 @@ cleanup() {
 trap cleanup EXIT
 
 [[ "${EUID}" -eq 0 ]] || { echo "CT120_P13_MANUAL_REQUIRES_ROOT=true"; exit 1; }
-[[ -n "${P13_EXPECTED_WRAPPER_SHA256:-}" ]] || { echo "P13_EXPECTED_WRAPPER_SHA256_MISSING=true"; exit 1; }
-[[ "${P13_EXPECTED_WRAPPER_SHA256}" =~ ^[0-9a-f]{64}$ ]] || { echo "P13_EXPECTED_WRAPPER_SHA256_FORMAT=FAIL"; exit 1; }
 
 cd "$REPO_ROOT"
 [[ -z "$(git status --porcelain)" ]] || { echo "CT120_P13_MANUAL_WORKTREE_DIRTY=true"; exit 1; }
@@ -66,8 +67,20 @@ POC_ROOT="$REPO_ROOT/safety-poc"
 # ---- 1. local artifact prerequisites -----------------------------------------
 [[ -f "$WRAPPER" ]] || { echo "P13_REAL_WRAPPER_PRESENT=false"; exit 1; }
 [[ -f "$PAYLOAD" ]] || { echo "P13_PAYLOAD_PRESENT=false"; exit 1; }
+
+# Independent pin: expected identity comes from the Git-reviewed build manifest
+# (status=BUILT), never computed by the operator from the installed file.
+MANIFEST="$REPO_ROOT/safety-poc/deploy/p13_wrapper_manifest.json"
+[[ -f "$MANIFEST" ]] || { echo "P13_WRAPPER_MANIFEST_ABSENT=true"; exit 1; }
+MANIFEST_STATUS="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$MANIFEST")"
+EXPECTED_WRAPPER_SHA256="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["wrapper_sha256"])' "$MANIFEST")"
+if [[ "$MANIFEST_STATUS" != "BUILT" || -z "$EXPECTED_WRAPPER_SHA256" ]]; then
+    echo "P13_WRAPPER_MANIFEST_NOT_BUILT=true"
+    exit 1
+fi
+echo "P13_WRAPPER_MANIFEST_STATUS=$MANIFEST_STATUS"
 WRAPPER_SHA="$(sha256sum "$WRAPPER" | awk '{print $1}')"
-[[ "$WRAPPER_SHA" == "$P13_EXPECTED_WRAPPER_SHA256" ]] || { echo "P13_REAL_WRAPPER_SHA256=FAIL"; exit 1; }
+[[ "$WRAPPER_SHA" == "$EXPECTED_WRAPPER_SHA256" ]] || { echo "P13_REAL_WRAPPER_SHA256=FAIL"; exit 1; }
 echo "P13_REAL_WRAPPER_PRESENT=true"
 echo "P13_REAL_WRAPPER_SHA256=$WRAPPER_SHA"
 

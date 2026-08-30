@@ -13,9 +13,9 @@ EXPECTED_BRANCH=feat/p13-one-shot-actuation
 
 # Runtime-derived wrapper identity.  The wrapper is the single native
 # entrypoint for the proven P2P -> ViP -> UAUT -> CTPP -> six-write path.
-# Preflight may emit ACTUATION_TRANSPORT_IMPLEMENTED=true only when this exact
-# pinned artifact is present with the expected mode and hash.
-EXPECTED_WRAPPER_SHA256="${P13_EXPECTED_WRAPPER_SHA256:-}"
+# Preflight may emit ACTUATION_TRANSPORT_IMPLEMENTED=true only when the
+# installed wrapper matches the independently derived expected identity
+# recorded in the Git-reviewed build manifest (deploy/p13_wrapper_manifest.json).
 EXPECTED_WRAPPER_MODE="${P13_EXPECTED_WRAPPER_MODE:-700}"
 
 STEP=START
@@ -53,16 +53,40 @@ PAYLOAD_SHA="$(sha256sum "$PAYLOAD_FILE" | awk '{print $1}')"
 echo "P13_PAYLOAD_SHA256=$PAYLOAD_SHA"
 
 STEP=REAL_ADAPTER_IDENTITY
-if [[ -z "$EXPECTED_WRAPPER_SHA256" ]]; then
-    echo "P13_EXPECTED_WRAPPER_SHA256_MISSING=true"
+# Expected wrapper identity is derived from the Git-reviewed build manifest,
+# never computed by the operator from the installed file itself.
+MANIFEST="$REPO_ROOT/safety-poc/deploy/p13_wrapper_manifest.json"
+if [[ ! -f "$MANIFEST" ]]; then
+    echo "P13_WRAPPER_MANIFEST_ABSENT=true"
     echo "ACTUATION_TRANSPORT_IMPLEMENTED=false"
     exit 1
 fi
+MANIFEST_STATUS="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$MANIFEST")"
+EXPECTED_WRAPPER_SHA256="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["wrapper_sha256"])' "$MANIFEST")"
+if [[ "$MANIFEST_STATUS" != "BUILT" || -z "$EXPECTED_WRAPPER_SHA256" || "$EXPECTED_WRAPPER_SHA256" == "0"* ]]; then
+    echo "P13_WRAPPER_MANIFEST_NOT_BUILT=true"
+    echo "ACTUATION_TRANSPORT_IMPLEMENTED=false"
+    exit 1
+fi
+EXPECTED_WRAPPER_SHA256="$EXPECTED_WRAPPER_SHA256"
+EXPECTED_WRAPPER_MODE="${P13_EXPECTED_WRAPPER_MODE:-700}"
 if [[ ! -f "$WRAPPER" ]]; then
     echo "P13_REAL_WRAPPER_PRESENT=false"
     echo "ACTUATION_TRANSPORT_IMPLEMENTED=false"
     exit 1
 fi
+WRAPPER_UID="$(stat -c '%u' "$WRAPPER")"
+[[ "$WRAPPER_UID" == "0" ]] || {
+    echo "P13_REAL_WRAPPER_OWNER=FAIL(uid=$WRAPPER_UID)"
+    echo "ACTUATION_TRANSPORT_IMPLEMENTED=false"
+    exit 1
+}
+PAYLOAD_UID="$(stat -c '%u' "$PAYLOAD_FILE")"
+[[ "$PAYLOAD_UID" == "0" ]] || {
+    echo "P13_PAYLOAD_OWNER=FAIL(uid=$PAYLOAD_UID)"
+    echo "ACTUATION_TRANSPORT_IMPLEMENTED=false"
+    exit 1
+}
 WRAPPER_MODE="$(stat -c '%a' "$WRAPPER")"
 [[ "$WRAPPER_MODE" == "$EXPECTED_WRAPPER_MODE" ]] || {
     echo "P13_REAL_WRAPPER_MODE=FAIL($WRAPPER_MODE)"
@@ -78,6 +102,7 @@ WRAPPER_SHA="$(sha256sum "$WRAPPER" | awk '{print $1}')"
 echo "P13_REAL_WRAPPER_PRESENT=true"
 echo "P13_REAL_WRAPPER_SHA256=$WRAPPER_SHA"
 echo "P13_REAL_WRAPPER_MODE=$WRAPPER_MODE"
+echo "P13_REAL_WRAPPER_OWNER=root"
 
 STEP=REAL_ADAPTER_DRY_INIT
 if ! python3 "$SCRIPT_DIR/p13_adapter_dry_init.py" \

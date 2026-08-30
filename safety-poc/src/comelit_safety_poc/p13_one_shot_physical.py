@@ -71,6 +71,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tree", required=True)
     parser.add_argument("--run-dir", default="/root/comelit-p13-run")
     args = parser.parse_args(argv)
+    # uid=0 enforcement on wrapper/payload is on by default (production path);
+    # tests running as non-root opt out via the environment.
+    require_root_owner = os.environ.get("P13_REQUIRE_ROOT_OWNER", "1") != "0"
 
     # Operator gate: the exact token must be present in the environment at
     # execution time.  It is never persisted and never implied by this task.
@@ -95,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
         wrapper_sha256=args.wrapper_sha256,
         wrapper_mode=args.wrapper_mode,
         payload_file=payload_path,
+        require_root_owner=require_root_owner,
     )
     spec.verify()
 

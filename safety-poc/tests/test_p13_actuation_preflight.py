@@ -18,20 +18,50 @@ class P13ActuationPreflightTests(unittest.TestCase):
         self.assertIn("LIVE_TEST_READY=false", self.text)
 
     def test_actuation_transport_is_runtime_derived_not_hardcoded(self):
+        # Blocker 4: the marker must be emitted only after manifest-derived
+        # identity and dry-init proofs, and must be false when artifacts absent.
         self.assertIn("P13_REAL_WRAPPER_PRESENT=false", self.text)
         self.assertIn('echo "ACTUATION_TRANSPORT_IMPLEMENTED=false"', self.text)
         self.assertIn("ACTUATION_TRANSPORT_IMPLEMENTED=true", self.text)
+        self.assertIn("P13_WRAPPER_MANIFEST_NOT_BUILT=true", self.text)
         dry_init = self.text.index("STEP=REAL_ADAPTER_DRY_INIT")
         true_marker = self.text.index('echo "ACTUATION_TRANSPORT_IMPLEMENTED=true"')
         self.assertGreater(true_marker, dry_init)
 
     def test_wrapper_identity_pinned(self):
-        self.assertIn('EXPECTED_WRAPPER_SHA256="${P13_EXPECTED_WRAPPER_SHA256:-}"', self.text)
-        self.assertIn("P13_EXPECTED_WRAPPER_SHA256_MISSING=true", self.text)
+        # Expected identity comes from the Git-reviewed build manifest.
+        self.assertIn("p13_wrapper_manifest.json", self.text)
+        self.assertIn("P13_WRAPPER_MANIFEST_ABSENT=true", self.text)
+        self.assertIn("P13_WRAPPER_MANIFEST_NOT_BUILT=true", self.text)
+        self.assertIn('json.load(open(sys.argv[1]))["wrapper_sha256"]', self.text)
         self.assertIn("P13_REAL_WRAPPER_SHA256=FAIL", self.text)
         self.assertIn("P13_REAL_WRAPPER_MODE=FAIL", self.text)
         self.assertIn('stat -c \'%a\' "$WRAPPER"', self.text)
         self.assertIn("P13_REAL_WRAPPER_SHA256=$WRAPPER_SHA", self.text)
+
+    def test_ownership_checks_fail_closed(self):
+        self.assertIn("P13_REAL_WRAPPER_OWNER=FAIL", self.text)
+        self.assertIn("P13_PAYLOAD_OWNER=FAIL", self.text)
+        self.assertIn('stat -c \'%u\' "$WRAPPER"', self.text)
+        self.assertIn('stat -c \'%u\' "$PAYLOAD_FILE"', self.text)
+        self.assertIn("P13_REAL_WRAPPER_OWNER=root", self.text)
+
+    def test_build_procedure_and_template_exist(self):
+        build = Path(__file__).resolve().parents[1] / "scripts" / "build_p13_wrapper.sh"
+        template = Path(__file__).resolve().parents[1] / "deploy" / "p13_wrapper_template.sh"
+        manifest = Path(__file__).resolve().parents[1] / "deploy" / "p13_wrapper_manifest.json"
+        self.assertTrue(build.is_file())
+        self.assertTrue(template.is_file())
+        self.assertTrue(manifest.is_file())
+        body = build.read_text(encoding="utf-8")
+        self.assertIn("P13_BUILD_COMPLETE=true", body)
+        self.assertIn("p13_wrapper_manifest.json", body)
+        self.assertIn("chown root:root", body)
+        tmpl = template.read_text(encoding="utf-8")
+        self.assertIn("P13_CTPP_OPEN_OUTCOME", tmpl)
+        self.assertIn("P13_TEARDOWN=PASS", tmpl)
+        m = manifest.read_text(encoding="utf-8")
+        self.assertIn('"status": "NOT_BUILT"', m)
 
     def test_audit_durability_proof_required(self):
         self.assertIn("p13_audit_durability_proof.py", self.text)

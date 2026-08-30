@@ -55,14 +55,14 @@ printf '%s\\n' 'P13_CTPP_OPEN_OUTCOME={marker_body}'
     path.chmod(0o700)
 
 
-def write_wrapper_count(path: Path, open_outcome: str, count: int, close: str = "PASS") -> None:
-    script = f"""#!/bin/sh
-printf '%s\\n' 'P13_CTPP_OPEN_OUTCOME={open_outcome}'
-printf '%s\\n' 'P13_DOOR_WRITE_COUNT={count}'
-printf '%s\\n' 'P13_CTPP_CLOSE={close}'
-printf '%s\\n' 'P13_TEARDOWN=PASS'
-"""
-    path.write_text(script, encoding="utf-8")
+def write_wrapper_count(path: Path, open_outcome: str, count: int, close: str = "PASS", teardown: str | None = "PASS", exit_code: int = 0) -> None:
+    lines = [f"#!/bin/sh\nprintf '%s\\n' 'P13_CTPP_OPEN_OUTCOME={open_outcome}'"]
+    lines.append(f"printf '%s\\n' 'P13_DOOR_WRITE_COUNT={count}'")
+    lines.append(f"printf '%s\\n' 'P13_CTPP_CLOSE={close}'")
+    if teardown is not None:
+        lines.append(f"printf '%s\\n' 'P13_TEARDOWN={teardown}'")
+    lines.append(f"exit {exit_code}\n")
+    path.write_text("\n".join(lines), encoding="utf-8")
     path.chmod(0o700)
 
 
@@ -72,6 +72,7 @@ class Ct120RealSessionTests(unittest.TestCase):
             wrapper=wrapper,
             wrapper_sha256=hashlib.sha256(wrapper.read_bytes()).hexdigest(),
             payload_file=payload,
+            require_root_owner=False,
         )
 
     def _payload(self, tmp: Path) -> Path:
@@ -111,7 +112,12 @@ class Ct120RealSessionTests(unittest.TestCase):
             self.assertEqual(markers["P13_REAL_ADAPTER_CONSTRUCTED"], "true")
 
             # wrong hash must fail closed
-            bad_spec = Ct120ArtifactSpec(wrapper=wrapper, wrapper_sha256="0" * 64, payload_file=payload)
+            bad_spec = Ct120ArtifactSpec(
+                wrapper=wrapper,
+                wrapper_sha256="0" * 64,
+                payload_file=payload,
+                require_root_owner=False,
+            )
             with self.assertRaises(ValueError):
                 Ct120RealP13Session(bad_spec, make_bundle(), dry_init=True)
 
@@ -123,6 +129,7 @@ class Ct120RealSessionTests(unittest.TestCase):
                 wrapper=tmp / "missing-wrapper",
                 wrapper_sha256="0" * 64,
                 payload_file=payload,
+                require_root_owner=False,
             )
             with self.assertRaises(FileNotFoundError):
                 Ct120RealP13Session(spec, make_bundle(), dry_init=True)
@@ -207,6 +214,240 @@ class Ct120RealSessionTests(unittest.TestCase):
             # write-count mismatch and the boundary maps it to AMBIGUOUS.
             evidence = boundary.attempt_once(TransportRequest(operation_id="op-r2", target="f" * 64))
             self.assertEqual(evidence.outcome, BoundaryOutcome.AMBIGUOUS)
+
+
+class Ct120ReportConsistencyTests(unittest.TestCase):
+    """Blocker 3/4/5: wrapper result must be one consistent transaction report."""
+
+    def _make(self, tmp: Path, open_outcome: str, count: int, close: str = "PASS",
+              teardown: str | None = "PASS", exit_code: int = 0, run_dir: Path | None = None):
+        wrapper = tmp / "wrapper"
+        write_wrapper_count(wrapper, open_outcome, count, close, teardown, exit_code)
+        payload = tmp / "payloads.json"
+        import json
+        bodies = [bytes([i + 1]) * 12 for i in range(6)]
+        payload.write_text(json.dumps({
+            "schema": 1,
+            "ucfg_sha256": "d31dca0fa13a57d3cbc600510149b3ad2a29c43e20949190ec62b44321d310b7",
+            "target_index": 0,
+            "target_fingerprint": "f" * 64,
+            "target_name": "FixtureDoor",
+            "channel_id_fixture": 7449,
+            "write_count": 6,
+            "bodies": [
+                {"hex": b.hex(), "bytes": len(b), "sha256": hashlib.sha256(b).hexdigest()}
+                for b in bodies
+            ],
+        }), encoding="utf-8")
+        os.chmod(payload, 0o600)
+        spec = Ct120ArtifactSpec(
+            wrapper=wrapper,
+            wrapper_sha256=hashlib.sha256(wrapper.read_bytes()).hexdigest(),
+            payload_file=payload,
+            require_root_owner=False,
+        )
+        run_dir = run_dir or (tmp / "run")
+        session = Ct120RealP13Session(spec, make_bundle(), run_dir=run_dir)
+        return session
+
+    def _bodies(self):
+        return [bytes([i + 1]) * 12 for i in range(6)]
+
+    def test_missing_teardown_marker_is_ambiguous(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            session = self._make(tmp, "OPENED", 6, close="PASS", teardown=None)
+            self.assertEqual(session.open_ctpp(), CtppOpenOutcome.AMBIGUOUS)
+
+    def test_failed_teardown_marker_is_ambiguous(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            session = self._make(tmp, "OPENED", 6, close="PASS", teardown="FAIL")
+            self.assertEqual(session.open_ctpp(), CtppOpenOutcome.AMBIGUOUS)
+
+    def test_six_writes_missing_close_is_ambiguous(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            session = self._make(tmp, "OPENED", 6, close="FAIL", teardown="PASS")
+            self.assertEqual(session.open_ctpp(), CtppOpenOutcome.AMBIGUOUS)
+
+    def test_six_writes_no_close_marker_is_ambiguous(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            # no P13_CTPP_CLOSE line at all -> close_ok stays False
+            wrapper = tmp / "wrapper"
+            wrapper.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' 'P13_CTPP_OPEN_OUTCOME=OPENED'\n"
+                "printf '%s\\n' 'P13_DOOR_WRITE_COUNT=6'\n"
+                "printf '%s\\n' 'P13_TEARDOWN=PASS'\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            wrapper.chmod(0o700)
+            payload = tmp / "payloads.json"
+            import json
+            bodies = [bytes([i + 1]) * 12 for i in range(6)]
+            payload.write_text(json.dumps({
+                "schema": 1,
+                "ucfg_sha256": "d31dca0f" + "0" * 56,
+                "target_index": 0,
+                "target_fingerprint": "f" * 64,
+                "target_name": "FixtureDoor",
+                "channel_id_fixture": 7449,
+                "write_count": 6,
+                "bodies": [
+                    {"hex": b.hex(), "bytes": len(b), "sha256": hashlib.sha256(b).hexdigest()}
+                    for b in bodies
+                ],
+            }), encoding="utf-8")
+            os.chmod(payload, 0o600)
+            spec = Ct120ArtifactSpec(
+                wrapper=wrapper,
+                wrapper_sha256=hashlib.sha256(wrapper.read_bytes()).hexdigest(),
+                payload_file=payload,
+                require_root_owner=False,
+            )
+            session = Ct120RealP13Session(spec, make_bundle(), run_dir=tmp / "run")
+            self.assertEqual(session.open_ctpp(), CtppOpenOutcome.AMBIGUOUS)
+
+    def test_proven_not_opened_with_writes_is_ambiguous(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            session = self._make(tmp, "PROVEN_NOT_OPENED", 3, close="PASS", teardown="PASS")
+            self.assertEqual(session.open_ctpp(), CtppOpenOutcome.AMBIGUOUS)
+
+    def test_rejected_with_writes_is_ambiguous(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            session = self._make(tmp, "REJECTED", 1, close="PASS", teardown="PASS")
+            self.assertEqual(session.open_ctpp(), CtppOpenOutcome.AMBIGUOUS)
+
+    def test_opened_partial_writes_is_ambiguous(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            session = self._make(tmp, "OPENED", 3, close="PASS", teardown="PASS")
+            self.assertEqual(session.open_ctpp(), CtppOpenOutcome.AMBIGUOUS)
+
+    def test_invalid_open_marker_is_ambiguous(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            session = self._make(tmp, "BOGUS", 6, close="PASS", teardown="PASS")
+            self.assertEqual(session.open_ctpp(), CtppOpenOutcome.AMBIGUOUS)
+
+    def test_missing_open_marker_is_ambiguous(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            wrapper = tmp / "wrapper"
+            wrapper.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' 'P13_DOOR_WRITE_COUNT=6'\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            wrapper.chmod(0o700)
+            payload = tmp / "payloads.json"
+            import json
+            bodies = [bytes([i + 1]) * 12 for i in range(6)]
+            payload.write_text(json.dumps({
+                "schema": 1,
+                "ucfg_sha256": "d31dca0f" + "0" * 56,
+                "target_index": 0,
+                "target_fingerprint": "f" * 64,
+                "target_name": "FixtureDoor",
+                "channel_id_fixture": 7449,
+                "write_count": 6,
+                "bodies": [
+                    {"hex": b.hex(), "bytes": len(b), "sha256": hashlib.sha256(b).hexdigest()}
+                    for b in bodies
+                ],
+            }), encoding="utf-8")
+            os.chmod(payload, 0o600)
+            spec = Ct120ArtifactSpec(
+                wrapper=wrapper,
+                wrapper_sha256=hashlib.sha256(wrapper.read_bytes()).hexdigest(),
+                payload_file=payload,
+                require_root_owner=False,
+            )
+            session = Ct120RealP13Session(spec, make_bundle(), run_dir=tmp / "run")
+            self.assertEqual(session.open_ctpp(), CtppOpenOutcome.AMBIGUOUS)
+
+    def test_nonzero_exit_is_ambiguous_even_with_complete_markers(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            session = self._make(tmp, "OPENED", 6, close="PASS", teardown="PASS", exit_code=3)
+            self.assertEqual(session.open_ctpp(), CtppOpenOutcome.AMBIGUOUS)
+
+    def test_proven_not_opened_with_zero_writes_and_clean_exit_is_proven_not_sent(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            session = self._make(tmp, "PROVEN_NOT_OPENED", 0, close="PASS", teardown="PASS")
+            self.assertEqual(session.open_ctpp(), CtppOpenOutcome.PROVEN_NOT_OPENED)
+            self.assertTrue(session._report_valid)
+
+    def test_timeout_wrapper_is_ambiguous(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            wrapper = tmp / "wrapper"
+            wrapper.write_text("#!/bin/sh\nsleep 30\n", encoding="utf-8")
+            wrapper.chmod(0o700)
+            payload = tmp / "payloads.json"
+            import json
+            bodies = [bytes([i + 1]) * 12 for i in range(6)]
+            payload.write_text(json.dumps({
+                "schema": 1,
+                "ucfg_sha256": "d31dca0f" + "0" * 56,
+                "target_index": 0,
+                "target_fingerprint": "f" * 64,
+                "target_name": "FixtureDoor",
+                "channel_id_fixture": 7449,
+                "write_count": 6,
+                "bodies": [
+                    {"hex": b.hex(), "bytes": len(b), "sha256": hashlib.sha256(b).hexdigest()}
+                    for b in bodies
+                ],
+            }), encoding="utf-8")
+            os.chmod(payload, 0o600)
+            spec = Ct120ArtifactSpec(
+                wrapper=wrapper,
+                wrapper_sha256=hashlib.sha256(wrapper.read_bytes()).hexdigest(),
+                payload_file=payload,
+                require_root_owner=False,
+            )
+            session = Ct120RealP13Session(
+                spec, make_bundle(), run_dir=tmp / "run",
+                timeout_seconds=0.2, term_grace_seconds=0.2,
+            )
+            self.assertEqual(session.open_ctpp(), CtppOpenOutcome.AMBIGUOUS)
+            self.assertTrue(session._timeout_observed)
+
+    def test_teardown_never_synthesized_by_adapter(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            session = self._make(tmp, "OPENED", 6, close="PASS", teardown=None)
+            session.open_ctpp()
+            # teardown() reports only the wrapper proof; it never fabricates PASS.
+            self.assertFalse(session.teardown())
+
+    def test_ownership_checks_fail_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            wrapper = tmp / "wrapper"
+            write_wrapper_count(wrapper, "OPENED", 6)
+            payload = tmp / "payloads.json"
+            import json
+            bodies = [bytes([i + 1]) * 12 for i in range(6)]
+            payload.write_text(json.dumps({"bodies": []}), encoding="utf-8")
+            os.chmod(payload, 0o600)
+            # require_root_owner=True (default) fails on non-root test files.
+            spec = Ct120ArtifactSpec(
+                wrapper=wrapper,
+                wrapper_sha256=hashlib.sha256(wrapper.read_bytes()).hexdigest(),
+                payload_file=payload,
+                require_root_owner=True,
+            )
+            with self.assertRaises(ValueError):
+                Ct120RealP13Session(spec, make_bundle(), dry_init=True)
 
 
 if __name__ == "__main__":

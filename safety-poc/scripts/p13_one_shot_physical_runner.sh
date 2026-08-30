@@ -11,8 +11,7 @@ umask 077
 # invokes the real transport exactly once.  There is no retry anywhere.
 #
 # Usage:
-#   P13_APPROVAL=I_APPROVE_P13_ONE_SHOT_PHYSICAL_DOOR_TEST \
-#     P13_EXPECTED_WRAPPER_SHA256=<sha256> \
+#     P13_APPROVAL=I_APPROVE_P13_ONE_SHOT_PHYSICAL_DOOR_TEST \
 #     p13_one_shot_physical_runner.sh --db <path> --operation-id <id> \
 #       --target-fingerprint <fp> [--min-interval-seconds 10]
 
@@ -26,7 +25,9 @@ AUDIT_FILE="$AUDIT_DIR/audit.jsonl"
 RUN_DIR=/root/comelit-p13-run
 EXPECTED_BRANCH=feat/p13-one-shot-actuation
 APPROVAL_TOKEN=I_APPROVE_P13_ONE_SHOT_PHYSICAL_DOOR_TEST
-EXPECTED_WRAPPER_SHA256="${P13_EXPECTED_WRAPPER_SHA256:-}"
+# Expected wrapper identity is read from the Git-reviewed build manifest, never
+# computed by the operator from the installed file.
+MANIFEST="$REPO_ROOT/safety-poc/deploy/p13_wrapper_manifest.json"
 EXPECTED_WRAPPER_MODE="${P13_EXPECTED_WRAPPER_MODE:-700}"
 
 # -- arguments ------------------------------------------------------------
@@ -92,6 +93,18 @@ echo "P13_ONE_SHOT_PAYLOAD_SHA256=$PAYLOAD_SHA"
 STEP=EXECUTE
 export PYTHONPATH="$POC_ROOT/src"
 export PYTHONDONTWRITEBYTECODE=1
+
+# Independent pin from the Git-reviewed build manifest.
+if [[ ! -f "$MANIFEST" ]]; then
+    echo "P13_WRAPPER_MANIFEST_ABSENT=true"
+    exit 1
+fi
+MANIFEST_STATUS="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$MANIFEST")"
+EXPECTED_WRAPPER_SHA256="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["wrapper_sha256"])' "$MANIFEST")"
+if [[ "$MANIFEST_STATUS" != "BUILT" || -z "$EXPECTED_WRAPPER_SHA256" ]]; then
+    echo "P13_WRAPPER_MANIFEST_NOT_BUILT=true"
+    exit 1
+fi
 
 python3 -m comelit_safety_poc.p13_one_shot_physical \
     --db "$DB" \
