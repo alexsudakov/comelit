@@ -3,20 +3,12 @@
 # Capture P13 runtime identity for the first PoC door opening (CT120, root).
 #
 # Per P13_POC_DIRECT_PATH.md, the native holder SHA is a *runtime identity*
-# for this PoC, not a claim of reproducible provenance.  This script captures
+# for this PoC, not a claim of reproducible provenance. This script captures
 # the current artifact identities once, verifies permissions and the required
-# non-actuating capability surface, and writes a root-only runtime identity
-# file that the preflight then validates against the live artifacts.
+# P13 CLI surface without executing the holder, and writes a root-only runtime
+# identity file that the preflight then validates against the live artifacts.
 #
 # It performs NO Comelit network session and NO Door write.
-#
-# Usage (root, on CT120, in the repo):
-#   bash safety-poc/scripts/p13_capture_runtime_identity.sh
-#
-# Optional overrides:
-#   P13_HOLDER_PATH=/path/to/comelit-p13-native-holder
-#   P13_HOLDER_CAPABILITY_FLAG=--capabilities   (default; use --help if absent)
-#   P13_TARGET_FINGERPRINT=<64-hex>             (expected target binding)
 # =============================================================================
 set -Eeuo pipefail
 umask 077
@@ -27,8 +19,8 @@ HOLDER_PATH="${P13_HOLDER_PATH:-/root/comelit-p13-native/comelit_p13_holder}"
 WRAPPER=/usr/local/sbin/comelit-p13-door-wrapper
 PAYLOAD=/root/comelit-p13-actuator-prep/real-door-payloads.json
 IDENTITY_FILE=/root/comelit-p13-runtime-identity.json
-CAPABILITY_FLAG="${P13_HOLDER_CAPABILITY_FLAG:---capabilities}"
 EXPECTED_TARGET_FINGERPRINT="${P13_TARGET_FINGERPRINT:-}"
+EXPECTED_UCFG_SHA256="${P13_EXPECTED_UCFG_SHA256:-d31dca0fa13a57d3cbc600510149b3ad2a29c43e20949190ec62b44321d310b7}"
 
 [[ "${EUID}" -eq 0 ]] || { echo "P13_RUNTIME_IDENTITY_REQUIRES_ROOT=true"; exit 1; }
 
@@ -40,21 +32,24 @@ HOLDER_SHA="$(sha256sum "$HOLDER_PATH" | awk '{print $1}')"
 HOLDER_UID="$(stat -c '%u' "$HOLDER_PATH")"
 HOLDER_MODE="$(stat -c '%a' "$HOLDER_PATH")"
 [[ "$HOLDER_UID" == "0" ]] || { echo "P13_HOLDER_OWNER=FAIL(uid=$HOLDER_UID)"; exit 1; }
+[[ "$HOLDER_MODE" == "700" ]] || { echo "P13_HOLDER_MODE=FAIL($HOLDER_MODE)"; exit 1; }
 
-# Non-actuating capability surface check: the holder must expose the required
-# P13 CLI without opening a Comelit session or sending Door data.  We probe a
-# read-only capability/help flag; success means the binary loads and the
-# required surface exists.  No network/Door action is performed.
-CAPABILITY_OUTPUT="$(timeout 15 "$HOLDER_PATH" "$CAPABILITY_FLAG" 2>&1 || true)"
-CAPABILITY_RC=$?
-if [[ $CAPABILITY_RC -eq 0 ]] || [[ -n "$CAPABILITY_OUTPUT" ]]; then
-    HOLDER_CAPABILITY="PASS"
-else
-    HOLDER_CAPABILITY="FAIL"
-fi
-[[ "$HOLDER_CAPABILITY" == "PASS" ]] || { echo "P13_HOLDER_CAPABILITY=FAIL"; exit 1; }
+# Strictly non-executing capability check.  The holder itself is NOT launched:
+# inspect its embedded CLI surface and require the three arguments the wrapper
+# depends on for the one-shot physical path.
+command -v strings >/dev/null 2>&1 || { echo "P13_HOLDER_CAPABILITY_TOOL_MISSING=true"; exit 1; }
+HOLDER_STRINGS="$(strings "$HOLDER_PATH")"
+for required in '--payload' '--operation-id' '--emit-ctpp-markers'; do
+    grep -Fq -- "$required" <<<"$HOLDER_STRINGS" || {
+        echo "P13_HOLDER_CAPABILITY=FAIL"
+        echo "P13_HOLDER_REQUIRED_FLAG_MISSING=true"
+        exit 1
+    }
+done
+HOLDER_CAPABILITY="PASS"
 echo "P13_HOLDER_CAPABILITY=PASS"
-echo "P13_HOLDER_CAPABILITY_FLAG=$CAPABILITY_FLAG"
+echo "P13_HOLDER_CAPABILITY_METHOD=STATIC_STRINGS"
+echo "P13_HOLDER_EXECUTED=false"
 
 # -- wrapper -------------------------------------------------------------------
 [[ -f "$WRAPPER" ]] || { echo "P13_WRAPPER_PRESENT=false"; exit 1; }
@@ -64,7 +59,6 @@ WRAPPER_MODE="$(stat -c '%a' "$WRAPPER")"
 [[ "$WRAPPER_UID" == "0" ]] || { echo "P13_WRAPPER_OWNER=FAIL(uid=$WRAPPER_UID)"; exit 1; }
 [[ "$WRAPPER_MODE" == "700" ]] || { echo "P13_WRAPPER_MODE=FAIL($WRAPPER_MODE)"; exit 1; }
 
-# wrapper must point at the exact holder being captured
 if grep -q "HOLDER_PATH=\"$HOLDER_PATH\"" "$WRAPPER" 2>/dev/null; then
     WRAPPER_HOLDER_BIND="PASS"
 else
@@ -81,7 +75,6 @@ PAYLOAD_MODE="$(stat -c '%a' "$PAYLOAD")"
 [[ "$PAYLOAD_MODE" == "600" ]] || { echo "P13_PAYLOAD_MODE=FAIL($PAYLOAD_MODE)"; exit 1; }
 PAYLOAD_SHA="$(sha256sum "$PAYLOAD" | awk '{print $1}')"
 
-# exactly six validated writes + target binding via the typed bundle loader
 BUNDLE_REPORT="$(python3 - "$PAYLOAD" <<'PY'
 import json, sys
 raw = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -96,6 +89,8 @@ PAYLOAD_TARGET_FINGERPRINT="$(echo "$BUNDLE_REPORT" | sed -n 's/^target_fingerpr
 PAYLOAD_UCFG_SHA="$(echo "$BUNDLE_REPORT" | sed -n 's/^ucfg_sha256=//p')"
 [[ "$PAYLOAD_WRITE_COUNT" == "6" ]] || { echo "P13_PAYLOAD_WRITE_COUNT=FAIL($PAYLOAD_WRITE_COUNT)"; exit 1; }
 [[ "$PAYLOAD_TARGET_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]] || { echo "P13_PAYLOAD_TARGET_FINGERPRINT=FAIL"; exit 1; }
+[[ "$PAYLOAD_UCFG_SHA" == "$EXPECTED_UCFG_SHA256" ]] || { echo "P13_PAYLOAD_UCFG_BINDING=FAIL"; exit 1; }
+echo "P13_PAYLOAD_UCFG_BINDING=PASS"
 if [[ -n "$EXPECTED_TARGET_FINGERPRINT" ]]; then
     [[ "$PAYLOAD_TARGET_FINGERPRINT" == "$EXPECTED_TARGET_FINGERPRINT" ]] || {
         echo "P13_PAYLOAD_TARGET_BINDING=FAIL"
@@ -116,7 +111,7 @@ cat > "$IDENTITY_FILE" <<EOF
     "uid": "$HOLDER_UID",
     "mode": "$HOLDER_MODE",
     "capability": "$HOLDER_CAPABILITY",
-    "capability_flag": "$CAPABILITY_FLAG"
+    "capability_method": "STATIC_STRINGS"
   },
   "wrapper": {
     "path": "$WRAPPER",
