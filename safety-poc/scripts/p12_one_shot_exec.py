@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 import os
 from pathlib import Path
+import signal
 import subprocess
 
 
@@ -21,6 +22,13 @@ class OneShotResult:
     outcome: OneShotOutcome
     process_rc: int | None
     timeout_observed: bool
+
+
+def _signal_process_group(proc: subprocess.Popen[bytes], sig: signal.Signals) -> None:
+    try:
+        os.killpg(proc.pid, sig)
+    except ProcessLookupError:
+        pass
 
 
 def run_once(
@@ -42,16 +50,17 @@ def run_once(
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             close_fds=True,
+            start_new_session=True,
         )
         try:
             rc = proc.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
-            proc.terminate()
+            _signal_process_group(proc, signal.SIGTERM)
             try:
                 rc = proc.wait(timeout=term_grace_seconds)
                 return OneShotResult(OneShotOutcome.TIMEOUT_TERM, rc, True)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                _signal_process_group(proc, signal.SIGKILL)
                 rc = proc.wait()
                 return OneShotResult(OneShotOutcome.TIMEOUT_KILL, rc, True)
 
@@ -68,6 +77,7 @@ def write_status(path: Path, result: OneShotResult) -> None:
         f"P12_ONE_SHOT_TIMEOUT_OBSERVED={'true' if result.timeout_observed else 'false'}",
         "P12_ONE_SHOT_PROCESS_INVOCATIONS=1",
         "P12_ONE_SHOT_AUTO_RETRY=false",
+        "P12_ONE_SHOT_PROCESS_GROUP_ISOLATED=true",
         "TIMEOUT_MAPPING_VERIFIED=PASS",
     )
     path.parent.mkdir(parents=True, exist_ok=True)
