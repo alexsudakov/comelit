@@ -5,8 +5,9 @@
 # Per P13_POC_DIRECT_PATH.md, the native holder SHA is a *runtime identity*
 # for this PoC, not a claim of reproducible provenance. This script captures
 # the current artifact identities once, verifies permissions and the required
-# P13 CLI surface without executing the holder, and writes a root-only runtime
-# identity file that the preflight then validates against the live artifacts.
+# P13 no-argument holder capability markers without executing the holder, and
+# writes a root-only runtime identity file that the preflight validates against
+# the live artifacts.
 #
 # It performs NO Comelit network session and NO Door write.
 # =============================================================================
@@ -34,21 +35,29 @@ HOLDER_MODE="$(stat -c '%a' "$HOLDER_PATH")"
 [[ "$HOLDER_UID" == "0" ]] || { echo "P13_HOLDER_OWNER=FAIL(uid=$HOLDER_UID)"; exit 1; }
 [[ "$HOLDER_MODE" == "700" ]] || { echo "P13_HOLDER_MODE=FAIL($HOLDER_MODE)"; exit 1; }
 
-# Strictly non-executing capability check.  The holder itself is NOT launched:
-# inspect its embedded CLI surface and require the three arguments the wrapper
-# depends on for the one-shot physical path.
-command -v strings >/dev/null 2>&1 || { echo "P13_HOLDER_CAPABILITY_TOOL_MISSING=true"; exit 1; }
-HOLDER_STRINGS="$(strings "$HOLDER_PATH")"
-for required in '--payload' '--operation-id' '--emit-ctpp-markers'; do
-    grep -Fq -- "$required" <<<"$HOLDER_STRINGS" || {
+# Strictly non-executing capability check. The current PoC wrapper intentionally
+# invokes the transformed holder with NO CLI arguments. The holder's payload is
+# pinned at build time and operation_id is enforced by the wrapper/executor
+# environment boundary. Therefore capability is proven by the exact embedded
+# P13 transaction/result markers that the real-session adapter consumes, not by
+# obsolete CLI flag strings.
+for required in \
+    'P13_CTPP_OPEN_OUTCOME' \
+    'P13_DOOR_WRITE_COUNT' \
+    'P13_TEARDOWN=PASS' \
+    'P13_ONE_SHOT_MAX_INVOCATIONS=1' \
+    'P13_AUTO_RETRY_ALLOWED=false' \
+    'PHYSICAL_DOOR_ACTION=false'; do
+    grep -aFq -- "$required" "$HOLDER_PATH" || {
         echo "P13_HOLDER_CAPABILITY=FAIL"
-        echo "P13_HOLDER_REQUIRED_FLAG_MISSING=true"
+        echo "P13_HOLDER_REQUIRED_MARKER_MISSING=true"
         exit 1
     }
 done
 HOLDER_CAPABILITY="PASS"
 echo "P13_HOLDER_CAPABILITY=PASS"
-echo "P13_HOLDER_CAPABILITY_METHOD=STATIC_STRINGS"
+echo "P13_HOLDER_CAPABILITY_METHOD=STATIC_P13_MARKERS_NOARG"
+echo "P13_HOLDER_ENTRYPOINT=NO_ARGUMENTS"
 echo "P13_HOLDER_EXECUTED=false"
 
 # -- wrapper -------------------------------------------------------------------
@@ -111,7 +120,8 @@ cat > "$IDENTITY_FILE" <<EOF
     "uid": "$HOLDER_UID",
     "mode": "$HOLDER_MODE",
     "capability": "$HOLDER_CAPABILITY",
-    "capability_method": "STATIC_STRINGS"
+    "capability_method": "STATIC_P13_MARKERS_NOARG",
+    "entrypoint": "NO_ARGUMENTS"
   },
   "wrapper": {
     "path": "$WRAPPER",
