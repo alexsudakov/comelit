@@ -89,13 +89,30 @@ for marker in "${required[@]}"; do
     }
 done
 
+# The preflight run is immutable evidence from RUN_HEAD/RUN_TREE. The collector
+# may be a later descendant only when the entire intervening diff is limited to
+# this collector and its repository-only test. This prevents later P12 runtime
+# changes from being retroactively attached to an older preflight PASS.
+COLLECTOR_HEAD="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+COLLECTOR_TREE="$(git -C "$REPO_ROOT" rev-parse HEAD^{tree})"
+git -C "$REPO_ROOT" cat-file -e "$RUN_HEAD^{commit}" 2>/dev/null || { echo "P12_PREFLIGHT_RUN_HEAD_PRESENT=false"; exit 1; }
+[[ "$(git -C "$REPO_ROOT" rev-parse "$RUN_HEAD^{tree}")" == "$RUN_TREE" ]] || {
+    echo "P12_PREFLIGHT_RUN_TREE_BINDING=FAIL"
+    exit 1
+}
+git -C "$REPO_ROOT" merge-base --is-ancestor "$RUN_HEAD" "$COLLECTOR_HEAD" || {
+    echo "P12_PREFLIGHT_RUN_NOT_ANCESTOR_OF_COLLECTOR=true"
+    exit 1
+}
+DRIFT_PATHS="$(git -C "$REPO_ROOT" diff --name-only "$RUN_HEAD..$COLLECTOR_HEAD")"
+if printf '%s\n' "$DRIFT_PATHS" | sed '/^$/d' | grep -Ev '^(safety-poc/scripts/collect_p12_readonly_preflight_evidence\.sh|safety-poc/tests/test_collect_p12_readonly_preflight_evidence\.py)$' >/dev/null; then
+    echo "P12_PREFLIGHT_TO_COLLECTOR_DRIFT_SCOPE=FAIL"
+    exit 1
+fi
+echo "P12_PREFLIGHT_TO_COLLECTOR_DRIFT_SCOPE=PASS"
+
 # Public evidence contains only fixed safety/readiness markers and hashes.
 # Never copy raw service logs, credential files, or target identity values.
-ORIGINAL_HEAD="$(git -C "$REPO_ROOT" rev-parse HEAD)"
-ORIGINAL_TREE="$(git -C "$REPO_ROOT" rev-parse HEAD^{tree})"
-[[ "$ORIGINAL_HEAD" == "$RUN_HEAD" ]] || { echo "P12_PREFLIGHT_EVIDENCE_HEAD_DRIFT=true"; exit 1; }
-[[ "$ORIGINAL_TREE" == "$RUN_TREE" ]] || { echo "P12_PREFLIGHT_EVIDENCE_TREE_DRIFT=true"; exit 1; }
-
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 EVIDENCE_BRANCH="evidence/p12-preflight-${STAMP}"
 EVIDENCE_REL="evidence/p12-preflight/${STAMP}"
@@ -117,11 +134,14 @@ RC_SHA="$(sha256sum "$RCFILE" | awk '{print $1}')"
 META_SHA="$(sha256sum "$META" | awk '{print $1}')"
 
 cat > "$EVIDENCE_DIR/MANIFEST.txt" <<EOF
-EVIDENCE_SCHEMA=P12_PREFLIGHT_V1
+EVIDENCE_SCHEMA=P12_PREFLIGHT_V2
 COLLECTED_AT_UTC=$STAMP
 SOURCE_BRANCH=$SOURCE_BRANCH
-SOURCE_HEAD=$ORIGINAL_HEAD
-SOURCE_TREE=$ORIGINAL_TREE
+COLLECTOR_SOURCE_HEAD=$COLLECTOR_HEAD
+COLLECTOR_SOURCE_TREE=$COLLECTOR_TREE
+PREFLIGHT_RUN_HEAD=$RUN_HEAD
+PREFLIGHT_RUN_TREE=$RUN_TREE
+PREFLIGHT_TO_COLLECTOR_DRIFT_SCOPE=PASS
 PREFLIGHT_RUN_STARTED_AT_UTC=$RUN_STAMP
 PREFLIGHT_SERVICE_UNIT=$UNIT
 PREFLIGHT_LOG_SHA256=$LOG_SHA
