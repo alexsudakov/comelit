@@ -156,13 +156,85 @@ echo "P13_AUDIT_DURABILITY_PROOF=PASS"
 echo "AUDIT_SINK_VERIFIED=PASS"
 
 STEP=NO_CONFLICT
-pgrep -x "comelit_ice_offer_holder" >/dev/null && { echo "P13_CONFLICTING_PROCESS=true"; exit 1; } || true
-pgrep -x "comelit-p13-door-wrapper" >/dev/null && { echo "P13_CONFLICTING_PROCESS=true"; exit 1; } || true
+# Match full command lines because Linux process comm names are limited to 15
+# characters; pgrep -x on the old long names emitted warnings and could never
+# match the actual P13 processes.
+pgrep -f -- '(^|/)comelit_ice_offer_holder([[:space:]]|$)' >/dev/null && { echo "P13_CONFLICTING_PROCESS=true"; exit 1; } || true
+pgrep -f -- '(^|/)comelit_p13_holder([[:space:]]|$)' >/dev/null && { echo "P13_CONFLICTING_PROCESS=true"; exit 1; } || true
+pgrep -f -- '(^|/)comelit-p13-door-wrapper([[:space:]]|$)' >/dev/null && { echo "P13_CONFLICTING_PROCESS=true"; exit 1; } || true
 echo "P13_CONFLICTING_PROCESS=false"
 
 STEP=NO_RETRY_SURFACE
-grep -rn "retry\|RETRY" "$POC_ROOT/src/comelit_safety_poc/executor.py" >/dev/null && { echo "P13_RETRY_SURFACE_DETECTED=true"; exit 1; } || true
-grep -rn "retry\|RETRY" "$POC_ROOT/src/comelit_safety_poc/ct120_real_session.py" >/dev/null && { echo "P13_RETRY_SURFACE_DETECTED=true"; exit 1; } || true
+# Verify executable one-shot semantics, not the presence of the word "retry"
+# in comments or conservative recovery messages.  This remains non-actuating:
+# Python source is parsed as AST and the wrapper is inspected as text only.
+if ! python3 - "$POC_ROOT/src/comelit_safety_poc/executor.py" "$POC_ROOT/src/comelit_safety_poc/ct120_real_session.py" <<'PY'
+import ast
+import sys
+from pathlib import Path
+
+executor_path = Path(sys.argv[1])
+session_path = Path(sys.argv[2])
+executor_tree = ast.parse(executor_path.read_text(encoding="utf-8"))
+session_tree = ast.parse(session_path.read_text(encoding="utf-8"))
+
+
+def method(tree: ast.AST, class_name: str, method_name: str) -> ast.FunctionDef:
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            for item in node.body:
+                if isinstance(item, ast.FunctionDef) and item.name == method_name:
+                    return item
+    raise AssertionError(f"missing {class_name}.{method_name}")
+
+
+def attr_calls(node: ast.AST, attr: str) -> int:
+    return sum(
+        1
+        for item in ast.walk(node)
+        if isinstance(item, ast.Call)
+        and isinstance(item.func, ast.Attribute)
+        and item.func.attr == attr
+    )
+
+execute = method(executor_tree, "OneShotExecutor", "execute")
+open_ctpp = method(session_tree, "Ct120RealP13Session", "open_ctpp")
+
+# The side-effect transport has one syntactic send point in execute().
+assert attr_calls(execute, "send_once") == 1, "execute() must contain exactly one send_once call"
+# No loop may surround/repeat the send path.
+assert not any(isinstance(item, (ast.For, ast.AsyncFor, ast.While)) for item in ast.walk(execute)), \
+    "execute() must not contain retry loops"
+# The native wrapper has one syntactic invocation point in open_ctpp().
+assert attr_calls(open_ctpp, "_run_wrapper_once") == 1, \
+    "open_ctpp() must contain exactly one wrapper invocation"
+assert not any(isinstance(item, (ast.For, ast.AsyncFor, ast.While)) for item in ast.walk(open_ctpp)), \
+    "open_ctpp() must not contain retry loops"
+# There must be no retry-named callable API on either class.
+for tree, class_name in ((executor_tree, "OneShotExecutor"), (session_tree, "Ct120RealP13Session")):
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            retry_methods = [
+                item.name for item in node.body
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and "retry" in item.name.lower()
+            ]
+            assert not retry_methods, f"retry methods present on {class_name}: {retry_methods}"
+
+print("P13_PYTHON_ONE_SHOT_SOURCE=PASS")
+PY
+then
+    echo "P13_ONE_SHOT_SOURCE_CONTRACT=FAIL"
+    echo "P13_RETRY_SURFACE_DETECTED=true"
+    exit 1
+fi
+WRAPPER_EXEC_COUNT="$(grep -Fc 'exec "$HOLDER_PATH"' "$WRAPPER" || true)"
+[[ "$WRAPPER_EXEC_COUNT" == "1" ]] || {
+    echo "P13_WRAPPER_SINGLE_EXEC=FAIL(count=$WRAPPER_EXEC_COUNT)"
+    echo "P13_RETRY_SURFACE_DETECTED=true"
+    exit 1
+}
+echo "P13_WRAPPER_SINGLE_EXEC=PASS"
+echo "P13_ONE_SHOT_SOURCE_CONTRACT=PASS"
 echo "P13_RETRY_SURFACE_DETECTED=false"
 
 STEP=SOURCE_SCAN
