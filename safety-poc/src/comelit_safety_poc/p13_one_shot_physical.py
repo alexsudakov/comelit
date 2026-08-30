@@ -102,6 +102,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     spec.verify()
 
+    # Bind the exact durable operation id to the single wrapper invocation.
+    # subprocess.Popen in Ct120RealP13Session inherits this environment, while
+    # the wrapper itself refuses to run when P13_OPERATION_ID is absent.  This
+    # keeps the journal operation and native transport invocation on the same
+    # one-shot identity without adding a second transport call surface.
+    os.environ["P13_OPERATION_ID"] = args.operation_id
+
     # The real session performs the proven P2P -> ViP -> UAUT -> CTPP path and
     # the six prepared Door writes in exactly one invocation.
     session = Ct120RealP13Session(
