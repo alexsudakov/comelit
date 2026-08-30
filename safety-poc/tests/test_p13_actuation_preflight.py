@@ -100,8 +100,12 @@ class P13ActuationPreflightTests(unittest.TestCase):
 
     def test_conflicting_process_check(self):
         self.assertIn("P13_CONFLICTING_PROCESS=false", self.text)
-        self.assertIn('pgrep -x "comelit_ice_offer_holder"', self.text)
-        self.assertIn('pgrep -x "comelit-p13-door-wrapper"', self.text)
+        self.assertIn("pgrep -f --", self.text)
+        self.assertIn("comelit_ice_offer_holder", self.text)
+        self.assertIn("comelit_p13_holder", self.text)
+        self.assertIn("comelit-p13-door-wrapper", self.text)
+        self.assertNotIn('pgrep -x "comelit_ice_offer_holder"', self.text)
+        self.assertNotIn('pgrep -x "comelit-p13-door-wrapper"', self.text)
 
     def test_readonly_readiness_and_approval_markers(self):
         self.assertIn("READONLY_TRANSPORT_READY=true", self.text)
