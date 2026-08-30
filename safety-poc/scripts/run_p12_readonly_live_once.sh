@@ -27,17 +27,37 @@ chmod 700 "$RUN_DIR"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RAW="$RUN_DIR/${STAMP}.raw.log"
 SAFE="$RUN_DIR/${STAMP}.safe.txt"
-: > "$RAW"
-chmod 600 "$RAW"
+EXEC_STATUS="$RUN_DIR/${STAMP}.exec.txt"
 
-# Exactly one wrapper invocation. No shell retry loop and no second application attempt.
-set +e
-timeout --signal=TERM --kill-after=5s 75s "$WRAPPER" >"$RAW" 2>&1
-rc=$?
-set -e
+# The supervisor creates exactly one child process, never retries it, and
+# distinguishes process failure from an observed wall-clock timeout without
+# overloading a process exit code such as GNU timeout(1) rc=124.
+python3 "$SCRIPT_DIR/p12_one_shot_exec.py" \
+    --wrapper "$WRAPPER" \
+    --raw "$RAW" \
+    --status "$EXEC_STATUS" \
+    --timeout-seconds 75 \
+    --term-grace-seconds 5
+
+chmod 600 "$RAW" "$EXEC_STATUS"
+cat "$EXEC_STATUS"
+
+grep -Fxq 'P12_ONE_SHOT_PROCESS_INVOCATIONS=1' "$EXEC_STATUS"
+grep -Fxq 'P12_ONE_SHOT_AUTO_RETRY=false' "$EXEC_STATUS"
+grep -Fxq 'TIMEOUT_MAPPING_VERIFIED=PASS' "$EXEC_STATUS"
+outcome="$(awk -F= '$1 == "P12_ONE_SHOT_OUTCOME" {print $2}' "$EXEC_STATUS")"
+rc="$(awk -F= '$1 == "P12_ONE_SHOT_PROCESS_RC" {print $2}' "$EXEC_STATUS")"
+
+[[ -n "$outcome" && -n "$rc" ]] || {
+    echo "P12_ONE_SHOT_STATUS_PARSE=FAIL"
+    echo "READONLY_TRANSPORT_READY=false"
+    echo "LIVE_TEST_READY=false"
+    exit 1
+}
 
 echo "P12_READONLY_LIVE_RUN_PERFORMED=true"
 echo "P12_READONLY_LIVE_WRAPPER_INVOCATIONS=1"
+echo "P12_READONLY_LIVE_WRAPPER_OUTCOME=$outcome"
 echo "P12_READONLY_LIVE_WRAPPER_RC=$rc"
 echo "P12_READONLY_LIVE_RAW_LOG=$RAW"
 
@@ -99,6 +119,21 @@ PY
 chmod 600 "$SAFE"
 cat "$SAFE"
 
+if [[ "$outcome" != "COMPLETED" ]]; then
+    echo "P12_READONLY_LIVE_PROOF=FAIL outcome=$outcome"
+    echo "TIMEOUT_MAPPING_VERIFIED=PASS"
+    echo "READONLY_TRANSPORT_READY=false"
+    echo "LIVE_TEST_READY=false"
+    exit 1
+fi
+if [[ "$rc" != "0" ]]; then
+    echo "P12_READONLY_LIVE_PROOF=FAIL wrapper_rc=$rc"
+    echo "TIMEOUT_MAPPING_VERIFIED=PASS"
+    echo "READONLY_TRANSPORT_READY=false"
+    echo "LIVE_TEST_READY=false"
+    exit 1
+fi
+
 required=(
   'P2_VIP_UAUT_AUTH=PASS'
   'UAUT_RESPONSE_CODE=200'
@@ -120,18 +155,12 @@ required=(
 for marker in "${required[@]}"; do
   grep -Fxq "$marker" "$SAFE" || {
     echo "P12_READONLY_LIVE_PROOF=FAIL missing=$marker"
+    echo "TIMEOUT_MAPPING_VERIFIED=PASS"
     echo "READONLY_TRANSPORT_READY=false"
     echo "LIVE_TEST_READY=false"
     exit 1
   }
 done
-
-[[ "$rc" -eq 0 ]] || {
-    echo "P12_READONLY_LIVE_PROOF=FAIL wrapper_rc=$rc"
-    echo "READONLY_TRANSPORT_READY=false"
-    echo "LIVE_TEST_READY=false"
-    exit 1
-}
 
 # Successful UCFG access after UAUT auth and clean UAUT close must be observed
 # in exact order inside the same one-shot wrapper invocation before claiming
@@ -161,6 +190,7 @@ PY
 then
     echo "P12_AUTH_SESSION_LIFETIME_SEQUENCE=FAIL"
     echo "AUTH_SESSION_LIFETIME_VERIFIED=FAIL"
+    echo "TIMEOUT_MAPPING_VERIFIED=PASS"
     echo "READONLY_TRANSPORT_READY=false"
     echo "LIVE_TEST_READY=false"
     exit 1
@@ -172,14 +202,14 @@ echo "REAL_TRANSPORT_IMPLEMENTED=true"
 echo "REAL_TRANSPORT_READONLY_SESSION_PROOF=PASS"
 echo "READONLY_SCOPE_ENFORCED=PASS"
 echo "AUTH_SESSION_LIFETIME_VERIFIED=PASS"
+echo "TIMEOUT_MAPPING_VERIFIED=PASS"
 echo "TARGET_BINDING_VERIFIED=NOT_PROVEN"
-echo "TIMEOUT_MAPPING_VERIFIED=NOT_PROVEN"
 echo "CREDENTIAL_MATERIAL_EMITTED=false"
 echo "ACTUATOR_COMMAND_ATTEMPTED=false"
 echo "PHYSICAL_DOOR_ACTION=false"
 echo "PHYSICAL_EFFECT_ASSERTED=false"
-# The repository readiness model requires TARGET_BINDING_VERIFIED=PASS and
-# TIMEOUT_MAPPING_VERIFIED=PASS as independent gates. Do not overclaim overall
-# readiness from a successful auth/UCFG transaction alone.
+# The repository readiness model still requires TARGET_BINDING_VERIFIED=PASS
+# as an independent gate. Do not overclaim overall readiness from a successful
+# auth/UCFG transaction plus verified timeout mapping alone.
 echo "READONLY_TRANSPORT_READY=false"
 echo "LIVE_TEST_READY=false"
