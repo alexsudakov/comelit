@@ -116,6 +116,30 @@ class P13HolderTransformSafeTests(unittest.TestCase):
         self.assertIn("if (expected_opcode == 2 && body_len > 12)", out)
         self.assertIn("extension_len != body_len - 16u", out)
 
+    def test_peer_tap_sequence_does_not_require_per_write_ack(self):
+        out = module.transform(BASELINE, make_payload(), "012345678")
+        self.assertNotIn("P13_DOOR_WRITE_%u_ACKED=true", out)
+        self.assertNotIn("P13_DOOR_WRITE_REQUEST_ID=FAIL", out)
+        self.assertIn("p13_writes_sent = p13_write_index;", out)
+        self.assertEqual(
+            out.count("g_timeout_add(200, p13_register_settle_cb, NULL);"),
+            1,
+        )
+        self.assertEqual(
+            out.count("g_timeout_add(1000, p13_post_writes_settle_cb, NULL);"),
+            1,
+        )
+        self.assertIn("P13_DOOR_INBOUND_FRAME_OBSERVED=true", out)
+
+    def test_peer_tap_inbound_frames_are_observational_only(self):
+        out = module.transform(BASELINE, make_payload(), "012345678")
+        block_start = out.index("if (request_id == ctpp_channel_id &&")
+        block_end = out.index("if (p13_stage == P13_STAGE_WAIT_CTPP_CLOSE_RESPONSE)")
+        block = out[block_start:block_end]
+        self.assertIn("p13_consume_post_ack(frame_len);", block)
+        self.assertNotIn("p13_queue_door_write", block)
+        self.assertNotIn("p13_writes_sent =", block)
+
     def test_ctpp_address_is_derived_from_unique_vip_object(self):
         doc = {
             "outer": {
