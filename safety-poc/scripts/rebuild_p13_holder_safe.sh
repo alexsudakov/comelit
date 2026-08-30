@@ -2,7 +2,8 @@
 # Rebuild only the P13 native holder with the safe transform.
 #
 # This is deliberately non-actuating: it reads the pinned baseline source,
-# root-only payload, and exact bound UCFG snapshot; generates C; compiles; and
+# root-only payload, and either the exact bound UCFG snapshot or a root-only
+# SHA-pinned runtime CTPP identity binding; generates C; compiles; and
 # atomically replaces the holder at the same path already used by the proven
 # signaling wrapper. It performs no Comelit network session and never reaches
 # SEND_ARMED.
@@ -75,7 +76,7 @@ STEP=TRANSFORM
 install -d -m 700 -o root -g root "$NATIVE_DIR"
 : > "$BUILD_LOG"
 chmod 600 "$BUILD_LOG"
-python3 "$SCRIPT_DIR/p13_holder_transform_safe.py" \
+python3 "$SCRIPT_DIR/p13_holder_transform_runtime_binding.py" \
     --source "$BASE_SOURCE" \
     --payload "$PAYLOAD" \
     --output "$HOLDER_SOURCE" \
