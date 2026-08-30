@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import os
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -61,6 +63,34 @@ class PrepareP13PeerPayloadTests(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=False):
             with self.assertRaises(RuntimeError):
                 module.extract_doors_with_peer_fallback(vip)
+
+    def test_exact_p12_runtime_ucfg_path_is_known(self):
+        self.assertEqual(
+            module.P12_RUNTIME_UCFG,
+            Path("/run/comelit-p2p/p12-ucfg-response.json"),
+        )
+
+    def test_runtime_ucfg_is_selected_only_when_sha_matches(self):
+        with tempfile.TemporaryDirectory() as td:
+            capture = Path(td) / "p12-ucfg-response.json"
+            raw = b'{"fixture":"ucfg"}'
+            capture.write_bytes(raw)
+            expected = hashlib.sha256(raw).hexdigest()
+            with (
+                mock.patch.object(module, "P12_RUNTIME_UCFG", capture),
+                mock.patch.object(module.base, "EXPECTED_UCFG_SHA256", expected),
+                mock.patch.object(module.base, "_walk_ucfg_candidates", return_value=iter(())),
+            ):
+                self.assertEqual(module.find_pinned_ucfg(), capture)
+
+            capture.write_bytes(b"different")
+            with (
+                mock.patch.object(module, "P12_RUNTIME_UCFG", capture),
+                mock.patch.object(module.base, "EXPECTED_UCFG_SHA256", expected),
+                mock.patch.object(module.base, "_walk_ucfg_candidates", return_value=iter(())),
+            ):
+                with self.assertRaises(RuntimeError):
+                    module.find_pinned_ucfg()
 
     def test_source_declares_offline_only(self):
         text = SCRIPT.read_text(encoding="utf-8")
