@@ -111,7 +111,6 @@ class Ct120RealSessionTests(unittest.TestCase):
             markers = session.dry_initialize()
             self.assertEqual(markers["P13_REAL_ADAPTER_CONSTRUCTED"], "true")
 
-            # wrong hash must fail closed
             bad_spec = Ct120ArtifactSpec(
                 wrapper=wrapper,
                 wrapper_sha256="0" * 64,
@@ -176,7 +175,6 @@ class Ct120RealSessionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
             wrapper = tmp / "wrapper"
-            # wrapper prints only a write count with no typed open marker
             write_wrapper_count(wrapper, "", 0)
             wrapper.write_text("#!/bin/sh\nprintf '%s\\n' 'P13_DOOR_WRITE_COUNT=0'\n", encoding="utf-8")
             wrapper.chmod(0o700)
@@ -202,7 +200,6 @@ class Ct120RealSessionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
             wrapper = tmp / "wrapper"
-            # wrapper claims only 3 writes -> boundary must not report complete
             write_wrapper_count(wrapper, "OPENED", 3)
             payload = self._payload(tmp)
             spec = self._spec(tmp, wrapper, payload)
@@ -210,8 +207,6 @@ class Ct120RealSessionTests(unittest.TestCase):
             boundary = RealDoorActuationBoundary(
                 session, make_bundle(), body_loader=DictBodyLoader(self._bodies())
             )
-            # The wrapper reported only 3 writes; close_ctpp() raises a
-            # write-count mismatch and the boundary maps it to AMBIGUOUS.
             evidence = boundary.attempt_once(TransportRequest(operation_id="op-r2", target="f" * 64))
             self.assertEqual(evidence.outcome, BoundaryOutcome.AMBIGUOUS)
 
@@ -274,7 +269,6 @@ class Ct120ReportConsistencyTests(unittest.TestCase):
     def test_six_writes_no_close_marker_is_ambiguous(self):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
-            # no P13_CTPP_CLOSE line at all -> close_ok stays False
             wrapper = tmp / "wrapper"
             wrapper.write_text(
                 "#!/bin/sh\n"
@@ -426,20 +420,31 @@ class Ct120ReportConsistencyTests(unittest.TestCase):
             tmp = Path(td)
             session = self._make(tmp, "OPENED", 6, close="PASS", teardown=None)
             session.open_ctpp()
-            # teardown() reports only the wrapper proof; it never fabricates PASS.
             self.assertFalse(session.teardown())
 
     def test_ownership_checks_fail_closed(self):
+        class SyntheticNonRootArtifact:
+            def __init__(self, content: bytes):
+                self._content = content
+
+            def is_file(self):
+                return True
+
+            def read_bytes(self):
+                return self._content
+
+            def stat(self):
+                class S:
+                    st_mode = stat.S_IFREG | 0o700
+                    st_uid = 12345
+                return S()
+
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
-            wrapper = tmp / "wrapper"
-            write_wrapper_count(wrapper, "OPENED", 6)
             payload = tmp / "payloads.json"
-            import json
-            bodies = [bytes([i + 1]) * 12 for i in range(6)]
-            payload.write_text(json.dumps({"bodies": []}), encoding="utf-8")
+            payload.write_text('{"bodies": []}', encoding="utf-8")
             os.chmod(payload, 0o600)
-            # require_root_owner=True (default) fails on non-root test files.
+            wrapper = SyntheticNonRootArtifact(b"synthetic-wrapper")
             spec = Ct120ArtifactSpec(
                 wrapper=wrapper,
                 wrapper_sha256=hashlib.sha256(wrapper.read_bytes()).hexdigest(),
