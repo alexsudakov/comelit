@@ -35,23 +35,24 @@ class PrepareP13PeerPayloadTests(unittest.TestCase):
             vip = module.extract_vip_for_peer(doc)
         self.assertEqual(vip, {"apt-address": "APT00001", "apt-subaddress": "7"})
 
-    def test_peer_action_is_required_anywhere_in_ucfg(self):
+    def test_ucfg_without_action_metadata_still_reconstructs_pinned_apartment(self):
         doc = {
-            "identity": {"apt-address": "APT00001", "apt-subaddress": "7"},
-            "features": {"door": {"opendoor-actions": [{"action": "other"}]}},
+            "configuration": {
+                "identity": {"apt-address": "APT00001", "apt-subaddress": "7"},
+                "other": {"value": 1},
+            }
         }
         with (
             mock.patch.object(module, "EXPECTED_APT_ADDRESS_SHA256", _sha("APT00001")),
             mock.patch.object(module, "EXPECTED_APT_SUBADDRESS_SHA256", _sha("7")),
         ):
-            with self.assertRaises(RuntimeError):
-                module.extract_vip_for_peer(doc)
+            vip = module.extract_vip_for_peer(doc)
+        self.assertEqual(vip, {"apt-address": "APT00001", "apt-subaddress": "7"})
 
     def test_apartment_identity_must_be_unique(self):
         doc = {
             "a": {"apt-address": "APT00001", "apt-subaddress": "7"},
             "b": {"apt-address": "APT00001"},
-            "door": {"action": "peer"},
         }
         with (
             mock.patch.object(module, "EXPECTED_APT_ADDRESS_SHA256", _sha("APT00001")),
@@ -60,7 +61,7 @@ class PrepareP13PeerPayloadTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 module.extract_vip_for_peer(doc)
 
-    def test_runtime_pinned_peer_target_has_legacy_apt_address_field(self):
+    def test_runtime_pinned_peer_target_has_legacy_address_fields(self):
         env = {
             "P13_PEER_ENTRANCE": "00000643",
             "P13_PEER_OUTPUT_INDEX": "1",
@@ -113,6 +114,7 @@ class PrepareP13PeerPayloadTests(unittest.TestCase):
 
     def test_source_declares_offline_only(self):
         text = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("P13_PEER_ACTION_METADATA_REQUIRED=false", text)
         self.assertIn("NETWORK_ACTION_PERFORMED=false", text)
         self.assertIn("ACTUATOR_COMMAND_ATTEMPTED=false", text)
         self.assertIn("PHYSICAL_DOOR_ACTION=false", text)
