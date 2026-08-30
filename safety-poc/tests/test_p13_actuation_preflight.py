@@ -86,5 +86,36 @@ class P13ActuationPreflightTests(unittest.TestCase):
         self.assertIn("LIVE_TEST_READY=false", self.text)
 
 
+class Ct120ManualPreflightTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.text = Path(__file__).resolve().parents[1] / "scripts" / "ct120_p13_preflight_manual.sh"
+
+    def test_manual_script_is_non_actuating(self):
+        body = self.text.read_text(encoding="utf-8")
+        self.assertIn("P13_NON_ACTUATING_PREFLIGHT=PASS", body)
+        self.assertIn("PHYSICAL_DOOR_ACTION=false", body)
+        self.assertIn("ACTUATOR_COMMAND_ATTEMPTED=false", body)
+        self.assertIn("EXPLICIT_LIVE_TEST_APPROVAL=false", body)
+        self.assertIn("LIVE_TEST_READY=false", body)
+        for forbidden in ("curl ", "wget ", "nc ", "open_door"):
+            self.assertNotIn(forbidden, body)
+
+    def test_manual_script_collects_only_public_safe_evidence(self):
+        body = self.text.read_text(encoding="utf-8")
+        self.assertIn("evidence/p13-preflight-$STAMP", body)
+        self.assertIn("P13_PREFLIGHT_EVIDENCE_HEAD=$HEAD", body)
+        self.assertIn("P13_PREFLIGHT_EVIDENCE_TREE=$TREE", body)
+        self.assertIn("P13_PREFLIGHT_PAYLOAD_SHA256", body)
+        self.assertNotIn("apt-address", body)
+        self.assertNotIn("password", body)
+        self.assertNotIn("token_value", body)
+
+    def test_manual_script_requires_root(self):
+        body = self.text.read_text(encoding="utf-8")
+        self.assertIn("CT120_P13_MANUAL_REQUIRES_ROOT=true", body)
+        self.assertIn('[[ "${EUID}" -eq 0 ]]', body)
+
+
 if __name__ == "__main__":
     unittest.main()
