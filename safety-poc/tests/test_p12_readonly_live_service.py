@@ -33,6 +33,13 @@ class P12ReadonlyLiveServiceTests(unittest.TestCase):
         self.assertNotIn("open_door", self.start)
         self.assertNotIn("OPEN_DOOR", self.start)
 
+    def test_collector_waits_only_for_local_result(self):
+        self.assertIn("P12_LIVE_COLLECT_WAIT_ONLY=true", self.collect)
+        self.assertIn('[[ -s "$RCFILE" ]] && break', self.collect)
+        self.assertIn("sleep 1", self.collect)
+        self.assertNotIn("run_p12_readonly_live_once.sh", self.collect)
+        self.assertNotIn("P12_READONLY_LIVE_APPROVAL=", self.collect)
+
     def test_collector_reports_functional_poc_status(self):
         self.assertIn("POC_P2P_CONNECTION=PASS", self.collect)
         self.assertIn("POC_AUTHENTICATION=PASS", self.collect)
