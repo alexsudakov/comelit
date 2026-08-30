@@ -2,19 +2,19 @@
 # =============================================================================
 # P13 door wrapper template (reviewed, versioned in Git).
 #
-# This template is the deterministic source for the installed
-# /usr/local/sbin/comelit-p13-door-wrapper on CT120.  It is built by
-# scripts/build_p13_wrapper.sh, which:
-#   - verifies the pinned native P2P/ICE/PseudoTCP/ViP holder identity,
-#   - substitutes this template's HOLDER_PATH marker,
-#   - writes the installed wrapper to the root-only destination,
-#   - computes the independently derived expected SHA-256 and records it in
-#     deploy/p13_wrapper_manifest.json (Git-reviewed) BEFORE the installed
-#     wrapper is compared by preflight.
-#
 # The installed wrapper performs the single proven transaction:
 #   Cloud P2P -> ICE -> PseudoTCP -> ViP -> UAUT open/auth -> CTPP open ->
 #   six prepared Door writes -> CTPP close -> teardown.
+#
+# The generated P13 holder is bound at build time to the root-only payload
+# path and emits typed P13 markers unconditionally.  It therefore needs no
+# runtime CLI arguments.  Avoiding synthetic --payload/--operation-id flags
+# also preserves compatibility with the proven P12 baseline main(argc, argv).
+#
+# The operation id is still mandatory at the wrapper boundary.  The Python
+# one-shot runner sets P13_OPERATION_ID from its exact --operation-id before
+# the single wrapper Popen; this wrapper refuses to invoke the holder without
+# that value.  No retry loop exists here.
 #
 # The wrapper protocol is typed markers on stdout:
 #   P13_CTPP_OPEN_OUTCOME=OPENED|AMBIGUOUS|PROVEN_NOT_OPENED|REJECTED
@@ -39,6 +39,6 @@ OPERATION_ID="${P13_OPERATION_ID:-}"
 [[ -x "$HOLDER_PATH" ]] || { echo "P13_WRAPPER_HOLDER_ABSENT=true" >&2; exit 2; }
 [[ -r "$PAYLOAD_FILE" ]] || { echo "P13_WRAPPER_PAYLOAD_ABSENT=true" >&2; exit 2; }
 
-# One invocation only: no retry loop exists anywhere in this wrapper.
-exec "$HOLDER_PATH" --payload "$PAYLOAD_FILE" --operation-id "$OPERATION_ID" \
-    --emit-ctpp-markers
+# Exactly one holder invocation. The holder uses its build-bound payload path
+# and emits the P13 transaction markers without command-line switches.
+exec "$HOLDER_PATH"
