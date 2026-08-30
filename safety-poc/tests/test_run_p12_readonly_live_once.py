@@ -18,6 +18,7 @@ class P12ReadonlyLiveOnceTests(unittest.TestCase):
         self.assertEqual(self.text.count('python3 "$SCRIPT_DIR/p12_one_shot_exec.py"'), 1)
         self.assertIn("P12_ONE_SHOT_PROCESS_INVOCATIONS=1", self.text)
         self.assertIn("P12_ONE_SHOT_AUTO_RETRY=false", self.text)
+        self.assertIn("P12_ONE_SHOT_PROCESS_GROUP_ISOLATED=true", self.text)
         self.assertIn("P12_READONLY_LIVE_WRAPPER_INVOCATIONS=1", self.text)
         self.assertNotIn("timeout --signal", self.text)
         self.assertNotIn("for attempt", self.text)
@@ -60,12 +61,30 @@ class P12ReadonlyLiveOnceTests(unittest.TestCase):
         self.assertIn("len(hits) != 1", self.text)
         self.assertIn("positions != sorted(positions)", self.text)
 
-    def test_timeout_mapping_is_verified_without_opening_target_binding_gate(self):
-        self.assertIn("TIMEOUT_MAPPING_VERIFIED=PASS", self.text)
-        self.assertIn("TARGET_BINDING_VERIFIED=NOT_PROVEN", self.text)
+    def test_target_binding_must_be_fresh_and_public_safe(self):
+        self.assertIn("UCFG_CAPTURE=/run/comelit-p2p/p12-ucfg-response.json", self.text)
+        self.assertIn('rm -f -- "$UCFG_CAPTURE"', self.text)
+        self.assertEqual(self.text.count('python3 "$SCRIPT_DIR/p12_verify_target_binding.py"'), 1)
+        self.assertIn("TARGET_BINDING_VERIFIED=PASS", self.text)
+        self.assertIn("TARGET_IDENTITY_VALUES_EMITTED=false", self.text)
+        self.assertIn("P12_TARGET_BINDING_PROOF=FAIL", self.text)
+
+    def test_all_readonly_live_gates_are_emitted_but_aggregate_waits_for_repository_evaluator(self):
+        for marker in (
+            "REAL_TRANSPORT_IMPLEMENTED=true",
+            "REAL_TRANSPORT_READONLY_SESSION_PROOF=PASS",
+            "READONLY_SCOPE_ENFORCED=PASS",
+            "TARGET_BINDING_VERIFIED=PASS",
+            "AUTH_SESSION_LIFETIME_VERIFIED=PASS",
+            "TIMEOUT_MAPPING_VERIFIED=PASS",
+            "CREDENTIAL_MATERIAL_EMITTED=false",
+            "ACTUATOR_COMMAND_ATTEMPTED=false",
+            "P12_READONLY_LIVE_GATES=PASS",
+        ):
+            self.assertIn(marker, self.text)
         self.assertIn('echo "READONLY_TRANSPORT_READY=false"', self.text)
         self.assertNotIn('echo "READONLY_TRANSPORT_READY=true"', self.text)
-        self.assertIn("TARGET_BINDING_VERIFIED=PASS", self.text)
+        self.assertIn("LIVE_TEST_READY=false", self.text)
 
 
 if __name__ == "__main__":
