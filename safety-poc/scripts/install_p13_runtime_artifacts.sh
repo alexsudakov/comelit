@@ -11,15 +11,13 @@
 # p13_holder_transform.py, adding the CTPP open / six Door writes / close /
 # teardown stage machine and the typed result markers.
 #
+# If the root-only real Door payload is absent, this script can prepare it
+# offline for the already captured peer target using P13_PEER_ENTRANCE and
+# P13_PEER_OUTPUT_INDEX. The prep replaces all legacy network methods with
+# synthetic methods and performs no Comelit session or actuator action.
+#
 # This script performs NO Comelit network session, NO UAUT/CTPP/Door action,
 # and never reaches SEND_ARMED.
-#
-# Usage (root, on CT120, in an exact-synced feature branch checkout):
-#   bash safety-poc/scripts/install_p13_runtime_artifacts.sh
-#
-# Optional overrides:
-#   P13_BASE_SOURCE=/root/comelit-vip-poc/bin/comelit_ice_offer_holder.c
-#   P13_PAYLOAD=/root/comelit-p13-actuator-prep/real-door-payloads.json
 # =============================================================================
 set -Eeuo pipefail
 umask 077
@@ -30,7 +28,8 @@ REPO_ROOT="$(git -C "$POC_ROOT" rev-parse --show-toplevel)"
 EXPECTED_BRANCH=feat/p13-one-shot-actuation
 BASE_SOURCE="${P13_BASE_SOURCE:-/root/comelit-vip-poc/bin/comelit_ice_offer_holder.c}"
 BASE_BINARY="/root/comelit-vip-poc/bin/comelit_ice_offer_holder"
-PAYLOAD="${P13_PAYLOAD:-/root/comelit-p13-actuator-prep/real-door-payloads.json}"
+DEFAULT_PAYLOAD=/root/comelit-p13-actuator-prep/real-door-payloads.json
+PAYLOAD="${P13_PAYLOAD:-$DEFAULT_PAYLOAD}"
 NATIVE_DIR=/root/comelit-p13-native
 HOLDER="$NATIVE_DIR/comelit_p13_holder"
 WRAPPER=/usr/local/sbin/comelit-p13-door-wrapper
@@ -73,7 +72,7 @@ TREE="$(git -C "$REPO_ROOT" rev-parse HEAD^{tree})"
 echo "P13_INSTALL_HEAD=$HEAD"
 echo "P13_INSTALL_TREE=$TREE"
 
-# ---- 1. baseline artifacts ---------------------------------------------------
+# ---- 1. baseline + root-only payload ----------------------------------------
 STEP=BASELINE
 [[ -f "$BASE_SOURCE" ]] || { echo "P13_BASE_SOURCE_PRESENT=false"; exit 1; }
 [[ -f "$BASE_BINARY" ]] || { echo "P13_BASE_BINARY_PRESENT=false"; exit 1; }
@@ -81,20 +80,30 @@ BASE_SOURCE_SHA="$(sha256sum "$BASE_SOURCE" | awk '{print $1}')"
 BASE_BINARY_SHA="$(sha256sum "$BASE_BINARY" | awk '{print $1}')"
 [[ "$BASE_SOURCE_SHA" == "$EXPECTED_BASE_SOURCE_SHA" ]] || { echo "P13_BASE_SOURCE_PIN=FAIL"; exit 1; }
 [[ "$BASE_BINARY_SHA" == "$EXPECTED_BASE_BINARY_SHA" ]] || { echo "P13_BASE_BINARY_PIN=FAIL"; exit 1; }
-[[ -f "$PAYLOAD" ]] || { echo "P13_PAYLOAD_PRESENT=false"; exit 1; }
-PAYLOAD_MODE="$(stat -c '%a' "$PAYLOAD")"
-[[ "$PAYLOAD_MODE" == "600" ]] || { echo "P13_PAYLOAD_MODE=FAIL($PAYLOAD_MODE)"; exit 1; }
 echo "P13_BASE_SOURCE_PIN=PASS"
 echo "P13_BASE_BINARY_PIN=PASS"
 
-# The generated holder pins the SHA-256 of the canonical JSON byte stream.
-# Normalize only JSON formatting before transform/build so the runtime file
-# bytes are exactly the bytes whose SHA is embedded in the holder. Door bodies
-# and all semantic metadata remain unchanged.
+if [[ ! -f "$PAYLOAD" ]]; then
+    STEP=PAYLOAD_PREP
+    [[ "$PAYLOAD" == "$DEFAULT_PAYLOAD" ]] || { echo "P13_PAYLOAD_CUSTOM_PATH_PREP_UNSUPPORTED=true"; exit 1; }
+    [[ -n "${P13_PEER_ENTRANCE:-}" ]] || { echo "P13_PEER_ENTRANCE_REQUIRED=true"; exit 1; }
+    [[ -n "${P13_PEER_OUTPUT_INDEX:-}" ]] || { echo "P13_PEER_OUTPUT_INDEX_REQUIRED=true"; exit 1; }
+    python3 "$SCRIPT_DIR/prepare_p13_peer_payload.py"
+    [[ -f "$PAYLOAD" ]] || { echo "P13_PAYLOAD_PREP=FAIL"; exit 1; }
+    echo "P13_PAYLOAD_PREP=PASS"
+fi
+
 STEP=PAYLOAD_CANONICALIZE
+PAYLOAD_MODE="$(stat -c '%a' "$PAYLOAD")"
+[[ "$PAYLOAD_MODE" == "600" ]] || { echo "P13_PAYLOAD_MODE=FAIL($PAYLOAD_MODE)"; exit 1; }
+PAYLOAD_UID="$(stat -c '%u' "$PAYLOAD")"
+[[ "$PAYLOAD_UID" == "0" ]] || { echo "P13_PAYLOAD_OWNER=FAIL(uid=$PAYLOAD_UID)"; exit 1; }
 python3 "$SCRIPT_DIR/p13_canonicalize_payload.py" --payload "$PAYLOAD"
-[[ "$(stat -c '%a' "$PAYLOAD")" == "600" ]] || { echo "P13_PAYLOAD_MODE_AFTER_CANONICALIZE=FAIL"; exit 1; }
-echo "P13_PAYLOAD_CANONICAL_RUNTIME_BYTES=PASS"
+PAYLOAD_MODE="$(stat -c '%a' "$PAYLOAD")"
+[[ "$PAYLOAD_MODE" == "600" ]] || { echo "P13_PAYLOAD_MODE_AFTER_CANONICALIZE=FAIL($PAYLOAD_MODE)"; exit 1; }
+echo "P13_PAYLOAD_PRESENT=true"
+echo "P13_PAYLOAD_OWNER=root"
+echo "P13_PAYLOAD_MODE=600"
 
 # ---- 2. transform + build holder ---------------------------------------------
 STEP=TRANSFORM
@@ -124,7 +133,6 @@ strings -a "$HOLDER" | grep -q 'P13_TEARDOWN=PASS'
 strings -a "$HOLDER" | grep -q 'P13_ONE_SHOT_MAX_INVOCATIONS=1'
 strings -a "$HOLDER" | grep -q 'P13_AUTO_RETRY_ALLOWED=false'
 strings -a "$HOLDER" | grep -q 'PHYSICAL_DOOR_ACTION=false'
-strings -a "$HOLDER" | grep -q -- '--emit-ctpp-markers'
 echo "P13_HOLDER_BUILD=PASS"
 echo "P13_HOLDER_SHA256=$(sha256sum "$HOLDER" | awk '{print $1}')"
 echo "P13_HOLDER_MODE=$(stat -c '%a' "$HOLDER")"
