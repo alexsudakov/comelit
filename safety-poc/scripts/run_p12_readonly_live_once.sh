@@ -45,7 +45,6 @@ echo "P12_READONLY_LIVE_RAW_LOG=$RAW"
 # Emit only exact public-safe protocol/safety markers needed to classify the run.
 python3 - "$RAW" "$SAFE" <<'PY'
 from pathlib import Path
-import re
 import sys
 
 raw = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace").splitlines()
@@ -134,13 +133,53 @@ done
     exit 1
 }
 
+# Successful UCFG access after UAUT auth and clean UAUT close must be observed
+# in exact order inside the same one-shot wrapper invocation before claiming
+# that the authenticated session lifetime is sufficient for the read-only flow.
+if ! python3 - "$SAFE" <<'PY'
+from pathlib import Path
+import sys
+
+lines = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+sequence = (
+    "P2_VIP_UAUT_AUTH=PASS",
+    "VIP_UAUT_CLOSE_RESPONSE=PASS",
+    "VIP_UCFG_OPEN_RESPONSE=PASS",
+    "UCFG_RECEIVED=true",
+    "VIP_UCFG_CLOSE_RESPONSE=PASS",
+    "P12_READONLY_TRANSACTION=PASS",
+)
+positions = []
+for marker in sequence:
+    hits = [index for index, line in enumerate(lines) if line == marker]
+    if len(hits) != 1:
+        raise SystemExit(1)
+    positions.append(hits[0])
+if positions != sorted(positions) or len(set(positions)) != len(positions):
+    raise SystemExit(1)
+PY
+then
+    echo "P12_AUTH_SESSION_LIFETIME_SEQUENCE=FAIL"
+    echo "AUTH_SESSION_LIFETIME_VERIFIED=FAIL"
+    echo "READONLY_TRANSPORT_READY=false"
+    echo "LIVE_TEST_READY=false"
+    exit 1
+fi
+
+echo "P12_AUTH_SESSION_LIFETIME_SEQUENCE=PASS"
 echo "P12_READONLY_LIVE_PROOF=PASS"
 echo "REAL_TRANSPORT_IMPLEMENTED=true"
 echo "REAL_TRANSPORT_READONLY_SESSION_PROOF=PASS"
 echo "READONLY_SCOPE_ENFORCED=PASS"
+echo "AUTH_SESSION_LIFETIME_VERIFIED=PASS"
+echo "TARGET_BINDING_VERIFIED=NOT_PROVEN"
+echo "TIMEOUT_MAPPING_VERIFIED=NOT_PROVEN"
 echo "CREDENTIAL_MATERIAL_EMITTED=false"
 echo "ACTUATOR_COMMAND_ATTEMPTED=false"
 echo "PHYSICAL_DOOR_ACTION=false"
 echo "PHYSICAL_EFFECT_ASSERTED=false"
-echo "READONLY_TRANSPORT_READY=true"
+# The repository readiness model requires TARGET_BINDING_VERIFIED=PASS and
+# TIMEOUT_MAPPING_VERIFIED=PASS as independent gates. Do not overclaim overall
+# readiness from a successful auth/UCFG transaction alone.
+echo "READONLY_TRANSPORT_READY=false"
 echo "LIVE_TEST_READY=false"
