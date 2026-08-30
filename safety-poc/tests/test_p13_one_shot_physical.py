@@ -236,13 +236,12 @@ class P13OneShotRunnerShellTests(unittest.TestCase):
         self.assertIn("--target-fingerprint", self.text)
         self.assertIn("p13_actuation_preflight.sh", self.text)
 
-    def test_runner_uses_manifest_based_independent_pin(self):
-        # Blocker 1: expected wrapper SHA comes from the Git-reviewed build
-        # manifest, never computed by the operator from the installed file.
-        self.assertIn("p13_wrapper_manifest.json", self.text)
-        self.assertIn("P13_WRAPPER_MANIFEST_ABSENT=true", self.text)
-        self.assertIn("P13_WRAPPER_MANIFEST_NOT_BUILT=true", self.text)
-        self.assertIn('json.load(open(sys.argv[1]))["wrapper_sha256"]', self.text)
+    def test_runner_uses_runtime_identity_pin(self):
+        # PoC: expected wrapper SHA comes from the root-only runtime identity
+        # file captured by p13_capture_runtime_identity.sh.
+        self.assertIn("p13-runtime-identity.json", self.text)
+        self.assertIn("P13_RUNTIME_IDENTITY_ABSENT=true", self.text)
+        self.assertIn('json.load(open(sys.argv[1]))["wrapper"]["sha256"]', self.text)
         self.assertNotIn("P13_EXPECTED_WRAPPER_SHA256", self.text)
 
 

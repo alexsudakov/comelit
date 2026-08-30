@@ -25,9 +25,9 @@ AUDIT_FILE="$AUDIT_DIR/audit.jsonl"
 RUN_DIR=/root/comelit-p13-run
 EXPECTED_BRANCH=feat/p13-one-shot-actuation
 APPROVAL_TOKEN=I_APPROVE_P13_ONE_SHOT_PHYSICAL_DOOR_TEST
-# Expected wrapper identity is read from the Git-reviewed build manifest, never
-# computed by the operator from the installed file.
-MANIFEST="$REPO_ROOT/safety-poc/deploy/p13_wrapper_manifest.json"
+# Runtime identity (PoC): the expected wrapper identity is read from the
+# root-only runtime identity file captured by p13_capture_runtime_identity.sh.
+IDENTITY_FILE=/root/comelit-p13-runtime-identity.json
 EXPECTED_WRAPPER_MODE="${P13_EXPECTED_WRAPPER_MODE:-700}"
 
 # -- arguments ------------------------------------------------------------
@@ -94,17 +94,12 @@ STEP=EXECUTE
 export PYTHONPATH="$POC_ROOT/src"
 export PYTHONDONTWRITEBYTECODE=1
 
-# Independent pin from the Git-reviewed build manifest.
-if [[ ! -f "$MANIFEST" ]]; then
-    echo "P13_WRAPPER_MANIFEST_ABSENT=true"
+# Runtime identity from the captured root-only identity file.
+if [[ ! -f "$IDENTITY_FILE" ]]; then
+    echo "P13_RUNTIME_IDENTITY_ABSENT=true"
     exit 1
 fi
-MANIFEST_STATUS="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$MANIFEST")"
-EXPECTED_WRAPPER_SHA256="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["wrapper_sha256"])' "$MANIFEST")"
-if [[ "$MANIFEST_STATUS" != "BUILT" || -z "$EXPECTED_WRAPPER_SHA256" ]]; then
-    echo "P13_WRAPPER_MANIFEST_NOT_BUILT=true"
-    exit 1
-fi
+EXPECTED_WRAPPER_SHA256="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["wrapper"]["sha256"])' "$IDENTITY_FILE")"
 
 python3 -m comelit_safety_poc.p13_one_shot_physical \
     --db "$DB" \

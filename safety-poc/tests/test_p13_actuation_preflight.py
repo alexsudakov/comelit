@@ -23,45 +23,44 @@ class P13ActuationPreflightTests(unittest.TestCase):
         self.assertIn("P13_REAL_WRAPPER_PRESENT=false", self.text)
         self.assertIn('echo "ACTUATION_TRANSPORT_IMPLEMENTED=false"', self.text)
         self.assertIn("ACTUATION_TRANSPORT_IMPLEMENTED=true", self.text)
-        self.assertIn("P13_WRAPPER_MANIFEST_NOT_BUILT=true", self.text)
+        self.assertIn("P13_RUNTIME_IDENTITY_ABSENT=true", self.text)
         dry_init = self.text.index("STEP=REAL_ADAPTER_DRY_INIT")
         true_marker = self.text.index('echo "ACTUATION_TRANSPORT_IMPLEMENTED=true"')
         self.assertGreater(true_marker, dry_init)
 
     def test_wrapper_identity_pinned(self):
-        # Expected identity comes from the Git-reviewed build manifest.
-        self.assertIn("p13_wrapper_manifest.json", self.text)
-        self.assertIn("P13_WRAPPER_MANIFEST_ABSENT=true", self.text)
-        self.assertIn("P13_WRAPPER_MANIFEST_NOT_BUILT=true", self.text)
-        self.assertIn('json.load(open(sys.argv[1]))["wrapper_sha256"]', self.text)
+        # PoC runtime identity: expected identity comes from the root-only
+        # runtime identity file captured by p13_capture_runtime_identity.sh.
+        self.assertIn("p13-runtime-identity.json", self.text)
+        self.assertIn("P13_RUNTIME_IDENTITY_ABSENT=true", self.text)
+        self.assertIn('json.load(open(sys.argv[1]))["holder"]["sha256"]', self.text)
+        self.assertIn("P13_HOLDER_SHA256=FAIL", self.text)
         self.assertIn("P13_REAL_WRAPPER_SHA256=FAIL", self.text)
         self.assertIn("P13_REAL_WRAPPER_MODE=FAIL", self.text)
         self.assertIn('stat -c \'%a\' "$WRAPPER"', self.text)
         self.assertIn("P13_REAL_WRAPPER_SHA256=$WRAPPER_SHA", self.text)
+        self.assertIn("P13_REAL_WRAPPER_HOLDER_BIND=PASS", self.text)
 
     def test_ownership_checks_fail_closed(self):
         self.assertIn("P13_REAL_WRAPPER_OWNER=FAIL", self.text)
         self.assertIn("P13_PAYLOAD_OWNER=FAIL", self.text)
+        self.assertIn("P13_HOLDER_OWNER=FAIL", self.text)
         self.assertIn('stat -c \'%u\' "$WRAPPER"', self.text)
         self.assertIn('stat -c \'%u\' "$PAYLOAD_FILE"', self.text)
         self.assertIn("P13_REAL_WRAPPER_OWNER=root", self.text)
+        self.assertIn("P13_HOLDER_OWNER=root", self.text)
 
-    def test_build_procedure_and_template_exist(self):
-        build = Path(__file__).resolve().parents[1] / "scripts" / "build_p13_wrapper.sh"
-        template = Path(__file__).resolve().parents[1] / "deploy" / "p13_wrapper_template.sh"
-        manifest = Path(__file__).resolve().parents[1] / "deploy" / "p13_wrapper_manifest.json"
-        self.assertTrue(build.is_file())
-        self.assertTrue(template.is_file())
-        self.assertTrue(manifest.is_file())
-        body = build.read_text(encoding="utf-8")
-        self.assertIn("P13_BUILD_COMPLETE=true", body)
-        self.assertIn("p13_wrapper_manifest.json", body)
-        self.assertIn("chown root:root", body)
-        tmpl = template.read_text(encoding="utf-8")
-        self.assertIn("P13_CTPP_OPEN_OUTCOME", tmpl)
-        self.assertIn("P13_TEARDOWN=PASS", tmpl)
-        m = manifest.read_text(encoding="utf-8")
-        self.assertIn('"status": "NOT_BUILT"', m)
+    def test_capture_script_is_non_actuating_and_captures_runtime_identity(self):
+        capture = Path(__file__).resolve().parents[1] / "scripts" / "p13_capture_runtime_identity.sh"
+        self.assertTrue(capture.is_file())
+        body = capture.read_text(encoding="utf-8")
+        self.assertIn("P13_RUNTIME_IDENTITY_CAPTURE_COMPLETE=true", body)
+        self.assertIn("p13-runtime-identity.json", body)
+        self.assertIn("P13_HOLDER_CAPABILITY=PASS", body)
+        self.assertIn("P13_PAYLOAD_SIX_WRITES=PASS", body)
+        self.assertIn("P13_WRAPPER_HOLDER_BIND=PASS", body)
+        for forbidden in ("curl ", "wget ", "netcat", "open_door", "systemctl start"):
+            self.assertNotIn(forbidden, body)
 
     def test_audit_durability_proof_required(self):
         self.assertIn("p13_audit_durability_proof.py", self.text)

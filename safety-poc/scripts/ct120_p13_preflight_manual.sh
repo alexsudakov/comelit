@@ -68,17 +68,14 @@ POC_ROOT="$REPO_ROOT/safety-poc"
 [[ -f "$WRAPPER" ]] || { echo "P13_REAL_WRAPPER_PRESENT=false"; exit 1; }
 [[ -f "$PAYLOAD" ]] || { echo "P13_PAYLOAD_PRESENT=false"; exit 1; }
 
-# Independent pin: expected identity comes from the Git-reviewed build manifest
-# (status=BUILT), never computed by the operator from the installed file.
-MANIFEST="$REPO_ROOT/safety-poc/deploy/p13_wrapper_manifest.json"
-[[ -f "$MANIFEST" ]] || { echo "P13_WRAPPER_MANIFEST_ABSENT=true"; exit 1; }
-MANIFEST_STATUS="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$MANIFEST")"
-EXPECTED_WRAPPER_SHA256="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["wrapper_sha256"])' "$MANIFEST")"
-if [[ "$MANIFEST_STATUS" != "BUILT" || -z "$EXPECTED_WRAPPER_SHA256" ]]; then
-    echo "P13_WRAPPER_MANIFEST_NOT_BUILT=true"
-    exit 1
-fi
-echo "P13_WRAPPER_MANIFEST_STATUS=$MANIFEST_STATUS"
+# Runtime identity (PoC): live artifacts must match the identity captured once
+# by p13_capture_runtime_identity.sh.  This is runtime identity validation,
+# not reproducible provenance (per P13_POC_DIRECT_PATH.md).
+IDENTITY_FILE=/root/comelit-p13-runtime-identity.json
+[[ -f "$IDENTITY_FILE" ]] || { echo "P13_RUNTIME_IDENTITY_ABSENT=true"; exit 1; }
+EXPECTED_WRAPPER_SHA256="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["wrapper"]["sha256"])' "$IDENTITY_FILE")"
+EXPECTED_HOLDER_PATH="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["holder"]["path"])' "$IDENTITY_FILE")"
+echo "P13_RUNTIME_IDENTITY_FILE=$IDENTITY_FILE"
 WRAPPER_SHA="$(sha256sum "$WRAPPER" | awk '{print $1}')"
 [[ "$WRAPPER_SHA" == "$EXPECTED_WRAPPER_SHA256" ]] || { echo "P13_REAL_WRAPPER_SHA256=FAIL"; exit 1; }
 echo "P13_REAL_WRAPPER_PRESENT=true"
