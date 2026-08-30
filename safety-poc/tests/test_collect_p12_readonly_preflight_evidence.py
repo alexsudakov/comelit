@@ -48,12 +48,27 @@ class P12ReadonlyPreflightEvidenceCollectorTests(unittest.TestCase):
         ):
             self.assertIn(marker, self.text)
 
+    def test_run_identity_and_collector_identity_are_separate(self):
+        self.assertIn("PREFLIGHT_RUN_HEAD=$RUN_HEAD", self.text)
+        self.assertIn("PREFLIGHT_RUN_TREE=$RUN_TREE", self.text)
+        self.assertIn("COLLECTOR_SOURCE_HEAD=$COLLECTOR_HEAD", self.text)
+        self.assertIn("COLLECTOR_SOURCE_TREE=$COLLECTOR_TREE", self.text)
+        self.assertIn('rev-parse "$RUN_HEAD^{tree}"', self.text)
+        self.assertIn('merge-base --is-ancestor "$RUN_HEAD" "$COLLECTOR_HEAD"', self.text)
+        self.assertIn("P12_PREFLIGHT_RUN_TREE_BINDING=FAIL", self.text)
+        self.assertIn("P12_PREFLIGHT_RUN_NOT_ANCESTOR_OF_COLLECTOR=true", self.text)
+
+    def test_intervening_drift_is_collector_only(self):
+        self.assertIn('git -C "$REPO_ROOT" diff --name-only "$RUN_HEAD..$COLLECTOR_HEAD"', self.text)
+        self.assertIn("collect_p12_readonly_preflight_evidence", self.text)
+        self.assertIn("test_collect_p12_readonly_preflight_evidence", self.text)
+        self.assertIn("P12_PREFLIGHT_TO_COLLECTOR_DRIFT_SCOPE=FAIL", self.text)
+        self.assertIn("P12_PREFLIGHT_TO_COLLECTOR_DRIFT_SCOPE=PASS", self.text)
+
     def test_evidence_is_hash_bound_and_scope_limited(self):
         self.assertIn("PREFLIGHT_LOG_SHA256", self.text)
         self.assertIn("PREFLIGHT_RC_SHA256", self.text)
         self.assertIn("PREFLIGHT_META_SHA256", self.text)
-        self.assertIn("P12_PREFLIGHT_EVIDENCE_HEAD_DRIFT=true", self.text)
-        self.assertIn("P12_PREFLIGHT_EVIDENCE_TREE_DRIFT=true", self.text)
         self.assertIn("P12_PREFLIGHT_EVIDENCE_SCOPE_CHECK=FAIL", self.text)
         self.assertIn("P12_PREFLIGHT_PUBLIC_EVIDENCE_SECRET_SCAN=PASS", self.text)
         self.assertIn("P12_PREFLIGHT_PUBLIC_EVIDENCE_SAFETY_SCAN=PASS", self.text)
