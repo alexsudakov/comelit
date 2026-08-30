@@ -13,31 +13,71 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import prepare_p13_real_payloads as base
 
-# Public-safe pin for the already captured self-activation target pair
-# entrance|output-index. The plaintext target remains runtime-only.
+# Public-safe pins. Plaintext apartment/entrance identities remain runtime-only.
 EXPECTED_PEER_TARGET_SHA256 = "ec95e794a2a16aa02fb02489d9794419f13744ba66dfcb711f8af9326ee1ff30"
+EXPECTED_APT_ADDRESS_SHA256 = "baabc15b4b5496c0918278ab7475e3bfa5c5b257495137632f4a846ae4c040a6"
+EXPECTED_APT_SUBADDRESS_SHA256 = "7902699be42c8a8e46fbbb4501726517e86b22c56a189f7625a6da49081b2451"
 
 # Exact capture location used by the successful P12 one-shot read-only run.
-# The UCFG value remains runtime-only; content is accepted only if its SHA
-# matches the already pinned P12 live evidence.
 P12_RUNTIME_UCFG = Path("/run/comelit-p2p/p12-ucfg-response.json")
 
 
-def _peer_actions(vip: dict) -> list[dict]:
-    params = vip.get("user-parameters")
-    if not isinstance(params, dict):
-        raise RuntimeError("ViP user-parameters missing")
-    actions = params.get("opendoor-actions")
-    if actions is None:
-        raise RuntimeError("opendoor-actions missing")
-    peers = [mapping for mapping in base._dicts(actions) if mapping.get("action") == "peer"]
-    if len(peers) != 1:
-        raise RuntimeError(f"expected exactly one peer opendoor action, found {len(peers)}")
-    return peers
+def _scalar_text(value: object) -> str | None:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return str(value)
+    return None
 
 
-def runtime_peer_door(vip: dict) -> dict:
-    _peer_actions(vip)
+def _key_scalars(node: object, key: str) -> list[str]:
+    values: list[str] = []
+    if isinstance(node, dict):
+        for current_key, value in node.items():
+            if current_key == key:
+                text = _scalar_text(value)
+                if text is not None:
+                    values.append(text)
+            values.extend(_key_scalars(value, key))
+    elif isinstance(node, list):
+        for item in node:
+            values.extend(_key_scalars(item, key))
+    return values
+
+
+def _unique_pinned_scalar(node: object, key: str, expected_sha256: str) -> str:
+    values = _key_scalars(node, key)
+    if len(values) != 1:
+        raise RuntimeError(f"expected exactly one scalar {key}, found {len(values)}")
+    value = values[0]
+    actual = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    if actual != expected_sha256:
+        raise RuntimeError(f"pinned {key} identity mismatch")
+    return value
+
+
+def _require_peer_action(doc: object) -> None:
+    peers = [mapping for mapping in base._dicts(doc) if mapping.get("action") == "peer"]
+    if not peers:
+        raise RuntimeError("captured UCFG does not contain action=peer")
+
+
+def extract_vip_for_peer(doc: object) -> dict:
+    # The live UCFG layout is not the legacy component's vip.user-parameters
+    # layout. Reconstruct only the apartment identity required by its offline
+    # packet oracle, using the same SHA pins already proven by P12 target binding.
+    _require_peer_action(doc)
+    apt_address = _unique_pinned_scalar(doc, "apt-address", EXPECTED_APT_ADDRESS_SHA256)
+    apt_subaddress = _unique_pinned_scalar(doc, "apt-subaddress", EXPECTED_APT_SUBADDRESS_SHA256)
+    return {
+        "apt-address": apt_address,
+        "apt-subaddress": apt_subaddress,
+    }
+
+
+def runtime_peer_door(_vip: dict) -> dict:
     entrance = os.environ.get("P13_PEER_ENTRANCE", "")
     output_raw = os.environ.get("P13_PEER_OUTPUT_INDEX", "")
     name = os.environ.get("P13_PEER_ENTRANCE_NAME", "peer")
@@ -55,24 +95,17 @@ def runtime_peer_door(vip: dict) -> dict:
     if actual != EXPECTED_PEER_TARGET_SHA256:
         raise RuntimeError("P13 peer runtime target does not match captured self-activation target pin")
 
+    # The pinned legacy oracle expects door_item['apt-address']; keep number too
+    # because the public-safe target fingerprint helper uses it.
     return {
         "name": name,
         "number": entrance,
+        "apt-address": entrance,
         "output-index": output_index,
     }
 
 
-def extract_doors_with_peer_fallback(vip: dict) -> list[dict]:
-    params = vip.get("user-parameters")
-    if not isinstance(params, dict):
-        raise RuntimeError("ViP user-parameters missing")
-    doors = params.get("opendoor-address-book")
-    if isinstance(doors, list) and doors:
-        if not all(isinstance(item, dict) for item in doors):
-            raise RuntimeError("opendoor-address-book contains invalid entries")
-        return list(doors)
-    # This installation is the captured peer-door configuration. Construct the
-    # exact runtime-only door descriptor needed by the proven legacy oracle.
+def extract_doors_for_peer(vip: dict) -> list[dict]:
     return [runtime_peer_door(vip)]
 
 
@@ -84,12 +117,9 @@ def _matches_pinned_ucfg(path: Path) -> bool:
 
 
 def find_pinned_ucfg() -> Path:
-    # Prefer the exact runtime capture used by P12. Never trust the path alone:
-    # require the already-proven UCFG SHA before using its content.
     if _matches_pinned_ucfg(P12_RUNTIME_UCFG):
         return P12_RUNTIME_UCFG
 
-    # Fallback to any preserved root-only copy with the exact same identity.
     matches: list[Path] = []
     for path in base._walk_ucfg_candidates():
         if _matches_pinned_ucfg(path):
@@ -102,9 +132,10 @@ def find_pinned_ucfg() -> Path:
 
 
 def main() -> int:
-    # Reuse the already-tested offline oracle and output format. Only target
-    # discovery is adapted for this installation's action=peer configuration.
-    base.extract_doors = extract_doors_with_peer_fallback
+    # Reuse the proven legacy packet-construction oracle with all network methods
+    # replaced. Adapt only UCFG layout and the peer-door descriptor.
+    base.extract_vip = extract_vip_for_peer
+    base.extract_doors = extract_doors_for_peer
     base.find_exact_ucfg = find_pinned_ucfg
     rc = base.main()
     print("P13_PEER_TARGET_SOURCE=RUNTIME_PINNED")
