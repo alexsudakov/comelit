@@ -14,15 +14,17 @@ class P12ReadonlyLiveOnceTests(unittest.TestCase):
         self.assertIn("APPROVAL_EXPECTED=I_APPROVE_P12_READONLY_LIVE_ONCE", self.text)
         self.assertIn("P12_READONLY_LIVE_APPROVAL=FAIL", self.text)
 
-    def test_wrapper_is_invoked_exactly_once(self):
-        invocation = '75s "$WRAPPER" >"$RAW" 2>&1'
-        self.assertEqual(self.text.count(invocation), 1)
+    def test_runner_uses_deterministic_one_shot_supervisor_once(self):
+        self.assertEqual(self.text.count('python3 "$SCRIPT_DIR/p12_one_shot_exec.py"'), 1)
+        self.assertIn("P12_ONE_SHOT_PROCESS_INVOCATIONS=1", self.text)
+        self.assertIn("P12_ONE_SHOT_AUTO_RETRY=false", self.text)
         self.assertIn("P12_READONLY_LIVE_WRAPPER_INVOCATIONS=1", self.text)
+        self.assertNotIn("timeout --signal", self.text)
         self.assertNotIn("for attempt", self.text)
         self.assertNotIn("while true", self.text.lower())
 
     def test_raw_log_is_not_printed_and_safe_allowlist_is_used(self):
-        self.assertIn('chmod 600 "$RAW"', self.text)
+        self.assertIn('chmod 600 "$RAW" "$EXEC_STATUS"', self.text)
         self.assertIn('cat "$SAFE"', self.text)
         self.assertNotIn('cat "$RAW"', self.text)
         self.assertIn("UAUT_RESPONSE_CODE=200", self.text)
@@ -58,13 +60,12 @@ class P12ReadonlyLiveOnceTests(unittest.TestCase):
         self.assertIn("len(hits) != 1", self.text)
         self.assertIn("positions != sorted(positions)", self.text)
 
-    def test_live_proof_does_not_overclaim_full_readonly_readiness(self):
+    def test_timeout_mapping_is_verified_without_opening_target_binding_gate(self):
+        self.assertIn("TIMEOUT_MAPPING_VERIFIED=PASS", self.text)
         self.assertIn("TARGET_BINDING_VERIFIED=NOT_PROVEN", self.text)
-        self.assertIn("TIMEOUT_MAPPING_VERIFIED=NOT_PROVEN", self.text)
         self.assertIn('echo "READONLY_TRANSPORT_READY=false"', self.text)
         self.assertNotIn('echo "READONLY_TRANSPORT_READY=true"', self.text)
         self.assertIn("TARGET_BINDING_VERIFIED=PASS", self.text)
-        self.assertIn("TIMEOUT_MAPPING_VERIFIED=PASS", self.text)
 
 
 if __name__ == "__main__":
