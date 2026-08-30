@@ -161,3 +161,48 @@ A physical Door test is outside P12. It additionally requires:
 - exact target, one-shot semantics, no automatic retry, timeout handling and abort conditions.
 
 No repository-only commit or read-only probe may set the explicit approval marker on behalf of the operator.
+
+## P13 repository acceptance — one-shot actuation contract
+
+Repository-only P13 work must prove all of the following without a network
+action or physical Door action:
+
+- the fixed actuation plan is exactly
+  `CLOUD_SIGNALING -> ICE -> PSEUDOTCP -> VIP_ECHO -> UAUT_OPEN -> UAUT_AUTH ->
+  CTPP_OPEN -> DOOR_WRITES -> CTPP_CLOSE -> CLEAN_TEARDOWN`;
+- `attempt_number=1` only, enforced by `TransportRequest`;
+- one `operation_id` can cause at most one transport invocation;
+- duplicate operation ids never send again;
+- `SEND_ARMED` remains the irreversible ambiguity boundary, persisted before
+  the single transport call;
+- post-`SEND_ARMED` uncertainty => `UNKNOWN_OUTCOME`, never retried
+  automatically;
+- protocol ACK is never proof of physical relay movement;
+- `physical_effect_asserted=true` is forbidden in every evidence type;
+- a durable append-only audit journal records transport attempts and outcomes
+  with fsync before acknowledgement;
+- the non-actuating preflight keeps `EXPLICIT_LIVE_TEST_APPROVAL=false` and
+  `LIVE_TEST_READY=false`;
+- prepared real Door payload bodies stay root-only (mode 0600), are never
+  committed, and are never emitted to stdout/evidence/Codex context;
+- credentials are never exported, committed, or sent to external model context.
+
+Expected repository markers:
+
+- `P13_ACTUATION_TRANSPORT_MODEL_TESTS=PASS`;
+- `P13_AUDIT_SINK_TESTS=PASS`;
+- `P13_ACTUATION_BOUNDARY_TESTS=PASS`;
+- `P13_ONE_SHOT_EXECUTOR_INTEGRATION_TESTS=PASS`;
+- `P13_ACTUATION_PREFLIGHT_TESTS=PASS`;
+- `P13_REAL_PAYLOAD_PREP_TESTS=PASS`;
+- `P13_PRIMARY_PATH=CLOUD_P2P_ICE_PSEUDOTCP_VIP_CTPP`;
+- `P13_ATTEMPT_NUMBER_FIXED=1`;
+- `P13_AUTO_RETRY_ALLOWED=false`;
+- `P13_PHYSICAL_EFFECT_ASSERTION_ALLOWED=false`;
+- `ACTUATION_TRANSPORT_IMPLEMENTED=true`;
+- `AUDIT_SINK_VERIFIED=PASS`;
+- `EXPLICIT_LIVE_TEST_APPROVAL=false`;
+- `LIVE_TEST_READY=false`.
+
+P13 repository readiness cannot open the live-test gate: the operator approval
+marker is set only by the operator at the final physical execution step.

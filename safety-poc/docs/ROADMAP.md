@@ -79,11 +79,31 @@ Current sub-stages:
 
 No Door action is authorized by P12.
 
-## P13 — explicit live-test gate
+## P13 — one-shot actuation transport
 
-No live Door action is authorized by this roadmap. A future physical test requires a separate explicit decision and evidence for exact target, one-shot operation, no retry, audit, timeout handling and abort conditions.
+P13 repository work is implemented on `feat/p13-one-shot-actuation`:
 
-The live gate additionally requires an independently reviewed actuation transport. Successful P12 read-only session proof cannot satisfy this requirement.
+- fixed ten-stage actuation plan
+  (`CLOUD_SIGNALING -> ICE -> PSEUDOTCP -> VIP_ECHO -> UAUT_OPEN -> UAUT_AUTH ->
+  CTPP_OPEN -> DOOR_WRITES -> CTPP_CLOSE -> CLEAN_TEARDOWN`);
+- `RealDoorActuationBoundary` behind the existing typed one-shot boundary with
+  the five-outcome mapping (`PROVEN_NOT_SENT`, `REJECTED`, `ACCEPTED_NO_ACK`,
+  `ACKED`, `AMBIGUOUS`);
+- durable append-only audit sink with fsync-before-ack;
+- non-actuating preflight (`scripts/p13_actuation_preflight.sh`) proving
+  identity, payload mode 0600, audit durability, no conflicting process, no
+  retry surface, `ACTUATION_TRANSPORT_IMPLEMENTED=true`,
+  `AUDIT_SINK_VERIFIED=PASS`, while keeping `EXPLICIT_LIVE_TEST_APPROVAL=false`
+  and `LIVE_TEST_READY=false`;
+- offline prepared real Door payload generation
+  (`scripts/prepare_p13_real_payloads.py`) with root-only output and
+  SHA-256-only evidence.
+
+No live Door action is authorized by this roadmap stage. A physical test
+requires a separate explicit operator decision equivalent to
+`I_APPROVE_P13_ONE_SHOT_PHYSICAL_DOOR_TEST`, one fresh `operation_id`, exactly
+one transport invocation, no automatic retry, and `UNKNOWN_OUTCOME`
+classification for any post-`SEND_ARMED` ambiguity.
 
 ## P14 — Home Assistant integration
 

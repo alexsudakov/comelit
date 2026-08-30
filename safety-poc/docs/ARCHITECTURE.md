@@ -20,7 +20,14 @@ A per-target minimum interval is enforced before `SEND_ARMED`. A rate-limited re
 
 ## Real transport
 
-Not included. `DisabledRealTransport` contains no network implementation and intentionally fails closed.
+P13 implements the real Door actuation transport behind the typed boundary:
+`RealDoorActuationBoundary` (see `P13_ONE_SHOT_ACTUATION.md`) converts exactly
+one `TransportRequest` into one of the five typed outcomes using the proven
+P2P/session path plus the reconciled CTPP six-write transaction.  The
+repository ships the fixture session and the prepared-payload contract;
+`DisabledRealTransport` remains the fail-closed placeholder for the default
+CLI path until the CT120 live adapter is deployed.  Protocol ACK is never
+evidence that a relay moved or that a door opened.
 
 ## Typed transport boundary (v0.2)
 

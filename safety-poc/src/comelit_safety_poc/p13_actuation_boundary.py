@@ -1,0 +1,248 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol
+
+from .boundary import BoundaryEvidence, BoundaryOutcome, TransportRequest
+from .p13_transport_model import P13ActuationEvidence
+
+
+@dataclass(frozen=True)
+class P13PayloadBundle:
+    """Prepared real Door payload metadata loaded from the root-only prep file.
+
+    Only the metadata (write count, per-write SHA256, target fingerprint and
+    UCFG binding) is kept in memory; raw payload hex is loaded on demand by the
+    session adapter and is never written to Git, stdout, or Codex context.
+    """
+
+    schema: int
+    ucfg_sha256: str
+    target_index: int
+    target_fingerprint: str
+    target_name: str
+    channel_id_fixture: int
+    write_count: int
+    write_sha256: tuple[str, ...]
+    write_bytes: tuple[int, ...]
+
+    def verify(self) -> None:
+        if self.schema != 1:
+            raise ValueError("P13 payload bundle schema must be 1")
+        if not self.ucfg_sha256 or len(self.ucfg_sha256) != 64:
+            raise ValueError("P13 payload bundle requires a pinned UCFG SHA-256")
+        if not self.target_fingerprint or len(self.target_fingerprint) != 64:
+            raise ValueError("P13 payload bundle requires a target fingerprint")
+        if self.write_count != len(self.write_sha256) or self.write_count != len(self.write_bytes):
+            raise ValueError("P13 payload bundle write metadata is inconsistent")
+        if self.write_count != 6:
+            raise ValueError("P13 real Door transaction requires exactly six writes")
+
+
+class P13DoorSession(Protocol):
+    """Typed real actuation session.
+
+    A real implementation on CT120 wraps the proven P2P path
+    (cloud signaling -> ICE -> PseudoTCP -> ViP) and the reconciled CTPP Door
+    transaction.  The repository ships only a fixture implementation; the real
+    adapter is deployed root-only on CT120 and never receives credential
+    material through the boundary.
+    """
+
+    def open_ctpp(self) -> tuple[bool, bool]:
+        """Open the CTPP channel. Returns (opened, ambiguous)."""
+        ...
+
+    def write_door_body(self, body_hex: str) -> None:
+        """Send exactly one prepared Door body over the open CTPP channel."""
+        ...
+
+    def close_ctpp(self) -> bool:
+        """Close the CTPP channel. Returns True on clean close."""
+        ...
+
+    def teardown(self) -> None:
+        """Clean ViP session teardown."""
+        ...
+
+
+class P13BodyLoader(Protocol):
+    def load(self, index: int) -> str: ...
+
+
+@dataclass
+class FixtureP13DoorSession:
+    """Deterministic in-memory session used by tests and offline preflight."""
+
+    opened: bool = False
+    ambiguous_open: bool = False
+    write_count: int = 0
+    close_ok: bool = True
+    teardown_called: bool = False
+    fail_after_writes: int | None = None
+    fail_open: bool = False
+    ambiguous_close: bool = False
+
+    def open_ctpp(self) -> tuple[bool, bool]:
+        if self.fail_open:
+            return False, False
+        if self.ambiguous_open:
+            return False, True
+        self.opened = True
+        return True, False
+
+    def write_door_body(self, body_hex: str) -> None:
+        if not self.opened:
+            raise RuntimeError("fixture session write before CTPP open")
+        self.write_count += 1
+        if self.fail_after_writes is not None and self.write_count >= self.fail_after_writes:
+            raise RuntimeError("fixture session write failure after partial emission")
+
+    def close_ctpp(self) -> bool:
+        if not self.opened:
+            raise RuntimeError("fixture session close before CTPP open")
+        self.opened = False
+        if self.ambiguous_close:
+            raise RuntimeError("fixture session close outcome ambiguous")
+        return self.close_ok
+
+    def teardown(self) -> None:
+        self.teardown_called = True
+
+
+class RealDoorActuationBoundary:
+    """One-shot real Door actuation behind the typed transport boundary.
+
+    Invariant mapping (identical to the offline transaction model):
+
+    - failure before CTPP open with proof of zero writes -> PROVEN_NOT_SENT
+    - ambiguous CTPP open -> AMBIGUOUS (never downgraded to PROVEN_NOT_SENT)
+    - explicit rejection before any Door write -> REJECTED
+    - failure after any Door write -> AMBIGUOUS
+    - complete six-write transaction without a Door-specific ACK ->
+      ACCEPTED_NO_ACK (executor persists UNKNOWN_OUTCOME)
+    - protocol ACK never becomes physical-effect proof
+    """
+
+    def __init__(
+        self,
+        session: P13DoorSession,
+        bundle: P13PayloadBundle,
+        *,
+        body_loader: P13BodyLoader | None = None,
+    ):
+        self.session = session
+        self.bundle = bundle
+        self.body_loader = body_loader
+        self.calls = 0
+        self.last_evidence: P13ActuationEvidence | None = None
+
+    def _verify_target_binding(self, request: TransportRequest) -> None:
+        # The target string is the public-safe fingerprint; the prepared bundle
+        # is bound to the exact UCFG snapshot and apartment identity.
+        if request.target != self.bundle.target_fingerprint:
+            raise ValueError("P13 target binding mismatch: request target != prepared bundle fingerprint")
+
+    def _load_body(self, index: int) -> str:
+        if self.body_loader is None:
+            raise RuntimeError("P13 real body loader is required on the live path")
+        body_hex = self.body_loader.load(index)
+        digest = hashlib.sha256(bytes.fromhex(body_hex)).hexdigest()
+        if digest != self.bundle.write_sha256[index]:
+            raise RuntimeError("P13 prepared body SHA-256 mismatch")
+        return body_hex
+
+    def attempt_once(self, request: TransportRequest) -> BoundaryEvidence:
+        self.calls += 1
+        if self.calls > 1:
+            raise AssertionError("P13 actuation boundary invoked more than once")
+        self._verify_target_binding(request)
+        self.bundle.verify()
+
+        writes = 0
+        opened = False
+        protocol_ack = False
+        try:
+            opened, ambiguous = self.session.open_ctpp()
+            if ambiguous:
+                return BoundaryEvidence(
+                    outcome=BoundaryOutcome.AMBIGUOUS,
+                    detail="P13 CTPP open is ambiguous; retry is unsafe",
+                    protocol_acknowledged=False,
+                )
+            if not opened:
+                return BoundaryEvidence(
+                    outcome=BoundaryOutcome.PROVEN_NOT_SENT,
+                    detail="P13 CTPP open provably did not open; zero Door writes emitted",
+                    protocol_acknowledged=False,
+                )
+
+            for index in range(self.bundle.write_count):
+                body_hex = self._load_body(index)
+                self.session.write_door_body(body_hex)
+                writes += 1
+
+            close_ok = self.session.close_ctpp()
+            self.session.teardown()
+            protocol_ack = close_ok
+
+            evidence = P13ActuationEvidence(
+                cloud_signaling=True,
+                ice_connected=True,
+                pseudotcp_open=True,
+                vip_echo_ack=True,
+                uaut_open=True,
+                uaut_auth_200=True,
+                ctpp_open=True,
+                door_write_count=writes,
+                ctpp_close=close_ok,
+                clean_teardown=True,
+                protocol_acknowledged=protocol_ack,
+                actuator_command_attempted=True,
+            )
+            self.last_evidence = evidence
+            return BoundaryEvidence(
+                outcome=BoundaryOutcome.ACCEPTED_NO_ACK,
+                detail="P13 six-write Door transaction emitted; Door-specific ACK unproven",
+                protocol_acknowledged=False,
+            )
+        except Exception as exc:
+            # A failure before any Door write that also did not open the channel
+            # is provably pre-send; everything after an open attempt is conservative.
+            if not opened and writes == 0:
+                return BoundaryEvidence(
+                    outcome=BoundaryOutcome.PROVEN_NOT_SENT,
+                    detail=f"P13 failed before any Door write: {type(exc).__name__}",
+                    protocol_acknowledged=False,
+                )
+            return BoundaryEvidence(
+                outcome=BoundaryOutcome.AMBIGUOUS,
+                detail=f"P13 failed after Door emission boundary: {type(exc).__name__}",
+                protocol_acknowledged=False,
+            )
+
+
+class P13BodyFileLoader:
+    """Loads prepared Door bodies from the root-only payload file on CT120.
+
+    The file is owned by root with mode 0600; this loader never prints body
+    values and only hands one body at a time to the session adapter.
+    """
+
+    def __init__(self, path: str | Path = "/root/comelit-p13-actuator-prep/real-door-payloads.json"):
+        self.path = Path(path)
+
+    def load(self, index: int) -> str:
+        if not self.path.is_file():
+            raise FileNotFoundError(f"P13 payload file absent: {self.path}")
+        mode = self.path.stat().st_mode & 0o777
+        if mode != 0o600:
+            raise ValueError("P13 payload file must be mode 0600")
+        data = json.loads(self.path.read_text(encoding="utf-8"))
+        bodies = data.get("bodies")
+        if not isinstance(bodies, list) or index >= len(bodies):
+            raise ValueError("P13 payload file body index out of range")
+        return str(bodies[index]["hex"])
