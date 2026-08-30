@@ -40,8 +40,31 @@ class P12ReadonlyLiveOnceTests(unittest.TestCase):
             "PHYSICAL_DOOR_ACTION=false",
         ):
             self.assertIn(marker, self.text)
-        self.assertIn("READONLY_TRANSPORT_READY=true", self.text)
+        self.assertIn("REAL_TRANSPORT_READONLY_SESSION_PROOF=PASS", self.text)
         self.assertIn("LIVE_TEST_READY=false", self.text)
+
+    def test_auth_session_lifetime_requires_exact_same_invocation_sequence(self):
+        for marker in (
+            "P2_VIP_UAUT_AUTH=PASS",
+            "VIP_UAUT_CLOSE_RESPONSE=PASS",
+            "VIP_UCFG_OPEN_RESPONSE=PASS",
+            "UCFG_RECEIVED=true",
+            "VIP_UCFG_CLOSE_RESPONSE=PASS",
+            "P12_READONLY_TRANSACTION=PASS",
+        ):
+            self.assertIn(marker, self.text)
+        self.assertIn("P12_AUTH_SESSION_LIFETIME_SEQUENCE=PASS", self.text)
+        self.assertIn("AUTH_SESSION_LIFETIME_VERIFIED=PASS", self.text)
+        self.assertIn("len(hits) != 1", self.text)
+        self.assertIn("positions != sorted(positions)", self.text)
+
+    def test_live_proof_does_not_overclaim_full_readonly_readiness(self):
+        self.assertIn("TARGET_BINDING_VERIFIED=NOT_PROVEN", self.text)
+        self.assertIn("TIMEOUT_MAPPING_VERIFIED=NOT_PROVEN", self.text)
+        self.assertIn('echo "READONLY_TRANSPORT_READY=false"', self.text)
+        self.assertNotIn('echo "READONLY_TRANSPORT_READY=true"', self.text)
+        self.assertIn("TARGET_BINDING_VERIFIED=PASS", self.text)
+        self.assertIn("TIMEOUT_MAPPING_VERIFIED=PASS", self.text)
 
 
 if __name__ == "__main__":
