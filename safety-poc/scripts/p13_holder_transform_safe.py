@@ -166,6 +166,215 @@ p13_queue_open_ctpp(void)
 '''
 
 
+def _apply_peer_timing(text: str) -> str:
+    """Match the proven peer/TAP write cadence without requiring Door ACKs.
+
+    The recovered peer implementation performs six writes total: register,
+    ~200 ms settle, then five operation packets back-to-back, ~1 s settle, and
+    channel close. It does not read a response between those writes. Incoming
+    CTPP frames are therefore observational only and never advance the write
+    sequence.
+    """
+
+    tx_completed_anchor = "static void\np13_tx_completed(P13TxKind kind)"
+    prototypes = '''static gboolean p13_queue_door_write(guint index);
+static gboolean p13_queue_close_ctpp(void);
+static gboolean p13_register_settle_cb(gpointer data);
+static gboolean p13_post_writes_settle_cb(gpointer data);
+
+
+static void
+p13_tx_completed(P13TxKind kind)'''
+    text = _replace_once(
+        text,
+        tx_completed_anchor,
+        prototypes,
+        "peer/TAP forward declarations",
+    )
+
+    old_write_completed = '''        case P13_TX_WRITE_DOOR:
+            printf(
+                "P13_DOOR_WRITE_%u_SENT=PASS\\n",
+                (unsigned)p13_write_index
+            );
+            p13_stage = (P13Stage)(
+                P13_STAGE_WAIT_WRITE_1_RESPONSE +
+                (p13_write_index - 1) * 2
+            );
+            break;
+'''
+    new_write_completed = '''        case P13_TX_WRITE_DOOR:
+            printf(
+                "P13_DOOR_WRITE_%u_SENT=PASS\\n",
+                (unsigned)p13_write_index
+            );
+            p13_writes_sent = p13_write_index;
+
+            if (p13_write_index == 1) {
+                /* Peer/TAP register settles for ~200 ms; no ACK is required. */
+                p13_stage = P13_STAGE_WAIT_WRITE_1_RESPONSE;
+                p13_set_deadline();
+                g_timeout_add(200, p13_register_settle_cb, NULL);
+            } else if (p13_write_index < p13_door_write_count) {
+                /* The five operation packets are emitted back-to-back. */
+                p13_stage = (P13Stage)(
+                    P13_STAGE_WRITE_1_TX +
+                    p13_write_index * 2
+                );
+                if (!p13_queue_door_write(p13_write_index + 1)) {
+                    p13_failed = TRUE;
+                    if (loop)
+                        g_main_loop_quit(loop);
+                }
+            } else {
+                /* Give the gateway ~1 s to process the full operation. */
+                p13_stage = P13_STAGE_WAIT_WRITE_6_RESPONSE;
+                p13_set_deadline();
+                g_timeout_add(1000, p13_post_writes_settle_cb, NULL);
+            }
+            break;
+'''
+    text = _replace_once(
+        text,
+        old_write_completed,
+        new_write_completed,
+        "peer/TAP send-only write progression",
+    )
+
+    close_fn = '''static gboolean
+p13_queue_close_ctpp(void)
+{
+    return p13_queue_close_channel(
+        ctpp_channel_id,
+        P13_TX_CLOSE_CTPP
+    );
+}
+'''
+    close_with_callbacks = close_fn + '''
+
+static gboolean
+p13_register_settle_cb(gpointer data)
+{
+    (void)data;
+
+    if (p13_stage != P13_STAGE_WAIT_WRITE_1_RESPONSE ||
+        p13_writes_sent != 1) {
+        return G_SOURCE_REMOVE;
+    }
+
+    p13_deadline_us = 0;
+    p13_stage = P13_STAGE_WRITE_2_TX;
+    if (!p13_queue_door_write(2)) {
+        p13_failed = TRUE;
+        if (loop)
+            g_main_loop_quit(loop);
+    }
+
+    return G_SOURCE_REMOVE;
+}
+
+
+static gboolean
+p13_post_writes_settle_cb(gpointer data)
+{
+    (void)data;
+
+    if (p13_stage != P13_STAGE_WAIT_WRITE_6_RESPONSE ||
+        p13_writes_sent != p13_door_write_count) {
+        return G_SOURCE_REMOVE;
+    }
+
+    p13_deadline_us = 0;
+    p13_stage = P13_STAGE_CLOSE_CTPP_TX;
+    if (!p13_queue_close_ctpp()) {
+        p13_failed = TRUE;
+        if (loop)
+            g_main_loop_quit(loop);
+    }
+
+    return G_SOURCE_REMOVE;
+}
+'''
+    text = _replace_once(
+        text,
+        close_fn,
+        close_with_callbacks,
+        "peer/TAP settle callbacks",
+    )
+
+    old_ack_block = '''        if (p13_stage >= P13_STAGE_WAIT_WRITE_1_RESPONSE &&
+            p13_stage <= P13_STAGE_WAIT_WRITE_6_RESPONSE) {
+
+            guint write_index =
+                (p13_stage - P13_STAGE_WAIT_WRITE_1_RESPONSE) / 2 + 1;
+
+            if (request_id != ctpp_channel_id) {
+                fprintf(stderr, "P13_DOOR_WRITE_REQUEST_ID=FAIL\\n");
+                return FALSE;
+            }
+
+            p13_writes_sent = write_index;
+            printf(
+                "P13_DOOR_WRITE_%u_ACKED=true\\n",
+                (unsigned)write_index
+            );
+            fflush(stdout);
+
+            p13_consume_post_ack(frame_len);
+
+            if (write_index < p13_door_write_count) {
+                p13_stage = (P13Stage)(
+                    P13_STAGE_WRITE_1_TX + write_index * 2
+                );
+
+                if (!p13_queue_door_write(write_index + 1))
+                    return FALSE;
+            } else {
+                p13_stage = P13_STAGE_CLOSE_CTPP_TX;
+
+                if (!p13_queue_close_ctpp())
+                    return FALSE;
+            }
+
+            continue;
+        }
+'''
+    new_inbound_block = '''        if (request_id == ctpp_channel_id &&
+            p13_ctpp_open_ok &&
+            p13_stage >= P13_STAGE_WRITE_1_TX &&
+            p13_stage <= P13_STAGE_WAIT_CTPP_CLOSE_RESPONSE) {
+
+            /* Peer/TAP does not require a response to any Door write. Any
+             * CTPP frame observed here is informational and must not advance
+             * or retry the actuator sequence. */
+            printf("P13_DOOR_INBOUND_FRAME_OBSERVED=true\\n");
+            fflush(stdout);
+            p13_consume_post_ack(frame_len);
+            continue;
+        }
+'''
+    text = _replace_once(
+        text,
+        old_ack_block,
+        new_inbound_block,
+        "peer/TAP non-blocking inbound handling",
+    )
+
+    required = (
+        "g_timeout_add(200, p13_register_settle_cb, NULL);",
+        "g_timeout_add(1000, p13_post_writes_settle_cb, NULL);",
+        "P13_DOOR_INBOUND_FRAME_OBSERVED=true",
+        "p13_writes_sent = p13_write_index;",
+    )
+    for marker in required:
+        if marker not in text:
+            raise RuntimeError(f"peer/TAP timing patch missing marker: {marker}")
+    if "P13_DOOR_WRITE_%u_ACKED=true" in text:
+        raise RuntimeError("peer/TAP candidate still requires per-write Door ACKs")
+
+    return text
+
+
 def transform(source: str, payload: dict, ctpp_address: str) -> str:
     original_helpers = module.p13_helpers
 
@@ -262,6 +471,8 @@ p13_queue_open_ctpp(void)
         "optional OPEN response extension parser",
     )
 
+    transformed = _apply_peer_timing(transformed)
+
     final_timer = "g_timeout_add (\n                250,\n                pseudotcp_success_quit_cb"
     premature_timer = "g_timeout_add(\n        250,\n        pseudotcp_success_quit_cb"
     if transformed.count(final_timer) != 1:
@@ -277,6 +488,8 @@ p13_queue_open_ctpp(void)
         raise RuntimeError("P13 CTPP OPEN extension length is missing")
     if "extension_len != body_len - 16u" not in transformed:
         raise RuntimeError("P13 OPEN response extension validation is missing")
+    if "P13_DOOR_WRITE_%u_ACKED=true" in transformed:
+        raise RuntimeError("P13 peer/TAP candidate must not require Door write ACKs")
 
     return transformed
 
@@ -301,6 +514,8 @@ def main() -> int:
     print("P13_FINAL_SUCCESS_TIMER_COUNT=1")
     print("P13_UAUT_AUTH_HANDOFF=PASS")
     print("P13_CTPP_OPEN_EXTENSION=PASS")
+    print("P13_PEER_TAP_WRITE_TIMING=PASS")
+    print("P13_DOOR_WRITE_ACK_REQUIRED=false")
     print("P13_CTPP_ADDRESS_UCFG_BINDING=PASS")
     print("P13_CTPP_ADDRESS_VALUE_EMITTED=false")
     print(f"P13_PAYLOAD_WRITE_COUNT={len(payload['bodies'])}")
