@@ -18,12 +18,9 @@ class P13ActuationPreflightTests(unittest.TestCase):
         self.assertIn("LIVE_TEST_READY=false", self.text)
 
     def test_actuation_transport_is_runtime_derived_not_hardcoded(self):
-        # Blocker 4: the marker must be emitted only after real adapter identity
-        # and dry-init proofs, and must be false when the artifact is absent.
         self.assertIn("P13_REAL_WRAPPER_PRESENT=false", self.text)
         self.assertIn('echo "ACTUATION_TRANSPORT_IMPLEMENTED=false"', self.text)
         self.assertIn("ACTUATION_TRANSPORT_IMPLEMENTED=true", self.text)
-        # The true marker appears only after the dry-init block, never before.
         dry_init = self.text.index("STEP=REAL_ADAPTER_DRY_INIT")
         true_marker = self.text.index('echo "ACTUATION_TRANSPORT_IMPLEMENTED=true"')
         self.assertGreater(true_marker, dry_init)
@@ -37,8 +34,6 @@ class P13ActuationPreflightTests(unittest.TestCase):
         self.assertIn("P13_REAL_WRAPPER_SHA256=$WRAPPER_SHA", self.text)
 
     def test_audit_durability_proof_required(self):
-        # Blocker 5: preflight must invoke the dedicated append+fsync+reopen
-        # proof script and only then emit AUDIT_SINK_VERIFIED=PASS.
         self.assertIn("p13_audit_durability_proof.py", self.text)
         self.assertIn("--audit \"$AUDIT_FILE\"", self.text)
         self.assertIn("P13_AUDIT_DURABILITY_PROOF=FAIL", self.text)
@@ -103,10 +98,14 @@ class Ct120ManualPreflightTests(unittest.TestCase):
 
     def test_manual_script_collects_only_public_safe_evidence(self):
         body = self.text.read_text(encoding="utf-8")
-        self.assertIn("evidence/p13-preflight-$STAMP", body)
-        self.assertIn("P13_PREFLIGHT_EVIDENCE_HEAD=$HEAD", body)
-        self.assertIn("P13_PREFLIGHT_EVIDENCE_TREE=$TREE", body)
+        self.assertIn('EVIDENCE_BRANCH="evidence/p13-preflight-$STAMP"', body)
+        self.assertIn('EVIDENCE_REL="evidence/p13-preflight/$STAMP"', body)
+        self.assertIn("P13_PREFLIGHT_SOURCE_HEAD=$SOURCE_HEAD", body)
+        self.assertIn("P13_PREFLIGHT_SOURCE_TREE=$SOURCE_TREE", body)
         self.assertIn("P13_PREFLIGHT_PAYLOAD_SHA256", body)
+        self.assertIn("CREDENTIAL_VALUES_COLLECTED=false", body)
+        self.assertIn("TARGET_IDENTITY_VALUES_EMITTED=false", body)
+        self.assertIn("RAW_PAYLOAD_BODIES_COLLECTED=false", body)
         self.assertNotIn("apt-address", body)
         self.assertNotIn("password", body)
         self.assertNotIn("token_value", body)
@@ -115,6 +114,24 @@ class Ct120ManualPreflightTests(unittest.TestCase):
         body = self.text.read_text(encoding="utf-8")
         self.assertIn("CT120_P13_MANUAL_REQUIRES_ROOT=true", body)
         self.assertIn('[[ "${EUID}" -eq 0 ]]', body)
+
+    def test_manual_script_syncs_exact_remote_head_before_preflight(self):
+        body = self.text.read_text(encoding="utf-8")
+        self.assertIn('git fetch origin --prune', body)
+        self.assertIn('git checkout -q -B "$EXPECTED_BRANCH" "origin/$EXPECTED_BRANCH"', body)
+        self.assertIn('REMOTE_HEAD="$(git rev-parse "origin/$EXPECTED_BRANCH")"', body)
+        self.assertIn('[[ "$SOURCE_HEAD" == "$REMOTE_HEAD" ]]', body)
+        self.assertIn("CT120_P13_MANUAL_REMOTE_IDENTITY=PASS", body)
+
+    def test_manual_script_creates_dedicated_evidence_branch_before_push(self):
+        body = self.text.read_text(encoding="utf-8")
+        create_pos = body.index('git checkout -q -b "$EVIDENCE_BRANCH" "$SOURCE_HEAD"')
+        commit_pos = body.index('git -c user.name="hermes"')
+        push_pos = body.index('git push -u origin "$EVIDENCE_BRANCH"')
+        self.assertLess(create_pos, commit_pos)
+        self.assertLess(commit_pos, push_pos)
+        self.assertIn("P13_PREFLIGHT_EVIDENCE_PUSH=PASS", body)
+        self.assertIn("P13_PREFLIGHT_EVIDENCE_PUSH=REQUIRED", body)
 
 
 if __name__ == "__main__":
