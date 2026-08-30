@@ -39,6 +39,31 @@ class P12ReadonlyLivePreflightTests(unittest.TestCase):
         self.assertIn("ACTUATOR_COMMAND_ATTEMPTED=false", self.text)
         self.assertIn("PHYSICAL_EFFECT_ASSERTED=false", self.text)
 
+    def test_control_plane_is_parsed_and_checked_without_execution(self):
+        for name in (
+            "p12_one_shot_exec.py",
+            "p12_verify_target_binding.py",
+            "run_p12_readonly_live_once.sh",
+            "p12_finalize_readonly_readiness.py",
+        ):
+            self.assertIn(name, self.text)
+        self.assertIn("ast.parse", self.text)
+        self.assertIn("P12_PREFLIGHT_ONE_SHOT_CONTROL=PASS", self.text)
+        self.assertIn("P12_PREFLIGHT_TARGET_HASH_PROFILE=PASS", self.text)
+        self.assertIn("P12_PREFLIGHT_LIVE_RUNNER_CONTRACT=PASS", self.text)
+        self.assertIn("P12_PREFLIGHT_FINALIZER_CONTRACT=PASS", self.text)
+        self.assertIn("P12_PREFLIGHT_CONTROL_PLANE=PASS", self.text)
+        self.assertIn("subprocess.Popen(", self.text)
+        self.assertIn("start_new_session=True", self.text)
+        self.assertIn("os.killpg(proc.pid, sig)", self.text)
+        self.assertIn('echo \\"READONLY_TRANSPORT_READY=false\\"', self.text)
+        self.assertIn('echo \\"READONLY_TRANSPORT_READY=true\\"', self.text)
+
+    def test_target_profile_checks_hashes_without_emitting_identity_values(self):
+        self.assertIn('{"model", "version", "apt-address", "apt-subaddress"}', self.text)
+        self.assertIn(r'[0-9a-f]{64}', self.text)
+        self.assertIn("TARGET_IDENTITY_VALUES_EMITTED=false", self.text)
+
     def test_credential_check_is_metadata_only(self):
         self.assertIn("SECRETS_FILE=/root/.config/comelit/secrets.env", self.text)
         self.assertIn("stat -c '%a' \"$SECRETS_FILE\"", self.text)
