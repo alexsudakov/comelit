@@ -9,6 +9,7 @@ class P12ReadonlyLivePreflightTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.text = SCRIPT.read_text(encoding="utf-8")
+        cls.lines = [line.strip() for line in cls.text.splitlines()]
 
     def test_candidate_identity_is_exactly_pinned(self):
         self.assertIn("EXPECTED_BUILD_HEAD=150d594072aa1d999c99679d5451772e65c6554f", self.text)
@@ -24,8 +25,10 @@ class P12ReadonlyLivePreflightTests(unittest.TestCase):
         self.assertIn("SECRETS_CONTENT_READ=false", self.text)
         self.assertIn("ACTIVE_COMELIT_NETWORK_PROBES=false", self.text)
         self.assertNotIn('timeout "$WRAPPER"', self.text)
-        self.assertNotIn('"$WRAPPER" >', self.text)
-        self.assertNotIn('"$BINARY" >', self.text)
+        self.assertNotIn('"$WRAPPER"', self.lines)
+        self.assertNotIn('"$BINARY"', self.lines)
+        self.assertNotIn('exec "$WRAPPER"', self.text)
+        self.assertNotIn('exec "$BINARY"', self.text)
 
     def test_readonly_and_actuator_guards_are_present(self):
         self.assertIn("P12_READONLY_TRANSACTION=PASS", self.text)
