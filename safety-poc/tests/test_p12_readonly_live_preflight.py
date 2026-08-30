@@ -39,6 +39,28 @@ class P12ReadonlyLivePreflightTests(unittest.TestCase):
         self.assertIn("ACTUATOR_COMMAND_ATTEMPTED=false", self.text)
         self.assertIn("PHYSICAL_EFFECT_ASSERTED=false", self.text)
 
+    def test_diagnostic_trap_preserves_exit_status_and_reports_last_step(self):
+        self.assertIn("P12_PREFLIGHT_DIAGNOSTIC_TRAP=ARMED", self.text)
+        self.assertIn("P12_PREFLIGHT_EXIT_RC=$rc", self.text)
+        self.assertIn("P12_PREFLIGHT_LAST_STEP=$STEP", self.text)
+        self.assertIn("trap - EXIT", self.text)
+        self.assertIn('exit "$rc"', self.text)
+        for step in (
+            "SOURCE_ACTUATOR_SCAN",
+            "BINARY_ACTUATOR_SCAN",
+            "WRAPPER_ACTUATOR_SCAN",
+            "READONLY_SURFACE",
+            "WRAPPER_BINDING",
+            "CONTROL_PLANE_PARSE",
+            "CREDENTIAL_METADATA",
+            "PROCESS_CHECK",
+            "COMPLETE",
+        ):
+            self.assertIn(f"STEP={step}", self.text)
+        self.assertIn("P12_PREFLIGHT_SOURCE_ACTUATOR_SCAN=PASS", self.text)
+        self.assertIn("P12_PREFLIGHT_BINARY_ACTUATOR_SCAN=PASS", self.text)
+        self.assertIn("P12_PREFLIGHT_WRAPPER_ACTUATOR_SCAN=PASS", self.text)
+
     def test_control_plane_is_parsed_and_checked_without_execution(self):
         for name in (
             "p12_one_shot_exec.py",
