@@ -2,102 +2,187 @@
 # =============================================================================
 # CT120 manual non-actuating P13 preflight + public-safe evidence collection
 #
-# Запуск ОТ ROOT на CT120 (авторизованный путь, переданный оператором):
+# Run as root on CT120. This script performs no Comelit network session and no
+# actuator command. It verifies the installed real-adapter artifact in dry-init
+# mode, runs the non-actuating P13 preflight, records public-safe evidence, and
+# pushes a dedicated evidence branch when Git credentials are available.
 #
-#   export P13_EXPECTED_WRAPPER_SHA256="<sha256 от root:/usr/local/sbin/comelit-p13-door-wrapper>"
-#   bash /root/comelit-git/safety-poc/scripts/ct120_p13_preflight_manual.sh
+# Required runtime input:
+#   P13_EXPECTED_WRAPPER_SHA256=<sha256 of /usr/local/sbin/comelit-p13-door-wrapper>
 #
-# Что делает:
-#   1. гарантирует ветку feat/p13-one-shot-actuation и чистый worktree
-#   2. запускает p13_actuation_preflight.sh (non-actuating)
-#   3. собирает публично-безопасное evidence (только хэши/маркеры)
-#   4. ПУШИТ evidence-ветку evidence/p13-preflight-<STAMP>
-#   5. НИКАКОГО физического Door send и actuator-команд не выполняет
-#
-# Требования к среде CT120:
-#   - root (EUID=0)
-#   - репозиторий /root/comelit-git (клон alexsudakov/comelit)
-#   - wrapper: /usr/local/sbin/comelit-p13-door-wrapper (mode 700, root)
-#   - payload: /root/comelit-p13-actuator-prep/real-door-payloads.json (mode 600)
-#   - git push-токен с правами на alexsudakov/comelit:
-#       export GITHUB_TOKEN_COMELIT="<token>"
-#     (или GIT_ASKPASS, настроенный на CT120)
+# Optional push input:
+#   GITHUB_TOKEN_COMELIT=<repo-write token>
+# If omitted, configured Git credentials are tried. The token is never printed
+# or committed.
 # =============================================================================
 set -Eeuo pipefail
 umask 077
 
 REPO_ROOT="${COMELIT_REPO_ROOT:-/root/comelit-git}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-POC_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 EXPECTED_BRANCH=feat/p13-one-shot-actuation
+WRAPPER=/usr/local/sbin/comelit-p13-door-wrapper
+PAYLOAD=/root/comelit-p13-actuator-prep/real-door-payloads.json
+RUN_ROOT=/root/comelit-p13-preflight-evidence
+ASKPASS=/run/comelit-p13-evidence-askpass.sh
+SOURCE_HEAD=""
+EVIDENCE_BRANCH=""
+
+cleanup() {
+    rc=$?
+    rm -f -- "$ASKPASS"
+    if [[ -n "$SOURCE_HEAD" ]] && git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+        git -C "$REPO_ROOT" checkout -q "$EXPECTED_BRANCH" >/dev/null 2>&1 || true
+    fi
+    trap - EXIT
+    exit "$rc"
+}
+trap cleanup EXIT
 
 [[ "${EUID}" -eq 0 ]] || { echo "CT120_P13_MANUAL_REQUIRES_ROOT=true"; exit 1; }
+[[ -n "${P13_EXPECTED_WRAPPER_SHA256:-}" ]] || { echo "P13_EXPECTED_WRAPPER_SHA256_MISSING=true"; exit 1; }
+[[ "${P13_EXPECTED_WRAPPER_SHA256}" =~ ^[0-9a-f]{64}$ ]] || { echo "P13_EXPECTED_WRAPPER_SHA256_FORMAT=FAIL"; exit 1; }
+
+cd "$REPO_ROOT"
+[[ -z "$(git status --porcelain)" ]] || { echo "CT120_P13_MANUAL_WORKTREE_DIRTY=true"; exit 1; }
 
 echo "CT120_P13_MANUAL_START=true"
+echo "CT120_P13_MANUAL_NON_ACTUATING=true"
 
-# ---- 0. identity -----------------------------------------------------------
-cd "$REPO_ROOT"
-git fetch origin --prune 2>/dev/null || true
-git checkout -q "$EXPECTED_BRANCH" 2>/dev/null || git checkout -q -b "$EXPECTED_BRANCH" origin/"$EXPECTED_BRANCH"
-HEAD="$(git rev-parse HEAD)"
-TREE="$(git rev-parse HEAD^{tree})"
-[[ -z "$(git status --porcelain)" ]] || { echo "CT120_P13_MANUAL_WORKTREE_DIRTY=true"; exit 1; }
-echo "CT120_P13_MANUAL_HEAD=$HEAD"
-echo "CT120_P13_MANUAL_TREE=$TREE"
+# ---- 0. exact remote identity -----------------------------------------------
+git fetch origin --prune
+git checkout -q -B "$EXPECTED_BRANCH" "origin/$EXPECTED_BRANCH"
+SOURCE_HEAD="$(git rev-parse HEAD)"
+SOURCE_TREE="$(git rev-parse HEAD^{tree})"
+REMOTE_HEAD="$(git rev-parse "origin/$EXPECTED_BRANCH")"
+[[ "$SOURCE_HEAD" == "$REMOTE_HEAD" ]] || { echo "CT120_P13_MANUAL_REMOTE_IDENTITY=FAIL"; exit 1; }
+[[ -z "$(git status --porcelain)" ]] || { echo "CT120_P13_MANUAL_WORKTREE_DIRTY_AFTER_SYNC=true"; exit 1; }
+echo "CT120_P13_MANUAL_HEAD=$SOURCE_HEAD"
+echo "CT120_P13_MANUAL_TREE=$SOURCE_TREE"
+echo "CT120_P13_MANUAL_REMOTE_IDENTITY=PASS"
 
-# ---- 1. non-actuating preflight ---------------------------------------------
-if ! bash "$POC_ROOT/scripts/p13_actuation_preflight.sh" | tee /tmp/p13_preflight_$HEAD.log; then
+SCRIPT_DIR="$REPO_ROOT/safety-poc/scripts"
+POC_ROOT="$REPO_ROOT/safety-poc"
+
+# ---- 1. local artifact prerequisites -----------------------------------------
+[[ -f "$WRAPPER" ]] || { echo "P13_REAL_WRAPPER_PRESENT=false"; exit 1; }
+[[ -f "$PAYLOAD" ]] || { echo "P13_PAYLOAD_PRESENT=false"; exit 1; }
+WRAPPER_SHA="$(sha256sum "$WRAPPER" | awk '{print $1}')"
+[[ "$WRAPPER_SHA" == "$P13_EXPECTED_WRAPPER_SHA256" ]] || { echo "P13_REAL_WRAPPER_SHA256=FAIL"; exit 1; }
+echo "P13_REAL_WRAPPER_PRESENT=true"
+echo "P13_REAL_WRAPPER_SHA256=$WRAPPER_SHA"
+
+# ---- 2. non-actuating preflight ---------------------------------------------
+mkdir -p "$RUN_ROOT"
+chmod 700 "$RUN_ROOT"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+PREFLIGHT_LOG="$RUN_ROOT/${STAMP}.preflight.log"
+
+if ! bash "$POC_ROOT/scripts/p13_actuation_preflight.sh" | tee "$PREFLIGHT_LOG"; then
     echo "CT120_P13_MANUAL_PREFLIGHT=FAIL"
     exit 1
 fi
+chmod 600 "$PREFLIGHT_LOG"
+
+grep -Fxq 'P13_NON_ACTUATING_PREFLIGHT=PASS' "$PREFLIGHT_LOG"
+grep -Fxq 'READONLY_TRANSPORT_READY=true' "$PREFLIGHT_LOG"
+grep -Fxq 'ACTUATION_TRANSPORT_IMPLEMENTED=true' "$PREFLIGHT_LOG"
+grep -Fxq 'AUDIT_SINK_VERIFIED=PASS' "$PREFLIGHT_LOG"
+grep -Fxq 'P13_ONE_SHOT_MAX_INVOCATIONS=1' "$PREFLIGHT_LOG"
+grep -Fxq 'P13_AUTO_RETRY_ALLOWED=false' "$PREFLIGHT_LOG"
+grep -Fxq 'EXPLICIT_LIVE_TEST_APPROVAL=false' "$PREFLIGHT_LOG"
+grep -Fxq 'LIVE_TEST_READY=false' "$PREFLIGHT_LOG"
+grep -Fxq 'P13_ACTUATOR_COMMAND_ATTEMPTED=false' "$PREFLIGHT_LOG"
+grep -Fxq 'PHYSICAL_DOOR_ACTION=false' "$PREFLIGHT_LOG"
+grep -Fxq 'PHYSICAL_EFFECT_ASSERTED=false' "$PREFLIGHT_LOG"
 echo "CT120_P13_MANUAL_PREFLIGHT=PASS"
 
-# ---- 2. collect public-safe evidence (hashes/markers only) -------------------
-STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-EVIDENCE_DIR="$REPO_ROOT/evidence/p13-preflight-$STAMP"
+# ---- 3. public-safe evidence -------------------------------------------------
+EVIDENCE_BRANCH="evidence/p13-preflight-$STAMP"
+EVIDENCE_REL="evidence/p13-preflight/$STAMP"
+EVIDENCE_DIR="$REPO_ROOT/$EVIDENCE_REL"
 mkdir -p "$EVIDENCE_DIR"
+chmod 700 "$EVIDENCE_DIR"
 
-cp /tmp/p13_preflight_$HEAD.log "$EVIDENCE_DIR/preflight.log"
+# The preflight output is allowlisted operational metadata only. It never emits
+# credential values, raw payload bodies, target identity values, or approval.
+cp "$PREFLIGHT_LOG" "$EVIDENCE_DIR/preflight.log"
 chmod 600 "$EVIDENCE_DIR/preflight.log"
 
-# дополнительные маркеры: только хэши/факты, без значений identity
-{
-    echo "P13_PREFLIGHT_EVIDENCE_STAMP=$STAMP"
-    echo "P13_PREFLIGHT_EVIDENCE_HEAD=$HEAD"
-    echo "P13_PREFLIGHT_EVIDENCE_TREE=$TREE"
-    echo "P13_PREFLIGHT_WRAPPER_SHA256=${P13_EXPECTED_WRAPPER_SHA256:-UNSET}"
-    PAYLOAD_SHA="$(sha256sum /root/comelit-p13-actuator-prep/real-door-payloads.json 2>/dev/null | awk '{print $1}')"
-    echo "P13_PREFLIGHT_PAYLOAD_SHA256=${PAYLOAD_SHA:-UNSET}"
-    echo "P13_PREFLIGHT_AUDIT_VERIFIED=$(grep -c 'AUDIT_SINK_VERIFIED=PASS' /tmp/p13_preflight_$HEAD.log || true)"
-    echo "P13_PREFLIGHT_ACTUATION_IMPLEMENTED=$(grep -c 'ACTUATION_TRANSPORT_IMPLEMENTED=true' /tmp/p13_preflight_$HEAD.log || true)"
-    echo "P13_PREFLIGHT_PHYSICAL_DOOR_ACTION=false"
-    echo "P13_PREFLIGHT_ACTUATOR_COMMAND_ATTEMPTED=false"
-    echo "P13_PREFLIGHT_EXPLICIT_LIVE_TEST_APPROVAL=false"
-    echo "P13_PREFLIGHT_LIVE_TEST_READY=false"
-} > "$EVIDENCE_DIR/MANIFEST.txt"
+PAYLOAD_SHA="$(sha256sum "$PAYLOAD" | awk '{print $1}')"
+cat > "$EVIDENCE_DIR/MANIFEST.txt" <<EOF
+EVIDENCE_SCHEMA=P13_PREFLIGHT_V1
+P13_PREFLIGHT_EVIDENCE_STAMP=$STAMP
+P13_PREFLIGHT_SOURCE_BRANCH=$EXPECTED_BRANCH
+P13_PREFLIGHT_SOURCE_HEAD=$SOURCE_HEAD
+P13_PREFLIGHT_SOURCE_TREE=$SOURCE_TREE
+P13_PREFLIGHT_WRAPPER_SHA256=$WRAPPER_SHA
+P13_PREFLIGHT_PAYLOAD_SHA256=$PAYLOAD_SHA
+READONLY_TRANSPORT_READY=true
+ACTUATION_TRANSPORT_IMPLEMENTED=true
+AUDIT_SINK_VERIFIED=PASS
+P13_ONE_SHOT_MAX_INVOCATIONS=1
+P13_AUTO_RETRY_ALLOWED=false
+EXPLICIT_LIVE_TEST_APPROVAL=false
+LIVE_TEST_READY=false
+ACTUATOR_COMMAND_ATTEMPTED=false
+PHYSICAL_DOOR_ACTION=false
+PHYSICAL_EFFECT_ASSERTED=false
+PUBLIC_SAFE=true
+CREDENTIAL_VALUES_COLLECTED=false
+TARGET_IDENTITY_VALUES_EMITTED=false
+RAW_PAYLOAD_BODIES_COLLECTED=false
+EOF
 chmod 600 "$EVIDENCE_DIR/MANIFEST.txt"
 
-# ---- 3. commit + push evidence branch ----------------------------------------
-cd "$REPO_ROOT"
-git add "evidence/p13-preflight-$STAMP/"
-git -c user.name="hermes" -c user.email="hermes@localhost" commit -q -m "evidence: P13 non-actuating preflight $STAMP (HEAD $HEAD)"
+sha256sum "$EVIDENCE_DIR/MANIFEST.txt" "$EVIDENCE_DIR/preflight.log" > "$EVIDENCE_DIR/SHA256SUMS"
+chmod 600 "$EVIDENCE_DIR/SHA256SUMS"
 
+# ---- 4. dedicated evidence branch + commit ----------------------------------
+git checkout -q -b "$EVIDENCE_BRANCH" "$SOURCE_HEAD"
+git add "$EVIDENCE_REL/"
+git -c user.name="hermes" -c user.email="hermes@localhost" commit -q \
+    -m "evidence: P13 non-actuating preflight $STAMP"
+EVIDENCE_COMMIT="$(git rev-parse HEAD)"
+EVIDENCE_TREE="$(git rev-parse HEAD^{tree})"
+echo "P13_PREFLIGHT_EVIDENCE_BRANCH=$EVIDENCE_BRANCH"
+echo "P13_PREFLIGHT_EVIDENCE_COMMIT=$EVIDENCE_COMMIT"
+echo "P13_PREFLIGHT_EVIDENCE_TREE=$EVIDENCE_TREE"
+
+# ---- 5. push evidence branch -------------------------------------------------
+PUSH_OK=false
 if [[ -n "${GITHUB_TOKEN_COMELIT:-}" ]]; then
-    cat > /tmp/git-askpass-p13.sh <<EOF
-#!/bin/bash
-printf '%s\n' "\${GITHUB_TOKEN_COMELIT:-}"
+    cat > "$ASKPASS" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  *Username*) printf '%s\n' 'x-access-token' ;;
+  *) printf '%s\n' "${GITHUB_TOKEN_COMELIT:-}" ;;
+esac
 EOF
-    chmod 700 /tmp/git-askpass-p13.sh
-    GIT_ASKPASS=/tmp/git-askpass-p13.sh GIT_TERMINAL_PROMPT=0 \
-        git push origin "evidence/p13-preflight-$STAMP" 2>&1 | tail -2
-    rm -f /tmp/git-askpass-p13.sh
+    chmod 700 "$ASKPASS"
+    if GIT_ASKPASS="$ASKPASS" GIT_TERMINAL_PROMPT=0 git push -u origin "$EVIDENCE_BRANCH"; then
+        PUSH_OK=true
+    fi
 else
-    echo "CT120_P13_MANUAL_PUSH_SKIPPED=true (GITHUB_TOKEN_COMELIT не задан)"
+    if GIT_TERMINAL_PROMPT=0 git push -u origin "$EVIDENCE_BRANCH"; then
+        PUSH_OK=true
+    fi
 fi
 
-echo "CT120_P13_MANUAL_EVIDENCE_DIR=$EVIDENCE_DIR"
+if [[ "$PUSH_OK" == true ]]; then
+    echo "P13_PREFLIGHT_EVIDENCE_PUSH=PASS"
+else
+    echo "P13_PREFLIGHT_EVIDENCE_PUSH=REQUIRED"
+    echo "P13_PREFLIGHT_EVIDENCE_LOCAL_COMMIT=$EVIDENCE_COMMIT"
+fi
+
+# Return the working tree to the source feature branch.
+git checkout -q "$EXPECTED_BRANCH"
+[[ "$(git rev-parse HEAD)" == "$SOURCE_HEAD" ]] || { echo "CT120_P13_MANUAL_SOURCE_RETURN=FAIL"; exit 1; }
+[[ -z "$(git status --porcelain)" ]] || { echo "CT120_P13_MANUAL_SOURCE_RETURN_DIRTY=true"; exit 1; }
+
 echo "CT120_P13_MANUAL_COMPLETE=true"
 echo "P13_NON_ACTUATING_PREFLIGHT=PASS"
+echo "ACTUATOR_COMMAND_ATTEMPTED=false"
 echo "PHYSICAL_DOOR_ACTION=false"
 echo "EXPLICIT_LIVE_TEST_APPROVAL=false"
 echo "LIVE_TEST_READY=false"
