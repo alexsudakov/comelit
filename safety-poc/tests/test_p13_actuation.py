@@ -22,6 +22,7 @@ from comelit_safety_poc.boundary import (
 from comelit_safety_poc.executor import OneShotExecutor, Policy
 from comelit_safety_poc.model import State
 from comelit_safety_poc.p13_actuation_boundary import (
+    CtppOpenOutcome,
     FixtureP13DoorSession,
     P13BodyFileLoader,
     P13PayloadBundle,
@@ -144,14 +145,14 @@ class P13BoundaryTests(unittest.TestCase):
         self.assertTrue(session.teardown_called)
 
     def test_fail_before_open_is_proven_not_sent(self):
-        session = FixtureP13DoorSession(fail_open=True)
+        session = FixtureP13DoorSession(open_outcome=CtppOpenOutcome.PROVEN_NOT_OPENED)
         boundary = RealDoorActuationBoundary(session, make_bundle(), body_loader=DictBodyLoader([bytes([i + 1]) * 12 for i in range(6)]))
         evidence = boundary.attempt_once(TransportRequest(operation_id="op-2", target="f" * 64))
         self.assertEqual(evidence.outcome, BoundaryOutcome.PROVEN_NOT_SENT)
         self.assertEqual(session.write_count, 0)
 
     def test_ambiguous_open_is_never_downgraded(self):
-        session = FixtureP13DoorSession(ambiguous_open=True)
+        session = FixtureP13DoorSession(open_outcome=CtppOpenOutcome.AMBIGUOUS)
         boundary = RealDoorActuationBoundary(session, make_bundle(), body_loader=DictBodyLoader([bytes([i + 1]) * 12 for i in range(6)]))
         evidence = boundary.attempt_once(TransportRequest(operation_id="op-3", target="f" * 64))
         self.assertEqual(evidence.outcome, BoundaryOutcome.AMBIGUOUS)
@@ -189,11 +190,101 @@ class P13BoundaryTests(unittest.TestCase):
     def test_adapter_maps_ambiguous_to_raise(self):
         from comelit_safety_poc.errors import AmbiguousSend
 
-        session = FixtureP13DoorSession(ambiguous_open=True)
+        session = FixtureP13DoorSession(open_outcome=CtppOpenOutcome.AMBIGUOUS)
         boundary = RealDoorActuationBoundary(session, make_bundle(), body_loader=DictBodyLoader([bytes([i + 1]) * 12 for i in range(6)]))
         adapter = BoundaryTransportAdapter(boundary)
         with self.assertRaises(AmbiguousSend):
             adapter.send_once(operation_id="op-8", target="f" * 64)
+
+
+class ThrowingOpenSession:
+    """Simulates a real adapter whose CTPP open raises (timeout/disconnect/parse)."""
+
+    def __init__(self, exc: Exception):
+        self.exc = exc
+        self.write_count = 0
+
+    def open_ctpp(self):
+        raise self.exc
+
+    def write_door_body(self, body_hex: str) -> None:
+        self.write_count += 1
+
+    def close_ctpp(self) -> bool:
+        return True
+
+    def teardown(self) -> None:
+        return None
+
+
+class P13CtppOpenConservativeTests(unittest.TestCase):
+    """Blocker 2: exceptions from the real open operation default to AMBIGUOUS."""
+
+    def _boundary(self, session):
+        return RealDoorActuationBoundary(
+            session,
+            make_bundle(),
+            body_loader=DictBodyLoader([bytes([i + 1]) * 12 for i in range(6)]),
+        )
+
+    def test_timeout_during_open_is_ambiguous(self):
+        session = ThrowingOpenSession(TimeoutError("open timed out"))
+        evidence = self._boundary(session).attempt_once(TransportRequest(operation_id="op-t1", target="f" * 64))
+        self.assertEqual(evidence.outcome, BoundaryOutcome.AMBIGUOUS)
+        self.assertEqual(session.write_count, 0)
+
+    def test_disconnect_during_open_is_ambiguous(self):
+        session = ThrowingOpenSession(ConnectionError("peer disconnected"))
+        evidence = self._boundary(session).attempt_once(TransportRequest(operation_id="op-t2", target="f" * 64))
+        self.assertEqual(evidence.outcome, BoundaryOutcome.AMBIGUOUS)
+
+    def test_parse_failure_during_open_is_ambiguous(self):
+        session = ThrowingOpenSession(ValueError("malformed open response"))
+        evidence = self._boundary(session).attempt_once(TransportRequest(operation_id="op-t3", target="f" * 64))
+        self.assertEqual(evidence.outcome, BoundaryOutcome.AMBIGUOUS)
+
+    def test_proven_not_opened_is_proven_not_sent(self):
+        session = FixtureP13DoorSession(open_outcome=CtppOpenOutcome.PROVEN_NOT_OPENED)
+        evidence = self._boundary(session).attempt_once(TransportRequest(operation_id="op-t4", target="f" * 64))
+        self.assertEqual(evidence.outcome, BoundaryOutcome.PROVEN_NOT_SENT)
+        self.assertEqual(session.write_count, 0)
+
+    def test_explicit_rejection_is_rejected(self):
+        session = FixtureP13DoorSession(open_outcome=CtppOpenOutcome.REJECTED)
+        evidence = self._boundary(session).attempt_once(TransportRequest(operation_id="op-t5", target="f" * 64))
+        self.assertEqual(evidence.outcome, BoundaryOutcome.REJECTED)
+        self.assertEqual(session.write_count, 0)
+
+    def test_ambiguous_outcome_never_downgraded(self):
+        session = FixtureP13DoorSession(open_outcome=CtppOpenOutcome.AMBIGUOUS)
+        evidence = self._boundary(session).attempt_once(TransportRequest(operation_id="op-t6", target="f" * 64))
+        self.assertEqual(evidence.outcome, BoundaryOutcome.AMBIGUOUS)
+
+
+class P13ExactSixWritesTests(unittest.TestCase):
+    """Blocker 3: actuation_transaction_complete requires exactly six writes."""
+
+    def _evidence(self, count: int) -> P13ActuationEvidence:
+        return P13ActuationEvidence(
+            cloud_signaling=True, ice_connected=True, pseudotcp_open=True, vip_echo_ack=True,
+            uaut_open=True, uaut_auth_200=True, ctpp_open=True, door_write_count=count,
+            ctpp_close=True, clean_teardown=True,
+        )
+
+    def test_exactly_six_writes_complete(self):
+        self.assertTrue(self._evidence(6).actuation_transaction_complete)
+
+    def test_zero_writes_incomplete(self):
+        self.assertFalse(self._evidence(0).actuation_transaction_complete)
+
+    def test_one_write_incomplete(self):
+        self.assertFalse(self._evidence(1).actuation_transaction_complete)
+
+    def test_five_writes_incomplete(self):
+        self.assertFalse(self._evidence(5).actuation_transaction_complete)
+
+    def test_seven_writes_incomplete(self):
+        self.assertFalse(self._evidence(7).actuation_transaction_complete)
 
 
 class P13PayloadFileTests(unittest.TestCase):

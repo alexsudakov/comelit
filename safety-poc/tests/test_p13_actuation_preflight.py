@@ -17,9 +17,42 @@ class P13ActuationPreflightTests(unittest.TestCase):
         self.assertIn("EXPLICIT_LIVE_TEST_APPROVAL=false", self.text)
         self.assertIn("LIVE_TEST_READY=false", self.text)
 
-    def test_actuation_transport_and_audit_markers_present(self):
+    def test_actuation_transport_is_runtime_derived_not_hardcoded(self):
+        # Blocker 4: the marker must be emitted only after real adapter identity
+        # and dry-init proofs, and must be false when the artifact is absent.
+        self.assertIn("P13_REAL_WRAPPER_PRESENT=false", self.text)
+        self.assertIn('echo "ACTUATION_TRANSPORT_IMPLEMENTED=false"', self.text)
         self.assertIn("ACTUATION_TRANSPORT_IMPLEMENTED=true", self.text)
+        # The true marker appears only after the dry-init block, never before.
+        dry_init = self.text.index("STEP=REAL_ADAPTER_DRY_INIT")
+        true_marker = self.text.index('echo "ACTUATION_TRANSPORT_IMPLEMENTED=true"')
+        self.assertGreater(true_marker, dry_init)
+
+    def test_wrapper_identity_pinned(self):
+        self.assertIn('EXPECTED_WRAPPER_SHA256="${P13_EXPECTED_WRAPPER_SHA256:-}"', self.text)
+        self.assertIn("P13_EXPECTED_WRAPPER_SHA256_MISSING=true", self.text)
+        self.assertIn("P13_REAL_WRAPPER_SHA256=FAIL", self.text)
+        self.assertIn("P13_REAL_WRAPPER_MODE=FAIL", self.text)
+        self.assertIn('stat -c \'%a\' "$WRAPPER"', self.text)
+        self.assertIn("P13_REAL_WRAPPER_SHA256=$WRAPPER_SHA", self.text)
+
+    def test_audit_durability_proof_required(self):
+        # Blocker 5: preflight must invoke the dedicated append+fsync+reopen
+        # proof script and only then emit AUDIT_SINK_VERIFIED=PASS.
+        self.assertIn("p13_audit_durability_proof.py", self.text)
+        self.assertIn("--audit \"$AUDIT_FILE\"", self.text)
+        self.assertIn("P13_AUDIT_DURABILITY_PROOF=FAIL", self.text)
+        self.assertIn("AUDIT_SINK_VERIFIED=FAIL", self.text)
         self.assertIn("AUDIT_SINK_VERIFIED=PASS", self.text)
+
+    def test_audit_proof_script_uses_real_sink_api(self):
+        proof = Path(__file__).resolve().parents[1] / "scripts" / "p13_audit_durability_proof.py"
+        body = proof.read_text(encoding="utf-8")
+        self.assertIn("from comelit_safety_poc.audit import AuditEntry, AuditSink", body)
+        self.assertIn('event_type="preflight"', body)
+        self.assertIn("P13_AUDIT_APPEND_FSYNC_REOPEN=PASS", body)
+        self.assertIn("sink.record_raw(", body)
+        self.assertIn("verify_durable()", body)
 
     def test_one_shot_and_no_retry_contract(self):
         self.assertIn("P13_ONE_SHOT_MAX_INVOCATIONS=1", self.text)
@@ -38,12 +71,19 @@ class P13ActuationPreflightTests(unittest.TestCase):
         self.assertIn("P13_PAYLOAD_MODE=FAIL", self.text)
 
     def test_no_network_or_physical_commands(self):
-        for forbidden in ("curl ", "wget ", "nc ", "door ", "open_door", "systemctl start"):
+        for forbidden in ("curl ", "wget ", "netcat", "door ", "open_door", "systemctl start"):
             self.assertNotIn(forbidden, self.text)
 
     def test_conflicting_process_check(self):
         self.assertIn("P13_CONFLICTING_PROCESS=false", self.text)
         self.assertIn('pgrep -x "comelit_ice_offer_holder"', self.text)
+        self.assertIn('pgrep -x "comelit-p13-door-wrapper"', self.text)
+
+    def test_readonly_readiness_and_approval_markers(self):
+        self.assertIn("READONLY_TRANSPORT_READY=true", self.text)
+        self.assertIn("P13_ONE_SHOT_MAX_INVOCATIONS=1", self.text)
+        self.assertIn("EXPLICIT_LIVE_TEST_APPROVAL=false", self.text)
+        self.assertIn("LIVE_TEST_READY=false", self.text)
 
 
 if __name__ == "__main__":

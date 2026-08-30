@@ -112,7 +112,7 @@ class P13ActuationEvidence:
             and self.uaut_open
             and self.uaut_auth_200
             and self.ctpp_open
-            and self.door_write_count >= 1
+            and self.door_write_count == 6
             and self.ctpp_close
             and self.clean_teardown
             and not self.automatic_retry_observed

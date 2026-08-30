@@ -3,11 +3,34 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
 from .boundary import BoundaryEvidence, BoundaryOutcome, TransportRequest
 from .p13_transport_model import P13ActuationEvidence
+
+
+class CtppOpenOutcome(str, Enum):
+    """Typed result of one CTPP channel-open attempt.
+
+    The boundary maps these conservatively:
+
+    - ``PROVEN_NOT_OPENED`` — the adapter can prove the open request was never
+      emitted (local failure before any transmission).  Maps to
+      ``PROVEN_NOT_SENT``.
+    - ``REJECTED`` — an explicit protocol rejection was received before any
+      side-effect-capable acceptance.  Maps to ``REJECTED``.
+    - ``OPENED`` — the channel opened; the transaction may continue.
+    - ``AMBIGUOUS`` — timeout/disconnect/parse failure after the open request
+      may have been transmitted.  Maps to ``AMBIGUOUS`` and is never
+      downgraded.
+    """
+
+    PROVEN_NOT_OPENED = "PROVEN_NOT_OPENED"
+    REJECTED = "REJECTED"
+    OPENED = "OPENED"
+    AMBIGUOUS = "AMBIGUOUS"
 
 
 @dataclass(frozen=True)
@@ -47,13 +70,13 @@ class P13DoorSession(Protocol):
 
     A real implementation on CT120 wraps the proven P2P path
     (cloud signaling -> ICE -> PseudoTCP -> ViP) and the reconciled CTPP Door
-    transaction.  The repository ships only a fixture implementation; the real
-    adapter is deployed root-only on CT120 and never receives credential
-    material through the boundary.
+    transaction.  The repository ships a fixture implementation and a concrete
+    CT120 adapter (root-only); neither receives credential material through
+    the boundary.
     """
 
-    def open_ctpp(self) -> tuple[bool, bool]:
-        """Open the CTPP channel. Returns (opened, ambiguous)."""
+    def open_ctpp(self) -> CtppOpenOutcome:
+        """Open the CTPP channel exactly once with a typed outcome."""
         ...
 
     def write_door_body(self, body_hex: str) -> None:
@@ -78,21 +101,17 @@ class FixtureP13DoorSession:
     """Deterministic in-memory session used by tests and offline preflight."""
 
     opened: bool = False
-    ambiguous_open: bool = False
+    open_outcome: CtppOpenOutcome = CtppOpenOutcome.OPENED
     write_count: int = 0
     close_ok: bool = True
     teardown_called: bool = False
     fail_after_writes: int | None = None
-    fail_open: bool = False
     ambiguous_close: bool = False
 
-    def open_ctpp(self) -> tuple[bool, bool]:
-        if self.fail_open:
-            return False, False
-        if self.ambiguous_open:
-            return False, True
-        self.opened = True
-        return True, False
+    def open_ctpp(self) -> CtppOpenOutcome:
+        if self.open_outcome == CtppOpenOutcome.OPENED:
+            self.opened = True
+        return self.open_outcome
 
     def write_door_body(self, body_hex: str) -> None:
         if not self.opened:
@@ -118,13 +137,17 @@ class RealDoorActuationBoundary:
 
     Invariant mapping (identical to the offline transaction model):
 
-    - failure before CTPP open with proof of zero writes -> PROVEN_NOT_SENT
-    - ambiguous CTPP open -> AMBIGUOUS (never downgraded to PROVEN_NOT_SENT)
-    - explicit rejection before any Door write -> REJECTED
-    - failure after any Door write -> AMBIGUOUS
+    - ``CtppOpenOutcome.PROVEN_NOT_OPENED`` -> ``PROVEN_NOT_SENT`` (adapter
+      proves the open request was never emitted);
+    - ``CtppOpenOutcome.REJECTED`` -> ``REJECTED``;
+    - ``CtppOpenOutcome.AMBIGUOUS`` -> ``AMBIGUOUS`` (never downgraded);
+    - a generic exception from ``open_ctpp()`` defaults to ``AMBIGUOUS``
+      because a timeout/disconnect/parse failure after the open request may
+      mean it was transmitted;
+    - failure after any Door write -> ``AMBIGUOUS``;
     - complete six-write transaction without a Door-specific ACK ->
-      ACCEPTED_NO_ACK (executor persists UNKNOWN_OUTCOME)
-    - protocol ACK never becomes physical-effect proof
+      ``ACCEPTED_NO_ACK`` (executor persists ``UNKNOWN_OUTCOME``);
+    - protocol ACK never becomes physical-effect proof.
     """
 
     def __init__(
@@ -166,20 +189,39 @@ class RealDoorActuationBoundary:
         opened = False
         protocol_ack = False
         try:
-            opened, ambiguous = self.session.open_ctpp()
-            if ambiguous:
-                return BoundaryEvidence(
-                    outcome=BoundaryOutcome.AMBIGUOUS,
-                    detail="P13 CTPP open is ambiguous; retry is unsafe",
-                    protocol_acknowledged=False,
-                )
-            if not opened:
-                return BoundaryEvidence(
-                    outcome=BoundaryOutcome.PROVEN_NOT_SENT,
-                    detail="P13 CTPP open provably did not open; zero Door writes emitted",
-                    protocol_acknowledged=False,
-                )
+            open_outcome = self.session.open_ctpp()
+        except Exception as exc:
+            # A generic exception from the real open operation must default to
+            # AMBIGUOUS: the open request may already have been transmitted.
+            return BoundaryEvidence(
+                outcome=BoundaryOutcome.AMBIGUOUS,
+                detail=f"P13 CTPP open raised {type(exc).__name__}; may have been transmitted",
+                protocol_acknowledged=False,
+            )
 
+        if open_outcome == CtppOpenOutcome.AMBIGUOUS:
+            return BoundaryEvidence(
+                outcome=BoundaryOutcome.AMBIGUOUS,
+                detail="P13 CTPP open is ambiguous; retry is unsafe",
+                protocol_acknowledged=False,
+            )
+        if open_outcome == CtppOpenOutcome.PROVEN_NOT_OPENED:
+            return BoundaryEvidence(
+                outcome=BoundaryOutcome.PROVEN_NOT_SENT,
+                detail="P13 CTPP open provably never emitted; zero Door writes",
+                protocol_acknowledged=False,
+            )
+        if open_outcome == CtppOpenOutcome.REJECTED:
+            return BoundaryEvidence(
+                outcome=BoundaryOutcome.REJECTED,
+                detail="P13 CTPP open explicitly rejected before any Door write",
+                protocol_acknowledged=False,
+            )
+        if open_outcome != CtppOpenOutcome.OPENED:
+            raise AssertionError(f"unhandled CTPP open outcome: {open_outcome}")
+        opened = True
+
+        try:
             for index in range(self.bundle.write_count):
                 body_hex = self._load_body(index)
                 self.session.write_door_body(body_hex)
@@ -210,17 +252,11 @@ class RealDoorActuationBoundary:
                 protocol_acknowledged=False,
             )
         except Exception as exc:
-            # A failure before any Door write that also did not open the channel
-            # is provably pre-send; everything after an open attempt is conservative.
-            if not opened and writes == 0:
-                return BoundaryEvidence(
-                    outcome=BoundaryOutcome.PROVEN_NOT_SENT,
-                    detail=f"P13 failed before any Door write: {type(exc).__name__}",
-                    protocol_acknowledged=False,
-                )
+            # Once the channel is open, any failure after a Door write (or an
+            # ambiguous close) is conservative.
             return BoundaryEvidence(
                 outcome=BoundaryOutcome.AMBIGUOUS,
-                detail=f"P13 failed after Door emission boundary: {type(exc).__name__}",
+                detail=f"P13 failed after CTPP open: {type(exc).__name__}",
                 protocol_acknowledged=False,
             )
 

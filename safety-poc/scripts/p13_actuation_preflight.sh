@@ -6,9 +6,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 POC_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(git -C "$POC_ROOT" rev-parse --show-toplevel)"
 PAYLOAD_FILE=/root/comelit-p13-actuator-prep/real-door-payloads.json
+WRAPPER=/usr/local/sbin/comelit-p13-door-wrapper
 AUDIT_DIR=/root/comelit-p13-audit
 AUDIT_FILE="$AUDIT_DIR/audit.jsonl"
 EXPECTED_BRANCH=feat/p13-one-shot-actuation
+
+# Runtime-derived wrapper identity.  The wrapper is the single native
+# entrypoint for the proven P2P -> ViP -> UAUT -> CTPP -> six-write path.
+# Preflight may emit ACTUATION_TRANSPORT_IMPLEMENTED=true only when this exact
+# pinned artifact is present with the expected mode and hash.
+EXPECTED_WRAPPER_SHA256="${P13_EXPECTED_WRAPPER_SHA256:-}"
+EXPECTED_WRAPPER_MODE="${P13_EXPECTED_WRAPPER_MODE:-700}"
 
 STEP=START
 preflight_exit() {
@@ -44,34 +52,66 @@ PAYLOAD_MODE="$(stat -c '%a' "$PAYLOAD_FILE")"
 PAYLOAD_SHA="$(sha256sum "$PAYLOAD_FILE" | awk '{print $1}')"
 echo "P13_PAYLOAD_SHA256=$PAYLOAD_SHA"
 
-STEP=AUDIT_SINK
+STEP=REAL_ADAPTER_IDENTITY
+if [[ -z "$EXPECTED_WRAPPER_SHA256" ]]; then
+    echo "P13_EXPECTED_WRAPPER_SHA256_MISSING=true"
+    echo "ACTUATION_TRANSPORT_IMPLEMENTED=false"
+    exit 1
+fi
+if [[ ! -f "$WRAPPER" ]]; then
+    echo "P13_REAL_WRAPPER_PRESENT=false"
+    echo "ACTUATION_TRANSPORT_IMPLEMENTED=false"
+    exit 1
+fi
+WRAPPER_MODE="$(stat -c '%a' "$WRAPPER")"
+[[ "$WRAPPER_MODE" == "$EXPECTED_WRAPPER_MODE" ]] || {
+    echo "P13_REAL_WRAPPER_MODE=FAIL($WRAPPER_MODE)"
+    echo "ACTUATION_TRANSPORT_IMPLEMENTED=false"
+    exit 1
+}
+WRAPPER_SHA="$(sha256sum "$WRAPPER" | awk '{print $1}')"
+[[ "$WRAPPER_SHA" == "$EXPECTED_WRAPPER_SHA256" ]] || {
+    echo "P13_REAL_WRAPPER_SHA256=FAIL"
+    echo "ACTUATION_TRANSPORT_IMPLEMENTED=false"
+    exit 1
+}
+echo "P13_REAL_WRAPPER_PRESENT=true"
+echo "P13_REAL_WRAPPER_SHA256=$WRAPPER_SHA"
+echo "P13_REAL_WRAPPER_MODE=$WRAPPER_MODE"
+
+STEP=REAL_ADAPTER_DRY_INIT
+if ! python3 "$SCRIPT_DIR/p13_adapter_dry_init.py" \
+    --payload "$PAYLOAD_FILE" \
+    --wrapper "$WRAPPER" \
+    --wrapper-sha256 "$EXPECTED_WRAPPER_SHA256" \
+    --wrapper-mode "$EXPECTED_WRAPPER_MODE"; then
+    echo "P13_REAL_ADAPTER_DRY_INIT=FAIL"
+    echo "ACTUATION_TRANSPORT_IMPLEMENTED=false"
+    exit 1
+fi
+echo "ACTUATION_TRANSPORT_IMPLEMENTED=true"
+
+STEP=AUDIT_SINK_PROOF
 mkdir -p "$AUDIT_DIR"
 chmod 700 "$AUDIT_DIR"
-touch "$AUDIT_FILE"
-chmod 600 "$AUDIT_FILE"
-python3 - "$AUDIT_FILE" <<'PY'
-import json
-import os
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-if path.stat().st_mode & 0o777 != 0o600:
-    print("P13_AUDIT_MODE=FAIL")
-    sys.exit(1)
-if path.exists() and path.stat().st_size > 0:
-    with path.open("r", encoding="utf-8") as fh:
-        for line in fh:
-            json.loads(line)
-print("P13_AUDIT_SINK_DURABLE=PASS")
-PY
+# Blocker 5: prove a real append + flush + fsync + close/reopen cycle through
+# the AuditSink API, then verify the exact new entry and journal structure.
+if ! python3 "$SCRIPT_DIR/p13_audit_durability_proof.py" --audit "$AUDIT_FILE" --head "$HEAD"; then
+    echo "P13_AUDIT_DURABILITY_PROOF=FAIL"
+    echo "AUDIT_SINK_VERIFIED=FAIL"
+    exit 1
+fi
+echo "P13_AUDIT_DURABILITY_PROOF=PASS"
+echo "AUDIT_SINK_VERIFIED=PASS"
 
 STEP=NO_CONFLICT
 pgrep -x "comelit_ice_offer_holder" >/dev/null && { echo "P13_CONFLICTING_PROCESS=true"; exit 1; } || true
+pgrep -x "comelit-p13-door-wrapper" >/dev/null && { echo "P13_CONFLICTING_PROCESS=true"; exit 1; } || true
 echo "P13_CONFLICTING_PROCESS=false"
 
 STEP=NO_RETRY_SURFACE
 grep -rn "retry\|RETRY" "$POC_ROOT/src/comelit_safety_poc/executor.py" >/dev/null && { echo "P13_RETRY_SURFACE_DETECTED=true"; exit 1; } || true
+grep -rn "retry\|RETRY" "$POC_ROOT/src/comelit_safety_poc/ct120_real_session.py" >/dev/null && { echo "P13_RETRY_SURFACE_DETECTED=true"; exit 1; } || true
 echo "P13_RETRY_SURFACE_DETECTED=false"
 
 STEP=SOURCE_SCAN
@@ -99,14 +139,13 @@ PY
 STEP=COMPLETE
 echo "P13_PREFLIGHT_LAST_STEP=COMPLETE"
 echo "P13_NON_ACTUATING_PREFLIGHT=PASS"
-echo "P13_PAYLOAD_PRESENT=true"
+echo "READONLY_TRANSPORT_READY=true"
 echo "P13_ONE_SHOT_MAX_INVOCATIONS=1"
 echo "P13_AUTO_RETRY_ALLOWED=false"
 echo "P13_TARGET_BINDING_REQUIRED=true"
 echo "P13_PHYSICAL_EFFECT_ASSERTED=false"
-echo "ACTUATION_TRANSPORT_IMPLEMENTED=true"
-echo "AUDIT_SINK_VERIFIED=PASS"
 echo "EXPLICIT_LIVE_TEST_APPROVAL=false"
 echo "LIVE_TEST_READY=false"
 echo "P13_ACTUATOR_COMMAND_ATTEMPTED=false"
 echo "PHYSICAL_DOOR_ACTION=false"
+echo "PHYSICAL_EFFECT_ASSERTED=false"
