@@ -56,8 +56,8 @@ class P12ReadonlyLivePreflightTests(unittest.TestCase):
         self.assertIn("subprocess.Popen(", self.text)
         self.assertIn("start_new_session=True", self.text)
         self.assertIn("os.killpg(proc.pid, sig)", self.text)
-        self.assertIn('echo \\"READONLY_TRANSPORT_READY=false\\"', self.text)
-        self.assertIn('echo \\"READONLY_TRANSPORT_READY=true\\"', self.text)
+        self.assertIn('echo "READONLY_TRANSPORT_READY=false"', self.text)
+        self.assertIn('echo "READONLY_TRANSPORT_READY=true"', self.text)
 
     def test_target_profile_checks_hashes_without_emitting_identity_values(self):
         self.assertIn('{"model", "version", "apt-address", "apt-subaddress"}', self.text)
