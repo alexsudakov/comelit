@@ -20,16 +20,32 @@ EXPECTED_VALUE_SHA256 = {
     "apt-subaddress": "7902699be42c8a8e46fbbb4501726517e86b22c56a189f7625a6da49081b2451",
 }
 
+# The UCFG response observed on the live read-only path does not necessarily
+# include server-level model/version fields. Apartment address + subaddress are
+# the target-specific identity tuple and must each be present exactly once and
+# match the pinned fingerprints. model/version are consistency checks only: if
+# present, at least one observed scalar must match the pinned value; absence is
+# neutral rather than a binding failure.
+REQUIRED_UNIQUE_KEYS = ("apt-address", "apt-subaddress")
+OPTIONAL_CONTEXT_KEYS = ("model", "version")
+
 
 @dataclass(frozen=True)
 class TargetBindingResult:
     matches: dict[str, bool]
     observed_scalar_counts: dict[str, int]
+    required_unique: dict[str, bool]
+    optional_compatible: dict[str, bool]
     ucfg_sha256: str
 
     @property
     def verified(self) -> bool:
-        return all(self.matches.values())
+        required_ok = all(
+            self.matches[key] and self.required_unique[key]
+            for key in REQUIRED_UNIQUE_KEYS
+        )
+        optional_ok = all(self.optional_compatible[key] for key in OPTIONAL_CONTEXT_KEYS)
+        return required_ok and optional_ok
 
 
 def _scalar_text(value: Any) -> str | None:
@@ -68,9 +84,19 @@ def verify_payload(raw: bytes) -> TargetBindingResult:
         for key in sorted(wanted)
     }
     counts = {key: len(observed[key]) for key in sorted(wanted)}
+    required_unique = {
+        key: counts[key] == 1
+        for key in REQUIRED_UNIQUE_KEYS
+    }
+    optional_compatible = {
+        key: counts[key] == 0 or matches[key]
+        for key in OPTIONAL_CONTEXT_KEYS
+    }
     return TargetBindingResult(
         matches=matches,
         observed_scalar_counts=counts,
+        required_unique=required_unique,
+        optional_compatible=optional_compatible,
         ucfg_sha256=hashlib.sha256(raw).hexdigest(),
     )
 
@@ -89,8 +115,11 @@ def verify_file(path: Path) -> TargetBindingResult:
 
 def write_public_safe_report(path: Path, result: TargetBindingResult) -> None:
     lines = [
-        "P12_TARGET_BINDING_SCHEMA=1",
+        "P12_TARGET_BINDING_SCHEMA=2",
         f"UCFG_RESPONSE_SHA256={result.ucfg_sha256}",
+        "P12_TARGET_REQUIRED_IDENTITY=APT_ADDRESS_PLUS_APT_SUBADDRESS",
+        "P12_TARGET_REQUIRED_UNIQUE=true",
+        "P12_TARGET_OPTIONAL_CONTEXT=MODEL_VERSION_IF_PRESENT",
     ]
     marker_names = {
         "model": "P12_TARGET_MODEL_MATCH",
@@ -101,6 +130,12 @@ def write_public_safe_report(path: Path, result: TargetBindingResult) -> None:
     for key in ("model", "version", "apt-address", "apt-subaddress"):
         lines.append(f"{marker_names[key]}={'true' if result.matches[key] else 'false'}")
         lines.append(f"P12_TARGET_{key.upper().replace('-', '_')}_OBSERVED_SCALARS={result.observed_scalar_counts[key]}")
+    for key in REQUIRED_UNIQUE_KEYS:
+        name = key.upper().replace("-", "_")
+        lines.append(f"P12_TARGET_{name}_UNIQUE={'true' if result.required_unique[key] else 'false'}")
+    for key in OPTIONAL_CONTEXT_KEYS:
+        name = key.upper().replace("-", "_")
+        lines.append(f"P12_TARGET_{name}_CONTEXT_COMPATIBLE={'true' if result.optional_compatible[key] else 'false'}")
     lines.extend(
         (
             "TARGET_IDENTITY_VALUES_EMITTED=false",
