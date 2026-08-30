@@ -7,6 +7,7 @@ BUILD_DIR=/root/comelit-p12-readonly-candidate
 WRAPPER="$BUILD_DIR/comelit-p2p-cloud-probe-p12-readonly"
 BINARY="$BUILD_DIR/comelit_ice_offer_holder.p12-readonly"
 RUN_DIR=/root/comelit-p12-readonly-live
+UCFG_CAPTURE=/run/comelit-p2p/p12-ucfg-response.json
 APPROVAL_EXPECTED=I_APPROVE_P12_READONLY_LIVE_ONCE
 EXPECTED_WRAPPER_SHA=7eb9c4e8999dc6c6f15ac03344abd155a042482158352fadbca58a3f4fd91ce1
 EXPECTED_BINARY_SHA=bae10046aa4a449e0e1bb56315308592aaf06b82049c80291871d6485b55668c
@@ -28,6 +29,12 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RAW="$RUN_DIR/${STAMP}.raw.log"
 SAFE="$RUN_DIR/${STAMP}.safe.txt"
 EXEC_STATUS="$RUN_DIR/${STAMP}.exec.txt"
+TARGET_STATUS="$RUN_DIR/${STAMP}.target.txt"
+LIVE_GATES="$RUN_DIR/${STAMP}.gates.txt"
+
+# A target-binding proof must come from this invocation, never from a stale
+# UCFG capture left by an earlier experiment.
+rm -f -- "$UCFG_CAPTURE"
 
 # The supervisor creates exactly one child process, never retries it, and
 # distinguishes process failure from an observed wall-clock timeout without
@@ -44,6 +51,7 @@ cat "$EXEC_STATUS"
 
 grep -Fxq 'P12_ONE_SHOT_PROCESS_INVOCATIONS=1' "$EXEC_STATUS"
 grep -Fxq 'P12_ONE_SHOT_AUTO_RETRY=false' "$EXEC_STATUS"
+grep -Fxq 'P12_ONE_SHOT_PROCESS_GROUP_ISOLATED=true' "$EXEC_STATUS"
 grep -Fxq 'TIMEOUT_MAPPING_VERIFIED=PASS' "$EXEC_STATUS"
 outcome="$(awk -F= '$1 == "P12_ONE_SHOT_OUTCOME" {print $2}' "$EXEC_STATUS")"
 rc="$(awk -F= '$1 == "P12_ONE_SHOT_PROCESS_RC" {print $2}' "$EXEC_STATUS")"
@@ -197,19 +205,47 @@ then
 fi
 
 echo "P12_AUTH_SESSION_LIFETIME_SEQUENCE=PASS"
+
+[[ -f "$UCFG_CAPTURE" ]] || {
+    echo "P12_TARGET_UCFG_CAPTURE_PRESENT=false"
+    echo "TARGET_BINDING_VERIFIED=FAIL"
+    echo "READONLY_TRANSPORT_READY=false"
+    echo "LIVE_TEST_READY=false"
+    exit 1
+}
+
+if ! python3 "$SCRIPT_DIR/p12_verify_target_binding.py" \
+    --ucfg "$UCFG_CAPTURE" \
+    --output "$TARGET_STATUS"; then
+    [[ -f "$TARGET_STATUS" ]] && cat "$TARGET_STATUS"
+    echo "P12_TARGET_BINDING_PROOF=FAIL"
+    echo "READONLY_TRANSPORT_READY=false"
+    echo "LIVE_TEST_READY=false"
+    exit 1
+fi
+chmod 600 "$TARGET_STATUS"
+cat "$TARGET_STATUS"
+grep -Fxq 'TARGET_BINDING_VERIFIED=PASS' "$TARGET_STATUS"
+grep -Fxq 'TARGET_IDENTITY_VALUES_EMITTED=false' "$TARGET_STATUS"
+
 echo "P12_READONLY_LIVE_PROOF=PASS"
-echo "REAL_TRANSPORT_IMPLEMENTED=true"
-echo "REAL_TRANSPORT_READONLY_SESSION_PROOF=PASS"
-echo "READONLY_SCOPE_ENFORCED=PASS"
-echo "AUTH_SESSION_LIFETIME_VERIFIED=PASS"
-echo "TIMEOUT_MAPPING_VERIFIED=PASS"
-echo "TARGET_BINDING_VERIFIED=NOT_PROVEN"
-echo "CREDENTIAL_MATERIAL_EMITTED=false"
-echo "ACTUATOR_COMMAND_ATTEMPTED=false"
-echo "PHYSICAL_DOOR_ACTION=false"
-echo "PHYSICAL_EFFECT_ASSERTED=false"
-# The repository readiness model still requires TARGET_BINDING_VERIFIED=PASS
-# as an independent gate. Do not overclaim overall readiness from a successful
-# auth/UCFG transaction plus verified timeout mapping alone.
+cat > "$LIVE_GATES" <<'EOF'
+REAL_TRANSPORT_IMPLEMENTED=true
+REAL_TRANSPORT_READONLY_SESSION_PROOF=PASS
+READONLY_SCOPE_ENFORCED=PASS
+TARGET_BINDING_VERIFIED=PASS
+AUTH_SESSION_LIFETIME_VERIFIED=PASS
+TIMEOUT_MAPPING_VERIFIED=PASS
+CREDENTIAL_MATERIAL_EMITTED=false
+ACTUATOR_COMMAND_ATTEMPTED=false
+PHYSICAL_DOOR_ACTION=false
+PHYSICAL_EFFECT_ASSERTED=false
+P12_READONLY_LIVE_GATES=PASS
+EOF
+chmod 600 "$LIVE_GATES"
+cat "$LIVE_GATES"
+echo "P12_READONLY_LIVE_GATE_REPORT=$LIVE_GATES"
+# Aggregate readiness also requires the repository gates. A separate offline
+# evaluator combines those already-proven gates with this live gate report.
 echo "READONLY_TRANSPORT_READY=false"
 echo "LIVE_TEST_READY=false"
