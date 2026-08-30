@@ -17,26 +17,60 @@ sys.modules[spec.name] = module
 spec.loader.exec_module(module)
 
 
-class PrepareP13PeerPayloadTests(unittest.TestCase):
-    def _vip(self) -> dict:
-        return {
-            "apt-address": "redacted",
-            "user-parameters": {
-                "opendoor-address-book": [],
-                "opendoor-actions": [{"action": "peer", "output-index": 1}],
-            },
-        }
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-    def test_empty_address_book_uses_runtime_pinned_peer_target(self):
+
+class PrepareP13PeerPayloadTests(unittest.TestCase):
+    def test_split_ucfg_layout_reconstructs_legacy_vip_identity(self):
+        doc = {
+            "vip": {"transport": "fixture"},
+            "identity": {"apt-address": "APT00001", "apt-subaddress": "7"},
+            "features": {"door": {"opendoor-actions": [{"action": "peer", "output-index": 1}]}},
+        }
+        with (
+            mock.patch.object(module, "EXPECTED_APT_ADDRESS_SHA256", _sha("APT00001")),
+            mock.patch.object(module, "EXPECTED_APT_SUBADDRESS_SHA256", _sha("7")),
+        ):
+            vip = module.extract_vip_for_peer(doc)
+        self.assertEqual(vip, {"apt-address": "APT00001", "apt-subaddress": "7"})
+
+    def test_peer_action_is_required_anywhere_in_ucfg(self):
+        doc = {
+            "identity": {"apt-address": "APT00001", "apt-subaddress": "7"},
+            "features": {"door": {"opendoor-actions": [{"action": "other"}]}},
+        }
+        with (
+            mock.patch.object(module, "EXPECTED_APT_ADDRESS_SHA256", _sha("APT00001")),
+            mock.patch.object(module, "EXPECTED_APT_SUBADDRESS_SHA256", _sha("7")),
+        ):
+            with self.assertRaises(RuntimeError):
+                module.extract_vip_for_peer(doc)
+
+    def test_apartment_identity_must_be_unique(self):
+        doc = {
+            "a": {"apt-address": "APT00001", "apt-subaddress": "7"},
+            "b": {"apt-address": "APT00001"},
+            "door": {"action": "peer"},
+        }
+        with (
+            mock.patch.object(module, "EXPECTED_APT_ADDRESS_SHA256", _sha("APT00001")),
+            mock.patch.object(module, "EXPECTED_APT_SUBADDRESS_SHA256", _sha("7")),
+        ):
+            with self.assertRaises(RuntimeError):
+                module.extract_vip_for_peer(doc)
+
+    def test_runtime_pinned_peer_target_has_legacy_apt_address_field(self):
         env = {
             "P13_PEER_ENTRANCE": "00000643",
             "P13_PEER_OUTPUT_INDEX": "1",
             "P13_PEER_ENTRANCE_NAME": "fixture",
         }
         with mock.patch.dict(os.environ, env, clear=False):
-            doors = module.extract_doors_with_peer_fallback(self._vip())
+            doors = module.extract_doors_for_peer({"apt-address": "private", "apt-subaddress": "7"})
         self.assertEqual(len(doors), 1)
         self.assertEqual(doors[0]["number"], "00000643")
+        self.assertEqual(doors[0]["apt-address"], "00000643")
         self.assertEqual(doors[0]["output-index"], 1)
         self.assertEqual(doors[0]["name"], "fixture")
 
@@ -47,22 +81,7 @@ class PrepareP13PeerPayloadTests(unittest.TestCase):
         }
         with mock.patch.dict(os.environ, env, clear=False):
             with self.assertRaises(RuntimeError):
-                module.extract_doors_with_peer_fallback(self._vip())
-
-    def test_peer_action_is_required(self):
-        vip = {
-            "user-parameters": {
-                "opendoor-address-book": [],
-                "opendoor-actions": [{"action": "other"}],
-            }
-        }
-        env = {
-            "P13_PEER_ENTRANCE": "00000643",
-            "P13_PEER_OUTPUT_INDEX": "1",
-        }
-        with mock.patch.dict(os.environ, env, clear=False):
-            with self.assertRaises(RuntimeError):
-                module.extract_doors_with_peer_fallback(vip)
+                module.extract_doors_for_peer({"apt-address": "private", "apt-subaddress": "7"})
 
     def test_exact_p12_runtime_ucfg_path_is_known(self):
         self.assertEqual(
