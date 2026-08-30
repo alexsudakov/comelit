@@ -19,7 +19,6 @@ PAYLOAD=/root/comelit-p13-actuator-prep/real-door-payloads.json
 NATIVE_DIR=/root/comelit-p13-native
 HOLDER_SOURCE="$NATIVE_DIR/comelit_p13_holder.c"
 HOLDER_TMP="$NATIVE_DIR/comelit_p13_holder.safe.tmp"
-HOLDER="$NATIVE_DIR/comelit_p13-native-holder-unused"
 HOLDER=/root/comelit-p13-native/comelit_p13_holder
 WRAPPER=/usr/local/sbin/comelit-p13-door-wrapper
 BUILD_LOG="$NATIVE_DIR/rebuild-safe.log"
