@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import unittest
 
 
@@ -22,8 +23,7 @@ class P12CandidateStaticEvidenceCollectorTests(unittest.TestCase):
         self.assertIn("ACTIVE_COMELIT_NETWORK_PROBES=false", self.text)
         self.assertIn("ACTUATOR_COMMAND_ATTEMPTED=false", self.text)
         self.assertIn("PHYSICAL_DOOR_ACTION=false", self.text)
-        self.assertNotIn('"$BIN"\n', self.text)
-        self.assertNotIn('"$WRAP"\n', self.text)
+        self.assertIsNone(re.search(r'(?m)^[ \t]*"\$(?:BIN|WRAP)"(?:[ \t]|$)', self.text))
 
     def test_static_validation_tools_and_scans_are_present(self):
         self.assertIn('readelf -h "$BIN" >/dev/null', self.text)
