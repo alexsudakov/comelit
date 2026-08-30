@@ -126,13 +126,16 @@ cc -O2 -Wall -Wextra \
 chmod 700 "$HOLDER"
 chown root:root "$HOLDER"
 
-# runtime identity sanity (non-actuating static scan only)
-strings -a "$HOLDER" | grep -q 'P13_CTPP_OPEN_OUTCOME'
-strings -a "$HOLDER" | grep -q 'P13_DOOR_WRITE_COUNT'
-strings -a "$HOLDER" | grep -q 'P13_TEARDOWN=PASS'
-strings -a "$HOLDER" | grep -q 'P13_ONE_SHOT_MAX_INVOCATIONS=1'
-strings -a "$HOLDER" | grep -q 'P13_AUTO_RETRY_ALLOWED=false'
-strings -a "$HOLDER" | grep -q 'PHYSICAL_DOOR_ACTION=false'
+# runtime identity sanity (non-actuating static scan only).
+# Use direct binary-safe grep rather than `strings | grep -q`: with
+# `set -o pipefail`, grep -q may close the pipe as soon as it finds a match,
+# causing `strings` to exit on SIGPIPE (141) even though the marker is present.
+grep -aFq 'P13_CTPP_OPEN_OUTCOME' "$HOLDER"
+grep -aFq 'P13_DOOR_WRITE_COUNT' "$HOLDER"
+grep -aFq 'P13_TEARDOWN=PASS' "$HOLDER"
+grep -aFq 'P13_ONE_SHOT_MAX_INVOCATIONS=1' "$HOLDER"
+grep -aFq 'P13_AUTO_RETRY_ALLOWED=false' "$HOLDER"
+grep -aFq 'PHYSICAL_DOOR_ACTION=false' "$HOLDER"
 echo "P13_HOLDER_BUILD=PASS"
 echo "P13_HOLDER_SHA256=$(sha256sum "$HOLDER" | awk '{print $1}')"
 echo "P13_HOLDER_MODE=$(stat -c '%a' "$HOLDER")"
