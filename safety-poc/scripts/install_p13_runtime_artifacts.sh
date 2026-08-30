@@ -87,6 +87,15 @@ PAYLOAD_MODE="$(stat -c '%a' "$PAYLOAD")"
 echo "P13_BASE_SOURCE_PIN=PASS"
 echo "P13_BASE_BINARY_PIN=PASS"
 
+# The generated holder pins the SHA-256 of the canonical JSON byte stream.
+# Normalize only JSON formatting before transform/build so the runtime file
+# bytes are exactly the bytes whose SHA is embedded in the holder. Door bodies
+# and all semantic metadata remain unchanged.
+STEP=PAYLOAD_CANONICALIZE
+python3 "$SCRIPT_DIR/p13_canonicalize_payload.py" --payload "$PAYLOAD"
+[[ "$(stat -c '%a' "$PAYLOAD")" == "600" ]] || { echo "P13_PAYLOAD_MODE_AFTER_CANONICALIZE=FAIL"; exit 1; }
+echo "P13_PAYLOAD_CANONICAL_RUNTIME_BYTES=PASS"
+
 # ---- 2. transform + build holder ---------------------------------------------
 STEP=TRANSFORM
 mkdir -p "$NATIVE_DIR"
