@@ -21,6 +21,19 @@ EXPECTED_SOURCE_SHA=b8215df5008133c38fa57a31aae63f7cbf734710fa322aa641de2da08b80
 EXPECTED_BINARY_SHA=bae10046aa4a449e0e1bb56315308592aaf06b82049c80291871d6485b55668c
 EXPECTED_WRAPPER_SHA=7eb9c4e8999dc6c6f15ac03344abd155a042482158352fadbca58a3f4fd91ce1
 
+STEP=START
+preflight_exit() {
+    rc=$?
+    echo "P12_PREFLIGHT_EXIT_RC=$rc"
+    echo "P12_PREFLIGHT_LAST_STEP=$STEP"
+    trap - EXIT
+    exit "$rc"
+}
+trap preflight_exit EXIT
+
+echo "P12_PREFLIGHT_DIAGNOSTIC_TRAP=ARMED"
+
+STEP=IDENTITY_PINS
 [[ "${EUID}" -eq 0 ]] || { echo "P12_PREFLIGHT_REQUIRES_ROOT=true"; exit 1; }
 [[ -f "$SOURCE" && -f "$BINARY" && -f "$WRAPPER" && -f "$MANIFEST" ]] || {
     echo "P12_CANDIDATE_ARTIFACTS_PRESENT=false"
@@ -51,6 +64,7 @@ grep -Fxq "PHYSICAL_DOOR_ACTION=false" "$MANIFEST"
 grep -Fxq "LIVE_TEST_READY=false" "$MANIFEST"
 echo "P12_PREFLIGHT_BUILD_IDENTITY=PASS"
 
+STEP=ARTIFACT_SHAPE
 [[ "$(stat -c '%a' "$SOURCE")" == "600" ]]
 [[ "$(stat -c '%a' "$BINARY")" == "700" ]]
 [[ "$(stat -c '%a' "$WRAPPER")" == "700" ]]
@@ -59,19 +73,32 @@ readelf -h "$BINARY" >/dev/null
 bash -n "$WRAPPER"
 echo "P12_PREFLIGHT_ARTIFACT_SHAPE=PASS"
 
+STEP=SOURCE_ACTUATOR_SCAN
+echo "P12_PREFLIGHT_STEP=SOURCE_ACTUATOR_SCAN"
 if grep -Eq 'CTPP|OPEN_DOOR|open_door|create_door_message' "$SOURCE"; then
     echo "P12_PREFLIGHT_SOURCE_ACTUATOR_SCAN=FAIL"
     exit 1
 fi
+echo "P12_PREFLIGHT_SOURCE_ACTUATOR_SCAN=PASS"
+
+STEP=BINARY_ACTUATOR_SCAN
+echo "P12_PREFLIGHT_STEP=BINARY_ACTUATOR_SCAN"
 if strings -a "$BINARY" | grep -Eq 'CTPP|OPEN_DOOR|open_door|create_door_message'; then
     echo "P12_PREFLIGHT_BINARY_ACTUATOR_SCAN=FAIL"
     exit 1
 fi
+echo "P12_PREFLIGHT_BINARY_ACTUATOR_SCAN=PASS"
+
+STEP=WRAPPER_ACTUATOR_SCAN
+echo "P12_PREFLIGHT_STEP=WRAPPER_ACTUATOR_SCAN"
 if grep -Eq 'CTPP|OPEN_DOOR|open_door|create_door_message' "$WRAPPER"; then
     echo "P12_PREFLIGHT_WRAPPER_ACTUATOR_SCAN=FAIL"
     exit 1
 fi
+echo "P12_PREFLIGHT_WRAPPER_ACTUATOR_SCAN=PASS"
 
+STEP=READONLY_SURFACE
+echo "P12_PREFLIGHT_STEP=READONLY_SURFACE"
 grep -q 'P12_READONLY_TRANSACTION=PASS' "$SOURCE"
 grep -q 'P12_VIP_TOKEN_VALUE_EMITTED=false' "$SOURCE"
 grep -q 'CREDENTIAL_MATERIAL_EMITTED=false' "$SOURCE"
@@ -84,6 +111,8 @@ strings -a "$BINARY" | grep -q 'AUTO_RETRY_OBSERVED=false'
 strings -a "$BINARY" | grep -q 'LIVE_TEST_READY=false'
 echo "P12_PREFLIGHT_READONLY_SURFACE=PASS"
 
+STEP=WRAPPER_BINDING
+echo "P12_PREFLIGHT_STEP=WRAPPER_BINDING"
 [[ "$(grep -Fc "$BINARY" "$WRAPPER")" -eq 1 ]] || { echo "P12_PREFLIGHT_WRAPPER_BINDING=FAIL"; exit 1; }
 if grep -Fq '"$BASE/bin/comelit_ice_offer_holder"' "$WRAPPER"; then
     echo "P12_PREFLIGHT_BASELINE_HOLDER_BINDING_PRESENT=true"
@@ -97,6 +126,8 @@ echo "P12_PREFLIGHT_WRAPPER_BINDING=PASS"
 
 # Parse repository control-plane sources only. This does not execute the
 # supervisor, candidate, wrapper, finalizer, or any network-capable code.
+STEP=CONTROL_PLANE_PARSE
+echo "P12_PREFLIGHT_STEP=CONTROL_PLANE_PARSE"
 python3 - "$ONE_SHOT_EXEC" "$TARGET_VERIFY" "$LIVE_RUNNER" "$FINALIZER" <<'PY'
 from __future__ import annotations
 
@@ -164,6 +195,8 @@ print("P12_PREFLIGHT_FINALIZER_CONTRACT=PASS")
 PY
 echo "P12_PREFLIGHT_CONTROL_PLANE=PASS"
 
+STEP=CREDENTIAL_METADATA
+echo "P12_PREFLIGHT_STEP=CREDENTIAL_METADATA"
 [[ -d "$SECRETS_DIR" && -f "$SECRETS_FILE" ]] || {
     echo "P12_PREFLIGHT_CREDENTIAL_CONTAINER_PRESENT=false"
     exit 1
@@ -174,6 +207,8 @@ echo "P12_PREFLIGHT_CONTROL_PLANE=PASS"
 [[ "$(stat -c '%u' "$SECRETS_FILE")" == "0" ]] || { echo "P12_PREFLIGHT_SECRETS_FILE_OWNER=FAIL"; exit 1; }
 echo "P12_PREFLIGHT_CREDENTIAL_METADATA=PASS"
 
+STEP=PROCESS_CHECK
+echo "P12_PREFLIGHT_STEP=PROCESS_CHECK"
 if pgrep -f -- "$BINARY" >/dev/null 2>&1; then
     echo "P12_PREFLIGHT_CANDIDATE_PROCESS_RUNNING=true"
     exit 1
@@ -184,6 +219,7 @@ if pgrep -f -- "$WRAPPER" >/dev/null 2>&1; then
 fi
 echo "P12_PREFLIGHT_NO_ACTIVE_CANDIDATE=PASS"
 
+STEP=COMPLETE
 echo "P12_READONLY_LIVE_APPROVAL_REQUIRED=true"
 echo "P12_READONLY_LIVE_APPROVED=false"
 echo "P12_READONLY_LIVE_RUN_PERFORMED=false"
