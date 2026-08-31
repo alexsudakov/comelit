@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import hmac
 import json
 import os
 import re
-import secrets
+import signal
 import sqlite3
 import subprocess
 import threading
@@ -17,7 +18,6 @@ from typing import Mapping
 
 from .ha_contract import HaResultState
 from .model import State
-from .p13_one_shot_physical import APPROVAL_TOKEN
 from .store import Journal
 
 
@@ -64,12 +64,7 @@ def validate_operation_id(value: str) -> str:
 
 
 def canonical_signature_payload(
-    *,
-    method: str,
-    path: str,
-    timestamp: str,
-    nonce: str,
-    body: bytes,
+    *, method: str, path: str, timestamp: str, nonce: str, body: bytes
 ) -> bytes:
     body_sha = hashlib.sha256(body).hexdigest()
     return (
@@ -134,8 +129,8 @@ class P14ReplayStore:
                 )
             except sqlite3.IntegrityError as exc:
                 raise P14ReplayError("replayed_nonce") from exc
-            # Old nonces are irrelevant after the timestamp window. Keep a wide
-            # cleanup margin so cleanup can never make an in-window replay valid.
+            # Never delete an in-window nonce.  The wide cleanup margin makes a
+            # replay durable across bridge restarts without unbounded growth.
             con.execute("DELETE FROM accepted_nonces WHERE accepted_at < ?", (now - 86400,))
             con.commit()
         except BaseException:
@@ -210,8 +205,8 @@ class P14SignedRequestVerifier:
         operation_id = validate_operation_id(str(payload.get("operation_id") or ""))
 
         # Claim only after authentication and structural validation, but before
-        # any possible execution. A repeated signed request can never invoke the
-        # runner twice with the same nonce.
+        # any execution.  A repeated signed request can never invoke the runner
+        # twice with the same nonce.
         self.replay_store.claim(nonce, issued_at, now=now_i)
         return operation_id
 
@@ -240,38 +235,60 @@ class P14BridgeResult:
 @dataclass(frozen=True)
 class P14RunnerConfig:
     runner_path: str
+    runner_sha256: str
     journal_path: str
     target_fingerprint: str
-    min_interval_seconds: int = 10
+    lock_path: str
     live_enabled: bool = False
-    timeout_seconds: int = 120
+    timeout_seconds: int = 150
+    term_grace_seconds: int = 5
 
     def __post_init__(self) -> None:
-        if not Path(self.runner_path).is_absolute():
-            raise ValueError("runner_path must be absolute")
+        for value, name in (
+            (self.runner_path, "runner_path"),
+            (self.journal_path, "journal_path"),
+            (self.lock_path, "lock_path"),
+        ):
+            if not Path(value).is_absolute():
+                raise ValueError(f"{name} must be absolute")
+        if not _SHA256_RE.fullmatch(self.runner_sha256):
+            raise ValueError("runner_sha256 must be a lowercase sha256")
         if not _SHA256_RE.fullmatch(self.target_fingerprint):
             raise ValueError("target_fingerprint must be a lowercase sha256")
-        if self.min_interval_seconds < 1:
-            raise ValueError("min_interval_seconds must be positive")
-        if self.timeout_seconds < 10:
-            raise ValueError("timeout_seconds too small")
+        if self.timeout_seconds < 10 or self.timeout_seconds > 300:
+            raise ValueError("invalid timeout_seconds")
+        if self.term_grace_seconds < 1 or self.term_grace_seconds > 30:
+            raise ValueError("invalid term_grace_seconds")
 
 
 class P14CanonicalRunner:
-    """Narrow CT120 adapter to the already-proven P13 physical runner.
+    """Narrow bridge to a locally pinned P14 production runner.
 
-    Network input controls only ``operation_id``. Runner path, journal, target,
-    approval mapping, rate limit and timeout are local trusted configuration.
-    There is no retry loop. The process lock prevents two native runner
-    processes from being launched concurrently by this bridge.
+    Network input controls only ``operation_id``.  The executable identity,
+    P13 target/journal/artifacts, approval mapping and rate limit remain local
+    root-owned configuration.  No P14 secret is inherited by the child.  A
+    process-wide flock complements the in-process lock so two bridge processes
+    cannot launch actuation children concurrently during restarts/upgrades.
     """
 
     def __init__(self, config: P14RunnerConfig):
         self.config = config
-        self._lock = threading.Lock()
+        self._thread_lock = threading.Lock()
 
     def _journal(self) -> Journal:
         return Journal(self.config.journal_path)
+
+    def verify_runner_identity(self) -> None:
+        path = Path(self.config.runner_path)
+        if not path.is_file():
+            raise RuntimeError("p14_production_runner_absent")
+        if path.stat().st_uid != 0:
+            raise RuntimeError("p14_production_runner_owner_not_root")
+        if (path.stat().st_mode & 0o777) != 0o700:
+            raise RuntimeError("p14_production_runner_mode_invalid")
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if not hmac.compare_digest(actual, self.config.runner_sha256):
+            raise RuntimeError("p14_production_runner_sha256_mismatch")
 
     @staticmethod
     def _map_existing(operation_id: str, state: State, detail: str | None) -> P14BridgeResult:
@@ -280,6 +297,9 @@ class P14CanonicalRunner:
         elif state == State.FAILED_SAFE:
             mapped = HaResultState.FAILED_SAFE
         else:
+            # PREPARED/SEND_ARMED/SENT are deliberately not re-executed.  A
+            # nonterminal record may belong to a still-running or crashed
+            # operation, so the only safe network-facing state is UNKNOWN.
             mapped = HaResultState.UNKNOWN_OUTCOME
         return P14BridgeResult(
             operation_id=operation_id,
@@ -294,6 +314,56 @@ class P14CanonicalRunner:
             return None
         return self._map_existing(operation_id, op.state, op.detail)
 
+    def _record_failed_safe(self, operation_id: str, reason: str) -> P14BridgeResult:
+        journal = self._journal()
+        existing = journal.maybe_get(operation_id)
+        if existing is not None:
+            return self._map_existing(operation_id, existing.state, existing.detail)
+        try:
+            journal.create(operation_id, self.config.target_fingerprint, reason)
+            op = journal.transition(operation_id, State.FAILED_SAFE, reason)
+        except sqlite3.IntegrityError:
+            op = journal.get(operation_id)
+        mapped = self._map_existing(operation_id, op.state, op.detail)
+        return P14BridgeResult(
+            operation_id=mapped.operation_id,
+            state=mapped.state,
+            reason=mapped.reason,
+            runner_invoked=False,
+        )
+
+    def _acquire_process_lock(self):
+        lock_path = Path(self.config.lock_path)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(lock_path.parent, 0o700)
+        handle = lock_path.open("a+", encoding="utf-8")
+        os.chmod(lock_path, 0o600)
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            handle.close()
+            return None
+        return handle
+
+    @staticmethod
+    def _minimal_child_env() -> dict[str, str]:
+        # In particular, COMELIT_P14_SHARED_SECRET and every request HMAC value
+        # are absent.  The root-only P14 production runner maps the P13 approval
+        # token locally after its own immutable-runtime checks.
+        return {
+            "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+
+    @staticmethod
+    def _terminate_group(proc: subprocess.Popen[bytes], sig: signal.Signals) -> None:
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            pass
+
     def invoke(self, operation_id: str) -> P14BridgeResult:
         operation_id = validate_operation_id(operation_id)
 
@@ -302,80 +372,95 @@ class P14CanonicalRunner:
             return existing
 
         if not self.config.live_enabled:
-            return P14BridgeResult(
-                operation_id=operation_id,
-                state=HaResultState.FAILED_SAFE,
-                reason="p14_live_execution_disabled",
-                runner_invoked=False,
-            )
+            # Persist the no-send result so this operation identity can never be
+            # reused later after live mode is enabled.
+            return self._record_failed_safe(operation_id, "p14_live_execution_disabled_no_send")
 
-        if not self._lock.acquire(blocking=False):
-            return P14BridgeResult(
-                operation_id=operation_id,
-                state=HaResultState.FAILED_SAFE,
-                reason="bridge_busy_no_send_attempted",
-                runner_invoked=False,
-            )
+        if not self._thread_lock.acquire(blocking=False):
+            return self._record_failed_safe(operation_id, "bridge_busy_no_send_attempted")
 
+        process_lock = None
+        runner_invoked = False
         timed_out = False
         return_code: int | None = None
         try:
-            # Re-check after acquiring the lock: another request may have
-            # completed this operation between the first lookup and the lock.
+            try:
+                process_lock = self._acquire_process_lock()
+            except OSError:
+                return self._record_failed_safe(
+                    operation_id, "bridge_process_lock_error_no_send_attempted"
+                )
+            if process_lock is None:
+                return self._record_failed_safe(operation_id, "bridge_process_busy_no_send_attempted")
+
+            # Another request/process may have completed this operation while
+            # this request was waiting on local scheduling.
             existing = self._existing_without_resend(operation_id)
             if existing is not None:
                 return existing
 
-            command = [
-                "/usr/bin/bash",
-                self.config.runner_path,
-                "--db",
-                self.config.journal_path,
-                "--operation-id",
-                operation_id,
-                "--target-fingerprint",
-                self.config.target_fingerprint,
-                "--min-interval-seconds",
-                str(self.config.min_interval_seconds),
-            ]
-            env = os.environ.copy()
-            # The static P13 approval token is never accepted from the network.
-            # It is mapped locally only after the HMAC-authenticated HA request
-            # passed the P14 verifier and live execution is explicitly enabled.
-            env["P13_APPROVAL"] = APPROVAL_TOKEN
             try:
-                completed = subprocess.run(
+                self.verify_runner_identity()
+            except RuntimeError as exc:
+                return self._record_failed_safe(
+                    operation_id, f"runner_identity_invalid_no_send:{exc}"
+                )
+
+            command = [self.config.runner_path, "--operation-id", operation_id]
+            try:
+                proc = subprocess.Popen(
                     command,
-                    env=env,
+                    env=self._minimal_child_env(),
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
-                    text=True,
-                    timeout=self.config.timeout_seconds,
-                    check=False,
+                    close_fds=True,
+                    start_new_session=True,
                 )
-                return_code = completed.returncode
+            except OSError as exc:
+                return self._record_failed_safe(
+                    operation_id, f"runner_spawn_failed_no_send:{type(exc).__name__}"
+                )
+            runner_invoked = True
+            try:
+                proc.communicate(timeout=self.config.timeout_seconds)
             except subprocess.TimeoutExpired:
                 timed_out = True
+                self._terminate_group(proc, signal.SIGTERM)
+                try:
+                    proc.communicate(timeout=self.config.term_grace_seconds)
+                except subprocess.TimeoutExpired:
+                    self._terminate_group(proc, signal.SIGKILL)
+                    proc.communicate(timeout=5)
+            return_code = proc.returncode
         finally:
-            self._lock.release()
+            if process_lock is not None:
+                try:
+                    fcntl.flock(process_lock.fileno(), fcntl.LOCK_UN)
+                finally:
+                    process_lock.close()
+            self._thread_lock.release()
 
         journal = self._journal()
         op = journal.maybe_get(operation_id)
         if op is None:
+            # The production runner validates all identities before it creates
+            # PREPARED.  No durable operation means SEND_ARMED was not reached.
+            reason = (
+                "runner_timeout_before_operation_persisted_no_send"
+                if timed_out
+                else f"runner_exit_{return_code}_before_operation_persisted_no_send"
+            )
+            persisted = self._record_failed_safe(operation_id, reason)
             return P14BridgeResult(
-                operation_id=operation_id,
-                state=HaResultState.FAILED_SAFE,
-                reason=(
-                    "runner_timeout_before_operation_persisted"
-                    if timed_out
-                    else f"runner_exit_{return_code}_before_operation_persisted"
-                ),
-                runner_invoked=True,
+                operation_id=persisted.operation_id,
+                state=persisted.state,
+                reason=persisted.reason,
+                runner_invoked=runner_invoked,
             )
 
-        # The child is no longer running. Normalize any crash residue without
-        # ever attempting another send.
+        # The child process group has ended.  Normalize crash residue without
+        # ever launching another process/send.
         if op.state == State.PREPARED:
             op = journal.transition(
                 operation_id,
@@ -394,7 +479,7 @@ class P14CanonicalRunner:
             operation_id=result.operation_id,
             state=result.state,
             reason=result.reason,
-            runner_invoked=True,
+            runner_invoked=runner_invoked,
         )
 
 
@@ -412,8 +497,3 @@ class P14BridgeApplication:
     ) -> P14BridgeResult:
         operation_id = self.verifier.verify_open_door(headers=headers, body=body, now=now)
         return self.runner.invoke(operation_id)
-
-
-def new_nonce() -> str:
-    """Helper used by compatibility tests; HA has its own equivalent signer."""
-    return secrets.token_urlsafe(24)
