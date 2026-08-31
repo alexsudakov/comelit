@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 from typing import Any
 from urllib.parse import urlparse
 
@@ -10,17 +11,34 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import TextSelector, TextSelectorConfig, TextSelectorType
 
 from .client import ComelitBridgeClient
-from .const import CONF_BRIDGE_URL, CONF_SHARED_SECRET, DOMAIN
+from .const import BRIDGE_PORT, CONF_BRIDGE_URL, CONF_SHARED_SECRET, DOMAIN
 
 
 def _normalize_bridge_url(value: str) -> str:
     value = (value or "").strip().rstrip("/")
     parsed = urlparse(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise ValueError("invalid bridge URL")
+    if parsed.scheme != "http" or not parsed.hostname:
+        raise ValueError("bridge must use private HTTP")
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise ValueError("bridge URL must not contain credentials/query/fragment")
-    return value
+    if parsed.path not in {"", "/"}:
+        raise ValueError("bridge URL path must be root")
+    if parsed.port != BRIDGE_PORT:
+        raise ValueError("bridge port mismatch")
+    try:
+        addr = ipaddress.ip_address(parsed.hostname)
+    except ValueError as exc:
+        raise ValueError("bridge hostname must be private IPv4") from exc
+    if (
+        addr.version != 4
+        or not addr.is_private
+        or addr.is_loopback
+        or addr.is_unspecified
+        or addr.is_multicast
+        or addr.is_link_local
+    ):
+        raise ValueError("bridge address must be private IPv4")
+    return f"http://{addr}:{BRIDGE_PORT}"
 
 
 class ComelitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -42,7 +60,10 @@ class ComelitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     bridge_url=bridge_url,
                     shared_secret=shared_secret,
                 )
-                if not await client.async_health():
+                # Config entries are created only after the CT120 backend has
+                # been deliberately live-promoted and its runner identity passes.
+                # No open-door request is used for this connectivity check.
+                if not await client.async_health(require_live=True):
                     errors["base"] = "cannot_connect"
                 else:
                     await self.async_set_unique_id(bridge_url)
