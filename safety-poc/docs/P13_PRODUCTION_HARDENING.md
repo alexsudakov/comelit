@@ -75,3 +75,30 @@ Future successful releases preserve the prior selected immutable release through
 the `previous` symlink.
 
 Rollback never performs a Comelit session or Door action.
+
+## G1B production physical validation
+
+G1B is a second, separately approved physical validation of the immutable
+production deployment.
+
+It does not reuse or reset the historical observed-acceptance gate.
+
+The G1B validation path has its own:
+
+- approval identity;
+- concurrency lock;
+- terminal one-use state;
+- fresh operation ID;
+- durable pre-live gate consumption;
+- immutable-release binding;
+- journal and audit path.
+
+The G1B runner does not depend on a Git worktree. It executes Python code from
+the immutable `current` release and verifies the release checksum plus the exact
+holder, wrapper, payload, target and runtime identities before a live-capable
+handoff.
+
+G1B readiness is non-actuating.
+
+The G1B open command is temporary validation authority only. After the physical
+validation and evidence freeze, it must be retired again before P13 merge.
