@@ -107,6 +107,34 @@ class P13ProductionReleaseTests(unittest.TestCase):
         self.assertIn('ln -sfn "$OLD_CURRENT" "$CURRENT"', self.text)
         self.assertIn("P13_PRODUCTION_INSTALL=FAIL", self.text)
 
+    def test_failed_promotion_restores_previous_selector(self):
+        self.assertIn("OLD_PREVIOUS_PRESENT=false", self.text)
+        self.assertIn("PREVIOUS_CHANGED=false", self.text)
+        self.assertIn(
+            'if [[ "$PREVIOUS_CHANGED" == true ]]; then',
+            self.text,
+        )
+        self.assertIn(
+            'ln -sfn "$OLD_PREVIOUS" "$PREVIOUS"',
+            self.text,
+        )
+        self.assertIn(
+            'rm -f "$PREVIOUS"',
+            self.text,
+        )
+        self.assertIn(
+            "P13_PRODUCTION_OLD_PREVIOUS_TARGET=FAIL",
+            self.text,
+        )
+        self.assertIn(
+            "P13_PRODUCTION_OLD_PREVIOUS_SCOPE=FAIL",
+            self.text,
+        )
+        self.assertIn(
+            "P13_PRODUCTION_PREVIOUS_NOT_SYMLINK=true",
+            self.text,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

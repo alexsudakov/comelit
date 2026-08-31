@@ -42,6 +42,9 @@ RELEASE_CREATED=false
 PROMOTED=false
 DISPATCH_CHANGED=false
 OLD_CURRENT=""
+OLD_PREVIOUS=""
+OLD_PREVIOUS_PRESENT=false
+PREVIOUS_CHANGED=false
 OLD_DISPATCH_BACKUP=""
 
 cleanup() {
@@ -57,6 +60,14 @@ cleanup() {
                 ln -sfn "$OLD_CURRENT" "$CURRENT"
             else
                 rm -f "$CURRENT"
+            fi
+        fi
+
+        if [[ "$PREVIOUS_CHANGED" == true ]]; then
+            if [[ "$OLD_PREVIOUS_PRESENT" == true ]]; then
+                ln -sfn "$OLD_PREVIOUS" "$PREVIOUS"
+            else
+                rm -f "$PREVIOUS"
             fi
         fi
 
@@ -272,10 +283,37 @@ else
     echo 'P13_PRODUCTION_FIRST_INSTALL=true'
 fi
 
+OLD_PREVIOUS=""
+OLD_PREVIOUS_PRESENT=false
+
+if [[ -L "$PREVIOUS" ]]; then
+    OLD_PREVIOUS="$(readlink -f "$PREVIOUS" 2>/dev/null || true)"
+
+    [[ -n "$OLD_PREVIOUS" && -d "$OLD_PREVIOUS" ]] || {
+        echo 'P13_PRODUCTION_OLD_PREVIOUS_TARGET=FAIL'
+        exit 1
+    }
+
+    case "$OLD_PREVIOUS" in
+        "$RELEASES"/*)
+            OLD_PREVIOUS_PRESENT=true
+            ;;
+        *)
+            echo 'P13_PRODUCTION_OLD_PREVIOUS_SCOPE=FAIL'
+            exit 1
+            ;;
+    esac
+
+elif [[ -e "$PREVIOUS" ]]; then
+    echo 'P13_PRODUCTION_PREVIOUS_NOT_SYMLINK=true'
+    exit 1
+fi
+
 if [[ -n "$OLD_CURRENT" && "$OLD_CURRENT" != "$RELEASE" ]]; then
     case "$OLD_CURRENT" in
         "$RELEASES"/*)
             ln -sfn "$OLD_CURRENT" "$PREVIOUS"
+            PREVIOUS_CHANGED=true
             ;;
         *)
             echo 'P13_PRODUCTION_OLD_CURRENT_SCOPE=FAIL'

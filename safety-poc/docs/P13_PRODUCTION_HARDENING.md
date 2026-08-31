@@ -69,6 +69,8 @@ A failed G1A install restores:
 
 - the previously installed P13 dispatcher;
 - the previous `current` release pointer;
+- the prior `previous` selector, including restoring its absence when it did
+  not exist before the attempted promotion;
 - removes a newly-created failed release.
 
 Future successful releases preserve the prior selected immutable release through
