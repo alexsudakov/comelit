@@ -20,15 +20,15 @@ class ComelitBridgeError(RuntimeError):
 
 
 class ComelitBridgeCannotConnect(ComelitBridgeError):
-    """Connection failed before a health check completed."""
+    """Bridge health/configuration validation failed."""
 
 
 class ComelitBridgeOutcomeUnknown(ComelitBridgeError):
-    """The open-door request may have reached the bridge; retry is forbidden."""
+    """No trustworthy signed result exists; retry is forbidden."""
 
 
 class ComelitBridgeRejected(ComelitBridgeError):
-    """The authenticated bridge rejected the request without a physical claim."""
+    """The authenticated request was rejected before a trusted result existed."""
 
 
 @dataclass(frozen=True)
@@ -36,8 +36,21 @@ class ComelitBridgeResult:
     operation_id: str
     state: str
     reason: str
+    runner_invoked: bool
     retry_allowed: bool
     physical_effect_asserted: bool
+
+    def as_service_response(self) -> dict[str, object]:
+        return {
+            "operation_id": self.operation_id,
+            "state": self.state,
+            "reason": self.reason,
+            "runner_invoked": self.runner_invoked,
+            "retry_allowed": False,
+            "physical_effect_asserted": False,
+            "protocol_acknowledged": self.state == "ACKED",
+            "physical_door_state": "UNKNOWN",
+        }
 
 
 class ComelitBridgeClient:
@@ -46,19 +59,26 @@ class ComelitBridgeClient:
         self._base_url = bridge_url.rstrip("/") + "/"
         self._shared_secret = shared_secret
 
-    async def async_health(self) -> bool:
+    async def async_health(self, *, require_live: bool = False) -> bool:
         url = urljoin(self._base_url, "healthz")
         try:
             async with self._session.get(url, timeout=ClientTimeout(total=5)) as response:
                 if response.status != 200:
                     return False
                 payload = await response.json()
-        except (ClientError, asyncio.TimeoutError, ValueError):
+        except (ClientError, asyncio.TimeoutError, ValueError, TypeError):
             return False
-        return bool(
-            payload.get("ok")
-            and int(payload.get("protocol_version", 0)) == BRIDGE_PROTOCOL_VERSION
-        )
+        if not isinstance(payload, dict):
+            return False
+        if payload.get("ok") is not True:
+            return False
+        if int(payload.get("protocol_version", 0)) != BRIDGE_PROTOCOL_VERSION:
+            return False
+        if require_live and payload.get("live_enabled") is not True:
+            return False
+        if payload.get("live_enabled") is True and payload.get("runner_identity") != "pass":
+            return False
+        return True
 
     async def async_open_door(self, operation_id: str) -> ComelitBridgeResult:
         body, headers = build_signed_open_door_request(
@@ -67,7 +87,8 @@ class ComelitBridgeClient:
         )
         url = urljoin(self._base_url, OPEN_DOOR_PATH.lstrip("/"))
 
-        # Deliberately one HTTP attempt. aiohttp itself does not retry this POST.
+        # Deliberately one HTTP attempt.  No timeout/replay error is converted
+        # into a second POST.
         try:
             async with self._session.post(
                 url,
@@ -83,9 +104,12 @@ class ComelitBridgeClient:
                         "bridge response unreadable; do not retry"
                     ) from exc
 
+                if not isinstance(payload, dict):
+                    raise ComelitBridgeOutcomeUnknown("invalid bridge response; do not retry")
+
                 if response.status != 200:
-                    # Authentication/validation failures occur before the canonical
-                    # runner. Replay/5xx are ambiguous and must not be retried.
+                    # Only syntactic/auth failures are known to precede runner
+                    # execution. Replay and 5xx remain ambiguous.
                     if response.status in {400, 401, 404, 411, 413}:
                         raise ComelitBridgeRejected(
                             str(payload.get("error") or "bridge rejected request")
@@ -110,22 +134,29 @@ class ComelitBridgeClient:
                 "bridge request outcome unknown; do not retry"
             ) from exc
 
-        if not isinstance(payload, dict):
-            raise ComelitBridgeOutcomeUnknown("invalid bridge response; do not retry")
+        if payload.get("ok") is not True:
+            raise ComelitBridgeOutcomeUnknown("invalid signed success response; do not retry")
         if payload.get("operation_id") != operation_id:
             raise ComelitBridgeOutcomeUnknown("operation identity mismatch; do not retry")
-        state = str(payload.get("state") or "")
+        state = payload.get("state")
         if state not in {"ACKED", "FAILED_SAFE", "UNKNOWN_OUTCOME"}:
             raise ComelitBridgeOutcomeUnknown("invalid bridge state; do not retry")
-        if bool(payload.get("retry_allowed")):
-            raise ComelitBridgeOutcomeUnknown("unsafe retry flag from bridge")
-        if bool(payload.get("physical_effect_asserted")):
-            raise ComelitBridgeOutcomeUnknown("unsafe physical-effect assertion from bridge")
+        if payload.get("retry_allowed") is not False:
+            raise ComelitBridgeOutcomeUnknown("unsafe or missing retry flag from bridge")
+        if payload.get("physical_effect_asserted") is not False:
+            raise ComelitBridgeOutcomeUnknown(
+                "unsafe or missing physical-effect assertion from bridge"
+            )
+        if not isinstance(payload.get("runner_invoked"), bool):
+            raise ComelitBridgeOutcomeUnknown("invalid runner_invoked flag; do not retry")
+        if not isinstance(payload.get("reason"), str):
+            raise ComelitBridgeOutcomeUnknown("invalid reason; do not retry")
 
         return ComelitBridgeResult(
             operation_id=operation_id,
-            state=state,
-            reason=str(payload.get("reason") or ""),
+            state=str(state),
+            reason=payload["reason"],
+            runner_invoked=payload["runner_invoked"],
             retry_allowed=False,
             physical_effect_asserted=False,
         )
