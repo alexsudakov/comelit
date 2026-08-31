@@ -4,16 +4,16 @@
     "step": {
       "user": {
         "title": "Connect Comelit Door Bridge",
-        "description": "Connect Home Assistant to the restricted local CT120 bridge.",
+        "description": "Connect Home Assistant to the private CT120 P14 bridge. The bridge must already be live-promoted and firewall-limited to this Home Assistant host.",
         "data": {
-          "bridge_url": "Bridge URL",
+          "bridge_url": "Bridge URL (http://private-ip:18014)",
           "shared_secret": "Shared secret"
         }
       }
     },
     "error": {
-      "cannot_connect": "Cannot connect to the bridge",
-      "invalid_config": "Invalid bridge URL or shared secret"
+      "cannot_connect": "Bridge is unavailable, disabled, or its production runner identity is not valid",
+      "invalid_config": "Use the private CT120 IPv4 URL on port 18014 and a shared secret of at least 32 bytes"
     },
     "abort": {
       "already_configured": "This bridge is already configured"
@@ -22,11 +22,11 @@
   "services": {
     "open_door": {
       "name": "Open door",
-      "description": "Perform one protected Comelit Door attempt using a unique operation ID.",
+      "description": "Perform one protected Door operation. A service response is mandatory. ACKED is protocol evidence only and never proves the physical door opened.",
       "fields": {
         "operation_id": {
           "name": "Operation ID",
-          "description": "Unique p13-hermes UUID for this one-shot request. Never reuse it for a retry."
+          "description": "Fresh p13-hermes UUID4 for this one-shot request. Never reuse it as a retry after UNKNOWN_OUTCOME."
         }
       }
     }
