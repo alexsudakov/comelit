@@ -43,6 +43,24 @@ class P13ProductionReleaseTests(unittest.TestCase):
         self.assertIn('ln -sfn "$RELEASE" "$CURRENT"', self.text)
         self.assertIn('ln -sfn "$OLD_CURRENT" "$PREVIOUS"', self.text)
 
+    def test_first_install_handles_absent_current_selector(self):
+        self.assertIn(
+            'if [[ -L "$CURRENT" ]]; then',
+            self.text,
+        )
+        self.assertIn(
+            "P13_PRODUCTION_FIRST_INSTALL=true",
+            self.text,
+        )
+        self.assertIn(
+            "P13_PRODUCTION_CURRENT_NOT_SYMLINK=true",
+            self.text,
+        )
+        self.assertIn(
+            "P13_PRODUCTION_OLD_CURRENT_TARGET=FAIL",
+            self.text,
+        )
+
     def test_poc_dispatch_is_archived_and_replaced_by_deny_only_dispatch(self):
         self.assertIn(
             "RETIRED=\"$PROD_ROOT/retired\"",

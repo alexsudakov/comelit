@@ -231,7 +231,26 @@ fi
 
 STEP=PROMOTE
 
-OLD_CURRENT="$(readlink -f "$CURRENT" 2>/dev/null || true)"
+OLD_CURRENT=""
+
+# First install has no current selector.  Bare `readlink -f` is not an
+# existence test because GNU readlink can canonicalize a missing final path
+# component.
+if [[ -L "$CURRENT" ]]; then
+    OLD_CURRENT="$(readlink -f "$CURRENT" 2>/dev/null || true)"
+
+    [[ -n "$OLD_CURRENT" && -d "$OLD_CURRENT" ]] || {
+        echo 'P13_PRODUCTION_OLD_CURRENT_TARGET=FAIL'
+        exit 1
+    }
+
+elif [[ -e "$CURRENT" ]]; then
+    echo 'P13_PRODUCTION_CURRENT_NOT_SYMLINK=true'
+    exit 1
+
+else
+    echo 'P13_PRODUCTION_FIRST_INSTALL=true'
+fi
 
 if [[ -n "$OLD_CURRENT" && "$OLD_CURRENT" != "$RELEASE" ]]; then
     case "$OLD_CURRENT" in
