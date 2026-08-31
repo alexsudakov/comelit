@@ -4,8 +4,8 @@ import voluptuous as vol
 
 from homeassistant.components.button import DOMAIN as BUTTON_DOMAIN
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers import config_validation as cv, service
+from homeassistant.core import HomeAssistant, SupportsResponse
+from homeassistant.helpers import service
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
 
@@ -18,23 +18,32 @@ from .const import (
     PLATFORMS,
     SERVICE_OPEN_DOOR,
 )
+from .signing import validate_operation_id
+
+
+def _operation_id(value: object) -> str:
+    try:
+        return validate_operation_id(str(value))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise vol.Invalid("operation_id must be p13-hermes-<uuid4>") from exc
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Register the protected entity service independently of entry loading."""
+    """Register the protected response-required entity action."""
     service.async_register_platform_entity_service(
         hass,
         DOMAIN,
         SERVICE_OPEN_DOOR,
         entity_domain=BUTTON_DOMAIN,
-        schema={vol.Required(ATTR_OPERATION_ID): cv.string},
+        schema={vol.Required(ATTR_OPERATION_ID): _operation_id},
         func="async_open_door",
+        supports_response=SupportsResponse.ONLY,
     )
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up one local CT120 bridge config entry."""
+    """Set up one private CT120 bridge config entry."""
     client = ComelitBridgeClient(
         async_get_clientsession(hass),
         bridge_url=str(entry.data[CONF_BRIDGE_URL]),
