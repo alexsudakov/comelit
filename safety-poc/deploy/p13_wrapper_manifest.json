@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "status": "NOT_BUILT",
+  "template_sha256": "",
+  "holder_sha256": "",
+  "wrapper_sha256": "",
+  "build_procedure": "safety-poc/scripts/build_p13_wrapper.sh",
+  "destination": "/usr/local/sbin/comelit-p13-door-wrapper"
+}

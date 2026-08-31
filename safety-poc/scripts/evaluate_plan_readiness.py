@@ -8,7 +8,9 @@ from comelit_safety_poc.readiness import evaluate_readiness, parse_markers
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Evaluate repository and live-test gates from one or more marker reports.")
+    parser = argparse.ArgumentParser(
+        description="Evaluate repository, read-only transport, and live-test gates from marker reports."
+    )
     parser.add_argument("reports", nargs="+", type=Path)
     args = parser.parse_args()
 
@@ -18,8 +20,12 @@ def main() -> int:
 
     result = evaluate_readiness(markers)
     for gate in result.gates:
-        print(f"GATE marker={gate.marker} status={gate.status.value} expected={gate.expected} actual={gate.actual if gate.actual is not None else 'missing'}")
+        print(
+            f"GATE marker={gate.marker} status={gate.status.value} "
+            f"expected={gate.expected} actual={gate.actual if gate.actual is not None else 'missing'}"
+        )
     print(f"REPOSITORY_READY={'true' if result.repository_ready else 'false'}")
+    print(f"READONLY_TRANSPORT_READY={'true' if result.readonly_transport_ready else 'false'}")
     print(f"LIVE_TEST_READY={'true' if result.live_test_ready else 'false'}")
     print("REAL_TRANSPORT_ACTION_PERFORMED=false")
     print("PHYSICAL_DOOR_ACTION=false")

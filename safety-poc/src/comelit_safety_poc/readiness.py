@@ -23,6 +23,7 @@ class ReadinessGate:
 class TransportReadinessReport:
     gates: tuple[ReadinessGate, ...]
     repository_ready: bool
+    readonly_transport_ready: bool
     live_test_ready: bool
 
     @property
@@ -42,34 +43,52 @@ REPOSITORY_GATES: tuple[tuple[str, str], ...] = (
     ("PHYSICAL_EFFECT_ASSERTION_ALLOWED", "false"),
 )
 
-LIVE_GATES: tuple[tuple[str, str], ...] = (
+READONLY_GATES: tuple[tuple[str, str], ...] = (
     ("REAL_TRANSPORT_IMPLEMENTED", "true"),
     ("REAL_TRANSPORT_READONLY_SESSION_PROOF", "PASS"),
+    ("READONLY_SCOPE_ENFORCED", "PASS"),
     ("TARGET_BINDING_VERIFIED", "PASS"),
     ("AUTH_SESSION_LIFETIME_VERIFIED", "PASS"),
     ("TIMEOUT_MAPPING_VERIFIED", "PASS"),
+    ("CREDENTIAL_MATERIAL_EMITTED", "false"),
+    ("ACTUATOR_COMMAND_ATTEMPTED", "false"),
+)
+
+LIVE_GATES: tuple[tuple[str, str], ...] = (
+    ("ACTUATION_TRANSPORT_IMPLEMENTED", "true"),
     ("AUDIT_SINK_VERIFIED", "PASS"),
     ("EXPLICIT_LIVE_TEST_APPROVAL", "true"),
 )
 
 
+def _gate_status(actual: str | None, expected: str) -> GateStatus:
+    if actual is None:
+        return GateStatus.MISSING
+    if actual == expected:
+        return GateStatus.PASS
+    return GateStatus.FAIL
+
+
 def evaluate_readiness(evidence: Mapping[str, str]) -> TransportReadinessReport:
     gates: list[ReadinessGate] = []
-    for marker, expected in REPOSITORY_GATES + LIVE_GATES:
+    for marker, expected in REPOSITORY_GATES + READONLY_GATES + LIVE_GATES:
         actual = evidence.get(marker)
-        if actual is None:
-            status = GateStatus.MISSING
-        elif actual == expected:
-            status = GateStatus.PASS
-        else:
-            status = GateStatus.FAIL
-        gates.append(ReadinessGate(marker, expected, status, actual))
+        gates.append(ReadinessGate(marker, expected, _gate_status(actual, expected), actual))
 
-    repo_markers = {marker for marker, _ in REPOSITORY_GATES}
-    repository_ready = all(gate.status == GateStatus.PASS for gate in gates if gate.marker in repo_markers)
-    live_markers = {marker for marker, _ in LIVE_GATES}
-    live_test_ready = repository_ready and all(gate.status == GateStatus.PASS for gate in gates if gate.marker in live_markers)
-    return TransportReadinessReport(tuple(gates), repository_ready, live_test_ready)
+    by_marker = {gate.marker: gate for gate in gates}
+    repository_ready = all(by_marker[marker].status == GateStatus.PASS for marker, _ in REPOSITORY_GATES)
+    readonly_transport_ready = repository_ready and all(
+        by_marker[marker].status == GateStatus.PASS for marker, _ in READONLY_GATES
+    )
+    live_test_ready = readonly_transport_ready and all(
+        by_marker[marker].status == GateStatus.PASS for marker, _ in LIVE_GATES
+    )
+    return TransportReadinessReport(
+        tuple(gates),
+        repository_ready,
+        readonly_transport_ready,
+        live_test_ready,
+    )
 
 
 def parse_markers(text: str) -> dict[str, str]:
