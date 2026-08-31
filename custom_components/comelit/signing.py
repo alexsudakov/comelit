@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import time
 import uuid
@@ -12,6 +13,7 @@ PROTOCOL_VERSION = "1"
 OPEN_DOOR_PATH = "/v1/open-door"
 RESPONSE_SIGNATURE_HEADER = "X-Comelit-Response-Signature"
 _OPERATION_PREFIX = "p13-hermes-"
+_NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{22,64}$")
 
 
 def validate_operation_id(value: str) -> str:
@@ -77,7 +79,7 @@ def build_signed_open_door_request(
     operation_id = validate_operation_id(operation_id)
     timestamp = str(int(time.time()) if now is None else int(now))
     nonce_value = nonce or secrets.token_urlsafe(24)
-    if len(nonce_value) < 22 or len(nonce_value) > 64:
+    if not _NONCE_RE.fullmatch(nonce_value):
         raise ValueError("invalid nonce")
 
     body = json.dumps(
@@ -112,6 +114,8 @@ def verify_signed_open_door_response(
 ) -> bool:
     secret = shared_secret.encode("utf-8")
     if len(secret) < 32:
+        return False
+    if str(response_headers.get("X-Comelit-Version") or "") != PROTOCOL_VERSION:
         return False
     timestamp = str(request_headers.get("X-Comelit-Timestamp") or "")
     nonce = str(request_headers.get("X-Comelit-Nonce") or "")
