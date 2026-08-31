@@ -15,6 +15,13 @@ class P14ProductionRolloutTests(unittest.TestCase):
             self.assertIn(marker,text)
         self.assertIn('/usr/bin/env -i', text); self.assertIn('P13_APPROVAL="$P13_APPROVAL_TOKEN"', text); self.assertEqual(text.count('/usr/bin/python3 -m comelit_safety_poc.p13_one_shot_physical'),1); self.assertNotIn('feat/p13-one-shot-actuation', text)
 
+    def test_runner_rechecks_p13_audit_durability_before_actuation(self):
+        text=RUNNER.read_text()
+        self.assertIn('p13_audit_durability_proof.py', text)
+        self.assertIn('P14_P13_AUDIT_DURABILITY=PASS', text)
+        self.assertIn('--audit "$AUDIT" --head "$P13_SOURCE_HEAD"', text)
+        self.assertLess(text.index('P14_P13_AUDIT_DURABILITY=PASS'), text.index('/usr/bin/python3 -m comelit_safety_poc.p13_one_shot_physical'))
+
     def test_runner_public_cli_is_operation_id_only(self):
         text=RUNNER.read_text(); self.assertIn('[[ $# -eq 2 && "$1" == \'--operation-id\' ]]', text)
         for forbidden in ('--target-fingerprint)', '--runner)', '--retry)', '--approval)'): self.assertNotIn(forbidden,text)
@@ -23,7 +30,7 @@ class P14ProductionRolloutTests(unittest.TestCase):
         text=INSTALL.read_text(); self.assertIn('P14_PRODUCTION_INSTALL_NON_ACTUATING=true',text); self.assertIn('RELEASE_CONTENT.sha256',text); self.assertIn('P14_HA_RESPONSE_REQUIRED=true',text); self.assertIn('COMELIT_P14_LIVE_ENABLED=false',text); self.assertIn('COMELIT_P14_BIND_HOST=127.0.0.1',text); self.assertIn('P14_OPEN_DOOR_REQUEST_SENT=false',text); self.assertNotIn('I_APPROVE_P14_ENABLE_REUSABLE_DOOR_SERVICE',text)
 
     def test_failed_install_restarts_restored_bridge_state(self):
-        text=INSTALL.read_text(); self.assertIn('systemctl is-enabled comelit-p14-ha-bridge.service', text); self.assertIn('systemctl restart comelit-p14-ha-bridge.service', text); self.assertIn('failed release in memory', text)
+        text=INSTALL.read_text(); self.assertIn('systemctl is-enabled comelit-p14-ha-bridge.service', text); self.assertIn('systemctl restart comelit-p14-ha-bridge.service', text); self.assertIn('P14_PRODUCTION_INSTALL=FAIL', text)
 
     def test_live_promotion_requires_explicit_boundary_and_sends_no_post(self):
         text=PROMOTE.read_text(); self.assertIn('I_APPROVE_P14_ENABLE_REUSABLE_DOOR_SERVICE',text); self.assertIn('P14_LIVE_ENABLE_APPROVAL',text); self.assertIn('COMELIT_P14_LIVE_ENABLED":"true"',text); self.assertIn('P14_OPEN_DOOR_REQUEST_SENT=false',text); self.assertIn('P14_LIVE_PROMOTION_DISABLED_HEALTH=PASS', text); self.assertNotIn('/v1/open-door',text); self.assertNotIn('P13_APPROVAL=',text)
