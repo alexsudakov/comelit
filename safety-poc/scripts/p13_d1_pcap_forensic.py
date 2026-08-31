@@ -28,6 +28,12 @@ TAP_OPCODES = {0x1800, 0x1820, 0x18C0, 0x1840, 0x1860}
 PSEUDOTCP_HEADER = 24
 VIP_HEADER = 8
 
+# Primary self_activation.pcap contains one exact seven-byte application
+# prefix before the first ViP frame in BOTH selected directions.  Its protocol
+# semantics are deliberately not inferred here; this is a capture-pinned
+# framing invariant only.
+EXPECTED_CAPTURE_PREFIX = bytes.fromhex("00030100fe0100")
+
 
 @dataclass(frozen=True)
 class Segment:
@@ -163,6 +169,38 @@ def parse_vip_stream(stream: Reassembled, direction: str) -> tuple[list[VipFrame
         frames.append(VipFrame(timestamp, request_id, body, offset, direction))
         offset += frame_len
     return frames, skipped
+
+
+def capture_prefix_matches(
+    stream: Reassembled,
+    frames: list[VipFrame],
+    skipped: int,
+) -> bool:
+    """Validate the exact capture-pinned pre-ViP prefix and full framing.
+
+    The primary capture has one seven-byte prefix before the first ViP frame in
+    each direction.  We do not assign protocol semantics to those bytes.
+
+    This gate additionally proves that:
+    - the only parser-skipped bytes are that exact prefix;
+    - the first frame begins immediately after it;
+    - the last parsed frame ends exactly at the end of the reassembled stream.
+
+    Therefore extra bytes before, between, or after ViP frames fail closed.
+    """
+    if not frames:
+        return False
+
+    first_offset = frames[0].stream_offset
+    last = frames[-1]
+    framed_end = last.stream_offset + VIP_HEADER + len(last.body)
+
+    return (
+        first_offset == len(EXPECTED_CAPTURE_PREFIX)
+        and skipped == len(EXPECTED_CAPTURE_PREFIX)
+        and stream.data[:first_offset] == EXPECTED_CAPTURE_PREFIX
+        and framed_end == len(stream.data)
+    )
 
 
 def load_pcap_flows(path: Path) -> dict[tuple[tuple[str, int], tuple[str, int]], dict[str, list[Segment]]]:
@@ -437,6 +475,18 @@ def main() -> int:
             f"out_conflicts={out_stream.conflicts} in_conflicts={in_stream.conflicts}"
         )
 
+    out_prefix_ok = capture_prefix_matches(
+        out_stream,
+        outbound,
+        out_skipped,
+    )
+    in_prefix_ok = capture_prefix_matches(
+        in_stream,
+        inbound,
+        in_skipped,
+    )
+    capture_prefix_gate = out_prefix_ok and in_prefix_ok
+
     result = analyze(outbound, inbound, door, prepared)
     result.update(
         {
@@ -451,6 +501,11 @@ def main() -> int:
             "P13_D1_IN_STREAM_CONFLICTS": str(in_stream.conflicts),
             "P13_D1_OUT_UNFRAMED_BYTES": str(out_skipped),
             "P13_D1_IN_UNFRAMED_BYTES": str(in_skipped),
+            "P13_D1_OUT_CAPTURE_PREFIX": "PASS" if out_prefix_ok else "FAIL",
+            "P13_D1_IN_CAPTURE_PREFIX": "PASS" if in_prefix_ok else "FAIL",
+            "P13_D1_CAPTURE_PREFIX_MATCH": "PASS" if capture_prefix_gate else "FAIL",
+            "P13_D1_CAPTURE_PREFIX_BYTES": str(len(EXPECTED_CAPTURE_PREFIX)),
+            "P13_D1_CAPTURE_PREFIX_SHA256": hashlib.sha256(EXPECTED_CAPTURE_PREFIX).hexdigest(),
             "P13_D1_TARGET_VALUE_EMITTED": "false",
             "P13_D1_RAW_FRAME_VALUES_EMITTED": "false",
             "NETWORK_ACTION_PERFORMED": "false",
@@ -458,7 +513,12 @@ def main() -> int:
             "SEND_ARMED_REACHED": "false",
         }
     )
-    result["P13_D1_FORENSIC"] = "PASS" if result["P13_D1_STANDALONE_ACCEPTABLE"] == "true" else "FAIL"
+    result["P13_D1_FORENSIC"] = (
+        "PASS"
+        if result["P13_D1_STANDALONE_ACCEPTABLE"] == "true"
+        and capture_prefix_gate
+        else "FAIL"
+    )
 
     lines = [f"{key}={value}" for key, value in result.items()]
     for line in lines:

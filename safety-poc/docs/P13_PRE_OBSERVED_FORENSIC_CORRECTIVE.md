@@ -61,7 +61,17 @@ rechecked primary fixture invariants:
 - incoming ViP frames: `52`;
 - PseudoTCP gaps: `0/0`;
 - conflicting retransmissions: `0/0`;
-- unframed reassembled bytes: `0/0`.
+- one exact capture-pinned seven-byte pre-ViP prefix
+  `00030100fe0100` in each selected direction;
+- parser-skipped bytes: `7/7`, consisting only of that prefix;
+- no extra bytes between ViP frames or after the final ViP frame.
+
+The first CT120 forensic deployment exposed that the earlier repository
+assumption `unframed reassembled bytes: 0/0` was incorrect.  Offline inspection
+of the primary capture proved that both directions contain the same single
+seven-byte prefix at stream offset zero, with the first ViP frame beginning at
+offset seven.  The corrective treats those bytes only as a capture-pinned
+framing invariant and does not assign them unproven protocol semantics.
 
 A contradiction stops deployment before any live-capable action.
 

@@ -60,6 +60,70 @@ class P13D1PcapForensicTests(unittest.TestCase):
         self.assertEqual(frames[0].timestamp, 10.0)
         self.assertEqual(frames[1].body, b"defg")
 
+    def test_capture_prefix_gate_accepts_exact_primary_capture_shape(self):
+        first = vip_frame(7, b"abc")
+        second = vip_frame(9, b"defg")
+        raw = module.EXPECTED_CAPTURE_PREFIX + first + second
+        stream = module.Reassembled(
+            raw,
+            tuple([10.0] * len(raw)),
+            0,
+            0,
+        )
+
+        frames, skipped = module.parse_vip_stream(stream, "fixture")
+
+        self.assertEqual(skipped, len(module.EXPECTED_CAPTURE_PREFIX))
+        self.assertEqual(frames[0].stream_offset, len(module.EXPECTED_CAPTURE_PREFIX))
+        self.assertTrue(
+            module.capture_prefix_matches(
+                stream,
+                frames,
+                skipped,
+            )
+        )
+
+    def test_capture_prefix_gate_rejects_wrong_prefix_and_trailing_bytes(self):
+        frame = vip_frame(7, b"abc")
+
+        wrong_raw = b"\\x01" * len(module.EXPECTED_CAPTURE_PREFIX) + frame
+        wrong_stream = module.Reassembled(
+            wrong_raw,
+            tuple([10.0] * len(wrong_raw)),
+            0,
+            0,
+        )
+        wrong_frames, wrong_skipped = module.parse_vip_stream(
+            wrong_stream,
+            "fixture",
+        )
+        self.assertFalse(
+            module.capture_prefix_matches(
+                wrong_stream,
+                wrong_frames,
+                wrong_skipped,
+            )
+        )
+
+        trailing_raw = module.EXPECTED_CAPTURE_PREFIX + frame + b"\\x99"
+        trailing_stream = module.Reassembled(
+            trailing_raw,
+            tuple([10.0] * len(trailing_raw)),
+            0,
+            0,
+        )
+        trailing_frames, trailing_skipped = module.parse_vip_stream(
+            trailing_stream,
+            "fixture",
+        )
+        self.assertFalse(
+            module.capture_prefix_matches(
+                trailing_stream,
+                trailing_frames,
+                trailing_skipped,
+            )
+        )
+
     def test_semantic_target_match_keeps_standalone_candidate_without_claiming_exact_body(self):
         pin = fixture_pin()
         door = module.VipFrame(10.0, 77, tap_body(0x1840, address=b"12345678"), 0, "out")
