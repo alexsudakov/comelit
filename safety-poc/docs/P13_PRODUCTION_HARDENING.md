@@ -76,29 +76,50 @@ the `previous` symlink.
 
 Rollback never performs a Comelit session or Door action.
 
-## G1B production physical validation
+## G1B production physical validation — completed and retired
 
-G1B is a second, separately approved physical validation of the immutable
-production deployment.
+G1B completed a second, separately approved physical validation of the
+immutable production deployment.
 
-It does not reuse or reset the historical observed-acceptance gate.
+The validation used a dedicated single-use authority and did not reuse or
+reset the historical observed-acceptance gate.
 
-The G1B validation path has its own:
+The one live G1B operation was:
 
-- approval identity;
-- concurrency lock;
-- terminal one-use state;
-- fresh operation ID;
-- durable pre-live gate consumption;
-- immutable-release binding;
-- journal and audit path.
+- operation ID: `p13-g1b-80de7068-72e5-40db-9e4f-47e1a42d2351`;
+- immutable release:
+  `p13-516c5a54f5f8-50c0a916f73e-b6a10c68773a`;
+- source HEAD: `5a416a7e1d49c35947579b298f2028fe30853592`;
+- source TREE: `516c5a54f5f8646eaed7a1b6599718c1cc69640b`;
+- attempt number: `1`;
+- transition:
+  `PREPARED -> SEND_ARMED -> SENT -> UNKNOWN_OUTCOME`;
+- protocol state: `UNKNOWN_OUTCOME`;
+- Door-specific ACK: `UNPROVEN`;
+- independent operator physical observation: `OPENED`;
+- observed physical acceptance: `PASS`;
+- automatic retry: forbidden;
+- resend: forbidden.
 
-The G1B runner does not depend on a Git worktree. It executes Python code from
-the immutable `current` release and verifies the release checksum plus the exact
-holder, wrapper, payload, target and runtime identities before a live-capable
-handoff.
+The physical observation does not promote the protocol result to `ACKED` and
+does not create a protocol assertion that the relay moved.
 
-G1B readiness is non-actuating.
+The G1B gate was durably consumed before the live-capable handoff. After the
+single invocation, the temporary Hermes ForceCommand authority, sudo authority,
+and installed G1B gate binary were retired.
 
-The G1B open command is temporary validation authority only. After the physical
-validation and evidence freeze, it must be retired again before P13 merge.
+The historical observed-open gate remains consumed as well.
+
+Frozen public-safe evidence:
+
+- branch: `evidence/p13-g1b-opened-20260831T203116Z`;
+- commit: `4ce5dedebe9df7e681e38af84f59ae92eafe8c28`;
+- tree: `f089fd459af8a0ee3365b86b7cee99e31d8e1e9c`;
+- path:
+  `safety-poc/evidence/p13-g1b-production-opened-20260831T203116Z.txt`.
+
+The temporary G1B live-validation source is intentionally not retained in the
+final P13 production source tree or final immutable production release.
+
+P13 production runtime remains readiness-only. Reusable Door actuation belongs
+to P14 and is not introduced by P13.
