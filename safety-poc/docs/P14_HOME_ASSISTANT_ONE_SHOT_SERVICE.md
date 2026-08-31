@@ -1,214 +1,95 @@
-# P14 — Home Assistant one-shot Door service
+# P14 — production Home Assistant one-shot Door service
 
-Status: **DRAFT / NON-SERVING / NO PHYSICAL TEST**
+Status: **IMPLEMENTED / PRODUCTION-READY CODE / DEPLOYMENT EXPLICIT**
 
-P14 connects the already-proven P13 one-shot actuation boundary to Home Assistant without giving Hermes direct device authority and without creating a second generic shell/action executor.
+P14 exposes the P13-proven one-shot Door boundary through a narrow Home Assistant integration without exposing a generic CT120 shell, caller-controlled target, retry switch, or physical-state claim.
 
-## 1. Architecture
-
-Canonical path:
+## 1. Canonical architecture
 
 ```text
-Hermes
-  -> dialog-service authorization + owner/confirmation gate
-  -> Home Assistant comelit.open_door entity service
+Hermes / dialog-service authorization + confirmation
+  -> Home Assistant comelit.open_door (response required)
+  -> button.comelit_main_entrance_open_door
   -> custom_components/comelit
-  -> authenticated local P14 CT120 bridge
-  -> canonical P13 one-shot physical runner
-  -> proven P13 transport boundary
+  -> HMAC-authenticated private CT120 P14 bridge
+  -> root-owned hash-pinned P14 production runner
+  -> immutable final P13 release source + runtime artifacts
+  -> P13 OneShotExecutor / durable journal / audit
+  -> proven Cloud P2P -> ViP -> UAUT -> CTPP -> six-write boundary
 ```
 
-Forbidden paths:
+Forbidden paths remain: Hermes to CT120 shell; Home Assistant to arbitrary CT120 command/target/payload; network request to P13 approval token; `button.press` to Door actuation; bridge retry loops; protocol result to physical Door-state assertion.
 
-```text
-Hermes -> CT120 shell
-Hermes -> P13 native holder
-Hermes -> raw Home Assistant device authority
-Dialog-service -> CT120 bridge
-Home Assistant -> arbitrary CT120 command
-```
+## 2. Home Assistant action contract
 
-Home Assistant remains the device-action execution layer. CT120 is a narrowly scoped device backend for this integration.
+Public action: `comelit.open_door` on canonical entity `button.comelit_main_entrance_open_door`. The only caller-controlled execution value is `operation_id = p13-hermes-<canonical uuid4>`.
 
-## 2. Home Assistant public contract
+The action is registered with `SupportsResponse.ONLY`. A caller must request and inspect the service response; generic service completion cannot stand in for “the door opened”. Standard `button.press` raises and has no bridge call.
 
-Integration domain: `comelit`
+Every trusted response contains operation ID, `state = ACKED | FAILED_SAFE | UNKNOWN_OUTCOME`, reason, runner-invoked flag, `retry_allowed=false`, `physical_effect_asserted=false`, protocol-acknowledged flag, and `physical_door_state=UNKNOWN`. `ACKED` means protocol acknowledgement only; it never proves relay movement.
 
-Protected entity service:
+Transport timeout, unsigned/tampered response, replay ambiguity, or unreadable response is surfaced as a do-not-retry error.
 
-```text
-comelit.open_door
-```
+## 3. Authentication and replay
 
-Canonical target used by dialog-service:
+Endpoint: `POST /v1/open-door`. Exact JSON body contains only `operation_id`.
 
-```text
-button.comelit_main_entrance_open_door
-```
+HMAC-SHA256 binds version, method, path, Unix timestamp, fresh nonce and SHA-256 of the raw body. Timestamp skew defaults to 30 seconds. After HMAC/body validation and before any execution decision, the nonce is durably claimed in SQLite. A repeated nonce is rejected and never automatically retried.
 
-Required service field:
+HTTP 200 result bodies are themselves HMAC-signed against the request timestamp/nonce and must carry `X-Comelit-Version: 1`. Home Assistant requires exact safety flags `retry_allowed=false` and `physical_effect_asserted=false`.
 
-```text
-operation_id = p13-hermes-<uuid4>
-```
+## 4. Idempotency and concurrency
 
-No caller-supplied target fingerprint, CT120 host, native command, payload, retry setting, approval token or transport parameter is accepted.
+The P13 journal remains authoritative. A previously persisted operation ID is returned without spawning a child. Live-disabled or bridge-busy pre-send outcomes are persisted terminal `FAILED_SAFE`, so the same operation ID cannot later become a send after configuration changes.
 
-The entity intentionally rejects standard `button.press`. This prevents the standard Home Assistant button service from becoming an operation-id bypass.
+The bridge uses an in-process lock and root-only `flock` to prevent concurrent child launches across processes/restarts. The child receives a minimal environment; the P14 shared secret, HMAC headers and `P13_APPROVAL` are not inherited. Timeout terminates the whole child process group before journal recovery: `PREPARED -> FAILED_SAFE`; `SEND_ARMED/SENT -> UNKNOWN_OUTCOME`. No crash path launches a second child.
 
-## 3. CT120 bridge protocol
+## 5. Immutable P13 boundary
 
-Endpoint:
+P14 does not depend on a mutable P13 git worktree. The root-only runner pins final P13 release `p13-415edb4525e4-50c0a916f73e-b6a10c68773a`, source HEAD `0dace902d2cef1478cddea0f9d4cd36fcddb3837`, tree `415edb4525e46601cd0ef1249fc0965927b1ac29`, and exact proven target/artifact identities.
 
-```text
-POST /v1/open-door
-```
+Before the single P13 Python boundary invocation it verifies the P13 current selector, release checksums, manifest identities, retired observed-open surface, consumed historical/G1B physical-validation gates, absent G1B gate binary, root-owned holder/wrapper/payload, and absence of conflicting native actuation processes.
 
-Exact JSON body:
+Only after those checks does the root-only P14 runner create the static P13 approval value locally for the immutable P13 module. That value is never accepted from HA, HTTP or bridge environment. Historical validation gates remain consumed and are not reset or reused.
 
-```json
-{"operation_id":"p13-hermes-<uuid4>"}
-```
+## 6. Immutable P14 release
 
-Any extra JSON field is rejected before execution.
+`install_p14_production_release.sh` is non-actuating. It creates immutable releases under `/opt/comelit-door-safety-poc/p14/releases/` plus `current` and `previous` selectors, with exact source archives, `RELEASE.env` and `RELEASE_CONTENT.sha256`.
 
-Request authentication uses HMAC-SHA256 over:
+Install defaults are closed: `COMELIT_P14_BIND_HOST=127.0.0.1` and `COMELIT_P14_LIVE_ENABLED=false`. The installer performs only local `/healthz`, never `/v1/open-door`, never launches the production runner and never crosses `SEND_ARMED`.
 
-```text
-v1
-POST
-/v1/open-door
-<unix timestamp>
-<nonce>
-<sha256(raw request body)>
-```
+The HMAC secret exists only in root-owned mode-0600 `/root/.config/comelit/p14-ha-bridge.env`; deployment tooling never prints it. Failed install restores selectors/unit/env/runner and restarts the restored bridge state if necessary.
 
-Required headers:
+## 7. Explicit live promotion
 
-```text
-X-Comelit-Version: 1
-X-Comelit-Timestamp: <unix seconds>
-X-Comelit-Nonce: <fresh random nonce>
-X-Comelit-Signature: <hmac sha256 hex>
-```
+Reusable service is enabled only with `P14_LIVE_ENABLE_APPROVAL=I_APPROVE_P14_ENABLE_REUSABLE_DOOR_SERVICE` and explicit CT120 private IPv4 plus Home Assistant client IPv4. Promotion itself performs no Door request.
 
-The timestamp window defaults to 30 seconds. Nonces are claimed in a durable SQLite replay store **after signature/body validation and before any runner invocation**.
+Before live state it verifies disabled loopback health, exact P14 release, final P13 readiness/identities, production runner hash/mode/owner and no conflicting action process. A dedicated `inet comelit_p14` nftables allowlist drops TCP/18014 traffic from every non-loopback source except configured HA IPv4. A persistent systemd firewall unit is installed and made a required predecessor of the bridge **before** the bridge leaves loopback and live mode is enabled.
 
-A successful bridge response is also authenticated. Its HMAC covers:
+Any promotion failure restores the disabled environment and removes the live firewall surface.
 
-```text
-v1
-RESPONSE
-/v1/open-door
-<request timestamp>
-<request nonce>
-<sha256(raw response body)>
-```
+## 8. Safe disable / upgrade
 
-and is returned as:
+`disable_p14_live.sh` needs no actuation approval. It returns bridge to loopback/disabled, removes firewall dependency/table and verifies disabled health without `/v1/open-door`.
 
-```text
-X-Comelit-Response-Signature: <hmac sha256 hex>
-```
+A release upgrade while live is refused: disable first, install/verify the new immutable release, then explicitly promote again.
 
-Home Assistant rejects an unsigned/tampered successful response as `outcome unknown; do not retry`.
+## 9. Home Assistant installation
 
-The shared secret is configuration/runtime data only and must never be committed.
+`install_p14_ha_component_local.sh --config-dir /config` atomically stages/backups the component and never calls a service. Home Assistant must restart after installation.
 
-## 4. One-shot semantics
+Config flow accepts only `http://<private CT120 IPv4>:18014` with secret >=32 bytes. Health must report `live_enabled=true` and `runner_identity=pass` before a config entry is created. The shared secret is transferred through an operator-controlled channel and is never stored in Git or emitted by deploy logs.
 
-P14 does not create another actuation state machine. The canonical P13 journal remains authoritative.
+## 10. Rollout order
 
-For each accepted request:
+1. Merge exact-head green P14 PR.
+2. CT120: `deploy_p14.sh ct120-install` — immutable, loopback, disabled, non-actuating.
+3. CT120: explicit `ct120-promote` with CT120 private IPv4 and HA client IPv4 — capability enable only, no Door request.
+4. Install HA custom component into `/config`, restart HA.
+5. Add Comelit integration with private bridge URL and generated shared secret.
+6. Verify `button.press` is denied and `comelit.open_door` requires a service response.
+7. Only an authorized upstream action creates a fresh operation ID and calls `comelit.open_door`; there is no automatic validation send and no retry after ambiguity.
 
-1. validate HMAC/version/timestamp/nonce;
-2. validate exact body and UUID4 operation identity;
-3. durably claim nonce;
-4. check whether `operation_id` already exists in the P13 journal;
-5. if it exists, return the persisted/conservative state without spawning the runner;
-6. if live execution is disabled, return `FAILED_SAFE` without spawning;
-7. acquire the bridge process lock without waiting;
-8. re-check the P13 journal;
-9. invoke the canonical P13 runner at most once;
-10. inspect the durable P13 journal after the child exits;
-11. normalize crash residue without retry:
-    - `PREPARED` -> `FAILED_SAFE`;
-    - `SEND_ARMED` or `SENT` -> `UNKNOWN_OUTCOME`.
+## 11. Acceptance invariants
 
-`retry_allowed=false` and `physical_effect_asserted=false` are invariant for every result.
-
-## 5. Parallel/replay behavior
-
-- Same signed request nonce: durable replay rejection, no runner invocation.
-- Same operation ID with a new nonce: existing P13 journal state is returned, no resend.
-- Different operation while another bridge invocation is active: `FAILED_SAFE / bridge_busy_no_send_attempted`.
-- P13's atomic per-target rate-limit remains an additional lower-layer guard.
-- No automatic HTTP retry exists in the Home Assistant client.
-
-## 6. Live-enable boundary
-
-The bridge defaults to:
-
-```text
-COMELIT_P14_LIVE_ENABLED=false
-COMELIT_P14_BIND_HOST=127.0.0.1
-```
-
-Therefore merely installing P14 cannot perform a physical Door action.
-
-A future live deployment must deliberately configure all of the following outside Git:
-
-```text
-COMELIT_P14_SHARED_SECRET=<root-only / HA config-entry secret>
-COMELIT_P14_TARGET_FINGERPRINT=<locally pinned target>
-COMELIT_P14_RUNNER=<absolute path to canonical P13 runtime runner>
-COMELIT_P14_LIVE_ENABLED=true
-COMELIT_P14_BIND_HOST=<private CT120 address>
-```
-
-The live `COMELIT_P14_RUNNER` must point to a **separate clean P13 runtime worktree on `feat/p13-one-shot-actuation`**. Do not point it at the P14 stacked checkout: P13 preflight intentionally requires the P13 branch and will fail closed otherwise.
-
-P14 must not remove or weaken the P13 branch/worktree/runtime-identity/preflight gates.
-
-## 7. Result interpretation
-
-Bridge states are protocol/execution-boundary evidence only:
-
-- `ACKED` — protocol acknowledgement exists;
-- `FAILED_SAFE` — this operation did not cross the send boundary according to durable evidence;
-- `UNKNOWN_OUTCOME` — physical result is unknown and resend is forbidden.
-
-No state proves the physical door opened. P14 and Home Assistant must never set `physical_effect_asserted=true` from protocol evidence.
-
-## 8. Current validation
-
-Repository-only tests cover:
-
-- request HMAC compatibility between HA signer and CT120 verifier;
-- response HMAC compatibility and tamper rejection;
-- timestamp window and durable nonce replay rejection;
-- exact one-field request body;
-- exact `p13-hermes-<uuid4>` operation identity;
-- live-disabled no-spawn behavior;
-- exact canonical runner command shape;
-- duplicate operation no-spawn behavior;
-- timeout after `SEND_ARMED` -> terminal `UNKNOWN_OUTCOME`;
-- bridge concurrency fail-safe;
-- HA service registration requires `operation_id`;
-- standard `button.press` fails closed;
-- HA client contains no retry loop;
-- canonical HA entity/service names match dialog-service contract.
-
-GitHub `offline-safety` must be green on the exact P14 HEAD before any deployment step.
-
-## 9. Explicitly not done in P14 code creation
-
-- no CT120 service installation;
-- no shared-secret generation/distribution;
-- no HA custom-component installation;
-- no `COMELIT_P14_LIVE_ENABLED=true`;
-- no Home Assistant service call against CT120;
-- no Hermes serving activation;
-- no physical Door attempt.
-
-Those are separate rollout gates after code review and non-actuating deployment validation.
+`SEND_ARMED` remains the irreversible P13 uncertainty boundary; one operation ID has at most one actuation child/send path; automatic retry is absent at every layer; durable replay protection precedes execution; P14 secret never reaches P13 child; target/payload/runner/approval/retry are not caller-controlled; `UNKNOWN_OUTCOME` remains terminal and visible; `ACKED` remains protocol-only evidence; physical-effect assertion is forbidden; standard button press cannot actuate; upgrade begins disabled; firewall precedes private/live bind; safe disable is always available without a Door request.
