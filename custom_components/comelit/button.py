@@ -26,11 +26,11 @@ async def async_setup_entry(
 
 
 class ComelitMainEntranceDoorButton(ButtonEntity):
-    """Target entity for the protected comelit.open_door action.
+    """Target entity for the protected response-required Door action.
 
-    The standard button.press surface is intentionally disabled. The only
-    actuation-capable HA surface is the custom entity service, which requires an
-    upstream-generated one-shot operation_id.
+    ``button.press`` is intentionally disabled.  ``comelit.open_door`` is the
+    only action-capable HA surface and its response is mandatory.  Even ACKED
+    is protocol evidence only; this entity never reports physical Door state.
     """
 
     _attr_name = "Comelit main entrance open door"
@@ -50,9 +50,11 @@ class ComelitMainEntranceDoorButton(ButtonEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         return {
             "standard_press_allowed": False,
+            "response_required": True,
             "one_shot_operation_required": True,
             "automatic_retry_allowed": False,
             "physical_effect_asserted": False,
+            "physical_door_state": "UNKNOWN",
             "last_operation_id": self._last_operation_id,
             "last_protocol_state": self._last_protocol_state,
             "last_reason": self._last_reason,
@@ -60,17 +62,18 @@ class ComelitMainEntranceDoorButton(ButtonEntity):
 
     async def async_press(self) -> None:
         raise HomeAssistantError(
-            "button.press is disabled for Comelit Door; use comelit.open_door with operation_id"
+            "button.press is disabled for Comelit Door; use response-required "
+            "comelit.open_door with a fresh operation_id"
         )
 
-    async def async_open_door(self, operation_id: str) -> None:
+    async def async_open_door(self, operation_id: str) -> dict[str, object]:
         try:
             result = await self._client.async_open_door(operation_id)
         except ComelitBridgeRejected as exc:
-            raise HomeAssistantError(f"Comelit bridge rejected request before execution: {exc}") from exc
+            raise HomeAssistantError(
+                f"Comelit bridge rejected request before a trusted result: {exc}"
+            ) from exc
         except ComelitBridgeOutcomeUnknown as exc:
-            # This wording is intentional: HA/LLM callers must not convert a
-            # transport ambiguity into a second physical attempt.
             raise HomeAssistantError(
                 f"Comelit Door outcome unknown; do not retry automatically: {exc}"
             ) from exc
@@ -79,3 +82,4 @@ class ComelitMainEntranceDoorButton(ButtonEntity):
         self._last_protocol_state = result.state
         self._last_reason = result.reason
         self.async_write_ha_state()
+        return result.as_service_response()
