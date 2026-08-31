@@ -1,7 +1,7 @@
 {
   "domain": "comelit",
   "name": "Comelit Door Bridge",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "documentation": "https://github.com/alexsudakov/comelit",
   "issue_tracker": "https://github.com/alexsudakov/comelit/issues",
   "codeowners": ["@alexsudakov"],
