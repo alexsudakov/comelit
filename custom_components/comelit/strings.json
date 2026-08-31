@@ -1,0 +1,34 @@
+{
+  "title": "Comelit Door Bridge",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect Comelit Door Bridge",
+        "description": "Connect Home Assistant to the restricted local CT120 bridge.",
+        "data": {
+          "bridge_url": "Bridge URL",
+          "shared_secret": "Shared secret"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the bridge",
+      "invalid_config": "Invalid bridge URL or shared secret"
+    },
+    "abort": {
+      "already_configured": "This bridge is already configured"
+    }
+  },
+  "services": {
+    "open_door": {
+      "name": "Open door",
+      "description": "Perform one protected Comelit Door attempt using a unique operation ID.",
+      "fields": {
+        "operation_id": {
+          "name": "Operation ID",
+          "description": "Unique p13-hermes UUID for this one-shot request. Never reuse it for a retry."
+        }
+      }
+    }
+  }
+}

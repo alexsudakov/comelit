@@ -27,6 +27,8 @@ jobs:
         run: python3 scripts/static_safety_check.py
       - name: Compile Python scripts
         run: python3 -m py_compile scripts/*.py
+      - name: Compile Home Assistant custom component
+        run: python3 -m compileall -q ../custom_components/comelit
       - name: Parse shell entrypoints
         run: |
           for script in scripts/*.sh deploy/*.sh; do

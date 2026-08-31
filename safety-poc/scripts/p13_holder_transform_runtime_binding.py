@@ -10,9 +10,9 @@ from pathlib import Path
 import sys
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-EVIDENCE_TRANSFORM = SCRIPT_DIR / "p13_holder_transform_evidence.py"
+SAFE_TRANSFORM = SCRIPT_DIR / "p13_holder_transform_safe.py"
 
-spec = importlib.util.spec_from_file_location("p13_holder_transform_evidence_runtime", EVIDENCE_TRANSFORM)
+spec = importlib.util.spec_from_file_location("p13_holder_transform_safe_runtime", SAFE_TRANSFORM)
 module = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 sys.modules[spec.name] = module
@@ -66,9 +66,7 @@ def _load_runtime_binding(path: Path, payload: dict, *, require_root_owner: bool
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="P13 evidence-enabled safe holder transform using a root-only pinned CTPP identity binding"
-    )
+    parser = argparse.ArgumentParser(description="P13 safe holder transform using a root-only pinned CTPP identity binding")
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--payload", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -82,7 +80,7 @@ def main() -> int:
     # ephemeral /run capture and has disappeared, use only the root-owned 0600
     # runtime binding whose two address fields are independently SHA-pinned.
     try:
-        ctpp_address = module.module._load_bound_ctpp_address(payload)
+        ctpp_address = module._load_bound_ctpp_address(payload)
         binding_source = "EXACT_UCFG_SNAPSHOT"
     except RuntimeError as exc:
         if str(exc) != "exact P13-bound UCFG snapshot not found":
@@ -95,7 +93,6 @@ def main() -> int:
     args.output.write_text(transformed, encoding="utf-8")
 
     print("P13_HOLDER_TRANSFORM_SAFE=PASS")
-    print("P13_HOLDER_RX_EVIDENCE_TRANSFORM=PASS")
     print("P13_PREMATURE_UAUT_SUCCESS_TIMER=false")
     print("P13_FINAL_SUCCESS_TIMER_COUNT=1")
     print("P13_UAUT_AUTH_HANDOFF=PASS")
@@ -104,9 +101,6 @@ def main() -> int:
     print(f"P13_CTPP_ADDRESS_BINDING_SOURCE={binding_source}")
     print("P13_CTPP_ADDRESS_VALUE_EMITTED=false")
     print(f"P13_PAYLOAD_WRITE_COUNT={len(payload['bodies'])}")
-    print("P13_DOOR_ACK_SEMANTICS=UNPROVEN")
-    print("P13_DOOR_RESPONSE_SEMANTICS=RESPONSE_SEEN")
-    print("P13_CTPP_RX_RAW_EVIDENCE_SCOPE=ROOT_ONLY_RUNTIME_LOG")
     print("P13_RETRY_SURFACE_PRESENT=false")
     print("NETWORK_ACTION_PERFORMED=false")
     print("PHYSICAL_DOOR_ACTION=false")

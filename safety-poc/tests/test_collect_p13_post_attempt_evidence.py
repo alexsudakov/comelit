@@ -106,10 +106,6 @@ class P13PostAttemptCollectorTests(unittest.TestCase):
                 encoding="utf-8",
             )
             physical = root / "p13-physical-test.log"
-            observed = root / "hermes-observed.log"
-            observed_state = root / "hermes-observed.state"
-            operator_observation = root / "operator-observation.txt"
-
             physical.write_text(
                 "\n".join(
                     [
@@ -118,37 +114,6 @@ class P13PostAttemptCollectorTests(unittest.TestCase):
                         "P13_ONE_SHOT_APPROVAL=GRANTED",
                         "P13_ONE_SHOT_PREFLIGHT=PASS",
                         "P13_ONE_SHOT_LAST_STEP=COMPLETE",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-
-            observed.write_text(
-                "\n".join(
-                    [
-                        "P13_HERMES_TRIGGER=ACCEPTED",
-                        f"P13_HERMES_OPERATION_ID={op_id}",
-                        "P13_ONE_SHOT_APPROVAL=GRANTED",
-                        "P13_ONE_SHOT_PREFLIGHT=PASS",
-                        "P13_ONE_SHOT_LAST_STEP=COMPLETE",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            observed_state.write_text(
-                "CONSUMED_BEFORE_LIVE_ENTRYPOINT\n",
-                encoding="utf-8",
-            )
-            operator_observation.write_text(
-                "\n".join(
-                    [
-                        f"P13_OPERATION_ID={op_id}",
-                        "P13_PHYSICAL_OBSERVATION=OPENED",
-                        "P13_RELAY_CLICK_OBSERVED=unknown",
-                        "P13_DOOR_RELEASE_OBSERVED=unknown",
-                        "P13_APPROX_LATENCY=unknown",
                     ]
                 )
                 + "\n",
@@ -168,12 +133,6 @@ class P13PostAttemptCollectorTests(unittest.TestCase):
                 str(live),
                 "--physical-log-dir",
                 str(root),
-                "--observed-log",
-                str(observed),
-                "--observed-state",
-                str(observed_state),
-                "--operator-observation",
-                str(operator_observation),
             ]
             out = io.StringIO()
             with patch.object(sys, "argv", argv), contextlib.redirect_stdout(out):
@@ -187,54 +146,11 @@ class P13PostAttemptCollectorTests(unittest.TestCase):
             self.assertIn("P13_ONE_AUDITED_TRANSPORT_ATTEMPT=true", text)
             self.assertIn("P13_CTPP_OPENED_MARKER_COUNT=2", text)
             self.assertIn("P13_DOOR_WRITE_COUNT_6_MARKER_COUNT=2", text)
-            self.assertIn("P13_PHYSICAL_OBSERVATION=OPENED", text)
-            self.assertIn("P13_OBSERVED_PHYSICAL_ACCEPTANCE=PASS", text)
-            self.assertIn("P13_OPERATOR_OBSERVATION_OPERATION_MATCH=true", text)
-            self.assertIn(
-                "P13_HERMES_OBSERVED_GATE_TERMINAL_CONSUMED=true",
-                text,
-            )
-            self.assertIn(
-                "P13_HERMES_OBSERVED_RESEND_ALLOWED=false",
-                text,
-            )
+            self.assertIn("P13_PHYSICAL_OBSERVATION=UNAVAILABLE", text)
             self.assertIn("P13_DUPLICATE_TRANSMISSION_EVIDENCE=NOT_OBSERVED", text)
             self.assertNotIn("secret-target", text)
             self.assertNotIn("secret-detail", text)
             self.assertNotIn("private-detail", text)
-
-
-    def test_operator_observation_is_exactly_operation_bound(self):
-        module = self._load()
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "observation.txt"
-            path.write_text(
-                "\n".join(
-                    [
-                        "P13_OPERATION_ID=wrong-operation",
-                        "P13_PHYSICAL_OBSERVATION=OPENED",
-                        "P13_RELAY_CLICK_OBSERVED=unknown",
-                        "P13_DOOR_RELEASE_OBSERVED=unknown",
-                        "P13_APPROX_LATENCY=unknown",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            with self.assertRaises(ValueError):
-                module._parse_operator_observation(
-                    path,
-                    "p13-hermes-expected",
-                )
-
-    def test_missing_operator_observation_preserves_unavailable_default(self):
-        module = self._load()
-        self.assertIsNone(
-            module._parse_operator_observation(
-                None,
-                "p13-hermes-any",
-            )
-        )
 
 
 if __name__ == "__main__":
