@@ -30,6 +30,39 @@ class P12ReadonlyLivePreflightTests(unittest.TestCase):
         self.assertNotIn('exec "$WRAPPER"', self.text)
         self.assertNotIn('exec "$BINARY"', self.text)
 
+    def test_binary_strings_checks_are_pipefail_safe(self):
+        self.assertIn(
+            'BINARY_STRINGS="$(mktemp /root/.p12-preflight-binary-strings.XXXXXX)"',
+            self.text,
+        )
+        self.assertIn(
+            'strings -a "$BINARY" > "$BINARY_STRINGS"',
+            self.text,
+        )
+        self.assertIn(
+            'rm -f -- "$BINARY_STRINGS"',
+            self.text,
+        )
+
+        # Never combine an early-exit grep consumer with strings under
+        # `set -o pipefail`: strings can receive SIGPIPE and turn a valid
+        # positive match into rc=141.
+        self.assertNotIn(
+            'strings -a "$BINARY" | grep',
+            self.text,
+        )
+
+        self.assertIn(
+            "grep -Eq 'CTPP|OPEN_DOOR|open_door|create_door_message' "
+            '"$BINARY_STRINGS"',
+            self.text,
+        )
+        self.assertIn(
+            "grep -q 'P12_READONLY_TRANSACTION=PASS' "
+            '"$BINARY_STRINGS"',
+            self.text,
+        )
+
     def test_readonly_and_actuator_guards_are_present(self):
         self.assertIn("P12_READONLY_TRANSACTION=PASS", self.text)
         self.assertIn("P12_VIP_TOKEN_VALUE_EMITTED=false", self.text)

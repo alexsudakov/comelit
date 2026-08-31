@@ -22,8 +22,15 @@ EXPECTED_BINARY_SHA=bae10046aa4a449e0e1bb56315308592aaf06b82049c80291871d6485b55
 EXPECTED_WRAPPER_SHA=7eb9c4e8999dc6c6f15ac03344abd155a042482158352fadbca58a3f4fd91ce1
 
 STEP=START
+BINARY_STRINGS=""
+
 preflight_exit() {
     rc=$?
+
+    if [[ -n "${BINARY_STRINGS:-}" ]]; then
+        rm -f -- "$BINARY_STRINGS"
+    fi
+
     echo "P12_PREFLIGHT_EXIT_RC=$rc"
     echo "P12_PREFLIGHT_LAST_STEP=$STEP"
     trap - EXIT
@@ -71,6 +78,12 @@ STEP=ARTIFACT_SHAPE
 [[ "$(stat -c '%a' "$MANIFEST")" == "600" ]]
 readelf -h "$BINARY" >/dev/null
 bash -n "$WRAPPER"
+
+BINARY_STRINGS="$(mktemp /root/.p12-preflight-binary-strings.XXXXXX)"
+chmod 600 "$BINARY_STRINGS"
+strings -a "$BINARY" > "$BINARY_STRINGS"
+
+echo "P12_PREFLIGHT_BINARY_STRINGS_CAPTURE=PASS"
 echo "P12_PREFLIGHT_ARTIFACT_SHAPE=PASS"
 
 STEP=SOURCE_ACTUATOR_SCAN
@@ -83,7 +96,7 @@ echo "P12_PREFLIGHT_SOURCE_ACTUATOR_SCAN=PASS"
 
 STEP=BINARY_ACTUATOR_SCAN
 echo "P12_PREFLIGHT_STEP=BINARY_ACTUATOR_SCAN"
-if strings -a "$BINARY" | grep -Eq 'CTPP|OPEN_DOOR|open_door|create_door_message'; then
+if grep -Eq 'CTPP|OPEN_DOOR|open_door|create_door_message' "$BINARY_STRINGS"; then
     echo "P12_PREFLIGHT_BINARY_ACTUATOR_SCAN=FAIL"
     exit 1
 fi
@@ -104,11 +117,11 @@ grep -q 'P12_VIP_TOKEN_VALUE_EMITTED=false' "$SOURCE"
 grep -q 'CREDENTIAL_MATERIAL_EMITTED=false' "$SOURCE"
 grep -q 'AUTO_RETRY_OBSERVED=false' "$SOURCE"
 grep -q 'LIVE_TEST_READY=false' "$SOURCE"
-strings -a "$BINARY" | grep -q 'P12_READONLY_TRANSACTION=PASS'
-strings -a "$BINARY" | grep -q 'P12_VIP_TOKEN_VALUE_EMITTED=false'
-strings -a "$BINARY" | grep -q 'CREDENTIAL_MATERIAL_EMITTED=false'
-strings -a "$BINARY" | grep -q 'AUTO_RETRY_OBSERVED=false'
-strings -a "$BINARY" | grep -q 'LIVE_TEST_READY=false'
+grep -q 'P12_READONLY_TRANSACTION=PASS' "$BINARY_STRINGS"
+grep -q 'P12_VIP_TOKEN_VALUE_EMITTED=false' "$BINARY_STRINGS"
+grep -q 'CREDENTIAL_MATERIAL_EMITTED=false' "$BINARY_STRINGS"
+grep -q 'AUTO_RETRY_OBSERVED=false' "$BINARY_STRINGS"
+grep -q 'LIVE_TEST_READY=false' "$BINARY_STRINGS"
 echo "P12_PREFLIGHT_READONLY_SURFACE=PASS"
 
 STEP=WRAPPER_BINDING
