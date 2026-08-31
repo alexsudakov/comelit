@@ -2,6 +2,7 @@ open_door:
   target:
     entity:
       domain: button
+      integration: comelit
   fields:
     operation_id:
       required: true
