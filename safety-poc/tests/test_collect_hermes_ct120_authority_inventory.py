@@ -35,12 +35,18 @@ class HermesCt120AuthorityInventorySourceTests(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertNotIn(token, self.source)
 
-    def test_collector_never_calls_comelit_transport_or_live_gate(self) -> None:
+    def test_collector_never_executes_comelit_transport_or_live_gate(self) -> None:
+        # The collector is allowed to *name/hash* action-capable files as
+        # inventory. What is forbidden is any execution/handoff into them.
         forbidden = [
             'bash "$GATE"',
-            "p13_hermes_observed_acceptance.sh OPEN_72K4_3_ONCE",
-            "p13_hermes_one_shot.sh OPEN_72K4_3_ONCE",
-            "p13_one_shot_physical_runner.sh",
+            "exec safety-poc/scripts/p13_hermes_observed_acceptance.sh",
+            "bash safety-poc/scripts/p13_hermes_observed_acceptance.sh",
+            "exec safety-poc/scripts/p13_hermes_one_shot.sh",
+            "bash safety-poc/scripts/p13_hermes_one_shot.sh",
+            "exec safety-poc/scripts/p13_one_shot_physical_runner.sh",
+            "bash safety-poc/scripts/p13_one_shot_physical_runner.sh",
+            "OPEN_72K4_3_ONCE",
             "P13_APPROVAL=",
         ]
         for token in forbidden:
