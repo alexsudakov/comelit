@@ -1,0 +1,11 @@
+open_door:
+  target:
+    entity:
+      domain: button
+      integration: comelit
+  fields:
+    operation_id:
+      required: true
+      example: "p13-hermes-123e4567-e89b-42d3-a456-426614174000"
+      selector:
+        text:
