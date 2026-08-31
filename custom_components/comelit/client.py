@@ -28,7 +28,7 @@ class ComelitBridgeOutcomeUnknown(ComelitBridgeError):
 
 
 class ComelitBridgeRejected(ComelitBridgeError):
-    """The authenticated request was rejected before a trusted result existed."""
+    """Reserved for a future authenticated pre-execution rejection."""
 
 
 @dataclass(frozen=True)
@@ -87,8 +87,9 @@ class ComelitBridgeClient:
         )
         url = urljoin(self._base_url, OPEN_DOOR_PATH.lstrip("/"))
 
-        # Deliberately one HTTP attempt.  No timeout/replay error is converted
-        # into a second POST.
+        # Deliberately one HTTP attempt. Once this POST is attempted, no
+        # unsigned HTTP status is trusted as proof that execution did not occur.
+        # Only a valid signed 200 result can narrow the persisted outcome.
         try:
             async with self._session.post(
                 url,
@@ -108,14 +109,8 @@ class ComelitBridgeClient:
                     raise ComelitBridgeOutcomeUnknown("invalid bridge response; do not retry")
 
                 if response.status != 200:
-                    # Only syntactic/auth failures are known to precede runner
-                    # execution. Replay and 5xx remain ambiguous.
-                    if response.status in {400, 401, 404, 411, 413}:
-                        raise ComelitBridgeRejected(
-                            str(payload.get("error") or "bridge rejected request")
-                        )
                     raise ComelitBridgeOutcomeUnknown(
-                        "bridge outcome unknown; do not retry"
+                        "unsigned non-success response after Door POST; do not retry"
                     )
 
                 if not verify_signed_open_door_response(
