@@ -95,6 +95,32 @@ class P13ProductionTerminalizationTests(unittest.TestCase):
             text,
         )
 
+    def test_final_release_manifest_binds_frozen_g1b_evidence(self):
+        text = INSTALLER.read_text(encoding="utf-8")
+
+        required = (
+            "4ce5dedebe9df7e681e38af84f59ae92eafe8c28",
+            "f089fd459af8a0ee3365b86b7cee99e31d8e1e9c",
+            "p13-g1b-production-opened-20260831T203116Z.txt",
+            "p13-g1b-80de7068-72e5-40db-9e4f-47e1a42d2351",
+            "P13_G1B_PROTOCOL_STATE=UNKNOWN_OUTCOME",
+            "P13_G1B_DOOR_SPECIFIC_ACK=UNPROVEN",
+            "P13_G1B_PHYSICAL_OBSERVATION=OPENED",
+            "P13_G1B_OBSERVED_PHYSICAL_ACCEPTANCE=PASS",
+            "P13_G1B_GATE_TERMINAL=CONSUMED",
+            "P13_G1B_RESEND_ALLOWED=false",
+            "P13_G1B_AUTO_RETRY_ALLOWED=false",
+            "P13_G1B_TEMPORARY_HERMES_AUTHORITY_RETIRED=true",
+        )
+
+        for marker in required:
+            self.assertIn(marker, text)
+
+        self.assertNotIn(
+            "I_APPROVE_P13_G1B_IMMUTABLE_PRODUCTION_DOOR_TEST",
+            text,
+        )
+
     def test_p14_reusable_authority_remains_separate(self):
         text = DOC.read_text(encoding="utf-8")
 
