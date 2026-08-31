@@ -65,6 +65,12 @@ echo 'P14_P13_RUNTIME_ARTIFACTS=PASS'
 if pgrep -f -- '(^|/)comelit_p13_holder([[:space:]]|$)' >/dev/null || pgrep -f -- '(^|/)comelit-p13-door-wrapper([[:space:]]|$)' >/dev/null; then echo 'P14_CONFLICTING_NATIVE_PROCESS=true'; exit 75; fi
 mkdir -p "$(dirname "$JOURNAL")" "$(dirname "$AUDIT")" "$RUN_DIR"; chmod 700 "$(dirname "$JOURNAL")" "$(dirname "$AUDIT")" "$RUN_DIR"
 P13_PYTHONPATH="$P13_RELEASE/repo/src"; [[ -f "$P13_PYTHONPATH/comelit_safety_poc/p13_one_shot_physical.py" ]]
+P13_AUDIT_PROOF="$P13_RELEASE/repo/scripts/p13_audit_durability_proof.py"
+[[ -f "$P13_AUDIT_PROOF" ]] || { echo 'P14_P13_AUDIT_PROOF_PRESENT=false'; exit 1; }
+/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONPATH="$P13_PYTHONPATH" PYTHONDONTWRITEBYTECODE=1 \
+ /usr/bin/python3 "$P13_AUDIT_PROOF" --audit "$AUDIT" --head "$P13_SOURCE_HEAD" >/dev/null
+[[ -f "$AUDIT" && "$(stat -c '%u' "$AUDIT")" == '0' ]] || { echo 'P14_P13_AUDIT_IDENTITY=FAIL'; exit 1; }
+echo 'P14_P13_AUDIT_DURABILITY=PASS'
 /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONPATH="$P13_PYTHONPATH" PYTHONDONTWRITEBYTECODE=1 P13_APPROVAL="$P13_APPROVAL_TOKEN" P13_REQUIRE_ROOT_OWNER=1 \
  /usr/bin/python3 -m comelit_safety_poc.p13_one_shot_physical \
  --db "$JOURNAL" --operation-id "$OPERATION_ID" --target-fingerprint "$TARGET_FP" --min-interval-seconds "$MIN_INTERVAL" \
