@@ -252,10 +252,7 @@ import sys
 p = Path(sys.argv[1])
 bind = sys.argv[2]
 lines = p.read_text(encoding="utf-8").splitlines()
-updates = {
-    "COMELIT_P14_BIND_HOST": bind,
-    "COMELIT_P14_LIVE_ENABLED": "true",
-}
+updates = {"COMELIT_P14_BIND_HOST":bind,"COMELIT_P14_LIVE_ENABLED":"true"}
 seen = {key: 0 for key in updates}
 out = []
 for line in lines:
