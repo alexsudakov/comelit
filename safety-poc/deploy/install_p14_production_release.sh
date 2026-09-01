@@ -42,13 +42,16 @@ ENV_BACKUP=""
 UNIT_CHANGED=false
 UNIT_BACKUP=""
 UNIT_EXISTED=false
+UNIT_WAS_SYMLINK=false
+UNIT_SYMLINK_TARGET=""
 SERVICE_STATE_CAPTURED=false
 OLD_SERVICE_ENABLED=false
 OLD_SERVICE_ACTIVE=false
+SHARED_SECRET=""
 
 restore_prior_service_state() {
-    # Before CAPTURE_ROLLBACK there has been no service mutation. Early source
-    # or P13-readiness failures therefore must be completely side-effect free.
+    # Before CAPTURE_ROLLBACK there has been no service mutation. Early source,
+    # P13-readiness or existing-runtime preflight failures must be side-effect free.
     [[ "$SERVICE_STATE_CAPTURED" == true ]] || return 0
 
     # The new unit/process must be stopped before restoring old code/config.
@@ -56,10 +59,13 @@ restore_prior_service_state() {
     systemctl disable "$UNIT_NAME" >/dev/null 2>&1 || true
 
     if [[ "$UNIT_CHANGED" == true ]]; then
-        if [[ "$UNIT_EXISTED" == true && -f "$UNIT_BACKUP" ]]; then
-            cp -a "$UNIT_BACKUP" "$UNIT"
-        else
-            rm -f "$UNIT"
+        rm -f "$UNIT"
+        if [[ "$UNIT_EXISTED" == true ]]; then
+            if [[ "$UNIT_WAS_SYMLINK" == true ]]; then
+                ln -s "$UNIT_SYMLINK_TARGET" "$UNIT"
+            elif [[ -f "$UNIT_BACKUP" ]]; then
+                cp -a "$UNIT_BACKUP" "$UNIT"
+            fi
         fi
         systemctl daemon-reload >/dev/null 2>&1 || true
     fi
@@ -182,6 +188,20 @@ done
 [[ "$(sha256sum /root/comelit-p13-actuator-prep/real-door-payloads.json | awk '{print $1}')" == "$PAYLOAD_SHA" ]]
 echo 'P14_P13_IMMUTABLE_BOUNDARY=PASS'
 
+STEP=EXISTING_RUNTIME_PRECHECK
+if [[ -e "$ENV_FILE" || -L "$ENV_FILE" ]]; then
+    [[ -f "$ENV_FILE" && ! -L "$ENV_FILE" ]] || { echo 'P14_EXISTING_RUNTIME_ENV_INVALID=true'; exit 1; }
+    [[ "$(stat -c '%u:%a' "$ENV_FILE")" == '0:600' ]] || { echo 'P14_EXISTING_RUNTIME_ENV_IDENTITY=FAIL'; exit 1; }
+    LIVE_ASSIGNMENTS="$(grep -c '^COMELIT_P14_LIVE_ENABLED=' "$ENV_FILE" || true)"
+    [[ "$LIVE_ASSIGNMENTS" == 1 ]] && grep -qx 'COMELIT_P14_LIVE_ENABLED=false' "$ENV_FILE" || { echo 'P14_EXISTING_RUNTIME_MUST_BE_DISABLED_BEFORE_INSTALL=true'; exit 1; }
+    SECRET_ASSIGNMENTS="$(grep -c '^COMELIT_P14_SHARED_SECRET=' "$ENV_FILE" || true)"
+    [[ "$SECRET_ASSIGNMENTS" == 1 ]] || { echo 'P14_EXISTING_RUNTIME_SECRET_CARDINALITY=FAIL'; exit 1; }
+    SHARED_SECRET="$(sed -n 's/^COMELIT_P14_SHARED_SECRET=//p' "$ENV_FILE")"
+    [[ "$(printf '%s' "$SHARED_SECRET" | wc -c)" -ge 32 ]] || { echo 'P14_EXISTING_RUNTIME_SECRET_INVALID=true'; exit 1; }
+fi
+
+echo 'P14_EXISTING_RUNTIME_PREFLIGHT=PASS'
+
 STEP=STAGE_RELEASE
 RUNNER_SOURCE="$POC_ROOT/scripts/p14_production_runner.sh"
 [[ -f "$RUNNER_SOURCE" ]]
@@ -254,10 +274,17 @@ if [[ -f "$ENV_FILE" ]]; then
     ENV_BACKUP="$(mktemp /root/p14-env-backup.XXXXXX)"
     cp -a "$ENV_FILE" "$ENV_BACKUP"
 fi
-if [[ -f "$UNIT" ]]; then
+if [[ -L "$UNIT" ]]; then
+    UNIT_EXISTED=true
+    UNIT_WAS_SYMLINK=true
+    UNIT_SYMLINK_TARGET="$(readlink "$UNIT")"
+elif [[ -f "$UNIT" ]]; then
     UNIT_EXISTED=true
     UNIT_BACKUP="$(mktemp /root/p14-unit-backup.XXXXXX)"
     cp -a "$UNIT" "$UNIT_BACKUP"
+elif [[ -e "$UNIT" ]]; then
+    echo 'P14_EXISTING_UNIT_UNSUPPORTED_TYPE=true'
+    exit 1
 fi
 if systemctl is-enabled "$UNIT_NAME" >/dev/null 2>&1; then
     OLD_SERVICE_ENABLED=true
@@ -284,12 +311,6 @@ RUNNER_CHANGED=true
 
 STEP=ENVIRONMENT
 install -d -o root -g root -m 0700 "$ENV_DIR" "$RUNTIME_DIR"
-SHARED_SECRET=""
-if [[ -f "$ENV_FILE" ]]; then
-    [[ "$(stat -c '%u' "$ENV_FILE")" == 0 ]]
-    grep -qx 'COMELIT_P14_LIVE_ENABLED=false' "$ENV_FILE" || { echo 'P14_EXISTING_RUNTIME_MUST_BE_DISABLED_BEFORE_INSTALL=true'; exit 1; }
-    SHARED_SECRET="$(sed -n 's/^COMELIT_P14_SHARED_SECRET=//p' "$ENV_FILE")"
-fi
 [[ -n "$SHARED_SECRET" ]] || SHARED_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
 [[ "$(printf '%s' "$SHARED_SECRET" | wc -c)" -ge 32 ]]
 cat >"$ENV_FILE.tmp" <<EOF
