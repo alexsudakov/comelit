@@ -16,10 +16,12 @@ mkdir -p "$DEST_ROOT"; rm -rf "$TMP"; mkdir -p "$TMP"; cp -a "$SOURCE/." "$TMP/"
 find "$TMP" -type d -exec chmod 0755 {} +; find "$TMP" -type f -exec chmod 0644 {} +; chown -R "$OWNER" "$TMP"
 python3 -m compileall -q "$TMP"; find "$TMP" -type d -name __pycache__ -prune -exec rm -rf {} +
 MOVED_OLD=false
-rollback(){ rc=$?; if [[ $rc -ne 0 ]]; then set +e; rm -rf "$TMP"; if [[ "$MOVED_OLD" == true && -d "$BACKUP" && ! -e "$DEST" ]]; then mv "$BACKUP" "$DEST"; fi; set -e; fi; return "$rc"; }
+MOVED_NEW=false
+rollback(){ rc=$?; if [[ $rc -ne 0 ]]; then set +e; rm -rf "$TMP"; [[ "$MOVED_NEW" == true ]] && rm -rf "$DEST"; if [[ "$MOVED_OLD" == true && -d "$BACKUP" ]]; then mv "$BACKUP" "$DEST"; fi; set -e; fi; return "$rc"; }
 trap rollback EXIT
 if [[ -e "$DEST" ]]; then [[ -d "$DEST" ]] || { echo 'P14_HA_DEST_NOT_DIRECTORY=true'; exit 1; }; mv "$DEST" "$BACKUP"; MOVED_OLD=true; fi
 mv "$TMP" "$DEST"
+MOVED_NEW=true
 python3 - "$DEST/manifest.json" <<'PY'
 import json,sys
 obj=json.load(open(sys.argv[1], encoding='utf-8')); assert obj['domain']=='comelit'; assert obj['version']=='1.0.0'; assert obj['config_flow'] is True
