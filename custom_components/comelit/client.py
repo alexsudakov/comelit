@@ -28,7 +28,7 @@ class ComelitBridgeOutcomeUnknown(ComelitBridgeError):
 
 
 class ComelitBridgeRejected(ComelitBridgeError):
-    """The authenticated request was rejected before a trusted result existed."""
+    """The request was rejected before a network send occurred."""
 
 
 @dataclass(frozen=True)
@@ -72,7 +72,7 @@ class ComelitBridgeClient:
             return False
         if payload.get("ok") is not True:
             return False
-        if int(payload.get("protocol_version", 0)) != BRIDGE_PROTOCOL_VERSION:
+        if payload.get("protocol_version") != BRIDGE_PROTOCOL_VERSION:
             return False
         if require_live and payload.get("live_enabled") is not True:
             return False
@@ -81,10 +81,15 @@ class ComelitBridgeClient:
         return True
 
     async def async_open_door(self, operation_id: str) -> ComelitBridgeResult:
-        body, headers = build_signed_open_door_request(
-            shared_secret=self._shared_secret,
-            operation_id=operation_id,
-        )
+        try:
+            body, headers = build_signed_open_door_request(
+                shared_secret=self._shared_secret,
+                operation_id=operation_id,
+            )
+        except ValueError as exc:
+            raise ComelitBridgeRejected(
+                "invalid open-door request before send"
+            ) from exc
         url = urljoin(self._base_url, OPEN_DOOR_PATH.lstrip("/"))
 
         # Deliberately one HTTP attempt. No timeout/replay/error response is
