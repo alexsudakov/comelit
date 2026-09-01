@@ -25,6 +25,10 @@ TARGET_FP=832e5c09cf5f8ef79b9af83ba34b38a0a29847570ea37158310369850e2500ce
 HOLDER_SHA=50c0a916f73ec810f131be1f48f47761a2cc69b9d06107d121519f97c538b450
 WRAPPER_SHA=bf36b381f4921871f0b4df0820548b8943b935f1dfcd1521ceb79001dab71aa9
 PAYLOAD_SHA=0d0159f9cc562c1c67bc362b192a30d3fabd634b2b92c3a96d8f318ecd842832
+HEALTH_URL=http://127.0.0.1:18014/healthz
+HEALTH_READY_ATTEMPTS=20
+HEALTH_PROBE_TIMEOUT_SECONDS=0.25
+HEALTH_READY_INTERVAL_SECONDS=0.25
 
 STEP=START
 STAGE=""
@@ -48,6 +52,47 @@ SERVICE_STATE_CAPTURED=false
 OLD_SERVICE_ENABLED=false
 OLD_SERVICE_ACTIVE=false
 SHARED_SECRET=""
+HEALTH=""
+
+startup_diagnostics() {
+    echo 'P14_BRIDGE_STARTUP_DIAGNOSTICS_BEGIN=true' >&2
+    systemctl status "$UNIT_NAME" --no-pager -l >&2 || true
+    journalctl -u "$UNIT_NAME" --no-pager -n 100 -o short-iso-precise >&2 || true
+    echo 'P14_BRIDGE_STARTUP_DIAGNOSTICS_END=true' >&2
+}
+
+wait_for_bridge_health() {
+    local attempt
+
+    HEALTH=""
+    for ((attempt = 1; attempt <= HEALTH_READY_ATTEMPTS; attempt++)); do
+        if ! systemctl is-active --quiet "$UNIT_NAME"; then
+            echo "P14_BRIDGE_STARTUP_SERVICE_INACTIVE_AT_ATTEMPT=$attempt" >&2
+            startup_diagnostics
+            return 1
+        fi
+
+        if HEALTH="$(curl --fail --silent --show-error --max-time "$HEALTH_PROBE_TIMEOUT_SECONDS" "$HEALTH_URL" 2>/dev/null)"; then
+            if python3 - "$HEALTH" <<'PY'
+import json,sys
+obj=json.loads(sys.argv[1]); assert obj.get("ok") is True; assert obj.get("protocol_version") == 1; assert obj.get("live_enabled") is False; assert obj.get("runner_identity") == "disabled"
+PY
+            then
+                echo "P14_BRIDGE_READINESS_ATTEMPTS=$attempt"
+                return 0
+            fi
+            echo 'P14_BRIDGE_HEALTH_CONTRACT_INVALID=true' >&2
+            startup_diagnostics
+            return 1
+        fi
+
+        sleep "$HEALTH_READY_INTERVAL_SECONDS"
+    done
+
+    echo "P14_BRIDGE_READINESS_TIMEOUT_ATTEMPTS=$HEALTH_READY_ATTEMPTS" >&2
+    startup_diagnostics
+    return 1
+}
 
 restore_prior_service_state() {
     # Before CAPTURE_ROLLBACK there has been no service mutation. Early source,
@@ -368,11 +413,7 @@ systemctl daemon-reload
 systemctl enable --now "$UNIT_NAME" >/dev/null
 
 STEP=VERIFY
-HEALTH="$(curl --fail --silent --show-error --max-time 3 http://127.0.0.1:18014/healthz)"
-python3 - "$HEALTH" <<'PY'
-import json,sys
-obj=json.loads(sys.argv[1]); assert obj.get("ok") is True; assert obj.get("protocol_version") == 1; assert obj.get("live_enabled") is False; assert obj.get("runner_identity") == "disabled"
-PY
+wait_for_bridge_health
 ( cd "$CURRENT"; sha256sum -c RELEASE_CONTENT.sha256 >/dev/null )
 [[ "$(readlink -f "$CURRENT")" == "$RELEASE" ]]
 tar -C "$CURRENT" -czf "$RUNTIME_DIR/comelit-ha-component.tar.gz" custom_components/comelit
