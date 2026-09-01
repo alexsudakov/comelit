@@ -99,6 +99,19 @@ class P14ProductionRolloutTests(unittest.TestCase):
         service_restore_call = text.index("        restore_prior_service_state")
         self.assertLess(env_restore, service_restore_call)
 
+    def test_pre_mutation_install_failure_cannot_touch_existing_service(self):
+        text = INSTALL.read_text()
+        restore_start = text.index("restore_prior_service_state() {")
+        guard = '[[ "$SERVICE_STATE_CAPTURED" == true ]] || return 0'
+        guard_pos = text.index(guard, restore_start)
+        first_stop = text.index('systemctl stop "$UNIT_NAME"', restore_start)
+        self.assertLess(guard_pos, first_stop)
+
+        capture_pos = text.index("SERVICE_STATE_CAPTURED=true")
+        self.assertLess(text.index("STEP=SOURCE_IDENTITY"), capture_pos)
+        self.assertLess(text.index("STEP=P13_IMMUTABLE_BOUNDARY"), capture_pos)
+        self.assertLess(text.index("STEP=STAGE_RELEASE"), capture_pos)
+
     def test_live_promotion_requires_explicit_boundary_and_sends_no_post(self):
         text = PROMOTE.read_text()
         self.assertIn("I_APPROVE_P14_ENABLE_REUSABLE_DOOR_SERVICE", text)
