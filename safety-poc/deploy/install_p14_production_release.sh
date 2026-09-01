@@ -47,6 +47,10 @@ OLD_SERVICE_ENABLED=false
 OLD_SERVICE_ACTIVE=false
 
 restore_prior_service_state() {
+    # Before CAPTURE_ROLLBACK there has been no service mutation. Early source
+    # or P13-readiness failures therefore must be completely side-effect free.
+    [[ "$SERVICE_STATE_CAPTURED" == true ]] || return 0
+
     # The new unit/process must be stopped before restoring old code/config.
     systemctl stop "$UNIT_NAME" >/dev/null 2>&1 || true
     systemctl disable "$UNIT_NAME" >/dev/null 2>&1 || true
@@ -59,8 +63,6 @@ restore_prior_service_state() {
         fi
         systemctl daemon-reload >/dev/null 2>&1 || true
     fi
-
-    [[ "$SERVICE_STATE_CAPTURED" == true ]] || return 0
 
     if [[ "$UNIT_EXISTED" == true ]]; then
         if [[ "$OLD_SERVICE_ENABLED" == true ]]; then
@@ -123,6 +125,10 @@ cleanup() {
 
         [[ "$RELEASE_CREATED" == true && -d "$RELEASE" ]] && rm -rf "$RELEASE"
         [[ -z "$STAGE" ]] || rm -rf "$STAGE"
+        rm -f "$ENV_FILE.tmp" "$UNIT.tmp" >/dev/null 2>&1 || true
+        [[ -z "$RUNNER_BACKUP" ]] || rm -f "$RUNNER_BACKUP"
+        [[ -z "$ENV_BACKUP" ]] || rm -f "$ENV_BACKUP"
+        [[ -z "$UNIT_BACKUP" ]] || rm -f "$UNIT_BACKUP"
         echo 'P14_PRODUCTION_INSTALL=FAIL'
         echo "P14_PRODUCTION_INSTALL_LAST_STEP=$STEP"
         echo "P14_ROLLBACK_PRIOR_SERVICE_ENABLED=$OLD_SERVICE_ENABLED"
