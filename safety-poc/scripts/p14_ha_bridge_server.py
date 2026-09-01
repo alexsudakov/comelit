@@ -33,6 +33,7 @@ DEFAULT_RUNNER = "/usr/local/sbin/comelit-p14-production-runner"
 DEFAULT_JOURNAL = "/root/comelit-p13-run/p13-one-shot.sqlite3"
 DEFAULT_REPLAY_DB = "/root/comelit-p14-ha-bridge/replay.sqlite3"
 DEFAULT_LOCK = "/root/comelit-p14-ha-bridge/runner.lock"
+P14_SOCKET_TIMEOUT_SECONDS = 5.0
 
 
 def _required_env(name: str) -> str:
@@ -143,6 +144,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
     server_version = "ComelitP14Bridge/1"
     protocol_version = "HTTP/1.1"
 
+    def setup(self) -> None:
+        super().setup()
+        # Bound unauthenticated request-line/header/body reads. The live bridge
+        # is additionally source-allowlisted to the HA client by nftables.
+        self.connection.settimeout(P14_SOCKET_TIMEOUT_SECONDS)
+
     @property
     def app(self) -> P14BridgeApplication:
         return self.server.app  # type: ignore[attr-defined]
@@ -209,7 +216,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 413, {"ok": False, "error": "request_body_size_invalid"}
             )
             return
-        body = self.rfile.read(length)
+        try:
+            body = self.rfile.read(length)
+        except OSError:
+            # No authenticated request has been accepted. Close the connection
+            # rather than retaining a worker on a stalled/broken body stream.
+            self.close_connection = True
+            return
         if len(body) != length:
             self._json_response(400, {"ok": False, "error": "request_body_truncated"})
             return
