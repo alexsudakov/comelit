@@ -162,6 +162,22 @@ class P14HomeAssistantContractTests(unittest.TestCase):
         self.assertIn('payload.get("ok") is not True', source)
         self.assertIn('isinstance(payload.get("runner_invoked"), bool)', source)
 
+    def test_ha_client_rejects_invalid_input_before_post(self):
+        source = (ROOT / "custom_components/comelit/client.py").read_text()
+        build = source.index("body, headers = build_signed_open_door_request")
+        rejected = source.index("invalid open-door request before send")
+        post = source.index("async with self._session.post")
+        self.assertLess(build, rejected)
+        self.assertLess(rejected, post)
+        self.assertIn("raise ComelitBridgeRejected", source)
+
+    def test_ha_health_protocol_version_is_strict_and_non_throwing(self):
+        source = (ROOT / "custom_components/comelit/client.py").read_text()
+        self.assertIn(
+            'payload.get("protocol_version") != BRIDGE_PROTOCOL_VERSION', source
+        )
+        self.assertNotIn('int(payload.get("protocol_version", 0))', source)
+
     def test_ha_client_never_treats_unsigned_http_error_as_proven_safe_rejection(self):
         source = (ROOT / "custom_components/comelit/client.py").read_text()
         self.assertIn("unsigned bridge error after request send", source)
