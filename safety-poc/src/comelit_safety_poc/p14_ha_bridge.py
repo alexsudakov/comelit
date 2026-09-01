@@ -32,6 +32,9 @@ P14_MAX_BODY_BYTES = 512
 _OPERATION_PREFIX = "p13-hermes-"
 _NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{22,64}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_SYSTEMD_RUN = "/usr/bin/systemd-run"
+_SYSTEMCTL = "/usr/bin/systemctl"
+_SYSTEMD_UNIT_PREFIX = "comelit-p14-op-"
 
 
 class P14RequestError(ValueError):
@@ -129,7 +132,7 @@ class P14ReplayStore:
                 )
             except sqlite3.IntegrityError as exc:
                 raise P14ReplayError("replayed_nonce") from exc
-            # Never delete an in-window nonce.  The wide cleanup margin makes a
+            # Never delete an in-window nonce. The wide cleanup margin makes a
             # replay durable across bridge restarts without unbounded growth.
             con.execute("DELETE FROM accepted_nonces WHERE accepted_at < ?", (now - 86400,))
             con.commit()
@@ -205,7 +208,7 @@ class P14SignedRequestVerifier:
         operation_id = validate_operation_id(str(payload.get("operation_id") or ""))
 
         # Claim only after authentication and structural validation, but before
-        # any execution.  A repeated signed request can never invoke the runner
+        # any execution. A repeated signed request can never invoke the runner
         # twice with the same nonce.
         self.replay_store.claim(nonce, issued_at, now=now_i)
         return operation_id
@@ -264,11 +267,14 @@ class P14RunnerConfig:
 class P14CanonicalRunner:
     """Narrow bridge to a locally pinned P14 production runner.
 
-    Network input controls only ``operation_id``.  The executable identity,
+    Network input controls only ``operation_id``. The executable identity,
     P13 target/journal/artifacts, approval mapping and rate limit remain local
-    root-owned configuration.  No P14 secret is inherited by the child.  A
-    process-wide flock complements the in-process lock so two bridge processes
-    cannot launch actuation children concurrently during restarts/upgrades.
+    root-owned configuration. No P14 secret is inherited by the child. A
+    process-wide flock prevents concurrent bridge processes, while each live
+    invocation is placed in its own transient systemd service cgroup. That
+    cgroup contains the immutable P13 Python process and its nested
+    ``start_new_session`` native wrapper, so timeout cleanup cannot leave the
+    physical transport running after the bridge releases its execution lock.
     """
 
     def __init__(self, config: P14RunnerConfig):
@@ -277,6 +283,19 @@ class P14CanonicalRunner:
 
     def _journal(self) -> Journal:
         return Journal(self.config.journal_path)
+
+    @staticmethod
+    def _verify_root_tool(path_value: str, label: str) -> None:
+        path = Path(path_value)
+        if not path.is_file():
+            raise RuntimeError(f"{label}_absent")
+        stat_result = path.stat()
+        if stat_result.st_uid != 0:
+            raise RuntimeError(f"{label}_owner_not_root")
+        if stat_result.st_mode & 0o022:
+            raise RuntimeError(f"{label}_writable_by_non_root")
+        if not os.access(path, os.X_OK):
+            raise RuntimeError(f"{label}_not_executable")
 
     def verify_runner_identity(self) -> None:
         path = Path(self.config.runner_path)
@@ -289,15 +308,19 @@ class P14CanonicalRunner:
         actual = hashlib.sha256(path.read_bytes()).hexdigest()
         if not hmac.compare_digest(actual, self.config.runner_sha256):
             raise RuntimeError("p14_production_runner_sha256_mismatch")
+        self._verify_root_tool(_SYSTEMD_RUN, "p14_systemd_run")
+        self._verify_root_tool(_SYSTEMCTL, "p14_systemctl")
 
     @staticmethod
-    def _map_existing(operation_id: str, state: State, detail: str | None) -> P14BridgeResult:
+    def _map_existing(
+        operation_id: str, state: State, detail: str | None
+    ) -> P14BridgeResult:
         if state == State.ACKED:
             mapped = HaResultState.ACKED
         elif state == State.FAILED_SAFE:
             mapped = HaResultState.FAILED_SAFE
         else:
-            # PREPARED/SEND_ARMED/SENT are deliberately not re-executed.  A
+            # PREPARED/SEND_ARMED/SENT are deliberately not re-executed. A
             # nonterminal record may belong to a still-running or crashed
             # operation, so the only safe network-facing state is UNKNOWN.
             mapped = HaResultState.UNKNOWN_OUTCOME
@@ -348,7 +371,7 @@ class P14CanonicalRunner:
     @staticmethod
     def _minimal_child_env() -> dict[str, str]:
         # In particular, COMELIT_P14_SHARED_SECRET and every request HMAC value
-        # are absent.  The root-only P14 production runner maps the P13 approval
+        # are absent. The root-only P14 production runner maps the P13 approval
         # token locally after its own immutable-runtime checks.
         return {
             "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
@@ -364,6 +387,163 @@ class P14CanonicalRunner:
         except ProcessLookupError:
             pass
 
+    @staticmethod
+    def _unit_name(operation_id: str) -> str:
+        suffix = operation_id[len(_OPERATION_PREFIX) :].replace("-", "")
+        return f"{_SYSTEMD_UNIT_PREFIX}{suffix}.service"
+
+    def _inflight_path(self) -> Path:
+        return Path(f"{self.config.lock_path}.inflight")
+
+    @staticmethod
+    def _fsync_parent(path: Path) -> None:
+        fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    def _persist_inflight(self, operation_id: str, unit_name: str) -> None:
+        path = self._inflight_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(path.parent, 0o700)
+        tmp = path.with_name(
+            f".{path.name}.tmp-{os.getpid()}-{threading.get_ident()}"
+        )
+        payload = json.dumps(
+            {"operation_id": operation_id, "unit_name": unit_name},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        try:
+            with tmp.open("x", encoding="utf-8") as handle:
+                os.chmod(tmp, 0o600)
+                handle.write(payload + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)
+            self._fsync_parent(path)
+        finally:
+            if tmp.exists():
+                tmp.unlink()
+
+    def _clear_inflight(self) -> None:
+        path = self._inflight_path()
+        if path.exists():
+            path.unlink()
+            self._fsync_parent(path)
+
+    def _unit_has_live_processes(self, unit_name: str) -> bool:
+        try:
+            completed = subprocess.run(
+                [
+                    _SYSTEMCTL,
+                    "show",
+                    "--property=LoadState",
+                    "--property=ActiveState",
+                    unit_name,
+                ],
+                env=self._minimal_child_env(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                timeout=3,
+                check=False,
+                text=True,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            # Unknown containment state is treated as live, never as safe.
+            return True
+        if completed.returncode != 0:
+            return True
+        values: dict[str, str] = {}
+        for line in completed.stdout.splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                values[key] = value
+        if values.get("LoadState") == "not-found":
+            return False
+        active = values.get("ActiveState")
+        if active in {"inactive", "failed"}:
+            return False
+        if active in {"active", "activating", "deactivating", "reloading"}:
+            return True
+        return True
+
+    def _reconcile_inflight(self) -> None:
+        path = self._inflight_path()
+        if not path.exists():
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict) or set(payload) != {
+                "operation_id",
+                "unit_name",
+            }:
+                raise ValueError("invalid inflight marker")
+            operation_id = validate_operation_id(str(payload["operation_id"]))
+            unit_name = str(payload["unit_name"])
+            if unit_name != self._unit_name(operation_id):
+                raise ValueError("inflight unit identity mismatch")
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("p14_containment_marker_invalid") from exc
+        if self._unit_has_live_processes(unit_name):
+            raise RuntimeError("p14_prior_containment_unit_still_active")
+        self._clear_inflight()
+
+    def _contained_command(self, operation_id: str, unit_name: str) -> list[str]:
+        return [
+            _SYSTEMD_RUN,
+            "--quiet",
+            "--wait",
+            "--collect",
+            f"--unit={unit_name}",
+            "--service-type=exec",
+            "--property=KillMode=control-group",
+            "--property=TimeoutStopSec=5s",
+            "--property=UMask=0077",
+            "--setenv=PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+            "--setenv=LANG=C.UTF-8",
+            "--setenv=LC_ALL=C.UTF-8",
+            "--setenv=PYTHONDONTWRITEBYTECODE=1",
+            "--",
+            self.config.runner_path,
+            "--operation-id",
+            operation_id,
+        ]
+
+    def _stop_contained_unit_until_inactive(self, unit_name: str) -> None:
+        # This loop is intentionally fail-closed and unbounded. If systemd
+        # cannot prove the transient actuation cgroup inactive, the request
+        # thread keeps both execution locks and never returns a trusted bridge
+        # result. Other requests are rejected without spawning a child.
+        while self._unit_has_live_processes(unit_name):
+            for command in (
+                [
+                    _SYSTEMCTL,
+                    "kill",
+                    "--kill-whom=all",
+                    "--signal=SIGKILL",
+                    unit_name,
+                ],
+                [_SYSTEMCTL, "stop", unit_name],
+            ):
+                try:
+                    subprocess.run(
+                        command,
+                        env=self._minimal_child_env(),
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        close_fds=True,
+                        timeout=self.config.term_grace_seconds,
+                        check=False,
+                    )
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+            time.sleep(0.2)
+
     def invoke(self, operation_id: str) -> P14BridgeResult:
         operation_id = validate_operation_id(operation_id)
 
@@ -374,7 +554,9 @@ class P14CanonicalRunner:
         if not self.config.live_enabled:
             # Persist the no-send result so this operation identity can never be
             # reused later after live mode is enabled.
-            return self._record_failed_safe(operation_id, "p14_live_execution_disabled_no_send")
+            return self._record_failed_safe(
+                operation_id, "p14_live_execution_disabled_no_send"
+            )
 
         if not self._thread_lock.acquire(blocking=False):
             return self._record_failed_safe(operation_id, "bridge_busy_no_send_attempted")
@@ -391,7 +573,9 @@ class P14CanonicalRunner:
                     operation_id, "bridge_process_lock_error_no_send_attempted"
                 )
             if process_lock is None:
-                return self._record_failed_safe(operation_id, "bridge_process_busy_no_send_attempted")
+                return self._record_failed_safe(
+                    operation_id, "bridge_process_busy_no_send_attempted"
+                )
 
             # Another request/process may have completed this operation while
             # this request was waiting on local scheduling.
@@ -401,12 +585,21 @@ class P14CanonicalRunner:
 
             try:
                 self.verify_runner_identity()
+                self._reconcile_inflight()
             except RuntimeError as exc:
                 return self._record_failed_safe(
-                    operation_id, f"runner_identity_invalid_no_send:{exc}"
+                    operation_id, f"runner_identity_or_containment_invalid_no_send:{exc}"
                 )
 
-            command = [self.config.runner_path, "--operation-id", operation_id]
+            unit_name = self._unit_name(operation_id)
+            try:
+                self._persist_inflight(operation_id, unit_name)
+            except OSError as exc:
+                return self._record_failed_safe(
+                    operation_id, f"containment_marker_persist_failed_no_send:{type(exc).__name__}"
+                )
+
+            command = self._contained_command(operation_id, unit_name)
             try:
                 proc = subprocess.Popen(
                     command,
@@ -418,21 +611,35 @@ class P14CanonicalRunner:
                     start_new_session=True,
                 )
             except OSError as exc:
+                self._clear_inflight()
                 return self._record_failed_safe(
                     operation_id, f"runner_spawn_failed_no_send:{type(exc).__name__}"
                 )
+
             runner_invoked = True
             try:
                 proc.communicate(timeout=self.config.timeout_seconds)
             except subprocess.TimeoutExpired:
                 timed_out = True
-                self._terminate_group(proc, signal.SIGTERM)
-                try:
-                    proc.communicate(timeout=self.config.term_grace_seconds)
-                except subprocess.TimeoutExpired:
-                    self._terminate_group(proc, signal.SIGKILL)
-                    proc.communicate(timeout=5)
+                # Kill the transient systemd service cgroup first. It contains
+                # the P14 runner, P13 Python and the nested P13 wrapper even
+                # though that wrapper starts a new POSIX session/process group.
+                self._stop_contained_unit_until_inactive(unit_name)
+                self._terminate_group(proc, signal.SIGKILL)
+                while True:
+                    try:
+                        proc.communicate(timeout=5)
+                        break
+                    except subprocess.TimeoutExpired:
+                        self._terminate_group(proc, signal.SIGKILL)
             return_code = proc.returncode
+
+            # A nonzero systemd-run result can represent a runner/systemd
+            # failure. Prove its transient cgroup inactive before releasing the
+            # marker/locks; never assume process exit implies descendant exit.
+            if return_code != 0:
+                self._stop_contained_unit_until_inactive(unit_name)
+            self._clear_inflight()
         finally:
             if process_lock is not None:
                 try:
@@ -445,7 +652,7 @@ class P14CanonicalRunner:
         op = journal.maybe_get(operation_id)
         if op is None:
             # The production runner validates all identities before it creates
-            # PREPARED.  No durable operation means SEND_ARMED was not reached.
+            # PREPARED. No durable operation means SEND_ARMED was not reached.
             reason = (
                 "runner_timeout_before_operation_persisted_no_send"
                 if timed_out
@@ -459,8 +666,8 @@ class P14CanonicalRunner:
                 runner_invoked=runner_invoked,
             )
 
-        # The child process group has ended.  Normalize crash residue without
-        # ever launching another process/send.
+        # The transient systemd cgroup is inactive before this point. Normalize
+        # crash residue without ever launching another process/send.
         if op.state == State.PREPARED:
             op = journal.transition(
                 operation_id,
@@ -495,5 +702,7 @@ class P14BridgeApplication:
         body: bytes,
         now: int | None = None,
     ) -> P14BridgeResult:
-        operation_id = self.verifier.verify_open_door(headers=headers, body=body, now=now)
+        operation_id = self.verifier.verify_open_door(
+            headers=headers, body=body, now=now
+        )
         return self.runner.invoke(operation_id)
