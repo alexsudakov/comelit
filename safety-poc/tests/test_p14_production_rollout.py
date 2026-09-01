@@ -95,10 +95,9 @@ class P14ProductionRolloutTests(unittest.TestCase):
         self.assertIn('systemctl enable "$UNIT_NAME"', text)
         self.assertIn('systemctl start "$UNIT_NAME"', text)
         self.assertIn("P14_PRODUCTION_INSTALL=FAIL", text)
-        self.assertLess(
-            text.index('if [[ "$ENV_CHANGED" == true ]]'),
-            text.index("restore_prior_service_state"),
-        )
+        env_restore = text.index('if [[ "$ENV_CHANGED" == true ]]')
+        service_restore_call = text.index("        restore_prior_service_state")
+        self.assertLess(env_restore, service_restore_call)
 
     def test_live_promotion_requires_explicit_boundary_and_sends_no_post(self):
         text = PROMOTE.read_text()
