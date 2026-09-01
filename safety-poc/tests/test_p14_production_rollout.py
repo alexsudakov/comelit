@@ -4,7 +4,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "scripts" / "p14_production_runner.sh"
 BRIDGE = ROOT / "src" / "comelit_safety_poc" / "p14_ha_bridge.py"
+SERVER = ROOT / "scripts" / "p14_ha_bridge_server.py"
 INSTALL = ROOT / "deploy" / "install_p14_production_release.sh"
+HA_INSTALL = ROOT / "deploy" / "install_p14_ha_component_local.sh"
 PROMOTE = ROOT / "deploy" / "promote_p14_live.sh"
 DISABLE = ROOT / "deploy" / "disable_p14_live.sh"
 FIREWALL = ROOT / "deploy" / "p14_firewall.sh"
@@ -73,6 +75,17 @@ class P14ProductionRolloutTests(unittest.TestCase):
         self.assertIn("State.UNKNOWN_OUTCOME", text)
         self.assertIn("State.FAILED_SAFE", text)
 
+    def test_bridge_bounds_unauthenticated_socket_reads(self):
+        text = SERVER.read_text()
+        self.assertIn("P14_SOCKET_TIMEOUT_SECONDS", text)
+        self.assertIn("self.connection.settimeout(P14_SOCKET_TIMEOUT_SECONDS)", text)
+        self.assertIn("except OSError:", text)
+        socket_timeout = text.index("self.connection.settimeout(P14_SOCKET_TIMEOUT_SECONDS)")
+        body_read = text.index("body = self.rfile.read(length)")
+        authenticate = text.index("result = self.app.open_door(headers=headers, body=body)")
+        self.assertLess(socket_timeout, body_read)
+        self.assertLess(body_read, authenticate)
+
     def test_installer_is_immutable_and_non_actuating(self):
         text = INSTALL.read_text()
         self.assertIn("P14_PRODUCTION_INSTALL_NON_ACTUATING=true", text)
@@ -110,7 +123,38 @@ class P14ProductionRolloutTests(unittest.TestCase):
         capture_pos = text.index("SERVICE_STATE_CAPTURED=true")
         self.assertLess(text.index("STEP=SOURCE_IDENTITY"), capture_pos)
         self.assertLess(text.index("STEP=P13_IMMUTABLE_BOUNDARY"), capture_pos)
+        self.assertLess(text.index("STEP=EXISTING_RUNTIME_PRECHECK"), capture_pos)
         self.assertLess(text.index("STEP=STAGE_RELEASE"), capture_pos)
+
+    def test_existing_live_state_cardinality_is_checked_before_release_mutation(self):
+        text = INSTALL.read_text()
+        preflight = text.index("STEP=EXISTING_RUNTIME_PRECHECK")
+        stage = text.index("STEP=STAGE_RELEASE")
+        promote = text.index("STEP=PROMOTE_RELEASE")
+        self.assertLess(preflight, stage)
+        self.assertLess(preflight, promote)
+        self.assertIn("LIVE_ASSIGNMENTS=", text)
+        self.assertIn('[[ "$LIVE_ASSIGNMENTS" == 1 ]]', text)
+        self.assertIn("P14_EXISTING_RUNTIME_MUST_BE_DISABLED_BEFORE_INSTALL=true", text)
+        self.assertIn("SECRET_ASSIGNMENTS=", text)
+        self.assertIn('[[ "$SECRET_ASSIGNMENTS" == 1 ]]', text)
+
+    def test_masked_or_symlinked_unit_is_captured_and_restored_exactly(self):
+        text = INSTALL.read_text()
+        self.assertIn('if [[ -L "$UNIT" ]]; then', text)
+        self.assertIn("UNIT_WAS_SYMLINK=true", text)
+        self.assertIn('UNIT_SYMLINK_TARGET="$(readlink "$UNIT")"', text)
+        self.assertIn('ln -s "$UNIT_SYMLINK_TARGET" "$UNIT"', text)
+        self.assertIn("P14_EXISTING_UNIT_UNSUPPORTED_TYPE=true", text)
+
+    def test_ha_component_post_move_failure_restores_prior_component(self):
+        text = HA_INSTALL.read_text()
+        self.assertIn("MOVED_OLD=false", text)
+        self.assertIn("MOVED_NEW=false", text)
+        self.assertIn('[[ "$MOVED_NEW" == true ]] && rm -rf "$DEST"', text)
+        self.assertIn('if [[ "$MOVED_OLD" == true && -d "$BACKUP" ]]; then', text)
+        self.assertIn("MOVED_NEW=true", text)
+        self.assertLess(text.index("MOVED_NEW=true"), text.index('python3 - "$DEST/manifest.json"'))
 
     def test_live_promotion_requires_explicit_boundary_and_sends_no_post(self):
         text = PROMOTE.read_text()
