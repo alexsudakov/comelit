@@ -87,8 +87,8 @@ class ComelitBridgeClient:
         )
         url = urljoin(self._base_url, OPEN_DOOR_PATH.lstrip("/"))
 
-        # Deliberately one HTTP attempt.  No timeout/replay error is converted
-        # into a second POST.
+        # Deliberately one HTTP attempt. No timeout/replay/error response is
+        # converted into a second POST.
         try:
             async with self._session.post(
                 url,
@@ -108,14 +108,13 @@ class ComelitBridgeClient:
                     raise ComelitBridgeOutcomeUnknown("invalid bridge response; do not retry")
 
                 if response.status != 200:
-                    # Only syntactic/auth failures are known to precede runner
-                    # execution. Replay and 5xx remain ambiguous.
-                    if response.status in {400, 401, 404, 411, 413}:
-                        raise ComelitBridgeRejected(
-                            str(payload.get("error") or "bridge rejected request")
-                        )
+                    # The POST request has already left Home Assistant. Because
+                    # non-200 bridge responses are intentionally unsigned, HA
+                    # cannot prove that a received error was produced before
+                    # execution (or even by the authentic bridge). Any such
+                    # response is therefore an ambiguous one-shot outcome.
                     raise ComelitBridgeOutcomeUnknown(
-                        "bridge outcome unknown; do not retry"
+                        "unsigned bridge error after request send; outcome unknown; do not retry"
                     )
 
                 if not verify_signed_open_door_response(
