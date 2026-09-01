@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import sys
@@ -24,6 +25,7 @@ from comelit_safety_poc.p14_ha_bridge import (  # noqa: E402
     P14_MAX_BODY_BYTES,
     P14_OPEN_DOOR_PATH,
     P14_PROTOCOL_VERSION,
+    validate_operation_id,
     sign_request,
 )
 
@@ -52,11 +54,64 @@ def _bool_env(name: str, default: bool = False) -> bool:
     raise SystemExit(f"P14_CONFIG_ERROR={name}_INVALID_BOOL")
 
 
+def _reconcile_containment_before_serving(runner: P14CanonicalRunner) -> None:
+    """Recover a crash/disable orphan before opening the HTTP listener.
+
+    The inflight marker is durable and written before systemd-run.  A bridge
+    restart can therefore find a still-running transient actuation cgroup even
+    though the old HTTP process is already gone.  Startup must not serve any
+    request until that cgroup is inactive and its P13 journal residue is
+    terminalized.
+    """
+
+    marker = runner._inflight_path()
+    if not marker.exists():
+        return
+
+    process_lock = runner._acquire_process_lock()
+    if process_lock is None:
+        raise RuntimeError("p14_startup_process_lock_busy")
+    try:
+        runner.verify_runner_identity()
+        try:
+            runner._reconcile_inflight()
+            return
+        except RuntimeError as exc:
+            if str(exc) != "p14_prior_containment_unit_still_active":
+                raise
+
+        # Only the exact durable marker may select a transient unit.  No
+        # network input reaches this startup recovery path.
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or set(payload) != {
+            "operation_id",
+            "unit_name",
+        }:
+            raise RuntimeError("p14_containment_marker_invalid")
+        operation_id = validate_operation_id(str(payload["operation_id"]))
+        unit_name = str(payload["unit_name"])
+        if unit_name != runner._unit_name(operation_id):
+            raise RuntimeError("p14_containment_marker_invalid")
+
+        # Fail closed: this helper does not return while systemd cannot prove
+        # the transient cgroup inactive. It invokes no Door runner and creates
+        # no new operation.
+        runner._stop_contained_unit_until_inactive(unit_name)
+        runner._reconcile_inflight()
+    finally:
+        try:
+            fcntl.flock(process_lock.fileno(), fcntl.LOCK_UN)
+        finally:
+            process_lock.close()
+
+
 def build_application_from_env() -> P14BridgeApplication:
     secret = _required_env("COMELIT_P14_SHARED_SECRET").encode("utf-8")
     target = _required_env("COMELIT_P14_TARGET_FINGERPRINT")
     runner_sha = _required_env("COMELIT_P14_RUNNER_SHA256")
-    replay_store = P14ReplayStore(os.environ.get("COMELIT_P14_REPLAY_DB", DEFAULT_REPLAY_DB))
+    replay_store = P14ReplayStore(
+        os.environ.get("COMELIT_P14_REPLAY_DB", DEFAULT_REPLAY_DB)
+    )
     verifier = P14SignedRequestVerifier(
         shared_secret=secret,
         replay_store=replay_store,
@@ -74,6 +129,11 @@ def build_application_from_env() -> P14BridgeApplication:
             term_grace_seconds=int(os.environ.get("COMELIT_P14_TERM_GRACE", "5")),
         )
     )
+
+    # Reconcile even when the new configuration is disabled. This makes
+    # disable/restart a safe containment boundary: an old transient actuation
+    # cgroup cannot continue behind a healthy disabled HTTP bridge.
+    _reconcile_containment_before_serving(runner)
     if runner.config.live_enabled:
         runner.verify_runner_identity()
     return P14BridgeApplication(verifier, runner)
@@ -90,8 +150,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:
         return
 
-    def _json_response(self, status: int, payload: dict[str, object], *, response_auth: tuple[str, str] | None = None) -> None:
-        body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    def _json_response(
+        self,
+        status: int,
+        payload: dict[str, object],
+        *,
+        response_auth: tuple[str, str] | None = None,
+    ) -> None:
+        body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -99,7 +167,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         if response_auth is not None:
             timestamp, nonce = response_auth
-            signature = sign_request(self.app.verifier.shared_secret, method="RESPONSE", path=P14_OPEN_DOOR_PATH, timestamp=timestamp, nonce=nonce, body=body)
+            signature = sign_request(
+                self.app.verifier.shared_secret,
+                method="RESPONSE",
+                path=P14_OPEN_DOOR_PATH,
+                timestamp=timestamp,
+                nonce=nonce,
+                body=body,
+            )
             self.send_header("X-Comelit-Version", P14_PROTOCOL_VERSION)
             self.send_header("X-Comelit-Response-Signature", signature)
         self.end_headers()
@@ -107,63 +182,132 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         if self.path != P14_OPEN_DOOR_PATH:
-            self._json_response(404, {"ok": False, "error": "not_found"}); return
+            self._json_response(404, {"ok": False, "error": "not_found"})
+            return
         if self.headers.get("Transfer-Encoding"):
-            self._json_response(400, {"ok": False, "error": "transfer_encoding_forbidden"}); return
-        content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+            self._json_response(
+                400, {"ok": False, "error": "transfer_encoding_forbidden"}
+            )
+            return
+        content_type = (
+            (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        )
         if content_type != "application/json":
-            self._json_response(400, {"ok": False, "error": "application_json_required"}); return
+            self._json_response(
+                400, {"ok": False, "error": "application_json_required"}
+            )
+            return
         raw_length = self.headers.get("Content-Length") or ""
         if not raw_length.isdigit():
-            self._json_response(411, {"ok": False, "error": "content_length_required"}); return
+            self._json_response(
+                411, {"ok": False, "error": "content_length_required"}
+            )
+            return
         length = int(raw_length)
         if length < 2 or length > P14_MAX_BODY_BYTES:
-            self._json_response(413, {"ok": False, "error": "request_body_size_invalid"}); return
+            self._json_response(
+                413, {"ok": False, "error": "request_body_size_invalid"}
+            )
+            return
         body = self.rfile.read(length)
         if len(body) != length:
-            self._json_response(400, {"ok": False, "error": "request_body_truncated"}); return
-        headers = {key: self.headers.get(key, "") for key in ("X-Comelit-Version", "X-Comelit-Timestamp", "X-Comelit-Nonce", "X-Comelit-Signature")}
+            self._json_response(400, {"ok": False, "error": "request_body_truncated"})
+            return
+        headers = {
+            key: self.headers.get(key, "")
+            for key in (
+                "X-Comelit-Version",
+                "X-Comelit-Timestamp",
+                "X-Comelit-Nonce",
+                "X-Comelit-Signature",
+            )
+        }
         try:
             result = self.app.open_door(headers=headers, body=body)
         except P14ReplayError:
-            self._json_response(409, {"ok": False, "error": "replay_rejected_do_not_retry"}); return
+            self._json_response(
+                409, {"ok": False, "error": "replay_rejected_do_not_retry"}
+            )
+            return
         except P14AuthenticationError:
-            self._json_response(401, {"ok": False, "error": "authentication_failed"}); return
+            self._json_response(401, {"ok": False, "error": "authentication_failed"})
+            return
         except P14RequestError as exc:
-            self._json_response(400, {"ok": False, "error": str(exc)}); return
+            self._json_response(400, {"ok": False, "error": str(exc)})
+            return
         except Exception:
-            self._json_response(500, {"ok": False, "error": "internal_outcome_unknown_do_not_retry", "retry_allowed": False, "physical_effect_asserted": False}); return
-        self._json_response(200, result.as_dict(), response_auth=(headers["X-Comelit-Timestamp"], headers["X-Comelit-Nonce"]))
+            self._json_response(
+                500,
+                {
+                    "ok": False,
+                    "error": "internal_outcome_unknown_do_not_retry",
+                    "retry_allowed": False,
+                    "physical_effect_asserted": False,
+                },
+            )
+            return
+        self._json_response(
+            200,
+            result.as_dict(),
+            response_auth=(
+                headers["X-Comelit-Timestamp"],
+                headers["X-Comelit-Nonce"],
+            ),
+        )
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path != "/healthz":
-            self._json_response(404, {"ok": False, "error": "not_found"}); return
+            self._json_response(404, {"ok": False, "error": "not_found"})
+            return
         runner_identity = "disabled"
         if self.app.runner.config.live_enabled:
             try:
                 self.app.runner.verify_runner_identity()
             except RuntimeError:
-                self._json_response(503, {"ok": False, "protocol_version": 1, "live_enabled": True, "runner_identity": "fail"}); return
+                self._json_response(
+                    503,
+                    {
+                        "ok": False,
+                        "protocol_version": 1,
+                        "live_enabled": True,
+                        "runner_identity": "fail",
+                    },
+                )
+                return
             runner_identity = "pass"
-        self._json_response(200, {"ok": True, "protocol_version": 1, "live_enabled": bool(self.app.runner.config.live_enabled), "runner_identity": runner_identity})
+        self._json_response(
+            200,
+            {
+                "ok": True,
+                "protocol_version": 1,
+                "live_enabled": bool(self.app.runner.config.live_enabled),
+                "runner_identity": runner_identity,
+            },
+        )
 
 
 class P14HTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+
     def __init__(self, address, handler, app: P14BridgeApplication):
-        super().__init__(address, handler); self.app = app
+        super().__init__(address, handler)
+        self.app = app
 
 
 def main() -> int:
     if os.geteuid() != 0:
-        print("P14_BRIDGE_REQUIRES_ROOT=true", file=sys.stderr); return 1
+        print("P14_BRIDGE_REQUIRES_ROOT=true", file=sys.stderr)
+        return 1
     app = build_application_from_env()
     bind_host = os.environ.get("COMELIT_P14_BIND_HOST", "127.0.0.1").strip()
     bind_port = int(os.environ.get("COMELIT_P14_BIND_PORT", "18014"))
     print("P14_HA_BRIDGE_START=true", flush=True)
     print(f"P14_HA_BRIDGE_BIND={bind_host}:{bind_port}", flush=True)
-    print(f"P14_HA_BRIDGE_LIVE_ENABLED={str(app.runner.config.live_enabled).lower()}", flush=True)
+    print(
+        f"P14_HA_BRIDGE_LIVE_ENABLED={str(app.runner.config.live_enabled).lower()}",
+        flush=True,
+    )
     server = P14HTTPServer((bind_host, bind_port), BridgeHandler, app)
     try:
         server.serve_forever(poll_interval=0.5)
