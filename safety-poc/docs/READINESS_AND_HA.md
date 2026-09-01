@@ -1,59 +1,43 @@
 # Transport readiness and Home Assistant contract
 
-## Three readiness levels
+## Readiness lineage
 
-`readiness.py` separates three independent levels:
+The repository historically separated three proof levels: `REPOSITORY_READY`, `READONLY_TRANSPORT_READY`, and `LIVE_TEST_READY`. Those gates were intentionally independent. P12 read-only success did not authorize actuation, and P13 physical validation did not create a reusable operator surface.
 
-1. `REPOSITORY_READY` — offline structural/session/transaction proofs and core one-shot safety invariants.
-2. `READONLY_TRANSPORT_READY` — a real session has been proven only for connect/auth/configuration/target-discovery/close semantics.
-3. `LIVE_TEST_READY` — a later actuation transport, audit proof, and explicit operator approval are all present in addition to the first two levels.
+P13 is now completed and merged. Its production runtime is immutable/readiness-only; historical physical-validation gates remain consumed. P14 consumes the proven P13 one-shot boundary without reopening those validation gates.
 
-Missing markers remain `MISSING`; mismatched markers are `FAIL`. A higher readiness level cannot become true unless every lower level is already true.
+## P13 invariants inherited by P14
 
-## Repository gates
+P14 may not weaken: `SEND_ARMED` persisted before irreversible transport; one operation ID at most one transport invocation; attempt number 1 only; no automatic retry; post-SEND_ARMED uncertainty terminal `UNKNOWN_OUTCOME`; duplicate IDs never resend; protocol ACK does not prove physical relay movement; physical-effect assertion true is forbidden.
 
-Repository gates cover canonical/legacy source pins, body/control-plane/full-transaction reconciliation, the transport-boundary contract, fixed single attempt, no automatic retry, and no physical-effect assertion.
+## Production Home Assistant action
 
-## Read-only real-session gates
+Canonical action `comelit.open_door` targets `button.comelit_main_entrance_open_door` with mandatory `operation_id = p13-hermes-<uuid4>`. No target fingerprint, CT120 command, payload, runner path, approval token or retry setting is caller-controlled.
 
-P12 read-only readiness requires:
+The integration registers a response-required platform entity service (`SupportsResponse.ONLY`). `button.press` is explicitly disabled. A caller must request and inspect the structured result rather than treating generic service completion as physical Door-open proof.
 
-- `REAL_TRANSPORT_IMPLEMENTED=true` for a transport that is exposed only through the read-only session surface;
-- `REAL_TRANSPORT_READONLY_SESSION_PROOF=PASS`;
-- `READONLY_SCOPE_ENFORCED=PASS`;
-- `TARGET_BINDING_VERIFIED=PASS`;
-- `AUTH_SESSION_LIFETIME_VERIFIED=PASS`;
-- `TIMEOUT_MAPPING_VERIFIED=PASS`;
-- `CREDENTIAL_MATERIAL_EMITTED=false`;
-- `ACTUATOR_COMMAND_ATTEMPTED=false`.
+Trusted signed responses expose only execution/protocol state: `ACKED` (protocol acknowledgement only), `FAILED_SAFE` (durable evidence operation did not cross send boundary), or `UNKNOWN_OUTCOME` (physical result unknown and resend forbidden). Every trusted result carries `retry_allowed=false`, `physical_effect_asserted=false`, and `physical_door_state=UNKNOWN`.
 
-The fixed P12 application plan is:
+After the one-shot POST has left Home Assistant, an unsigned HTTP error, timeout, connection loss, unreadable body, or bad response signature is never treated as proof of `FAILED_SAFE`; it remains an untrusted do-not-retry outcome.
 
-`CONNECT -> AUTHENTICATE -> LOAD_CONFIGURATION -> DISCOVER_TARGETS -> CLOSE`.
+## CT120 P14 bridge
 
-A successful read-only session therefore proves connectivity/session behavior, not permission or capability to actuate a relay.
+Home Assistant reaches a private CT120 bridge over HMAC-SHA256 authenticated HTTP. The exact request body contains only operation ID. Timestamp and durable nonce replay protection are validated before execution. HTTP 200 result responses are HMAC-signed and version-bound.
 
-## Live-only gates
+The bridge launches only the root-owned hash-pinned P14 production runner and does not inherit the P14 shared secret into the actuation child. In-process and cross-process locks prevent concurrent launches.
 
-`LIVE_TEST_READY=true` additionally requires all of:
+Each accepted live operation is additionally contained in a uniquely named transient systemd service cgroup with `KillMode=control-group`. This containment is above the immutable P13 adapter, whose native wrapper intentionally starts a new POSIX session/process group; a new POSIX session does not escape the systemd cgroup. A durable inflight marker binds operation ID to transient unit before launch. Timeout does not return until the transient cgroup is proven inactive, and crash residue is reconciled before reuse: `PREPARED -> FAILED_SAFE`, `SEND_ARMED/SENT -> UNKNOWN_OUTCOME`.
 
-- `ACTUATION_TRANSPORT_IMPLEMENTED=true`;
-- `AUDIT_SINK_VERIFIED=PASS`;
-- `EXPLICIT_LIVE_TEST_APPROVAL=true`.
+The production runner binds to final immutable P13 release and exact holder/wrapper/payload/target identities. It verifies historical physical-validation gates remain consumed and retired. It creates the static P13 approval value locally only after those checks; that value is never part of the HA/HTTP contract.
 
-No repository-only commit or read-only probe may set the explicit approval marker on behalf of the operator.
+## Deployment boundary
 
-## Home Assistant service contract
+Installation is fail-closed: `COMELIT_P14_BIND_HOST=127.0.0.1` and `COMELIT_P14_LIVE_ENABLED=false`. Installing/upgrading P14 performs no Door POST and no runner invocation.
 
-The future integration surface remains `comelit.open_door` with a mandatory caller-supplied `operation_id` and explicit target.
+Failed installation restores P14 release selectors, runner, environment, unit file, and the exact prior bridge enabled/active state before returning failure.
 
-The contract requires:
+Reusable live service requires a separate explicit capability-enable action plus CT120 private IPv4 and Home Assistant client IPv4. The P14 nftables allowlist is activated and made a systemd predecessor of the bridge before private/live bind is enabled.
 
-- no automatic retry;
-- duplicate operation ids remain idempotent through the backend journal;
-- `FAILED_SAFE`, `ACKED`, and especially `UNKNOWN_OUTCOME` are surfaced to the caller;
-- `ACKED` remains protocol evidence only;
-- no result object may assert physical Door state;
-- HA must not convert a timeout or `UNKNOWN_OUTCOME` into an implicit retry.
+Safe disable always returns the bridge to loopback/disabled and removes the dedicated firewall surface without any Door request.
 
-Actual Home Assistant registration/config-entry code remains blocked until P12 read-only readiness and P13 live-actuation gates are independently completed. This avoids creating an operational access-control surface merely because read-only connectivity works.
+See `P14_HOME_ASSISTANT_ONE_SHOT_SERVICE.md` for exact production/deploy/rollback contract.

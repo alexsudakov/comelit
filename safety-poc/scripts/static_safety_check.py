@@ -9,10 +9,12 @@ SRC = ROOT / "src" / "comelit_safety_poc"
 python_files = sorted(SRC.glob("*.py"))
 
 banned_import_roots = {"socket", "http", "urllib", "requests", "aiohttp", "subprocess", "ssl"}
-# ct120_real_session.py is the single sanctioned module that launches the
-# pinned native wrapper (one process, no retry).  Every other module must stay
-# free of subprocess and network imports.
-allowed_subprocess_modules = {"ct120_real_session.py"}
+# ct120_real_session.py launches the pinned native wrapper. p14_ha_bridge.py is
+# the only additional sanctioned process boundary: it may invoke exactly the
+# canonical p13_one_shot_physical_runner.sh with locally pinned arguments after
+# HMAC/replay validation. Dedicated P14 tests pin that command shape and prove
+# that no network-supplied shell/target/retry parameters are exposed.
+allowed_subprocess_modules = {"ct120_real_session.py", "p14_ha_bridge.py"}
 banned_literals = [
     "http://", "https://", "/servicerest/", "64100", "api.comelitgroup.com",
     "IconaBridgeClient", ".open_door(", "OPEN_DOOR_INIT", "OPEN_DOOR_CONFIRM", "OPEN_DOOR =", "create_door_message",

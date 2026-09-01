@@ -1,0 +1,186 @@
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+RUNNER = ROOT / "scripts" / "p14_production_runner.sh"
+BRIDGE = ROOT / "src" / "comelit_safety_poc" / "p14_ha_bridge.py"
+SERVER = ROOT / "scripts" / "p14_ha_bridge_server.py"
+INSTALL = ROOT / "deploy" / "install_p14_production_release.sh"
+HA_INSTALL = ROOT / "deploy" / "install_p14_ha_component_local.sh"
+PROMOTE = ROOT / "deploy" / "promote_p14_live.sh"
+DISABLE = ROOT / "deploy" / "disable_p14_live.sh"
+FIREWALL = ROOT / "deploy" / "p14_firewall.sh"
+
+
+class P14ProductionRolloutTests(unittest.TestCase):
+    def test_runner_is_pinned_to_final_immutable_p13(self):
+        text = RUNNER.read_text()
+        for marker in (
+            "p13-415edb4525e4-50c0a916f73e-b6a10c68773a",
+            "0dace902d2cef1478cddea0f9d4cd36fcddb3837",
+            "415edb4525e46601cd0ef1249fc0965927b1ac29",
+            "P13_PRODUCTION_LIVE_COMMAND_EXPOSED=false",
+            "P13_AUTO_RETRY_ALLOWED=false",
+            "P14_P13_PHYSICAL_VALIDATION_GATES_RETIRED=PASS",
+            "P13_G1B_GATE_STATE=CONSUMED_BEFORE_LIVE_ENTRYPOINT",
+        ):
+            self.assertIn(marker, text)
+        self.assertIn("/usr/bin/env -i", text)
+        self.assertIn('P13_APPROVAL="$P13_APPROVAL_TOKEN"', text)
+        self.assertEqual(
+            text.count("/usr/bin/python3 -m comelit_safety_poc.p13_one_shot_physical"),
+            1,
+        )
+        self.assertNotIn("feat/p13-one-shot-actuation", text)
+
+    def test_runner_rechecks_p13_audit_durability_before_actuation(self):
+        text = RUNNER.read_text()
+        self.assertIn("p13_audit_durability_proof.py", text)
+        self.assertIn("P14_P13_AUDIT_DURABILITY=PASS", text)
+        self.assertIn('--audit "$AUDIT" --head "$P13_SOURCE_HEAD"', text)
+        self.assertLess(
+            text.index("P14_P13_AUDIT_DURABILITY=PASS"),
+            text.index("/usr/bin/python3 -m comelit_safety_poc.p13_one_shot_physical"),
+        )
+
+    def test_runner_public_cli_is_operation_id_only(self):
+        text = RUNNER.read_text()
+        self.assertIn('[[ $# -eq 2 && "$1" == \'--operation-id\' ]]', text)
+        for forbidden in (
+            "--target-fingerprint)",
+            "--runner)",
+            "--retry)",
+            "--approval)",
+        ):
+            self.assertNotIn(forbidden, text)
+
+    def test_bridge_contains_nested_p13_wrapper_in_transient_systemd_cgroup(self):
+        text = BRIDGE.read_text()
+        for marker in (
+            '"/usr/bin/systemd-run"',
+            '"--wait"',
+            '"--collect"',
+            '"--service-type=exec"',
+            '"--property=KillMode=control-group"',
+            "_persist_inflight",
+            "_reconcile_inflight",
+            "_stop_contained_unit_until_inactive",
+            "_normalize_stopped_operation",
+        ):
+            self.assertIn(marker, text)
+        self.assertLess(
+            text.index("self._persist_inflight(operation_id, unit_name)"),
+            text.index("subprocess.Popen("),
+        )
+        self.assertIn("State.UNKNOWN_OUTCOME", text)
+        self.assertIn("State.FAILED_SAFE", text)
+
+    def test_bridge_bounds_unauthenticated_socket_reads(self):
+        text = SERVER.read_text()
+        self.assertIn("P14_SOCKET_TIMEOUT_SECONDS", text)
+        self.assertIn("self.connection.settimeout(P14_SOCKET_TIMEOUT_SECONDS)", text)
+        self.assertIn("except OSError:", text)
+        socket_timeout = text.index("self.connection.settimeout(P14_SOCKET_TIMEOUT_SECONDS)")
+        body_read = text.index("body = self.rfile.read(length)")
+        authenticate = text.index("result = self.app.open_door(headers=headers, body=body)")
+        self.assertLess(socket_timeout, body_read)
+        self.assertLess(body_read, authenticate)
+
+    def test_installer_is_immutable_and_non_actuating(self):
+        text = INSTALL.read_text()
+        self.assertIn("P14_PRODUCTION_INSTALL_NON_ACTUATING=true", text)
+        self.assertIn("RELEASE_CONTENT.sha256", text)
+        self.assertIn("P14_HA_RESPONSE_REQUIRED=true", text)
+        self.assertIn("COMELIT_P14_LIVE_ENABLED=false", text)
+        self.assertIn("COMELIT_P14_BIND_HOST=127.0.0.1", text)
+        self.assertIn("P14_OPEN_DOOR_REQUEST_SENT=false", text)
+        self.assertNotIn("I_APPROVE_P14_ENABLE_REUSABLE_DOOR_SERVICE", text)
+
+    def test_failed_install_restores_exact_prior_bridge_service_state(self):
+        text = INSTALL.read_text()
+        self.assertIn('systemctl is-enabled "$UNIT_NAME"', text)
+        self.assertIn('systemctl is-active "$UNIT_NAME"', text)
+        self.assertIn("OLD_SERVICE_ENABLED=true", text)
+        self.assertIn("OLD_SERVICE_ACTIVE=true", text)
+        self.assertIn("restore_prior_service_state", text)
+        self.assertIn('systemctl stop "$UNIT_NAME"', text)
+        self.assertIn('systemctl disable "$UNIT_NAME"', text)
+        self.assertIn('systemctl enable "$UNIT_NAME"', text)
+        self.assertIn('systemctl start "$UNIT_NAME"', text)
+        self.assertIn("P14_PRODUCTION_INSTALL=FAIL", text)
+        env_restore = text.index('if [[ "$ENV_CHANGED" == true ]]')
+        service_restore_call = text.index("        restore_prior_service_state")
+        self.assertLess(env_restore, service_restore_call)
+
+    def test_pre_mutation_install_failure_cannot_touch_existing_service(self):
+        text = INSTALL.read_text()
+        restore_start = text.index("restore_prior_service_state() {")
+        guard = '[[ "$SERVICE_STATE_CAPTURED" == true ]] || return 0'
+        guard_pos = text.index(guard, restore_start)
+        first_stop = text.index('systemctl stop "$UNIT_NAME"', restore_start)
+        self.assertLess(guard_pos, first_stop)
+
+        capture_pos = text.index("SERVICE_STATE_CAPTURED=true")
+        self.assertLess(text.index("STEP=SOURCE_IDENTITY"), capture_pos)
+        self.assertLess(text.index("STEP=P13_IMMUTABLE_BOUNDARY"), capture_pos)
+        self.assertLess(text.index("STEP=EXISTING_RUNTIME_PRECHECK"), capture_pos)
+        self.assertLess(text.index("STEP=STAGE_RELEASE"), capture_pos)
+
+    def test_existing_live_state_cardinality_is_checked_before_release_mutation(self):
+        text = INSTALL.read_text()
+        preflight = text.index("STEP=EXISTING_RUNTIME_PRECHECK")
+        stage = text.index("STEP=STAGE_RELEASE")
+        promote = text.index("STEP=PROMOTE_RELEASE")
+        self.assertLess(preflight, stage)
+        self.assertLess(preflight, promote)
+        self.assertIn("LIVE_ASSIGNMENTS=", text)
+        self.assertIn('[[ "$LIVE_ASSIGNMENTS" == 1 ]]', text)
+        self.assertIn("P14_EXISTING_RUNTIME_MUST_BE_DISABLED_BEFORE_INSTALL=true", text)
+        self.assertIn("SECRET_ASSIGNMENTS=", text)
+        self.assertIn('[[ "$SECRET_ASSIGNMENTS" == 1 ]]', text)
+
+    def test_masked_or_symlinked_unit_is_captured_and_restored_exactly(self):
+        text = INSTALL.read_text()
+        self.assertIn('if [[ -L "$UNIT" ]]; then', text)
+        self.assertIn("UNIT_WAS_SYMLINK=true", text)
+        self.assertIn('UNIT_SYMLINK_TARGET="$(readlink "$UNIT")"', text)
+        self.assertIn('ln -s "$UNIT_SYMLINK_TARGET" "$UNIT"', text)
+        self.assertIn("P14_EXISTING_UNIT_UNSUPPORTED_TYPE=true", text)
+
+    def test_ha_component_post_move_failure_restores_prior_component(self):
+        text = HA_INSTALL.read_text()
+        self.assertIn("MOVED_OLD=false", text)
+        self.assertIn("MOVED_NEW=false", text)
+        self.assertIn('[[ "$MOVED_NEW" == true ]] && rm -rf "$DEST"', text)
+        self.assertIn('if [[ "$MOVED_OLD" == true && -d "$BACKUP" ]]; then', text)
+        self.assertIn("MOVED_NEW=true", text)
+        self.assertLess(text.index("MOVED_NEW=true"), text.index('python3 - "$DEST/manifest.json"'))
+
+    def test_live_promotion_requires_explicit_boundary_and_sends_no_post(self):
+        text = PROMOTE.read_text()
+        self.assertIn("I_APPROVE_P14_ENABLE_REUSABLE_DOOR_SERVICE", text)
+        self.assertIn("P14_LIVE_ENABLE_APPROVAL", text)
+        self.assertIn('COMELIT_P14_LIVE_ENABLED":"true"', text)
+        self.assertIn("P14_OPEN_DOOR_REQUEST_SENT=false", text)
+        self.assertIn("P14_LIVE_PROMOTION_DISABLED_HEALTH=PASS", text)
+        self.assertNotIn("/v1/open-door", text)
+        self.assertNotIn("P13_APPROVAL=", text)
+
+    def test_firewall_is_persistent_dependency_before_live_bridge(self):
+        promote = PROMOTE.read_text()
+        firewall = FIREWALL.read_text()
+        self.assertIn("Before=comelit-p14-ha-bridge.service", promote)
+        self.assertIn("Requires=comelit-p14-firewall.service", promote)
+        self.assertIn("ip saddr != $P14_HA_CLIENT_IP drop", firewall)
+        self.assertIn("tcp dport $P14_BRIDGE_PORT", firewall)
+
+    def test_disable_is_always_non_actuating_and_removes_live_surface(self):
+        text = DISABLE.read_text()
+        self.assertIn('COMELIT_P14_LIVE_ENABLED":"false"', text)
+        self.assertIn('COMELIT_P14_BIND_HOST":"127.0.0.1"', text)
+        self.assertIn("P14_OPEN_DOOR_REQUEST_SENT=false", text)
+        self.assertNotIn("I_APPROVE_P14_ENABLE_REUSABLE_DOOR_SERVICE", text)
+
+
+if __name__ == "__main__":
+    unittest.main()
