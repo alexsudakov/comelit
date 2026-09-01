@@ -26,7 +26,8 @@ HOLDER_SHA=50c0a916f73ec810f131be1f48f47761a2cc69b9d06107d121519f97c538b450
 WRAPPER_SHA=bf36b381f4921871f0b4df0820548b8943b935f1dfcd1521ceb79001dab71aa9
 PAYLOAD_SHA=0d0159f9cc562c1c67bc362b192a30d3fabd634b2b92c3a96d8f318ecd842832
 HEALTH_URL=http://127.0.0.1:18014/healthz
-HEALTH_READY_ATTEMPTS=40
+HEALTH_READY_ATTEMPTS=20
+HEALTH_PROBE_TIMEOUT_SECONDS=0.25
 HEALTH_READY_INTERVAL_SECONDS=0.25
 
 STEP=START
@@ -71,7 +72,7 @@ wait_for_bridge_health() {
             return 1
         fi
 
-        if HEALTH="$(curl --fail --silent --show-error --max-time 1 "$HEALTH_URL" 2>/dev/null)"; then
+        if HEALTH="$(curl --fail --silent --show-error --max-time "$HEALTH_PROBE_TIMEOUT_SECONDS" "$HEALTH_URL" 2>/dev/null)"; then
             if python3 - "$HEALTH" <<'PY'
 import json,sys
 obj=json.loads(sys.argv[1]); assert obj.get("ok") is True; assert obj.get("protocol_version") == 1; assert obj.get("live_enabled") is False; assert obj.get("runner_identity") == "disabled"
