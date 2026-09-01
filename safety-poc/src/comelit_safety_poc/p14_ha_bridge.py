@@ -355,6 +355,24 @@ class P14CanonicalRunner:
             runner_invoked=False,
         )
 
+    def _normalize_stopped_operation(self, operation_id: str) -> None:
+        journal = self._journal()
+        op = journal.maybe_get(operation_id)
+        if op is None:
+            return
+        if op.state == State.PREPARED:
+            journal.transition(
+                operation_id,
+                State.FAILED_SAFE,
+                "P14 containment recovery: child stopped before SEND_ARMED; retry forbidden",
+            )
+        elif op.state in {State.SEND_ARMED, State.SENT}:
+            journal.transition(
+                operation_id,
+                State.UNKNOWN_OUTCOME,
+                "P14 containment recovery after uncertainty boundary; retry forbidden",
+            )
+
     def _acquire_process_lock(self):
         lock_path = Path(self.config.lock_path)
         lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -455,8 +473,6 @@ class P14CanonicalRunner:
         except (OSError, subprocess.TimeoutExpired):
             # Unknown containment state is treated as live, never as safe.
             return True
-        if completed.returncode != 0:
-            return True
         values: dict[str, str] = {}
         for line in completed.stdout.splitlines():
             if "=" in line:
@@ -465,10 +481,11 @@ class P14CanonicalRunner:
         if values.get("LoadState") == "not-found":
             return False
         active = values.get("ActiveState")
-        if active in {"inactive", "failed"}:
+        if completed.returncode == 0 and active in {"inactive", "failed"}:
             return False
         if active in {"active", "activating", "deactivating", "reloading"}:
             return True
+        # A missing/unknown property set is not proof that the cgroup is empty.
         return True
 
     def _reconcile_inflight(self) -> None:
@@ -490,6 +507,10 @@ class P14CanonicalRunner:
             raise RuntimeError("p14_containment_marker_invalid") from exc
         if self._unit_has_live_processes(unit_name):
             raise RuntimeError("p14_prior_containment_unit_still_active")
+        # A previous bridge may have died after the child ended but before P13
+        # residue was normalized. Terminalize any durable operation before the
+        # marker is removed and before another one-shot can be launched.
+        self._normalize_stopped_operation(operation_id)
         self._clear_inflight()
 
     def _contained_command(self, operation_id: str, unit_name: str) -> list[str]:
@@ -547,11 +568,10 @@ class P14CanonicalRunner:
     def invoke(self, operation_id: str) -> P14BridgeResult:
         operation_id = validate_operation_id(operation_id)
 
-        existing = self._existing_without_resend(operation_id)
-        if existing is not None:
-            return existing
-
         if not self.config.live_enabled:
+            existing = self._existing_without_resend(operation_id)
+            if existing is not None:
+                return existing
             # Persist the no-send result so this operation identity can never be
             # reused later after live mode is enabled.
             return self._record_failed_safe(
@@ -577,12 +597,6 @@ class P14CanonicalRunner:
                     operation_id, "bridge_process_busy_no_send_attempted"
                 )
 
-            # Another request/process may have completed this operation while
-            # this request was waiting on local scheduling.
-            existing = self._existing_without_resend(operation_id)
-            if existing is not None:
-                return existing
-
             try:
                 self.verify_runner_identity()
                 self._reconcile_inflight()
@@ -590,6 +604,12 @@ class P14CanonicalRunner:
                 return self._record_failed_safe(
                     operation_id, f"runner_identity_or_containment_invalid_no_send:{exc}"
                 )
+
+            # Another request/process may already have persisted this identity.
+            # This check is deliberately after crash-containment reconciliation.
+            existing = self._existing_without_resend(operation_id)
+            if existing is not None:
+                return existing
 
             unit_name = self._unit_name(operation_id)
             try:
@@ -639,6 +659,7 @@ class P14CanonicalRunner:
             # marker/locks; never assume process exit implies descendant exit.
             if return_code != 0:
                 self._stop_contained_unit_until_inactive(unit_name)
+            self._normalize_stopped_operation(operation_id)
             self._clear_inflight()
         finally:
             if process_lock is not None:
@@ -664,21 +685,6 @@ class P14CanonicalRunner:
                 state=persisted.state,
                 reason=persisted.reason,
                 runner_invoked=runner_invoked,
-            )
-
-        # The transient systemd cgroup is inactive before this point. Normalize
-        # crash residue without ever launching another process/send.
-        if op.state == State.PREPARED:
-            op = journal.transition(
-                operation_id,
-                State.FAILED_SAFE,
-                "P14 bridge recovery: runner ended before SEND_ARMED; retry forbidden",
-            )
-        elif op.state in {State.SEND_ARMED, State.SENT}:
-            op = journal.transition(
-                operation_id,
-                State.UNKNOWN_OUTCOME,
-                "P14 bridge recovery after uncertainty boundary; retry forbidden",
             )
 
         result = self._map_existing(operation_id, op.state, op.detail)
