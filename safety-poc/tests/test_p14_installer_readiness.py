@@ -8,13 +8,17 @@ INSTALL = ROOT / "deploy" / "install_p14_production_release.sh"
 class P14InstallerReadinessTests(unittest.TestCase):
     def test_installer_waits_for_application_readiness(self):
         text = INSTALL.read_text()
-        self.assertIn("HEALTH_READY_ATTEMPTS=40", text)
+        self.assertIn("HEALTH_READY_ATTEMPTS=20", text)
+        self.assertIn("HEALTH_PROBE_TIMEOUT_SECONDS=0.25", text)
         self.assertIn("HEALTH_READY_INTERVAL_SECONDS=0.25", text)
         self.assertIn("wait_for_bridge_health()", text)
         self.assertIn('systemctl is-active --quiet "$UNIT_NAME"', text)
-        self.assertIn('curl --fail --silent --show-error --max-time 1 "$HEALTH_URL"', text)
+        self.assertIn(
+            'curl --fail --silent --show-error --max-time "$HEALTH_PROBE_TIMEOUT_SECONDS" "$HEALTH_URL"',
+            text,
+        )
         self.assertIn('sleep "$HEALTH_READY_INTERVAL_SECONDS"', text)
-        self.assertIn('P14_BRIDGE_READINESS_TIMEOUT_ATTEMPTS=', text)
+        self.assertIn("P14_BRIDGE_READINESS_TIMEOUT_ATTEMPTS=", text)
 
         start = text.index("wait_for_bridge_health()")
         verify = text.index("STEP=VERIFY")
@@ -28,14 +32,19 @@ class P14InstallerReadinessTests(unittest.TestCase):
         end = text.index("restore_prior_service_state()", start)
         readiness = text[start:end]
         active = readiness.index('systemctl is-active --quiet "$UNIT_NAME"')
-        curl = readiness.index('curl --fail --silent --show-error --max-time 1 "$HEALTH_URL"')
+        curl = readiness.index(
+            'curl --fail --silent --show-error --max-time "$HEALTH_PROBE_TIMEOUT_SECONDS" "$HEALTH_URL"'
+        )
         self.assertLess(active, curl)
 
     def test_startup_failure_diagnostics_are_captured_before_rollback(self):
         text = INSTALL.read_text()
         self.assertIn("startup_diagnostics()", text)
         self.assertIn('systemctl status "$UNIT_NAME" --no-pager -l', text)
-        self.assertIn('journalctl -u "$UNIT_NAME" --no-pager -n 100 -o short-iso-precise', text)
+        self.assertIn(
+            'journalctl -u "$UNIT_NAME" --no-pager -n 100 -o short-iso-precise',
+            text,
+        )
         readiness = text.index("wait_for_bridge_health()")
         cleanup = text.index("cleanup()")
         self.assertLess(readiness, cleanup)
