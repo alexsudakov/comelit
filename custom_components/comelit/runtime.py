@@ -6,13 +6,13 @@ import logging
 import os
 from pathlib import Path
 import re
-import shlex
 from uuid import uuid4
 
 from aiohttp import ClientSession
 from homeassistant.core import HomeAssistant
 
 from .cloud import ComelitCloudError, async_negotiate_p2p
+from .const import EVENT_RING
 from .ring_event import RingObservationError, parse_v4_safe_ring
 from .sdp import ComelitSdpError, transform_offer
 
@@ -21,18 +21,12 @@ _LOGGER = logging.getLogger(__name__)
 _NATIVE_ROOT = Path("/config/comelit-native-stage")
 _NATIVE_BINARY = _NATIVE_ROOT / "comelit-v4"
 _NATIVE_LIB = _NATIVE_ROOT / "lib"
-_SOURCE_SECRETS = Path("/config/comelit/secrets.env")
 _HELPER_SECRETS = Path("/root/.config/comelit/secrets.env")
 _RUN_DIR = Path("/run/comelit-p2p")
 _OFFER_FILE = _RUN_DIR / "offer.sdp"
 _REMOTE_FILE = _RUN_DIR / "remote.sdp"
 _STOP_FILE = _RUN_DIR / "stop"
 
-_REQUIRED_CREDENTIALS = (
-    "COMELIT_DUUID",
-    "COMELIT_VIP_TOKEN",
-    "COMELIT_OAUTH_ACCESS_TOKEN",
-)
 _RING_KEYS = {
     "V4_RING_OBSERVED",
     "V4_RING_DIRECTION",
@@ -47,35 +41,7 @@ class ComelitRingRuntimeError(RuntimeError):
     """Direct incoming-ring runtime cannot complete safely."""
 
 
-def _read_env_file(path: Path) -> dict[str, str]:
-    result: dict[str, str] = {}
-    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip()
-        try:
-            parts = shlex.split(value, posix=True)
-        except ValueError:
-            parts = [value]
-        if len(parts) == 1:
-            value = parts[0]
-        result[key] = value
-    return result
-
-
-def _prepare_credentials() -> dict[str, str]:
-    if not _SOURCE_SECRETS.is_file():
-        raise ComelitRingRuntimeError("credential_file_missing")
-
-    env = _read_env_file(_SOURCE_SECRETS)
-    missing = [key for key in _REQUIRED_CREDENTIALS if not env.get(key)]
-    if missing:
-        raise ComelitRingRuntimeError("credentials_incomplete")
-
-    vip_token = env["COMELIT_VIP_TOKEN"]
+def _prepare_helper_secret(vip_token: str) -> None:
     if not _HEX32_RE.fullmatch(vip_token):
         raise ComelitRingRuntimeError("vip_token_shape_invalid")
 
@@ -95,7 +61,12 @@ def _prepare_credentials() -> dict[str, str]:
         except FileNotFoundError:
             pass
 
-    return env
+
+def _remove_helper_secret() -> None:
+    try:
+        _HELPER_SECRETS.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def _read_offer() -> bytes:
@@ -136,14 +107,24 @@ class ComelitRingRuntime:
     """One bounded direct-HA incoming-ring listener cycle.
 
     The frozen V4.2 helper remains bounded to 180 seconds and exits after a
-    ring.  This runtime deliberately does not reconnect yet: persistent
-    registration is deferred until simultaneous-client compatibility is
-    tested with the official app and physical monitor.
+    ring. Automatic reconnect is deliberately deferred until simultaneous
+    client compatibility has been checked with the official app and monitor.
     """
 
-    def __init__(self, hass: HomeAssistant, session: ClientSession) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        session: ClientSession,
+        *,
+        device_uuid: str,
+        vip_token: str,
+        oauth_access_token: str,
+    ) -> None:
         self._hass = hass
         self._session = session
+        self._device_uuid = device_uuid
+        self._vip_token = vip_token
+        self._oauth_access_token = oauth_access_token
         self._task: asyncio.Task[None] | None = None
         self._process: asyncio.subprocess.Process | None = None
         self._offer_ready = asyncio.Event()
@@ -193,6 +174,7 @@ class ComelitRingRuntime:
                 pass
         self._task = None
         self._process = None
+        await self._hass.async_add_executor_job(_remove_helper_secret)
 
     async def _async_run_once(self) -> None:
         try:
@@ -205,10 +187,13 @@ class ComelitRingRuntime:
             _LOGGER.exception("Unexpected Comelit ring listener failure")
         finally:
             self._process = None
+            await self._hass.async_add_executor_job(_remove_helper_secret)
 
     async def _async_run_cycle(self) -> None:
         await self._hass.async_add_executor_job(_native_gate)
-        credentials = await self._hass.async_add_executor_job(_prepare_credentials)
+        await self._hass.async_add_executor_job(
+            _prepare_helper_secret, self._vip_token
+        )
 
         child_env = os.environ.copy()
         child_env["LD_LIBRARY_PATH"] = str(_NATIVE_LIB)
@@ -247,9 +232,9 @@ class ComelitRingRuntime:
             comelit_offer = transform_offer(raw_offer).decode("ascii")
             remote = await async_negotiate_p2p(
                 self._session,
-                device_uuid=credentials["COMELIT_DUUID"],
-                vip_token=credentials["COMELIT_VIP_TOKEN"],
-                oauth_access_token=credentials["COMELIT_OAUTH_ACCESS_TOKEN"],
+                device_uuid=self._device_uuid,
+                vip_token=self._vip_token,
+                oauth_access_token=self._oauth_access_token,
                 offer_sdp=comelit_offer,
             )
             await self._hass.async_add_executor_job(_write_remote, remote)
@@ -307,9 +292,6 @@ class ComelitRingRuntime:
             try:
                 ring = parse_v4_safe_ring(self._ring_lines)
             except RingObservationError as exc:
-                # Marker sets are naturally incomplete while the helper prints
-                # the five safe lines one by one.  Only evaluate once all keys
-                # are present.
                 present = {item.split("=", 1)[0] for item in self._ring_lines}
                 if _RING_KEYS.issubset(present):
                     raise ComelitRingRuntimeError(f"ring_contract:{exc}") from exc
@@ -326,7 +308,7 @@ class ComelitRingRuntime:
             event = ring.as_dict()
             event["event_id"] = str(uuid4())
             event["timestamp"] = datetime.now(UTC).isoformat()
-            self._hass.bus.async_fire("comelit_ring", event)
+            self._hass.bus.async_fire(EVENT_RING, event)
             _LOGGER.warning(
                 "Comelit ring event emitted: door=%s source=%s",
                 ring.door,
