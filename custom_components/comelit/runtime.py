@@ -131,24 +131,75 @@ class ComelitRingRuntime:
         self._listener_ready = asyncio.Event()
         self._ring_lines: list[str] = []
         self._ring_emitted = False
+        self._last_ring_event: dict[str, str] | None = None
+        self._last_error: str | None = None
         self._stopping = False
+
+    @property
+    def running(self) -> bool:
+        return self._task is not None and not self._task.done()
 
     @property
     def listener_ready(self) -> bool:
         return self._listener_ready.is_set()
 
+    @property
+    def ring_observed(self) -> bool:
+        return self._last_ring_event is not None
+
+    def status(self) -> dict[str, object]:
+        event = self._last_ring_event or {}
+        return {
+            "running": self.running,
+            "listener_ready": self.listener_ready,
+            "ring_observed": self.ring_observed,
+            "ring_door": event.get("door"),
+            "ring_source": event.get("source"),
+            "ring_kind": event.get("kind"),
+            "ring_direction": event.get("direction"),
+            "event_id": event.get("event_id"),
+            "timestamp": event.get("timestamp"),
+            "last_error": self._last_error,
+        }
+
     async def async_start(self) -> None:
-        if self._task is not None and not self._task.done():
+        if self.running:
             return
         self._stopping = False
         self._offer_ready.clear()
         self._listener_ready.clear()
         self._ring_lines.clear()
         self._ring_emitted = False
+        self._last_ring_event = None
+        self._last_error = None
         self._task = self._hass.async_create_task(
             self._async_run_once(),
             "comelit direct ring listener",
         )
+
+    async def async_wait_ready(self, timeout: float = 30.0) -> bool:
+        if self.listener_ready:
+            return True
+
+        task = self._task
+        if task is None or task.done():
+            return False
+
+        ready_wait = asyncio.create_task(self._listener_ready.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {ready_wait, task},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            return ready_wait in done and ready_wait.result()
+        finally:
+            if not ready_wait.done():
+                ready_wait.cancel()
+                try:
+                    await ready_wait
+                except asyncio.CancelledError:
+                    pass
 
     async def async_stop(self) -> None:
         self._stopping = True
@@ -182,8 +233,10 @@ class ComelitRingRuntime:
         except asyncio.CancelledError:
             raise
         except (ComelitRingRuntimeError, ComelitCloudError, ComelitSdpError) as exc:
+            self._last_error = str(exc)
             _LOGGER.error("Comelit ring listener stopped: %s", exc)
-        except Exception:
+        except Exception as exc:
+            self._last_error = f"unexpected:{type(exc).__name__}"
             _LOGGER.exception("Unexpected Comelit ring listener failure")
         finally:
             self._process = None
@@ -308,6 +361,7 @@ class ComelitRingRuntime:
             event = ring.as_dict()
             event["event_id"] = str(uuid4())
             event["timestamp"] = datetime.now(UTC).isoformat()
+            self._last_ring_event = dict(event)
             self._hass.bus.async_fire(EVENT_RING, event)
             _LOGGER.warning(
                 "Comelit ring event emitted: door=%s source=%s",
