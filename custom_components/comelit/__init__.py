@@ -23,6 +23,7 @@ from .const import (
 )
 from .runtime import ComelitRingRuntime
 from .signing import validate_operation_id
+from .test_control import async_register_test_control, async_unregister_test_control
 
 _RING_RUNTIMES = "ring_runtimes"
 
@@ -78,7 +79,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         runtimes = domain_data.setdefault(_RING_RUNTIMES, {})
         runtimes[entry.entry_id] = runtime
-        await runtime.async_start()
+
+        # Validation mode: do not auto-start the Comelit registration on HA
+        # startup.  The local-only CT120 test-control webhook starts exactly
+        # one bounded 180s cycle when requested through Hermes.
+        async_register_test_control(hass, runtime)
 
     if has_bridge:
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -91,6 +96,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     runtimes = domain_data.get(_RING_RUNTIMES, {})
     runtime = runtimes.pop(entry.entry_id, None)
     if runtime is not None:
+        async_unregister_test_control(hass)
         await runtime.async_stop()
 
     has_bridge = all(
