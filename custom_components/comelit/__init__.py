@@ -13,7 +13,10 @@ from .client import ComelitBridgeClient
 from .const import (
     ATTR_OPERATION_ID,
     CONF_BRIDGE_URL,
+    CONF_DEVICE_UUID,
+    CONF_OAUTH_ACCESS_TOKEN,
     CONF_SHARED_SECRET,
+    CONF_VIP_TOKEN,
     DOMAIN,
     PLATFORMS,
     SERVICE_OPEN_DOOR,
@@ -32,7 +35,7 @@ def _operation_id(value: object) -> str:
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Register the protected response-required entity action."""
+    """Register the protected transitional Door entity action."""
     service.async_register_platform_entity_service(
         hass,
         DOMAIN,
@@ -46,23 +49,40 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up the transitional Door bridge plus direct incoming-ring runtime."""
+    """Set up direct incoming-ring runtime and optional transitional Door bridge."""
     session = async_get_clientsession(hass)
-    client = ComelitBridgeClient(
-        session,
-        bridge_url=str(entry.data[CONF_BRIDGE_URL]),
-        shared_secret=str(entry.data[CONF_SHARED_SECRET]),
-    )
-
     domain_data = hass.data.setdefault(DOMAIN, {})
-    domain_data[entry.entry_id] = client
 
-    runtime = ComelitRingRuntime(hass, session)
-    runtimes = domain_data.setdefault(_RING_RUNTIMES, {})
-    runtimes[entry.entry_id] = runtime
-    await runtime.async_start()
+    has_bridge = all(
+        entry.data.get(key) for key in (CONF_BRIDGE_URL, CONF_SHARED_SECRET)
+    )
+    if has_bridge:
+        client = ComelitBridgeClient(
+            session,
+            bridge_url=str(entry.data[CONF_BRIDGE_URL]),
+            shared_secret=str(entry.data[CONF_SHARED_SECRET]),
+        )
+        domain_data[entry.entry_id] = client
 
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    has_ring_credentials = all(
+        entry.data.get(key)
+        for key in (CONF_DEVICE_UUID, CONF_VIP_TOKEN, CONF_OAUTH_ACCESS_TOKEN)
+    )
+    if has_ring_credentials:
+        runtime = ComelitRingRuntime(
+            hass,
+            session,
+            device_uuid=str(entry.data[CONF_DEVICE_UUID]),
+            vip_token=str(entry.data[CONF_VIP_TOKEN]),
+            oauth_access_token=str(entry.data[CONF_OAUTH_ACCESS_TOKEN]),
+        )
+        runtimes = domain_data.setdefault(_RING_RUNTIMES, {})
+        runtimes[entry.entry_id] = runtime
+        await runtime.async_start()
+
+    if has_bridge:
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
     return True
 
 
@@ -73,7 +93,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if runtime is not None:
         await runtime.async_stop()
 
-    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    has_bridge = all(
+        entry.data.get(key) for key in (CONF_BRIDGE_URL, CONF_SHARED_SECRET)
+    )
+    unloaded = True
+    if has_bridge:
+        unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
     if unloaded:
         domain_data.pop(entry.entry_id, None)
         if not runtimes:
