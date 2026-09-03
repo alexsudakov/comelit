@@ -1,0 +1,210 @@
+#!/bin/bash
+
+set -uo pipefail
+
+BASE="/root/comelit-vip-poc"
+RUN="/run/comelit-p2p"
+
+rm -rf "$RUN"
+
+install \
+  -d \
+  -m 700 \
+  "$RUN"
+
+"/root/comelit-v4-long-window/comelit_ice_offer_holder.v4-long-window" \
+  >"$RUN/ice-holder.log" \
+  2>&1 &
+
+HOLDER_PID=$!
+
+cleanup()
+{
+    touch "$RUN/stop" 2>/dev/null || true
+
+    if kill -0 "$HOLDER_PID" 2>/dev/null; then
+        wait "$HOLDER_PID" 2>/dev/null || true
+    fi
+}
+
+trap cleanup EXIT
+
+READY=false
+
+for _ in $(seq 1 150); do
+    if [ -s "$RUN/offer.sdp" ]; then
+        READY=true
+        break
+    fi
+
+    if ! kill -0 "$HOLDER_PID" 2>/dev/null; then
+        break
+    fi
+
+    sleep 0.1
+done
+
+echo "=== ICE OFFER HOLDER ==="
+
+cat "$RUN/ice-holder.log"
+
+if [ "$READY" != true ]; then
+    echo "ICE_OFFER_READY=false"
+    exit 20
+fi
+
+echo "ICE_OFFER_READY=true"
+
+echo
+echo "=== COMELIT SDP TRANSFORM ==="
+
+python3 \
+  "$BASE/scripts/comelit_sdp.py" \
+  --input "$RUN/offer.sdp" \
+  --output "$RUN/offer-comelit.sdp"
+
+TRANSFORM_RC=$?
+
+echo "COMELIT_SDP_TRANSFORM_RC=$TRANSFORM_RC"
+
+if [ "$TRANSFORM_RC" -ne 0 ]; then
+    echo "P2P_CLOUD_SKIPPED=true"
+    exit 21
+fi
+
+echo
+echo "=== HOLDER LIVE PRE-CLOUD ==="
+
+if kill -0 "$HOLDER_PID" 2>/dev/null; then
+    echo "HOLDER_LIVE=true"
+else
+    echo "HOLDER_LIVE=false"
+    exit 22
+fi
+
+echo
+echo "=== CLOUD P2P / COMELIT SDP ==="
+
+python3 \
+  "$BASE/scripts/comelit_cloud_probe.py" \
+  "$RUN/offer-comelit.sdp" \
+  "$RUN/remote.sdp"
+
+CLOUD_RC=$?
+
+echo
+echo "P2P_CLOUD_PROBE_RC=$CLOUD_RC"
+
+if [ "$CLOUD_RC" -ne 0 ]; then
+    echo "ICE_CONNECTIVITY_SKIPPED=true"
+
+    touch "$RUN/stop"
+    wait "$HOLDER_PID" 2>/dev/null || true
+    trap - EXIT
+
+    exit "$CLOUD_RC"
+fi
+
+if [ ! -s "$RUN/remote.sdp" ]; then
+    echo "REMOTE_SDP_PRESENT=false"
+    echo "ICE_CONNECTIVITY_SKIPPED=true"
+
+    touch "$RUN/stop"
+    wait "$HOLDER_PID" 2>/dev/null || true
+    trap - EXIT
+
+    exit 23
+fi
+
+chmod 600 "$RUN/remote.sdp"
+
+echo "REMOTE_SDP_PRESENT=true"
+
+echo
+echo "=== WAIT SAME NICEAGENT / ICE ==="
+
+wait "$HOLDER_PID"
+HOLDER_RC=$?
+
+trap - EXIT
+
+echo "ICE_HOLDER_RC=$HOLDER_RC"
+
+echo
+echo "=== ICE HOLDER FINAL LOG ==="
+
+cat "$RUN/ice-holder.log"
+
+echo
+echo "=== ICE RESULT ==="
+
+IMPORT_PASS=false
+CONNECTED_PASS=false
+READY_PASS=false
+PAIR_PASS=false
+PSEUDOTCP_PASS=false
+VIP_ECHO_PASS=false
+UAUT_OPEN_PASS=false
+
+grep -q '^REMOTE_PRIMITIVES_IMPORT=PASS$'   "$RUN/ice-holder.log"   && IMPORT_PASS=true
+
+grep -q '^ICE_CONNECTED=PASS$'   "$RUN/ice-holder.log"   && CONNECTED_PASS=true
+
+grep -q '^ICE_READY=PASS$'   "$RUN/ice-holder.log"   && READY_PASS=true
+
+grep -q '^SELECTED_PAIR=PASS$'   "$RUN/ice-holder.log"   && PAIR_PASS=true
+
+grep -q '^PSEUDOTCP_OPEN=PASS$'   "$RUN/ice-holder.log"   && PSEUDOTCP_PASS=true
+
+grep -q '^VIP_ECHO_ACK=PASS$'   "$RUN/ice-holder.log"   && VIP_ECHO_PASS=true
+
+grep -q '^VIP_UAUT_OPEN_RESPONSE=PASS$'   "$RUN/ice-holder.log"   && UAUT_OPEN_PASS=true
+
+echo "REMOTE_PRIMITIVES_IMPORT_PASS=$IMPORT_PASS"
+echo "ICE_CONNECTED_PASS=$CONNECTED_PASS"
+echo "ICE_READY_PASS=$READY_PASS"
+echo "SELECTED_PAIR_PASS=$PAIR_PASS"
+echo "PSEUDOTCP_OPEN_PASS=$PSEUDOTCP_PASS"
+echo "VIP_ECHO_ACK_PASS=$VIP_ECHO_PASS"
+echo "VIP_UAUT_OPEN_PASS=$UAUT_OPEN_PASS"
+
+ICE_PASS=false
+
+if [ "$IMPORT_PASS" = true ] \
+   && [ "$CONNECTED_PASS" = true ] \
+   && [ "$READY_PASS" = true ] \
+   && [ "$PAIR_PASS" = true ]; then
+
+    ICE_PASS=true
+fi
+
+if [ "$ICE_PASS" = true ]; then
+    echo "P2_ICE_CONNECTIVITY=PASS"
+else
+    echo "P2_ICE_CONNECTIVITY=FAIL"
+    exit 24
+fi
+
+if [ "$PSEUDOTCP_PASS" = true ]; then
+    echo "P2_PSEUDOTCP_OPEN=PASS"
+else
+    echo "P2_PSEUDOTCP_OPEN=FAIL"
+    exit 25
+fi
+
+if [ "$VIP_ECHO_PASS" = true ]; then
+    echo "P2_VIP_ECHO_ACK=PASS"
+else
+    echo "P2_VIP_ECHO_ACK=FAIL"
+    exit 26
+fi
+
+if [ "$HOLDER_RC" -eq 0 ] \
+   && [ "$UAUT_OPEN_PASS" = true ]; then
+
+    echo "P2_VIP_UAUT_OPEN=PASS"
+    exit 0
+fi
+
+echo "P2_VIP_UAUT_OPEN=FAIL"
+exit 27
