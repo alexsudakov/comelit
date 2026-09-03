@@ -18,7 +18,10 @@ from .const import (
     PLATFORMS,
     SERVICE_OPEN_DOOR,
 )
+from .runtime import ComelitRingRuntime
 from .signing import validate_operation_id
+
+_RING_RUNTIMES = "ring_runtimes"
 
 
 def _operation_id(value: object) -> str:
@@ -43,19 +46,36 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up one private CT120 bridge config entry."""
+    """Set up the transitional Door bridge plus direct incoming-ring runtime."""
+    session = async_get_clientsession(hass)
     client = ComelitBridgeClient(
-        async_get_clientsession(hass),
+        session,
         bridge_url=str(entry.data[CONF_BRIDGE_URL]),
         shared_secret=str(entry.data[CONF_SHARED_SECRET]),
     )
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = client
+
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    domain_data[entry.entry_id] = client
+
+    runtime = ComelitRingRuntime(hass, session)
+    runtimes = domain_data.setdefault(_RING_RUNTIMES, {})
+    runtimes[entry.entry_id] = runtime
+    await runtime.async_start()
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    domain_data = hass.data.get(DOMAIN, {})
+    runtimes = domain_data.get(_RING_RUNTIMES, {})
+    runtime = runtimes.pop(entry.entry_id, None)
+    if runtime is not None:
+        await runtime.async_stop()
+
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
-        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+        domain_data.pop(entry.entry_id, None)
+        if not runtimes:
+            domain_data.pop(_RING_RUNTIMES, None)
     return unloaded
