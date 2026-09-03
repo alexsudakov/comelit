@@ -17,7 +17,6 @@ def _status_payload(runtime: ComelitRingRuntime) -> dict[str, object]:
     status["press_panel_now"] = bool(
         status["running"]
         and status["listener_ready"]
-        and not status["ring_observed"]
     )
     status["network_door_action_performed"] = False
     status["physical_door_action"] = False

@@ -81,8 +81,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         runtimes[entry.entry_id] = runtime
 
         # Validation mode: do not auto-start the Comelit registration on HA
-        # startup.  The local-only CT120 test-control webhook starts exactly
-        # one bounded 180s cycle when requested through Hermes.
+        # startup yet.  The local-only CT120 test-control webhook starts the
+        # persistent listener explicitly when requested through Hermes.
         async_register_test_control(hass, runtime)
 
     if has_bridge:

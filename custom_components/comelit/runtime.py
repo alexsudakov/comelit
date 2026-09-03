@@ -104,11 +104,11 @@ def _native_gate() -> None:
 
 
 class ComelitRingRuntime:
-    """One bounded direct-HA incoming-ring listener cycle.
+    """Direct-HA incoming-ring listener runtime.
 
-    The frozen V4.2 helper remains bounded to 180 seconds and exits after a
-    ring. Automatic reconnect is deliberately deferred until simultaneous
-    client compatibility has been checked with the official app and monitor.
+    The persistent helper keeps one registered Comelit session for up to
+    3300 seconds and may emit multiple CALL_INIT events during that session.
+    Automatic reconnect is handled separately by the runtime supervisor.
     """
 
     def __init__(
@@ -130,7 +130,6 @@ class ComelitRingRuntime:
         self._offer_ready = asyncio.Event()
         self._listener_ready = asyncio.Event()
         self._ring_lines: list[str] = []
-        self._ring_emitted = False
         self._last_ring_event: dict[str, str] | None = None
         self._last_error: str | None = None
         self._stopping = False
@@ -169,7 +168,6 @@ class ComelitRingRuntime:
         self._offer_ready.clear()
         self._listener_ready.clear()
         self._ring_lines.clear()
-        self._ring_emitted = False
         self._last_ring_event = None
         self._last_error = None
         self._task = self._hass.async_create_task(
@@ -328,7 +326,7 @@ class ComelitRingRuntime:
             if line == "V4_RING_LISTENER_READY=true":
                 self._listener_ready.set()
                 _LOGGER.warning(
-                    "Comelit ring listener READY for one bounded 180s cycle"
+                    "Comelit ring listener READY for persistent 3300s cycle"
                 )
                 continue
 
@@ -339,25 +337,20 @@ class ComelitRingRuntime:
                 continue
 
             self._ring_lines.append(line)
-            if self._ring_emitted:
-                continue
-
-            try:
-                ring = parse_v4_safe_ring(self._ring_lines)
-            except RingObservationError as exc:
-                present = {item.split("=", 1)[0] for item in self._ring_lines}
-                if _RING_KEYS.issubset(present):
-                    raise ComelitRingRuntimeError(f"ring_contract:{exc}") from exc
-                continue
-
-            if ring is None:
-                continue
-
             present = {item.split("=", 1)[0] for item in self._ring_lines}
             if not _RING_KEYS.issubset(present):
                 continue
 
-            self._ring_emitted = True
+            batch = self._ring_lines
+            self._ring_lines = []
+
+            try:
+                ring = parse_v4_safe_ring(batch)
+            except RingObservationError as exc:
+                raise ComelitRingRuntimeError(f"ring_contract:{exc}") from exc
+
+            if ring is None:
+                continue
             event = ring.as_dict()
             event["event_id"] = str(uuid4())
             event["timestamp"] = datetime.now(UTC).isoformat()
