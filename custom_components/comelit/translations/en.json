@@ -1,28 +1,28 @@
 {
-  "title": "Comelit Door Bridge",
+  "title": "Comelit",
   "config": {
     "step": {
       "user": {
-        "title": "Connect Comelit Door Bridge",
-        "description": "Connect Home Assistant to the private CT120 P14 bridge. The bridge must already be live-promoted and firewall-limited to this Home Assistant host.",
+        "title": "Connect Comelit",
+        "description": "Configure the direct Comelit P2P incoming-ring listener in Home Assistant.",
         "data": {
-          "bridge_url": "Bridge URL (http://private-ip:18014)",
-          "shared_secret": "Shared secret"
+          "device_uuid": "Device UUID",
+          "vip_token": "ViP token",
+          "oauth_access_token": "OAuth access token"
         }
       }
     },
     "error": {
-      "cannot_connect": "Bridge is unavailable, disabled, or its production runner identity is not valid",
-      "invalid_config": "Use the private CT120 IPv4 URL on port 18014 and a shared secret of at least 32 bytes"
+      "invalid_config": "Check the Device UUID, ViP token and OAuth access token"
     },
     "abort": {
-      "already_configured": "This bridge is already configured"
+      "already_configured": "This Comelit device is already configured"
     }
   },
   "services": {
     "open_door": {
       "name": "Open door",
-      "description": "Perform one protected Door operation. A service response is mandatory. ACKED is protocol evidence only and never proves the physical door opened.",
+      "description": "Perform one protected transitional Door operation. A service response is mandatory. ACKED is protocol evidence only and never proves the physical door opened.",
       "fields": {
         "operation_id": {
           "name": "Operation ID",
