@@ -27,8 +27,8 @@ CTL_CONNECT = 0
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
-            "Offline timing correlation between ICE nomination and the first "
-            "PseudoTCP CONNECT in a successful Comelit capture. No network I/O; "
+            "Offline timing correlation between ICE nomination and PseudoTCP "
+            "CONNECT in a successful Comelit capture. No network I/O; "
             "credentials, STUN transaction IDs and tie-breakers are never printed."
         )
     )
@@ -111,23 +111,46 @@ def parse_stun(payload: bytes) -> dict[str, object] | None:
         "success": msg_type == STUN_BINDING_SUCCESS,
         "use_candidate": ATTR_USE_CANDIDATE in attrs,
         "controlling": ATTR_ICE_CONTROLLING in attrs,
-        # Used only internally to pair success responses; never printed.
+        # Internal correlation only; never printed.
         "txid": payload[8:20],
     }
 
 
-def is_pseudotcp_connect(payload: bytes) -> bool:
-    if len(payload) < PSEUDOTCP_HEADER + 1:
-        return False
+def pseudotcp_shape(payload: bytes) -> dict[str, object] | None:
+    if len(payload) < PSEUDOTCP_HEADER:
+        return None
     conv, seq, ack = struct.unpack("!III", payload[:12])
     flags = payload[13]
     body = payload[PSEUDOTCP_HEADER:]
-    return (
-        conv == 0
-        and seq == 0
-        and ack == 0
-        and flags == FLAG_CTL
-        and body[0] == CTL_CONNECT
+    if conv != 0:
+        return None
+    return {
+        "seq_zero": seq == 0,
+        "ack_zero": ack == 0,
+        "flags": flags,
+        "body": body,
+    }
+
+
+def is_local_initial_connect(payload: bytes) -> bool:
+    p = pseudotcp_shape(payload)
+    return bool(
+        p
+        and p["seq_zero"]
+        and p["ack_zero"]
+        and p["flags"] == FLAG_CTL
+        and p["body"]
+        and p["body"][0] == CTL_CONNECT
+    )
+
+
+def is_peer_connect(payload: bytes) -> bool:
+    p = pseudotcp_shape(payload)
+    return bool(
+        p
+        and p["flags"] == FLAG_CTL
+        and p["body"]
+        and p["body"][0] == CTL_CONNECT
     )
 
 
@@ -180,7 +203,7 @@ def main() -> int:
         if (
             packet["src"] == args.local_ip
             and packet["dst"] == args.peer_ip
-            and is_pseudotcp_connect(packet["payload"])
+            and is_local_initial_connect(packet["payload"])
         ):
             first_connect = packet
             break
@@ -192,8 +215,7 @@ def main() -> int:
     peer_port = int(first_connect["dport"])
     connect_ts = float(first_connect["ts"])
 
-    nominations: list[dict[str, object]] = []
-    success_by_txid: dict[bytes, float] = {}
+    events: list[dict[str, object]] = []
     for packet in packets:
         same_endpoint = (
             {packet["src"], packet["dst"]} == {args.local_ip, args.peer_ip}
@@ -204,6 +226,13 @@ def main() -> int:
         info = parse_stun(packet["payload"])
         if info is None:
             continue
+        events.append({"packet": packet, "info": info})
+
+    nominations: list[dict[str, object]] = []
+    successes: list[dict[str, object]] = []
+    for event in events:
+        packet = event["packet"]
+        info = event["info"]
         if (
             packet["src"] == args.peer_ip
             and info["request"]
@@ -211,18 +240,29 @@ def main() -> int:
             and info["use_candidate"]
         ):
             nominations.append({"ts": float(packet["ts"]), "txid": info["txid"]})
-        if packet["src"] == args.local_ip and info["success"]:
-            success_by_txid[info["txid"]] = float(packet["ts"])
+        elif packet["src"] == args.local_ip and info["success"]:
+            successes.append({"ts": float(packet["ts"]), "txid": info["txid"]})
 
     if not nominations:
         print("REMOTE_NOMINATION=NOT_FOUND")
         return 3
 
-    matched_responses = [
-        success_by_txid[n["txid"]]
-        for n in nominations
-        if n["txid"] in success_by_txid
-    ]
+    # STUN retransmissions reuse the same transaction ID. Pair each nomination
+    # occurrence with the first still-unused matching success which follows it,
+    # rather than collapsing all responses into a txid->last_timestamp dict.
+    response_used = [False] * len(successes)
+    matched_pairs: list[tuple[float, float]] = []
+    for nomination in nominations:
+        n_ts = float(nomination["ts"])
+        n_txid = nomination["txid"]
+        for i, success in enumerate(successes):
+            if response_used[i]:
+                continue
+            s_ts = float(success["ts"])
+            if success["txid"] == n_txid and s_ts >= n_ts:
+                response_used[i] = True
+                matched_pairs.append((n_ts, s_ts))
+                break
 
     remote_connect: dict[str, object] | None = None
     for packet in packets:
@@ -231,7 +271,7 @@ def main() -> int:
             and packet["dst"] == args.local_ip
             and int(packet["sport"]) == peer_port
             and int(packet["dport"]) == local_port
-            and is_pseudotcp_connect(packet["payload"])
+            and is_peer_connect(packet["payload"])
         ):
             remote_connect = packet
             break
@@ -251,17 +291,16 @@ def main() -> int:
                 continue
             payload = packet["payload"]
             if len(payload) == PSEUDOTCP_HEADER:
-                conv = struct.unpack("!I", payload[:4])[0]
-                flags = payload[13]
-                if conv == 0 and flags == 0:
+                p = pseudotcp_shape(payload)
+                if p and p["flags"] == 0:
                     local_ack = packet
                     break
 
     base = float(first_ts or connect_ts)
     first_nom = float(nominations[0]["ts"])
     last_nom = float(nominations[-1]["ts"])
-    first_resp = matched_responses[0] if matched_responses else None
-    last_resp = matched_responses[-1] if matched_responses else None
+    first_resp = matched_pairs[0][1] if matched_pairs else None
+    last_resp = matched_pairs[-1][1] if matched_pairs else None
 
     print(f"PCAP={args.pcap}")
     print(f"LINKTYPE={linktype}")
@@ -269,7 +308,8 @@ def main() -> int:
     print(f"P2P_PEER_IP={args.peer_ip}")
     print(f"P2P_PEER_PORT={peer_port}")
     print(f"REMOTE_USE_CANDIDATE_REQUESTS={len(nominations)}")
-    print(f"MATCHED_NOMINATION_SUCCESSES={len(matched_responses)}")
+    print(f"MATCHED_NOMINATION_SUCCESSES={len(matched_pairs)}")
+    print(f"NOMINATION_RETRANSMIT_TXID_REUSED={'true' if len(nominations) > len({n['txid'] for n in nominations}) else 'false'}")
 
     print("\n=== SUCCESSFUL TRANSITION TIMING ===")
     print(f"FIRST_REMOTE_USE_CANDIDATE_T={first_nom - base:.6f}")
@@ -287,23 +327,14 @@ def main() -> int:
     print(f"CONNECT_AFTER_FIRST_USE_CANDIDATE_MS={(connect_ts - first_nom) * 1000:.3f}")
     print(f"CONNECT_AFTER_LAST_USE_CANDIDATE_MS={(connect_ts - last_nom) * 1000:.3f}")
     if first_resp is not None:
-        print(
-            f"CONNECT_AFTER_FIRST_NOMINATION_SUCCESS_MS="
-            f"{(connect_ts - first_resp) * 1000:.3f}"
-        )
+        print(f"CONNECT_AFTER_FIRST_NOMINATION_SUCCESS_MS={(connect_ts - first_resp) * 1000:.3f}")
     if last_resp is not None:
-        print(
-            f"CONNECT_AFTER_LAST_NOMINATION_SUCCESS_MS="
-            f"{(connect_ts - last_resp) * 1000:.3f}"
-        )
+        print(f"CONNECT_AFTER_LAST_NOMINATION_SUCCESS_MS={(connect_ts - last_resp) * 1000:.3f}")
 
     if remote_connect is not None:
         remote_connect_ts = float(remote_connect["ts"])
         print(f"REMOTE_PSEUDOTCP_CONNECT_T={remote_connect_ts - base:.6f}")
-        print(
-            f"REMOTE_CONNECT_AFTER_LOCAL_CONNECT_MS="
-            f"{(remote_connect_ts - connect_ts) * 1000:.3f}"
-        )
+        print(f"REMOTE_CONNECT_AFTER_LOCAL_CONNECT_MS={(remote_connect_ts - connect_ts) * 1000:.3f}")
     else:
         remote_connect_ts = None
         print("REMOTE_PSEUDOTCP_CONNECT_T=UNOBSERVED")
@@ -311,15 +342,20 @@ def main() -> int:
     if local_ack is not None and remote_connect_ts is not None:
         ack_ts = float(local_ack["ts"])
         print(f"LOCAL_PSEUDOTCP_ACK_T={ack_ts - base:.6f}")
-        print(
-            f"LOCAL_ACK_AFTER_REMOTE_CONNECT_MS="
-            f"{(ack_ts - remote_connect_ts) * 1000:.3f}"
-        )
+        print(f"LOCAL_ACK_AFTER_REMOTE_CONNECT_MS={(ack_ts - remote_connect_ts) * 1000:.3f}")
     else:
         print("LOCAL_PSEUDOTCP_ACK_T=UNOBSERVED")
 
-    order_ok = connect_ts > last_nom and (last_resp is None or connect_ts > last_resp)
-    print(f"CONNECT_AFTER_REMOTE_NOMINATION={'true' if order_ok else 'false'}")
+    after_first_nomination = (
+        connect_ts > first_nom
+        and (first_resp is None or connect_ts > first_resp)
+    )
+    after_all_nomination_retries = (
+        connect_ts > last_nom
+        and (last_resp is None or connect_ts > last_resp)
+    )
+    print(f"CONNECT_AFTER_FIRST_REMOTE_NOMINATION={'true' if after_first_nomination else 'false'}")
+    print(f"CONNECT_AFTER_ALL_REMOTE_NOMINATION_RETRIES={'true' if after_all_nomination_retries else 'false'}")
     print("NETWORK_IO_PERFORMED=false")
     print("DOOR_ACTION_SENT=false")
     print("MEDIA_ACTION_SENT=false")
