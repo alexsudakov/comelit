@@ -8,12 +8,14 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .client import (
-    ComelitBridgeClient,
-    ComelitBridgeOutcomeUnknown,
-    ComelitBridgeRejected,
+from .const import (
+    DATA_RUNTIMES,
+    DOMAIN,
+    DOOR_ENTRANCE,
+    MAIN_ENTRANCE_ENTITY_ID,
+    MAIN_ENTRANCE_UNIQUE_ID,
 )
-from .const import DOMAIN, MAIN_ENTRANCE_ENTITY_ID, MAIN_ENTRANCE_UNIQUE_ID
+from .runtime import ComelitRingRuntime
 
 
 async def async_setup_entry(
@@ -21,65 +23,46 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    client: ComelitBridgeClient = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([ComelitMainEntranceDoorButton(entry, client)])
+    runtime: ComelitRingRuntime | None = (
+        hass.data.get(DOMAIN, {}).get(DATA_RUNTIMES, {}).get(entry.entry_id)
+    )
+    if runtime is not None:
+        async_add_entities([ComelitEntranceDoorButton(runtime)])
 
 
-class ComelitMainEntranceDoorButton(ButtonEntity):
-    """Target entity for the protected response-required Door action.
+class ComelitEntranceDoorButton(ButtonEntity):
+    """One-shot entrance Door command through the direct HA runtime."""
 
-    ``button.press`` is intentionally disabled.  ``comelit.open_door`` is the
-    only action-capable HA surface and its response is mandatory.  Even ACKED
-    is protocol evidence only; this entity never reports physical Door state.
-    """
-
-    _attr_name = "Comelit main entrance open door"
+    _attr_name = "Comelit — Подъезд"
     _attr_unique_id = MAIN_ENTRANCE_UNIQUE_ID
     _attr_icon = "mdi:door-open"
     _attr_should_poll = False
 
-    def __init__(self, entry: ConfigEntry, client: ComelitBridgeClient):
-        self._entry = entry
-        self._client = client
+    def __init__(self, runtime: ComelitRingRuntime) -> None:
+        self._runtime = runtime
         self.entity_id = MAIN_ENTRANCE_ENTITY_ID
-        self._last_operation_id: str | None = None
-        self._last_protocol_state: str | None = None
-        self._last_reason: str | None = None
+        self._last_result: dict[str, object] | None = None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        result = self._last_result or self._runtime.last_door_result or {}
         return {
-            "standard_press_allowed": False,
-            "response_required": True,
+            "standard_press_allowed": True,
             "one_shot_operation_required": True,
             "automatic_retry_allowed": False,
             "physical_effect_asserted": False,
             "physical_door_state": "UNKNOWN",
-            "last_operation_id": self._last_operation_id,
-            "last_protocol_state": self._last_protocol_state,
-            "last_reason": self._last_reason,
+            "last_operation_id": result.get("operation_id"),
+            "last_protocol_state": result.get("state"),
+            "last_protocol_acked": result.get("protocol_acked"),
         }
 
     async def async_press(self) -> None:
-        raise HomeAssistantError(
-            "button.press is disabled for Comelit Door; use response-required "
-            "comelit.open_door with a fresh operation_id"
-        )
-
-    async def async_open_door(self, operation_id: str) -> dict[str, object]:
-        try:
-            result = await self._client.async_open_door(operation_id)
-        except ComelitBridgeRejected as exc:
-            raise HomeAssistantError(
-                f"Comelit bridge rejected request before a trusted result: {exc}"
-            ) from exc
-        except ComelitBridgeOutcomeUnknown as exc:
-            raise HomeAssistantError(
-                f"Comelit Door outcome unknown; do not retry automatically: {exc}"
-            ) from exc
-
-        self._last_operation_id = result.operation_id
-        self._last_protocol_state = result.state
-        self._last_reason = result.reason
+        result = await self._runtime.async_open_door(DOOR_ENTRANCE)
+        self._last_result = dict(result)
         self.async_write_ha_state()
-        return result.as_service_response()
+        if result.get("state") != "ACKED":
+            raise HomeAssistantError(
+                "Comelit Door was not protocol-ACKED; automatic retry is forbidden. "
+                f"state={result.get('state')}"
+            )

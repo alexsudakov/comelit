@@ -1,13 +1,14 @@
 {
   "domain": "comelit",
-  "name": "Comelit Door Bridge",
-  "version": "1.0.0",
+  "name": "Comelit",
+  "version": "1.4.2",
   "documentation": "https://github.com/alexsudakov/comelit",
   "issue_tracker": "https://github.com/alexsudakov/comelit/issues",
   "codeowners": ["@alexsudakov"],
   "config_flow": true,
   "single_config_entry": true,
   "integration_type": "hub",
-  "iot_class": "local_push",
+  "iot_class": "cloud_push",
+  "dependencies": ["webhook"],
   "requirements": []
 }

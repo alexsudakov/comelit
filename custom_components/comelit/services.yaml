@@ -1,11 +1,12 @@
 open_door:
-  target:
-    entity:
-      domain: button
-      integration: comelit
+  name: Open Comelit door
+  description: Execute one direct Comelit Door attempt. Protocol ACK does not prove physical opening.
   fields:
-    operation_id:
+    door:
+      name: Door
       required: true
-      example: "p13-hermes-123e4567-e89b-42d3-a456-426614174000"
+      example: entrance
       selector:
-        text:
+        select:
+          options:
+            - entrance
