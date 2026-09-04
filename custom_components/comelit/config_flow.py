@@ -11,6 +11,7 @@ from .const import (
     CONF_DEVICE_UUID,
     CONF_OAUTH_ACCESS_TOKEN,
     CONF_OAUTH_REFRESH_TOKEN,
+    CONF_OAUTH_SCOPE,
     CONF_VIP_TOKEN,
     DOMAIN,
 )
@@ -48,6 +49,7 @@ class ComelitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 oauth_refresh_token = str(
                     user_input.get(CONF_OAUTH_REFRESH_TOKEN) or ""
                 ).strip()
+                oauth_scope = str(user_input.get(CONF_OAUTH_SCOPE) or "").strip()
             except (ValueError, KeyError):
                 errors["base"] = "invalid_config"
             else:
@@ -60,6 +62,8 @@ class ComelitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
                 if oauth_refresh_token:
                     data[CONF_OAUTH_REFRESH_TOKEN] = oauth_refresh_token
+                if oauth_scope:
+                    data[CONF_OAUTH_SCOPE] = oauth_scope
                 return self.async_create_entry(title="Comelit", data=data)
 
         schema = vol.Schema(
@@ -75,6 +79,9 @@ class ComelitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ),
                 vol.Optional(CONF_OAUTH_REFRESH_TOKEN): TextSelector(
                     TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                ),
+                vol.Optional(CONF_OAUTH_SCOPE): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.TEXT)
                 ),
             }
         )
