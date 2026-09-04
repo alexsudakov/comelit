@@ -3,6 +3,7 @@ from __future__ import annotations
 DOMAIN = "comelit"
 PLATFORMS = ["button"]
 DATA_RUNTIMES = "ring_runtimes"
+DATA_SUPERVISORS = "runtime_supervisors"
 
 CONF_DEVICE_UUID = "device_uuid"
 CONF_VIP_TOKEN = "vip_token"
