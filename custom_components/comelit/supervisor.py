@@ -1,16 +1,32 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
+from datetime import UTC, datetime
 import logging
 
 from homeassistant.core import HomeAssistant
 
+from .const import LISTENER_CYCLE_SECONDS
 from .runtime import ComelitRingRuntime
 
 _LOGGER = logging.getLogger(__name__)
 
 RECONNECT_DELAY_SECONDS = 5
 POLL_INTERVAL_SECONDS = 1
+
+LISTENER_STATE_STARTING = "starting"
+LISTENER_STATE_READY = "ready"
+LISTENER_STATE_RECONNECTING = "reconnecting"
+LISTENER_STATE_STOPPED = "stopped"
+LISTENER_STATE_ERROR = "error"
+LISTENER_STATES = (
+    LISTENER_STATE_STARTING,
+    LISTENER_STATE_READY,
+    LISTENER_STATE_RECONNECTING,
+    LISTENER_STATE_STOPPED,
+    LISTENER_STATE_ERROR,
+)
 
 
 class ComelitRuntimeSupervisor:
@@ -26,6 +42,9 @@ class ComelitRuntimeSupervisor:
         self._task: asyncio.Task[None] | None = None
         self._stopping = False
         self._reconnect_count = 0
+        self._state = LISTENER_STATE_STOPPED
+        self._last_ready: datetime | None = None
+        self._status_listeners: set[Callable[[], None]] = set()
 
     @property
     def running(self) -> bool:
@@ -35,11 +54,50 @@ class ComelitRuntimeSupervisor:
     def reconnect_count(self) -> int:
         return self._reconnect_count
 
+    @property
+    def state(self) -> str:
+        return self._state
+
+    def status(self) -> dict[str, object]:
+        runtime_status = self._runtime.status()
+        return {
+            "state": self._state,
+            "supervisor_running": self.running,
+            "runtime_running": bool(runtime_status.get("running")),
+            "listener_ready": bool(runtime_status.get("listener_ready")),
+            "reconnect_count": self._reconnect_count,
+            "last_ready": self._last_ready.isoformat() if self._last_ready else None,
+            "last_error": runtime_status.get("last_error"),
+            "cycle_duration_seconds": LISTENER_CYCLE_SECONDS,
+        }
+
+    def async_add_status_listener(self, callback: Callable[[], None]) -> Callable[[], None]:
+        """Register an in-process HA status listener and return its remover."""
+        self._status_listeners.add(callback)
+
+        def remove() -> None:
+            self._status_listeners.discard(callback)
+
+        return remove
+
+    def _notify_status(self) -> None:
+        for callback in tuple(self._status_listeners):
+            callback()
+
+    def _set_state(self, state: str) -> None:
+        if state == self._state:
+            return
+        self._state = state
+        if state == LISTENER_STATE_READY:
+            self._last_ready = datetime.now(UTC)
+        self._notify_status()
+
     async def async_start(self) -> None:
         if self.running:
             return
 
         self._stopping = False
+        self._set_state(LISTENER_STATE_STARTING)
         await self._runtime.async_start()
         self._task = self._hass.async_create_task(
             self._async_run(),
@@ -59,17 +117,30 @@ class ComelitRuntimeSupervisor:
 
         self._task = None
         await self._runtime.async_stop()
+        self._set_state(LISTENER_STATE_STOPPED)
 
     async def _async_run(self) -> None:
         try:
             while not self._stopping:
                 while self._runtime.running and not self._stopping:
+                    if self._runtime.listener_ready:
+                        self._set_state(LISTENER_STATE_READY)
+                    else:
+                        self._set_state(LISTENER_STATE_STARTING)
                     await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
                 if self._stopping:
                     return
 
                 self._reconnect_count += 1
+                runtime_status = self._runtime.status()
+                if runtime_status.get("last_error"):
+                    self._set_state(LISTENER_STATE_ERROR)
+                else:
+                    self._set_state(LISTENER_STATE_RECONNECTING)
+                # reconnect_count may change even when the visible state does not.
+                self._notify_status()
+
                 _LOGGER.warning(
                     "Comelit listener cycle ended; reconnecting in %ss (count=%s)",
                     RECONNECT_DELAY_SECONDS,
@@ -79,6 +150,10 @@ class ComelitRuntimeSupervisor:
 
                 if self._stopping:
                     return
+                self._set_state(LISTENER_STATE_STARTING)
                 await self._runtime.async_start()
         except asyncio.CancelledError:
             raise
+        except Exception:
+            _LOGGER.exception("Comelit runtime supervisor stopped unexpectedly")
+            self._set_state(LISTENER_STATE_ERROR)
