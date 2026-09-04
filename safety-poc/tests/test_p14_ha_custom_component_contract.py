@@ -114,7 +114,7 @@ class P14HomeAssistantContractTests(unittest.TestCase):
             (ROOT / "custom_components/comelit/manifest.json").read_text()
         )
         self.assertEqual(manifest["domain"], "comelit")
-        self.assertEqual(manifest["version"], "1.5.0")
+        self.assertEqual(manifest["version"], "1.5.1")
         self.assertTrue(manifest["config_flow"])
         self.assertTrue(manifest["single_config_entry"])
         self.assertEqual(manifest["requirements"], [])
@@ -137,6 +137,46 @@ class P14HomeAssistantContractTests(unittest.TestCase):
         self.assertNotIn("async_open_door", supervisor)
         self.assertIn("await supervisor.async_stop()", test_control)
         self.assertIn('status["supervisor_running"]', test_control)
+
+    def test_listener_status_sensor_is_diagnostic_and_event_driven(self):
+        const = (ROOT / "custom_components/comelit/const.py").read_text()
+        supervisor = (ROOT / "custom_components/comelit/supervisor.py").read_text()
+        sensor = (ROOT / "custom_components/comelit/sensor.py").read_text()
+        ast.parse(supervisor)
+        ast.parse(sensor)
+        self.assertIn('PLATFORMS = ["button", "sensor"]', const)
+        self.assertIn(
+            'LISTENER_STATUS_ENTITY_ID = "sensor.comelit_listener_status"', const
+        )
+        self.assertIn("LISTENER_CYCLE_SECONDS = 3300", const)
+        self.assertIn("SensorDeviceClass.ENUM", sensor)
+        self.assertIn("EntityCategory.DIAGNOSTIC", sensor)
+        self.assertIn("_attr_should_poll = False", sensor)
+        self.assertIn("async_add_status_listener", sensor)
+        self.assertIn("async_add_status_listener", supervisor)
+        for state in ("starting", "ready", "reconnecting", "stopped", "error"):
+            self.assertIn(f'"{state}"', supervisor)
+        self.assertIn('"reconnect_count": self._reconnect_count', supervisor)
+        self.assertIn('"last_ready":', supervisor)
+        self.assertNotIn("async_open_door", sensor)
+
+    def test_intercom_media_session_contract_is_strictly_on_demand(self):
+        doc = (
+            ROOT / "docs/intercom-media-session-architecture.md"
+        ).read_text()
+        self.assertIn("on-demand only", doc)
+        self.assertIn("180 seconds", doc)
+        self.assertIn("deadline is absolute", doc)
+        self.assertIn(
+            "at most one active intercom media session across the whole Comelit integration",
+            doc,
+        )
+        self.assertIn("switch.comelit_entrance_camera", doc)
+        self.assertIn("binary_sensor.comelit_entrance_camera_active", doc)
+        self.assertIn("sensor.comelit_entrance_camera_session_remaining", doc)
+        self.assertIn("camera.comelit_entrance", doc)
+        self.assertIn("official Comelit application can connect again", doc)
+        self.assertIn("must not stop or recreate the persistent Ring/Door listener", doc)
 
     def test_gate_entity_is_exposed_but_actuation_remains_fail_closed(self):
         const = (ROOT / "custom_components/comelit/const.py").read_text()
