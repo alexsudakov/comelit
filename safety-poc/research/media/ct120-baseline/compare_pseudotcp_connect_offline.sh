@@ -27,7 +27,6 @@ cat >"$SRC" <<'C'
 #include <nice/pseudotcp.h>
 #include <glib.h>
 #include <stdio.h>
-#include <string.h>
 
 static const char *out_path = NULL;
 
@@ -103,62 +102,84 @@ if magic == b'\xd4\xc3\xb2\xa1':
     endian = '<'
 elif magic == b'\xa1\xb2\xc3\xd4':
     endian = '>'
+elif magic == b'\x4d\x3c\xb2\xa1':
+    endian = '<'
+elif magic == b'\xa1\xb2\x3c\x4d':
+    endian = '>'
 else:
     raise SystemExit('PCAP_FORMAT_UNSUPPORTED')
 linktype = struct.unpack(endian + 'I', data[20:24])[0]
 if linktype != 101:
     raise SystemExit(f'LINKTYPE_UNSUPPORTED={linktype}')
 
-def classify_udp_ipv4(pkt: bytes):
+
+def udp_payload(pkt: bytes):
     if len(pkt) < 28 or (pkt[0] >> 4) != 4:
         return None
     ihl = (pkt[0] & 0x0f) * 4
-    if len(pkt) < ihl + 8 or pkt[9] != 17:
+    if ihl < 20 or len(pkt) < ihl + 8 or pkt[9] != 17:
         return None
+    total_len = struct.unpack('!H', pkt[2:4])[0]
+    if total_len == 0 or total_len > len(pkt):
+        total_len = len(pkt)
     src = pkt[12:16]
     dst = pkt[16:20]
-    udp = pkt[ihl:]
-    payload = udp[8:]
-    return src, dst, payload
+    udp = pkt[ihl:total_len]
+    if len(udp) < 8:
+        return None
+    ulen = struct.unpack('!H', udp[4:6])[0]
+    if ulen < 8:
+        return None
+    end = min(len(udp), ulen)
+    return src, dst, udp[8:end]
 
-def ptcp(payload: bytes):
-    if len(payload) < 24:
+
+def strict_connect(payload: bytes):
+    if len(payload) < 25:
         return None
     conv, seq, ack = struct.unpack('!III', payload[:12])
     flags = payload[13]
     body = payload[24:]
-    control = None
-    if flags & 2 and body:
-        control = body[0]
+
+    # Capture-proven PseudoTCP contract for the client-side initial CONNECT:
+    # conversation 0, CTL flag only, seq=ack=0, first data byte CTL_CONNECT=0.
+    # This intentionally rejects unrelated ViP/media UDP datagrams which may
+    # coincidentally have bit 0x02 set in byte 13.
+    if conv != 0 or flags != 2 or seq != 0 or ack != 0:
+        return None
+    if not body or body[0] != 0:
+        return None
+
     return {
         'wire_len': len(payload),
         'data_len': len(body),
         'conversation': conv,
         'flags': flags,
-        'seq_zero': seq == 0,
-        'ack_zero': ack == 0,
+        'seq_zero': True,
+        'ack_zero': True,
         'data_hex': body.hex(),
-        'control_byte': control,
+        'control_byte': body[0],
         'window': struct.unpack('!H', payload[14:16])[0],
     }
+
 
 pos = 24
 found = None
 while pos + 16 <= len(data):
-    ts_sec, ts_frac, incl_len, orig_len = struct.unpack(endian + 'IIII', data[pos:pos+16])
+    _ts_sec, _ts_frac, incl_len, _orig_len = struct.unpack(endian + 'IIII', data[pos:pos+16])
     pos += 16
+    if pos + incl_len > len(data):
+        break
     pkt = data[pos:pos+incl_len]
     pos += incl_len
-    parsed = classify_udp_ipv4(pkt)
+    parsed = udp_payload(pkt)
     if not parsed:
         continue
-    src, dst, payload = parsed
+    src, _dst, payload = parsed
     if src != local_ip:
         continue
-    p = ptcp(payload)
-    if not p:
-        continue
-    if p['flags'] & 2 and p['data_len'] > 0 and p['control_byte'] == 0:
+    p = strict_connect(payload)
+    if p is not None:
         found = p
         break
 
@@ -166,6 +187,7 @@ if found is None:
     raise SystemExit('CAPTURE_CONNECT_NOT_FOUND')
 out.write_text(json.dumps(found, sort_keys=True), encoding='utf-8')
 print('CAPTURE_CONNECT_EXTRACT=PASS')
+print('CAPTURE_MATCH_FILTER=conv0_flags2_seq0_ack0_ctl_connect0')
 PY
 
 python3 - "$WIRE" "$LOCAL_JSON" <<'PY'
