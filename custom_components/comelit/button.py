@@ -12,8 +12,11 @@ from .const import (
     DATA_RUNTIMES,
     DOMAIN,
     DOOR_ENTRANCE,
+    DOOR_GATE,
     MAIN_ENTRANCE_ENTITY_ID,
     MAIN_ENTRANCE_UNIQUE_ID,
+    MAIN_GATE_ENTITY_ID,
+    MAIN_GATE_UNIQUE_ID,
 )
 from .runtime import ComelitRingRuntime
 
@@ -27,7 +30,12 @@ async def async_setup_entry(
         hass.data.get(DOMAIN, {}).get(DATA_RUNTIMES, {}).get(entry.entry_id)
     )
     if runtime is not None:
-        async_add_entities([ComelitEntranceDoorButton(runtime)])
+        async_add_entities(
+            [
+                ComelitEntranceDoorButton(runtime),
+                ComelitGateDoorButton(runtime),
+            ]
+        )
 
 
 class ComelitEntranceDoorButton(ButtonEntity):
@@ -52,6 +60,7 @@ class ComelitEntranceDoorButton(ButtonEntity):
             "automatic_retry_allowed": False,
             "physical_effect_asserted": False,
             "physical_door_state": "UNKNOWN",
+            "actuation_profile_validated": True,
             "last_operation_id": result.get("operation_id"),
             "last_protocol_state": result.get("state"),
             "last_protocol_acked": result.get("protocol_acked"),
@@ -66,3 +75,40 @@ class ComelitEntranceDoorButton(ButtonEntity):
                 "Comelit Door was not protocol-ACKED; automatic retry is forbidden. "
                 f"state={result.get('state')}"
             )
+
+
+class ComelitGateDoorButton(ButtonEntity):
+    """Gate entity exposed fail-closed until actuation is independently proven."""
+
+    _attr_name = "Comelit — Калитка"
+    _attr_unique_id = MAIN_GATE_UNIQUE_ID
+    _attr_icon = "mdi:gate"
+    _attr_should_poll = False
+    _attr_available = False
+
+    def __init__(self, runtime: ComelitRingRuntime) -> None:
+        self._runtime = runtime
+        self.entity_id = MAIN_GATE_ENTITY_ID
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {
+            "door": DOOR_GATE,
+            "standard_press_allowed": False,
+            "one_shot_operation_required": True,
+            "automatic_retry_allowed": False,
+            "physical_effect_asserted": False,
+            "physical_door_state": "UNKNOWN",
+            "actuation_profile_validated": False,
+            "ring_source_validated": True,
+            "ring_source": "00000610",
+            "blocked_reason": "gate_actuation_profile_not_validated",
+        }
+
+    async def async_press(self) -> None:
+        # Deliberately no runtime call: a ring source identity does not prove
+        # the Door actuation profile for that target.
+        raise HomeAssistantError(
+            "Comelit gate actuation is unavailable until its one-shot profile "
+            "is independently validated"
+        )
