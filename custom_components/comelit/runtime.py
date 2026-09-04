@@ -12,8 +12,13 @@ from uuid import uuid4
 from aiohttp import ClientSession
 from homeassistant.core import HomeAssistant
 
-from .cloud import ComelitCloudError, async_negotiate_p2p
+from .cloud import (
+    ComelitCloudError,
+    ComelitCloudHttpError,
+    async_negotiate_p2p,
+)
 from .const import EVENT_RING
+from .oauth import ComelitOAuthError, ComelitOAuthManager
 from .ring_event import RingObservationError, parse_v4_safe_ring
 from .sdp import ComelitSdpError, transform_offer
 
@@ -127,13 +132,13 @@ class ComelitRingRuntime:
         *,
         device_uuid: str,
         vip_token: str,
-        oauth_access_token: str,
+        oauth: ComelitOAuthManager,
     ) -> None:
         self._hass = hass
         self._session = session
         self._device_uuid = device_uuid
         self._vip_token = vip_token
-        self._oauth_access_token = oauth_access_token
+        self._oauth = oauth
         self._task: asyncio.Task[None] | None = None
         self._process: asyncio.subprocess.Process | None = None
         self._offer_ready = asyncio.Event()
@@ -285,7 +290,7 @@ class ComelitRingRuntime:
             self._door_result_future = future
 
             # Generate the operation id immediately before the irreversible
-            # one-shot boundary.  It is HA-local and is never caller supplied.
+            # one-shot boundary. It is HA-local and is never caller supplied.
             operation_id = f"comelit-ha-{uuid4()}"
             try:
                 os.kill(process.pid, signal.SIGUSR1)
@@ -328,7 +333,12 @@ class ComelitRingRuntime:
             await self._async_run_cycle()
         except asyncio.CancelledError:
             raise
-        except (ComelitRingRuntimeError, ComelitCloudError, ComelitSdpError) as exc:
+        except (
+            ComelitRingRuntimeError,
+            ComelitCloudError,
+            ComelitOAuthError,
+            ComelitSdpError,
+        ) as exc:
             self._last_error = str(exc)
             _LOGGER.error("Comelit ring listener stopped: %s", exc)
         except Exception as exc:
@@ -383,13 +393,30 @@ class ComelitRingRuntime:
 
             raw_offer = await self._hass.async_add_executor_job(_read_offer)
             comelit_offer = transform_offer(raw_offer).decode("ascii")
-            remote = await async_negotiate_p2p(
-                self._session,
-                device_uuid=self._device_uuid,
-                vip_token=self._vip_token,
-                oauth_access_token=self._oauth_access_token,
-                offer_sdp=comelit_offer,
-            )
+            oauth_access_token = await self._oauth.async_get_access_token()
+            try:
+                remote = await async_negotiate_p2p(
+                    self._session,
+                    device_uuid=self._device_uuid,
+                    vip_token=self._vip_token,
+                    oauth_access_token=oauth_access_token,
+                    offer_sdp=comelit_offer,
+                )
+            except ComelitCloudHttpError as exc:
+                if exc.status != 401:
+                    raise
+                # A 401 is still before any Door one-shot boundary. Refresh
+                # OAuth once and retry only the cloud P2P bootstrap request.
+                oauth_access_token = await self._oauth.async_get_access_token(
+                    force_refresh=True
+                )
+                remote = await async_negotiate_p2p(
+                    self._session,
+                    device_uuid=self._device_uuid,
+                    vip_token=self._vip_token,
+                    oauth_access_token=oauth_access_token,
+                    offer_sdp=comelit_offer,
+                )
             await self._hass.async_add_executor_job(_write_remote, remote)
 
             rc = await process.wait()
