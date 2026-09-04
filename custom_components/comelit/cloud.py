@@ -12,6 +12,14 @@ class ComelitCloudError(RuntimeError):
     """Comelit cloud P2P negotiation failed."""
 
 
+class ComelitCloudHttpError(ComelitCloudError):
+    """Comelit cloud P2P negotiation returned a non-success HTTP status."""
+
+    def __init__(self, status: int) -> None:
+        self.status = status
+        super().__init__(f"http_status:{status}")
+
+
 def _validate_remote_sdp(remote: str) -> None:
     lines = [
         line.strip()
@@ -75,7 +83,7 @@ async def async_negotiate_p2p(
         raise ComelitCloudError("response_not_json") from exc
 
     if not 200 <= status < 300:
-        raise ComelitCloudError(f"http_status:{status}")
+        raise ComelitCloudHttpError(status)
     if not isinstance(obj, dict):
         raise ComelitCloudError("response_not_object")
 
