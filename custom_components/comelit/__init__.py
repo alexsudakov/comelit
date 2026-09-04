@@ -78,10 +78,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         runtimes = domain_data.setdefault(DATA_RUNTIMES, {})
         runtimes[entry.entry_id] = runtime
 
-        # Keep explicit validation start/stop until the reconnect supervisor is
-        # enabled. Door actions may start the same runtime on demand.
+        # Transitional validation endpoint remains available, but normal
+        # operation no longer depends on CT120/Hermes: the runtime supervisor
+        # starts with the config entry and reconnects inside Home Assistant.
         async_register_test_control(hass, runtime)
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        await runtime.async_start()
 
     return True
 
