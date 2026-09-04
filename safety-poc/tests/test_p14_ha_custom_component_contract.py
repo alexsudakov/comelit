@@ -114,10 +114,16 @@ class P14HomeAssistantContractTests(unittest.TestCase):
             (ROOT / "custom_components/comelit/manifest.json").read_text()
         )
         self.assertEqual(manifest["domain"], "comelit")
-        self.assertEqual(manifest["version"], "1.4.2")
+        self.assertEqual(manifest["version"], "1.4.3")
         self.assertTrue(manifest["config_flow"])
         self.assertTrue(manifest["single_config_entry"])
         self.assertEqual(manifest["requirements"], [])
+
+    def test_hacs_native_binary_exec_bit_is_repaired_before_launch(self):
+        runtime = (ROOT / "custom_components/comelit/runtime.py").read_text()
+        self.assertIn("os.chmod(_NATIVE_BINARY, 0o700)", runtime)
+        self.assertIn("native_binary_chmod_failed", runtime)
+        self.assertIn("native_binary_not_executable", runtime)
 
     def test_direct_service_uses_logical_door_and_internal_operation_id(self):
         text = (ROOT / "custom_components/comelit/__init__.py").read_text()

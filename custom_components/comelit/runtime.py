@@ -111,10 +111,15 @@ def _touch_stop() -> None:
 def _native_gate() -> None:
     if not _NATIVE_BINARY.is_file():
         raise ComelitRingRuntimeError("native_binary_missing")
-    if not os.access(_NATIVE_BINARY, os.X_OK):
-        raise ComelitRingRuntimeError("native_binary_not_executable")
     if not _NATIVE_LIB.is_dir():
         raise ComelitRingRuntimeError("native_library_dir_missing")
+    if not os.access(_NATIVE_BINARY, os.X_OK):
+        try:
+            os.chmod(_NATIVE_BINARY, 0o700)
+        except OSError as exc:
+            raise ComelitRingRuntimeError("native_binary_chmod_failed") from exc
+    if not os.access(_NATIVE_BINARY, os.X_OK):
+        raise ComelitRingRuntimeError("native_binary_not_executable")
 
 
 class ComelitRingRuntime:
