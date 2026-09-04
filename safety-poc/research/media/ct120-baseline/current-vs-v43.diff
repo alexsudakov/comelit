@@ -1,0 +1,525 @@
+--- /root/comelit-ring-implementation/safety-poc/research/ring/v4_3/comelit_ice_offer_holder.v4-persistent.c	2026-09-03 19:08:12.571546736 +0000
++++ /root/comelit-alpine-build/build/comelit-v4-persistent-ring-door.c	2026-09-04 08:03:25.476270854 +0000
+@@ -9,6 +9,7 @@
+ #include <string.h>
+ #include <sys/stat.h>
+ #include <unistd.h>
++#include <signal.h>
+ 
+ #define RUN_DIR     "/run/comelit-p2p"
+ #define OFFER_FILE  RUN_DIR "/offer.sdp"
+@@ -122,7 +123,11 @@
+     P12_TX_V4_ACK_PAIR,
+ 
+     P12_TX_V4_PEER_ECHO_REPLY,
+-    P12_TX_V4_PEER_ECHO_CLOSE_ACK
++    P12_TX_V4_PEER_ECHO_CLOSE_ACK,
++
++    P12_TX_V4_DOOR_OPEN_CTPP,
++    P12_TX_V4_DOOR_WRITE,
++    P12_TX_V4_DOOR_CLOSE_CTPP
+ } P12TxKind;
+ 
+ static P12ReadonlyStage p12_stage = P12_STAGE_IDLE;
+@@ -198,6 +203,84 @@
+ static gboolean v4_ring_observed = FALSE;
+ 
+ 
++typedef enum {
++    V4_DOOR_IDLE = 0,
++    V4_DOOR_WAIT_OPEN,
++    V4_DOOR_WAIT_WRITE,
++    V4_DOOR_WAIT_CLOSE
++} V4DoorStage;
++
++typedef enum {
++    V4_DOOR_FRAME_NOT_CONSUMED = 0,
++    V4_DOOR_FRAME_CONSUMED,
++    V4_DOOR_FRAME_FAIL
++} V4DoorFrameResult;
++
++#define V4_DOOR_REQUESTED_CHANNEL_ID 7449
++#define V4_DOOR_STEP_TIMEOUT_SECONDS 6
++
++static V4DoorStage v4_door_stage = V4_DOOR_IDLE;
++static guint16 v4_door_requested_channel_id = 0;
++static guint16 v4_door_channel_id = 0;
++static guint v4_door_write_index = 0;
++static guint v4_door_writes_acked = 0;
++static gint64 v4_door_deadline_us = 0;
++static gboolean v4_door_send_started = FALSE;
++static volatile sig_atomic_t v4_door_signal_pending = 0;
++
++static const guint8 v4_door_body_1[] = {
++    0xc0, 0x18, 0x5c, 0x8b, 0x2b, 0x73, 0x00, 0x11, 0x00, 0x40, 0xac, 0x23,
++    0x30, 0x30, 0x30, 0x34, 0x30, 0x31, 0x31, 0x37, 0x37, 0x00, 0x10, 0x0e,
++    0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x30, 0x30, 0x30, 0x34,
++    0x30, 0x31, 0x31, 0x37, 0x37, 0x00, 0x30, 0x30, 0x30, 0x34, 0x30, 0x31,
++    0x31, 0x37, 0x00, 0x00
++};
++
++static const guint8 v4_door_body_2[] = {
++    0x00, 0x18, 0x5c, 0x8b, 0x2c, 0x74, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
++    0x30, 0x30, 0x30, 0x34, 0x30, 0x31, 0x31, 0x37, 0x31, 0x00, 0x30, 0x30,
++    0x30, 0x30, 0x30, 0x36, 0x34, 0x33, 0x00, 0x00
++};
++
++static const guint8 v4_door_body_3[] = {
++    0x20, 0x18, 0x5c, 0x8b, 0x2c, 0x74, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
++    0x30, 0x30, 0x30, 0x34, 0x30, 0x31, 0x31, 0x37, 0x31, 0x00, 0x30, 0x30,
++    0x30, 0x30, 0x30, 0x36, 0x34, 0x33, 0x00, 0x00
++};
++
++static const guint8 v4_door_body_4[] = {
++    0xc0, 0x18, 0x70, 0xab, 0x29, 0x9f, 0x00, 0x0d, 0x00, 0x2d, 0x30, 0x30,
++    0x30, 0x30, 0x30, 0x36, 0x34, 0x33, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
++    0xff, 0xff, 0xff, 0xff, 0x30, 0x30, 0x30, 0x34, 0x30, 0x31, 0x31, 0x37,
++    0x31, 0x00, 0x30, 0x30, 0x30, 0x30, 0x30, 0x36, 0x34, 0x33, 0x00, 0x00
++};
++
++static const guint8 v4_door_body_5[] = {
++    0x00, 0x18, 0x5c, 0x8b, 0x2c, 0x74, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
++    0x30, 0x30, 0x30, 0x34, 0x30, 0x31, 0x31, 0x37, 0x31, 0x00, 0x30, 0x30,
++    0x30, 0x30, 0x30, 0x36, 0x34, 0x33, 0x00, 0x00
++};
++
++static const guint8 v4_door_body_6[] = {
++    0x20, 0x18, 0x5c, 0x8b, 0x2c, 0x74, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
++    0x30, 0x30, 0x30, 0x34, 0x30, 0x31, 0x31, 0x37, 0x31, 0x00, 0x30, 0x30,
++    0x30, 0x30, 0x30, 0x36, 0x34, 0x33, 0x00, 0x00
++};
++
++static const guint v4_door_body_len[] = { 52, 32, 32, 48, 32, 32 };
++static const guint v4_door_write_count = 6;
++
++static void v4_door_set_deadline(void);
++
++/* Exact CALL_INIT retransmit suppression.  The device retries the same
++ * CALL_INIT frame with a short backoff.  Hashing the protocol body lets
++ * us suppress only an identical frame inside a bounded window while a
++ * later or different CALL_INIT remains eligible for a new HA event. */
++#define V4_RING_DEDUP_WINDOW_USEC ((gint64)15 * G_USEC_PER_SEC)
++static gchar v4_last_ring_sha256[65] = {0};
++static gint64 v4_last_ring_seen_us = 0;
++
++
+ static const guint8 p12_ucfg_request_body[] = {
+     0x7b, 0x22, 0x6d, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65, 0x22, 0x3a, 0x22,
+     0x67, 0x65, 0x74, 0x2d, 0x63, 0x6f, 0x6e, 0x66, 0x69, 0x67, 0x75, 0x72,
+@@ -1652,7 +1735,7 @@
+                 );
+ 
+                 printf(
+-                    "V4_DOOR_ACTION_SURFACE_PRESENT=false\n"
++                    "V4_DOOR_ACTION_SURFACE_PRESENT=true\n"
+                 );
+ 
+                 printf(
+@@ -1712,6 +1795,24 @@
+             break;
+ 
+ 
++        case P12_TX_V4_DOOR_OPEN_CTPP:
++            printf("V4_DOOR_CTPP_OPEN_SENT=true\n");
++            v4_door_stage = V4_DOOR_WAIT_OPEN;
++            v4_door_set_deadline();
++            break;
++
++        case P12_TX_V4_DOOR_WRITE:
++            printf("V4_DOOR_WRITE_%u_SENT=true\n", (unsigned)v4_door_write_index);
++            v4_door_stage = V4_DOOR_WAIT_WRITE;
++            v4_door_set_deadline();
++            break;
++
++        case P12_TX_V4_DOOR_CLOSE_CTPP:
++            printf("V4_DOOR_CTPP_CLOSE_SENT=true\n");
++            v4_door_stage = V4_DOOR_WAIT_CLOSE;
++            v4_door_set_deadline();
++            break;
++
+         default:
+             break;
+     }
+@@ -2110,6 +2211,322 @@
+ }
+ 
+ 
++
++static gboolean
++v4_ring_is_retransmit(
++    const guint8 *body,
++    guint body_len)
++{
++    gchar *digest =
++        g_compute_checksum_for_data(
++            G_CHECKSUM_SHA256,
++            body,
++            body_len
++        );
++
++    if (!digest) {
++        /* Fail open: never drop a real ring merely because local hashing failed. */
++        return FALSE;
++    }
++
++    gint64 now = g_get_monotonic_time();
++    gboolean duplicate =
++        v4_last_ring_seen_us > 0 &&
++        now >= v4_last_ring_seen_us &&
++        (now - v4_last_ring_seen_us) <= V4_RING_DEDUP_WINDOW_USEC &&
++        g_strcmp0(digest, v4_last_ring_sha256) == 0;
++
++    if (duplicate) {
++        /* Refresh the window while the same protocol retransmit train continues. */
++        v4_last_ring_seen_us = now;
++        printf("V4_RING_RETRANSMIT_SUPPRESSED=true\n");
++        printf("V4_RING_RETRANSMIT_SHA256=%s\n", digest);
++    } else {
++        g_strlcpy(
++            v4_last_ring_sha256,
++            digest,
++            sizeof(v4_last_ring_sha256)
++        );
++        v4_last_ring_seen_us = now;
++        printf("V4_RING_FRAME_SHA256=%s\n", digest);
++    }
++
++    g_free(digest);
++    fflush(stdout);
++    return duplicate;
++}
++
++
++
++static void
++v4_door_set_deadline(void)
++{
++    v4_door_deadline_us =
++        g_get_monotonic_time() +
++        ((gint64)V4_DOOR_STEP_TIMEOUT_SECONDS * G_USEC_PER_SEC);
++}
++
++
++static void
++v4_door_reset(void)
++{
++    v4_door_stage = V4_DOOR_IDLE;
++    v4_door_requested_channel_id = 0;
++    v4_door_channel_id = 0;
++    v4_door_write_index = 0;
++    v4_door_writes_acked = 0;
++    v4_door_deadline_us = 0;
++    v4_door_send_started = FALSE;
++}
++
++
++static void
++v4_door_emit_result(const gchar *state)
++{
++    printf("V4_DOOR_RESULT=%s\n", state);
++    printf("V4_DOOR_WRITE_COUNT=%u\n", (unsigned)v4_door_writes_acked);
++    printf("V4_DOOR_AUTOMATIC_RETRY_ALLOWED=false\n");
++    printf("V4_DOOR_PHYSICAL_EFFECT_ASSERTED=false\n");
++    fflush(stdout);
++}
++
++
++static void
++v4_door_signal_handler(int signum)
++{
++    if (signum == SIGUSR1)
++        v4_door_signal_pending = 1;
++}
++
++
++static gboolean
++v4_door_queue_open(void)
++{
++    guint16 candidate = V4_DOOR_REQUESTED_CHANNEL_ID;
++    while (candidate == echo_channel_id ||
++           candidate == uaut_channel_id ||
++           candidate == ucfg_channel_id ||
++           candidate == v4_ctpp_channel_id ||
++           candidate == v4_cspb_channel_id) {
++        candidate++;
++    }
++    v4_door_requested_channel_id = candidate;
++
++    guint8 body[15];
++    memset(body, 0, sizeof(body));
++    write_le16(body + 0, 0xABCD);
++    write_le16(body + 2, 1);
++    write_le32(body + 4, 7);
++    memcpy(body + 8, "CTPP", 4);
++    write_le16(body + 12, candidate);
++
++    gboolean queued = p12_queue_vip_frame(
++        0, body, sizeof(body), P12_TX_V4_DOOR_OPEN_CTPP
++    );
++    memset(body, 0, sizeof(body));
++    if (!queued)
++        return FALSE;
++    v4_door_send_started = TRUE;
++    return p12_flush_tx();
++}
++
++
++static gboolean
++v4_door_queue_write(guint index)
++{
++    if (index == 0 || index > v4_door_write_count)
++        return FALSE;
++
++    const guint8 *body = v4_door_body_1;
++    switch (index) {
++        case 2: body = v4_door_body_2; break;
++        case 3: body = v4_door_body_3; break;
++        case 4: body = v4_door_body_4; break;
++        case 5: body = v4_door_body_5; break;
++        case 6: body = v4_door_body_6; break;
++        default: break;
++    }
++
++    v4_door_write_index = index;
++    gboolean queued = p12_queue_vip_frame(
++        v4_door_channel_id,
++        body,
++        v4_door_body_len[index - 1],
++        P12_TX_V4_DOOR_WRITE
++    );
++    if (!queued)
++        return FALSE;
++    v4_door_send_started = TRUE;
++    return p12_flush_tx();
++}
++
++
++static gboolean
++v4_door_queue_close(void)
++{
++    guint8 body[10];
++    memset(body, 0, sizeof(body));
++    write_le16(body + 0, 0x01EF);
++    write_le16(body + 2, 3);
++    write_le32(body + 4, 2);
++    write_le16(body + 8, v4_door_channel_id);
++
++    gboolean queued = p12_queue_vip_frame(
++        0, body, sizeof(body), P12_TX_V4_DOOR_CLOSE_CTPP
++    );
++    memset(body, 0, sizeof(body));
++    if (!queued)
++        return FALSE;
++    v4_door_send_started = TRUE;
++    return p12_flush_tx();
++}
++
++
++static V4DoorFrameResult
++v4_door_process_frame(guint32 request_id, const guint8 *body, guint body_len)
++{
++    if (v4_door_stage == V4_DOOR_IDLE)
++        return V4_DOOR_FRAME_NOT_CONSUMED;
++
++    if (v4_door_stage == V4_DOOR_WAIT_OPEN) {
++        if (request_id != 0 || body_len != 12 ||
++            read_le16(body + 0) != 0xABCD || read_le16(body + 2) != 2) {
++            return V4_DOOR_FRAME_NOT_CONSUMED;
++        }
++
++        guint16 response_channel = 0;
++        guint16 response_word = 0xffff;
++        if (!p12_parse_control_response(
++                body, body_len, 2, v4_door_requested_channel_id, TRUE,
++                &response_channel, &response_word)) {
++            v4_door_emit_result("UNKNOWN_OUTCOME");
++            failed = TRUE;
++            if (loop) g_main_loop_quit(loop);
++            return V4_DOOR_FRAME_FAIL;
++        }
++        if (response_word != 0) {
++            v4_door_emit_result("REJECTED");
++            v4_door_reset();
++            return V4_DOOR_FRAME_CONSUMED;
++        }
++
++        v4_door_channel_id = response_channel;
++        printf("V4_DOOR_CTPP_OPEN_RESPONSE=PASS\n");
++        fflush(stdout);
++        if (!v4_door_queue_write(1)) {
++            v4_door_emit_result("UNKNOWN_OUTCOME");
++            failed = TRUE;
++            if (loop) g_main_loop_quit(loop);
++            return V4_DOOR_FRAME_FAIL;
++        }
++        return V4_DOOR_FRAME_CONSUMED;
++    }
++
++    if (v4_door_stage == V4_DOOR_WAIT_WRITE) {
++        if (request_id != v4_door_channel_id)
++            return V4_DOOR_FRAME_NOT_CONSUMED;
++
++        v4_door_writes_acked = v4_door_write_index;
++        printf("V4_DOOR_WRITE_%u_ACKED=true\n", (unsigned)v4_door_write_index);
++        fflush(stdout);
++
++        if (v4_door_write_index < v4_door_write_count) {
++            if (!v4_door_queue_write(v4_door_write_index + 1)) {
++                v4_door_emit_result("UNKNOWN_OUTCOME");
++                failed = TRUE;
++                if (loop) g_main_loop_quit(loop);
++                return V4_DOOR_FRAME_FAIL;
++            }
++        } else if (!v4_door_queue_close()) {
++            v4_door_emit_result("UNKNOWN_OUTCOME");
++            failed = TRUE;
++            if (loop) g_main_loop_quit(loop);
++            return V4_DOOR_FRAME_FAIL;
++        }
++        return V4_DOOR_FRAME_CONSUMED;
++    }
++
++    if (v4_door_stage == V4_DOOR_WAIT_CLOSE) {
++        if (request_id != 0 || body_len != 12 ||
++            read_le16(body + 0) != 0x01EF || read_le16(body + 2) != 4 ||
++            read_le16(body + 8) != v4_door_channel_id) {
++            return V4_DOOR_FRAME_NOT_CONSUMED;
++        }
++
++        guint16 response_channel = 0;
++        guint16 response_word = 0xffff;
++        if (!p12_parse_control_response(
++                body, body_len, 4, v4_door_channel_id, FALSE,
++                &response_channel, &response_word) || response_word != 0) {
++            v4_door_emit_result("UNKNOWN_OUTCOME");
++            failed = TRUE;
++            if (loop) g_main_loop_quit(loop);
++            return V4_DOOR_FRAME_FAIL;
++        }
++
++        printf("V4_DOOR_CTPP_CLOSE_RESPONSE=PASS\n");
++        v4_door_emit_result("ACKED");
++        v4_door_reset();
++        return V4_DOOR_FRAME_CONSUMED;
++    }
++
++    return V4_DOOR_FRAME_NOT_CONSUMED;
++}
++
++
++static gboolean
++v4_door_tick_cb(gpointer data)
++{
++    (void)data;
++
++    if (v4_door_stage != V4_DOOR_IDLE &&
++        v4_door_deadline_us > 0 &&
++        g_get_monotonic_time() > v4_door_deadline_us) {
++        v4_door_emit_result(v4_door_send_started ? "UNKNOWN_OUTCOME" : "FAILED_SAFE");
++        if (v4_door_send_started) {
++            failed = TRUE;
++            if (loop) g_main_loop_quit(loop);
++            return G_SOURCE_REMOVE;
++        }
++        v4_door_reset();
++    }
++
++    if (!v4_door_signal_pending)
++        return G_SOURCE_CONTINUE;
++
++    v4_door_signal_pending = 0;
++
++    if (!v4_listener_ready ||
++        p12_stage != P12_STAGE_V4_LISTEN_RING ||
++        v4_door_stage != V4_DOOR_IDLE ||
++        p12_tx_pending) {
++        printf("V4_DOOR_RESULT=REJECTED_NOT_READY\n");
++        printf("V4_DOOR_AUTOMATIC_RETRY_ALLOWED=false\n");
++        printf("V4_DOOR_PHYSICAL_EFFECT_ASSERTED=false\n");
++        fflush(stdout);
++        return G_SOURCE_CONTINUE;
++    }
++
++    printf("V4_DOOR_COMMAND_ACCEPTED=true\n");
++    printf("V4_DOOR_TARGET=entrance\n");
++    printf("V4_DOOR_AUTOMATIC_RETRY_ALLOWED=false\n");
++    printf("V4_DOOR_PHYSICAL_EFFECT_ASSERTED=false\n");
++    fflush(stdout);
++
++    if (!v4_door_queue_open()) {
++        v4_door_emit_result(v4_door_send_started ? "UNKNOWN_OUTCOME" : "FAILED_SAFE");
++        if (v4_door_send_started) {
++            failed = TRUE;
++            if (loop) g_main_loop_quit(loop);
++            return G_SOURCE_REMOVE;
++        }
++        v4_door_reset();
++    }
++
++    return G_SOURCE_CONTINUE;
++}
++
++
+ static gboolean
+ p12_process_post_uaut(void)
+ {
+@@ -2144,6 +2561,18 @@
+             post_ack_capture + 8;
+ 
+ 
++        V4DoorFrameResult door_frame =
++            v4_door_process_frame(request_id, body, body_len);
++
++        if (door_frame == V4_DOOR_FRAME_FAIL)
++            return FALSE;
++
++        if (door_frame == V4_DOOR_FRAME_CONSUMED) {
++            p12_consume_post_ack(frame_len);
++            continue;
++        }
++
++
+         /*
+          * --------------------------------------------------------
+          * V4 post-registration diagnostic
+@@ -3619,6 +4048,19 @@
+                 }
+ 
+ 
++                if (
++                    v4_ring_is_retransmit(
++                        body,
++                        body_len
++                    )
++                ) {
++                    p12_consume_post_ack(
++                        frame_len
++                    );
++                    continue;
++                }
++
++
+                 v4_ring_observed =
+                     TRUE;
+ 
+@@ -5900,12 +6342,20 @@
+     printf("ICE_GATHER_START=PASS\n");
+     fflush(stdout);
+ 
++    signal(SIGUSR1, v4_door_signal_handler);
++
+     g_timeout_add(
+         100,
+         stop_check_cb,
+         NULL
+     );
+ 
++    g_timeout_add(
++        100,
++        v4_door_tick_cb,
++        NULL
++    );
++
+     g_timeout_add(
+         100,
+         remote_sdp_check_cb,
