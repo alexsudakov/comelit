@@ -10,6 +10,7 @@ from homeassistant.helpers.selector import TextSelector, TextSelectorConfig, Tex
 from .const import (
     CONF_DEVICE_UUID,
     CONF_OAUTH_ACCESS_TOKEN,
+    CONF_OAUTH_REFRESH_TOKEN,
     CONF_VIP_TOKEN,
     DOMAIN,
 )
@@ -44,19 +45,22 @@ class ComelitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 oauth_access_token = _clean_required(
                     user_input[CONF_OAUTH_ACCESS_TOKEN]
                 )
+                oauth_refresh_token = str(
+                    user_input.get(CONF_OAUTH_REFRESH_TOKEN) or ""
+                ).strip()
             except (ValueError, KeyError):
                 errors["base"] = "invalid_config"
             else:
                 await self.async_set_unique_id(device_uuid)
                 self._abort_if_unique_id_configured()
-                return self.async_create_entry(
-                    title="Comelit",
-                    data={
-                        CONF_DEVICE_UUID: device_uuid,
-                        CONF_VIP_TOKEN: vip_token,
-                        CONF_OAUTH_ACCESS_TOKEN: oauth_access_token,
-                    },
-                )
+                data = {
+                    CONF_DEVICE_UUID: device_uuid,
+                    CONF_VIP_TOKEN: vip_token,
+                    CONF_OAUTH_ACCESS_TOKEN: oauth_access_token,
+                }
+                if oauth_refresh_token:
+                    data[CONF_OAUTH_REFRESH_TOKEN] = oauth_refresh_token
+                return self.async_create_entry(title="Comelit", data=data)
 
         schema = vol.Schema(
             {
@@ -67,6 +71,9 @@ class ComelitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     TextSelectorConfig(type=TextSelectorType.PASSWORD)
                 ),
                 vol.Required(CONF_OAUTH_ACCESS_TOKEN): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                ),
+                vol.Optional(CONF_OAUTH_REFRESH_TOKEN): TextSelector(
                     TextSelectorConfig(type=TextSelectorType.PASSWORD)
                 ),
             }
