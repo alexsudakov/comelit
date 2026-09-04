@@ -7,13 +7,19 @@ from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN
 from .runtime import ComelitRingRuntime
+from .supervisor import ComelitRuntimeSupervisor
 
 WEBHOOK_ID = "comelit-ha-ring-test-control-v1"
 _ALLOWED_REMOTE = "192.168.1.85"
 
 
-def _status_payload(runtime: ComelitRingRuntime) -> dict[str, object]:
+def _status_payload(
+    runtime: ComelitRingRuntime,
+    supervisor: ComelitRuntimeSupervisor,
+) -> dict[str, object]:
     status = runtime.status()
+    status["supervisor_running"] = supervisor.running
+    status["reconnect_count"] = supervisor.reconnect_count
     status["press_panel_now"] = bool(
         status["running"]
         and status["listener_ready"]
@@ -31,6 +37,7 @@ async def _handle(
     request: Request,
     *,
     runtime: ComelitRingRuntime,
+    supervisor: ComelitRuntimeSupervisor,
 ) -> Response:
     del hass, webhook_id
 
@@ -48,9 +55,9 @@ async def _handle(
     action = payload.get("action")
 
     if action == "start":
-        await runtime.async_start()
+        await supervisor.async_start()
         ready = await runtime.async_wait_ready(timeout=30)
-        result = _status_payload(runtime)
+        result = _status_payload(runtime, supervisor)
         result["ok"] = bool(ready)
         result["action"] = "start"
         if not ready and not result.get("last_error"):
@@ -58,14 +65,14 @@ async def _handle(
         return json_response(result, status=200 if ready else 503)
 
     if action == "status":
-        result = _status_payload(runtime)
+        result = _status_payload(runtime, supervisor)
         result["ok"] = True
         result["action"] = "status"
         return json_response(result)
 
     if action == "stop":
-        await runtime.async_stop()
-        result = _status_payload(runtime)
+        await supervisor.async_stop()
+        result = _status_payload(runtime, supervisor)
         result["ok"] = True
         result["action"] = "stop"
         return json_response(result)
@@ -76,6 +83,7 @@ async def _handle(
 def async_register_test_control(
     hass: HomeAssistant,
     runtime: ComelitRingRuntime,
+    supervisor: ComelitRuntimeSupervisor,
 ) -> None:
     async def handler(
         handler_hass: HomeAssistant,
@@ -87,6 +95,7 @@ def async_register_test_control(
             webhook_id,
             request,
             runtime=runtime,
+            supervisor=supervisor,
         )
 
     webhook.async_register(
