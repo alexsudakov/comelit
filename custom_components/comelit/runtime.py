@@ -459,7 +459,7 @@ class ComelitRingRuntime:
 
             if line == "V4_RING_LISTENER_READY=true":
                 self._listener_ready.set()
-                _LOGGER.warning(
+                _LOGGER.info(
                     "Comelit ring listener READY for persistent 3300s cycle"
                 )
                 continue
