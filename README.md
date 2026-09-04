@@ -1,11 +1,27 @@
-# Comelit
+# Comelit for Home Assistant
 
-Repository for the Comelit ViP integration research and safety PoC.
+Custom Home Assistant integration for Comelit ViP.
 
-Current deployment target: CT120.
+Current target architecture is direct Home Assistant integration: Home Assistant owns the persistent Comelit P2P session, receives incoming ring events, and exposes protected Door control. CT120/Hermes is retained only for development and remote validation support; it is not part of the production runtime path.
 
-Canonical implementation source lives under [`safety-poc/`](safety-poc/). Historical v0.5 bootstrap transport artifacts remain under `artifacts/v0.5/` for reproducibility only; future development and deployment are Git-native.
+## Installation and updates
 
-The v0.6 development branch adds a public-safe CT120 evidence collector, payload-redacted CTPP body modeling, offline CTPP/full-transaction models, explicit readiness gates, and a Home Assistant service contract.
+The integration is intended to be installed and updated through HACS as a custom repository. All runtime files required by Home Assistant, including the native helper and its bundled runtime libraries, live under `custom_components/comelit/`.
 
-Safety rule: real Door transport remains disabled until the offline/runtime gates are complete and a separate explicit controlled live-test gate is approved. Protocol acknowledgement is never treated as proof that the physical relay moved.
+Repository: `alexsudakov/comelit`
+Category: Integration
+
+## Current capabilities
+
+- Direct Comelit cloud P2P bootstrap and persistent session
+- Incoming `comelit_ring` Home Assistant events
+- Exact-frame retransmit deduplication for incoming CALL_INIT
+- OAuth access-token refresh with refresh-token persistence in the Home Assistant config entry
+- Direct entrance Door action through `comelit.open_door`
+- Standard Home Assistant button entity for the main entrance
+
+## Safety contract
+
+Door operations are one-shot. Automatic Door retry is not allowed. A protocol acknowledgement is never treated as proof that the physical door opened. Physical Door validation requires a separate explicit controlled test.
+
+The gate Door target remains unavailable until its exact actuation profile is independently validated.
