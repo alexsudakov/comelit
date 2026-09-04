@@ -21,11 +21,13 @@ done
 rm -rf "$TMP"
 mkdir -m 700 "$TMP"
 
-python3 - "$BASE" "$PATCHED" <<'PY'
+python3 - "$BASE" "$PATCHED" "$HERE" <<'PY'
 from pathlib import Path
+import shlex
 import sys
 
 src = Path(sys.argv[1]).read_text(encoding="utf-8")
+patched_here = str(Path(sys.argv[3]).resolve())
 
 required = (
     'PSEUDOTCP_START_AT_SELECTED_PAIR=true',
@@ -38,6 +40,16 @@ for marker in required:
     if marker not in src:
         raise SystemExit(f'BASE_CONTRACT=FAIL missing={marker}')
 print('BASE_CONTRACT=PASS')
+
+# The selected-pair script derives REPO from its own HERE. Since this wrapper
+# executes a temporary copy under /root, preserve the original repository
+# directory explicitly or the copied script will derive the wrong BASE path.
+old = 'HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"\n'
+new = f'HERE={shlex.quote(patched_here)}\n'
+if src.count(old) != 1:
+    raise SystemExit(f'HERE_PATCH=FAIL count={src.count(old)}')
+src = src.replace(old, new, 1)
+print('HERE_PATCH=PASS')
 
 old = 'REMOTE="$RUN/remote.sdp"\n'
 new = 'REMOTE="$RUN/remote.sdp"\nREMOTE_FULL="$OUT/remote.full.sdp"\n'
