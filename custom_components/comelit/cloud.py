@@ -77,13 +77,18 @@ async def async_negotiate_p2p(
     except (ClientError, TimeoutError) as exc:
         raise ComelitCloudError(f"http_exception:{type(exc).__name__}") from exc
 
+    # Preserve the HTTP status boundary before decoding the body. In
+    # particular, a 401 must remain observable even if its body is empty or
+    # not JSON so the runtime can perform exactly one OAuth refresh and retry
+    # only this P2P bootstrap request.
+    if not 200 <= status < 300:
+        raise ComelitCloudHttpError(status)
+
     try:
         obj = json.loads(raw.decode("utf-8", errors="replace"))
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise ComelitCloudError("response_not_json") from exc
 
-    if not 200 <= status < 300:
-        raise ComelitCloudHttpError(status)
     if not isinstance(obj, dict):
         raise ComelitCloudError("response_not_object")
 
