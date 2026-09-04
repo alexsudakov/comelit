@@ -13,11 +13,11 @@ from .const import (
     CONF_OAUTH_ACCESS_TOKEN,
     CONF_OAUTH_EXPIRES_AT,
     CONF_OAUTH_REFRESH_TOKEN,
+    CONF_OAUTH_SCOPE,
 )
 
 TOKEN_ENDPOINT = "https://api.comelitgroup.com/o-auth-2/token"
 CLIENT_ID = "kgDV0WRlQcSF4jPsz887lOTPyVVtP7Oh"
-SCOPE = "all"
 REFRESH_SKEW_SECONDS = 300
 
 
@@ -48,14 +48,16 @@ async def async_refresh_oauth(
     session: ClientSession,
     *,
     refresh_token: str,
+    scope: str | None,
 ) -> OAuthRefreshResult:
     """Refresh a Comelit OAuth token using the app-proven refresh contract."""
     fields = {
         "grant_type": "refresh_token",
         "client_id": CLIENT_ID,
-        "scope": SCOPE,
         "refresh_token": refresh_token,
     }
+    if scope:
+        fields["scope"] = scope
     headers = {"Accept": "application/json"}
 
     try:
@@ -101,8 +103,8 @@ async def async_refresh_oauth(
     if token_type is not None and not isinstance(token_type, str):
         raise ComelitOAuthError("oauth_token_type_invalid")
 
-    scope = obj.get("scope")
-    if scope is not None and not isinstance(scope, str):
+    response_scope = obj.get("scope")
+    if response_scope is not None and not isinstance(response_scope, str):
         raise ComelitOAuthError("oauth_scope_invalid")
 
     return OAuthRefreshResult(
@@ -110,7 +112,7 @@ async def async_refresh_oauth(
         refresh_token=refresh,
         expires_in=expires_in,
         token_type=token_type,
-        scope=scope,
+        scope=response_scope,
     )
 
 
@@ -134,6 +136,7 @@ class ComelitOAuthManager:
             data = self._entry.data
             access = str(data.get(CONF_OAUTH_ACCESS_TOKEN) or "")
             refresh = str(data.get(CONF_OAUTH_REFRESH_TOKEN) or "")
+            scope = str(data.get(CONF_OAUTH_SCOPE) or "").strip() or None
             expires_at = _parse_expires_at(data.get(CONF_OAUTH_EXPIRES_AT))
             now = int(time.time())
 
@@ -149,10 +152,13 @@ class ComelitOAuthManager:
             refreshed = await async_refresh_oauth(
                 self._session,
                 refresh_token=refresh,
+                scope=scope,
             )
             new_data = dict(self._entry.data)
             new_data[CONF_OAUTH_ACCESS_TOKEN] = refreshed.access_token
             new_data[CONF_OAUTH_REFRESH_TOKEN] = refreshed.refresh_token or refresh
             new_data[CONF_OAUTH_EXPIRES_AT] = int(time.time()) + refreshed.expires_in
+            if refreshed.scope or scope:
+                new_data[CONF_OAUTH_SCOPE] = refreshed.scope or scope
             self._hass.config_entries.async_update_entry(self._entry, data=new_data)
             return refreshed.access_token
