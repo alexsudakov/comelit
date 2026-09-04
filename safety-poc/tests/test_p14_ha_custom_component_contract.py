@@ -114,7 +114,7 @@ class P14HomeAssistantContractTests(unittest.TestCase):
             (ROOT / "custom_components/comelit/manifest.json").read_text()
         )
         self.assertEqual(manifest["domain"], "comelit")
-        self.assertEqual(manifest["version"], "1.4.3")
+        self.assertEqual(manifest["version"], "1.5.0")
         self.assertTrue(manifest["config_flow"])
         self.assertTrue(manifest["single_config_entry"])
         self.assertEqual(manifest["requirements"], [])
@@ -124,6 +124,38 @@ class P14HomeAssistantContractTests(unittest.TestCase):
         self.assertIn("os.chmod(_NATIVE_BINARY, 0o700)", runtime)
         self.assertIn("native_binary_chmod_failed", runtime)
         self.assertIn("native_binary_not_executable", runtime)
+
+    def test_production_supervisor_autostarts_and_never_invokes_door(self):
+        init = (ROOT / "custom_components/comelit/__init__.py").read_text()
+        supervisor = (ROOT / "custom_components/comelit/supervisor.py").read_text()
+        test_control = (ROOT / "custom_components/comelit/test_control.py").read_text()
+        self.assertIn("await supervisor.async_start()", init)
+        self.assertIn("ComelitRuntimeSupervisor", init)
+        self.assertIn("RECONNECT_DELAY_SECONDS = 5", supervisor)
+        self.assertIn("await self._runtime.async_start()", supervisor)
+        self.assertIn("await self._runtime.async_stop()", supervisor)
+        self.assertNotIn("async_open_door", supervisor)
+        self.assertIn("await supervisor.async_stop()", test_control)
+        self.assertIn('status["supervisor_running"]', test_control)
+
+    def test_gate_entity_is_exposed_but_actuation_remains_fail_closed(self):
+        const = (ROOT / "custom_components/comelit/const.py").read_text()
+        button = (ROOT / "custom_components/comelit/button.py").read_text()
+        services = (ROOT / "custom_components/comelit/services.yaml").read_text()
+        self.assertIn('DOOR_GATE = "gate"', const)
+        self.assertIn(
+            'MAIN_GATE_ENTITY_ID = "button.comelit_main_gate_open_door"', const
+        )
+        self.assertIn("SUPPORTED_DOORS = (DOOR_ENTRANCE,)", const)
+        self.assertIn("ComelitGateDoorButton", button)
+        self.assertIn('_attr_name = "Comelit — Калитка"', button)
+        self.assertIn("_attr_available = False", button)
+        self.assertIn('"actuation_profile_validated": False', button)
+        self.assertIn('"ring_source": "00000610"', button)
+        self.assertNotIn(
+            "await self._runtime.async_open_door(DOOR_GATE)", button
+        )
+        self.assertNotIn("- gate", services)
 
     def test_direct_service_uses_logical_door_and_internal_operation_id(self):
         text = (ROOT / "custom_components/comelit/__init__.py").read_text()
@@ -260,6 +292,9 @@ class P14HomeAssistantContractTests(unittest.TestCase):
         self.assertIn('SERVICE_OPEN_DOOR = "open_door"', text)
         self.assertIn(
             'MAIN_ENTRANCE_ENTITY_ID = "button.comelit_main_entrance_open_door"', text
+        )
+        self.assertIn(
+            'MAIN_GATE_ENTITY_ID = "button.comelit_main_gate_open_door"', text
         )
 
     def test_success_server_response_is_hmac_signed(self):
