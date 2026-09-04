@@ -9,7 +9,8 @@
           "device_uuid": "Device UUID",
           "vip_token": "ViP token",
           "oauth_access_token": "OAuth access token",
-          "oauth_refresh_token": "OAuth refresh token"
+          "oauth_refresh_token": "OAuth refresh token",
+          "oauth_scope": "OAuth scope"
         }
       }
     },
