@@ -109,41 +109,99 @@ class P14HomeAssistantContractTests(unittest.TestCase):
             )
         )
 
-    def test_manifest_is_single_local_config_flow(self):
+    def test_manifest_is_single_direct_config_flow(self):
         manifest = json.loads(
             (ROOT / "custom_components/comelit/manifest.json").read_text()
         )
         self.assertEqual(manifest["domain"], "comelit")
-        self.assertEqual(manifest["version"], "1.0.0")
+        self.assertEqual(manifest["version"], "1.4.1")
         self.assertTrue(manifest["config_flow"])
         self.assertTrue(manifest["single_config_entry"])
         self.assertEqual(manifest["requirements"], [])
 
-    def test_service_is_response_required_and_operation_id_is_strict(self):
+    def test_direct_service_uses_logical_door_and_internal_operation_id(self):
         text = (ROOT / "custom_components/comelit/__init__.py").read_text()
-        self.assertIn("async_register_platform_entity_service", text)
-        self.assertIn("supports_response=SupportsResponse.ONLY", text)
-        self.assertIn("validate_operation_id", text)
-        self.assertNotIn("cv.string", text)
+        runtime = (ROOT / "custom_components/comelit/runtime.py").read_text()
+        self.assertIn("hass.services.async_register", text)
+        self.assertIn("SERVICE_OPEN_DOOR", text)
+        self.assertIn("vol.Required(ATTR_DOOR): vol.In(SUPPORTED_DOORS)", text)
+        self.assertIn("supports_response=SupportsResponse.OPTIONAL", text)
+        self.assertIn('operation_id = f"comelit-ha-{uuid4()}"', runtime)
+        self.assertNotIn("validate_operation_id", text)
 
-    def test_standard_button_press_is_fail_closed_and_action_returns_result(self):
+    def test_standard_button_delegates_to_direct_runtime_and_fails_closed(self):
         path = ROOT / "custom_components/comelit/button.py"
         source = path.read_text()
         tree = ast.parse(source)
         press = next(
             n
             for n in ast.walk(tree)
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and n.name == "async_press"
+            if isinstance(n, ast.AsyncFunctionDef) and n.name == "async_press"
         )
         self.assertTrue(any(isinstance(n, ast.Raise) for n in ast.walk(press)))
-        action = next(
+        self.assertIn('await self._runtime.async_open_door("entrance")', source)
+        self.assertIn('"automatic_retry_allowed": False', source)
+        self.assertIn('"physical_effect_asserted": False', source)
+        self.assertIn('"physical_door_state": "UNKNOWN"', source)
+
+    def test_config_flow_is_direct_and_refresh_token_is_optional(self):
+        source = (ROOT / "custom_components/comelit/config_flow.py").read_text()
+        self.assertIn("CONF_DEVICE_UUID", source)
+        self.assertIn("CONF_VIP_TOKEN", source)
+        self.assertIn("CONF_OAUTH_ACCESS_TOKEN", source)
+        self.assertIn("CONF_OAUTH_REFRESH_TOKEN", source)
+        self.assertIn("vol.Optional(CONF_OAUTH_REFRESH_TOKEN)", source)
+        self.assertNotIn("async_health(require_live=True)", source)
+        self.assertNotIn("parsed.port != BRIDGE_PORT", source)
+
+    def test_oauth_refresh_contract_is_single_form_post_and_persisted(self):
+        source = (ROOT / "custom_components/comelit/oauth.py").read_text()
+        tree = ast.parse(source)
+        refresh = next(
             n
             for n in ast.walk(tree)
-            if isinstance(n, ast.AsyncFunctionDef) and n.name == "async_open_door"
+            if isinstance(n, ast.AsyncFunctionDef) and n.name == "async_refresh_oauth"
         )
-        self.assertTrue(any(isinstance(n, ast.Return) for n in ast.walk(action)))
-        self.assertIn("physical_door_state", source)
+        posts = [
+            n
+            for n in ast.walk(refresh)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "post"
+        ]
+        self.assertEqual(len(posts), 1)
+        self.assertIn('"grant_type": "refresh_token"', source)
+        self.assertIn('"client_id": CLIENT_ID', source)
+        self.assertIn('"scope": SCOPE', source)
+        self.assertIn('"refresh_token": refresh_token', source)
+        self.assertIn("REFRESH_SKEW_SECONDS = 300", source)
+        self.assertIn("async_update_entry", source)
+        self.assertNotIn("print(", source)
+        self.assertNotIn("_LOGGER", source)
+
+    def test_runtime_retries_only_p2p_bootstrap_once_after_401(self):
+        source = (ROOT / "custom_components/comelit/runtime.py").read_text()
+        tree = ast.parse(source)
+        cycle = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.AsyncFunctionDef) and n.name == "_async_run_cycle"
+        )
+        calls = [
+            n
+            for n in ast.walk(cycle)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id == "async_negotiate_p2p"
+        ]
+        self.assertEqual(len(calls), 2)
+        loops = [n for n in ast.walk(cycle) if isinstance(n, (ast.For, ast.While))]
+        self.assertEqual(loops, [])
+        self.assertIn("except ComelitCloudHttpError as exc", source)
+        self.assertIn("if exc.status != 401", source)
+        self.assertIn("force_refresh=True", source)
+        self.assertIn('"automatic_retry_allowed": False', source)
+        self.assertIn('"physical_effect_asserted": False', source)
 
     def test_ha_client_open_door_has_no_retry_loop_and_requires_exact_safety_flags(self):
         path = ROOT / "custom_components/comelit/client.py"
@@ -184,15 +242,6 @@ class P14HomeAssistantContractTests(unittest.TestCase):
         self.assertIn("ComelitBridgeOutcomeUnknown", source)
         self.assertNotIn("response.status in {400, 401, 404, 411, 413}", source)
         self.assertNotIn("Only syntactic/auth failures are known to precede runner", source)
-
-    def test_config_flow_accepts_only_private_ipv4_http_port_18014(self):
-        source = (ROOT / "custom_components/comelit/config_flow.py").read_text()
-        self.assertIn('parsed.scheme != "http"', source)
-        self.assertIn("parsed.port != BRIDGE_PORT", source)
-        self.assertIn("ipaddress.ip_address", source)
-        self.assertIn("not addr.is_private", source)
-        self.assertIn("addr.is_link_local", source)
-        self.assertIn("async_health(require_live=True)", source)
 
     def test_canonical_entity_and_service_names(self):
         text = (ROOT / "custom_components/comelit/const.py").read_text()
