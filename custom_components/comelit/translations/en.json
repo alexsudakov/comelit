@@ -8,12 +8,14 @@
         "data": {
           "device_uuid": "Device UUID",
           "vip_token": "ViP token",
-          "oauth_access_token": "OAuth access token"
+          "oauth_access_token": "OAuth access token",
+          "oauth_refresh_token": "OAuth refresh token",
+          "oauth_scope": "OAuth scope"
         }
       }
     },
     "error": {
-      "invalid_config": "Check the Device UUID, ViP token and OAuth access token"
+      "invalid_config": "Check the Device UUID, ViP token and OAuth tokens"
     },
     "abort": {
       "already_configured": "This Comelit device is already configured"
@@ -22,11 +24,11 @@
   "services": {
     "open_door": {
       "name": "Open door",
-      "description": "Perform one protected transitional Door operation. A service response is mandatory. ACKED is protocol evidence only and never proves the physical door opened.",
+      "description": "Perform one protected direct Door operation. ACKED is protocol evidence only and never proves the physical door opened.",
       "fields": {
-        "operation_id": {
-          "name": "Operation ID",
-          "description": "Fresh p13-hermes UUID4 for this one-shot request. Never reuse it as a retry after UNKNOWN_OUTCOME."
+        "door": {
+          "name": "Door",
+          "description": "Logical door target exposed by the integration."
         }
       }
     }
