@@ -24,7 +24,7 @@ from .sdp import ComelitSdpError, transform_offer
 
 _LOGGER = logging.getLogger(__name__)
 
-_NATIVE_ROOT = Path("/config/comelit-native-stage")
+_NATIVE_ROOT = Path(__file__).resolve().parent / "native"
 _NATIVE_BINARY = _NATIVE_ROOT / "comelit-v4"
 _NATIVE_LIB = _NATIVE_ROOT / "lib"
 _HELPER_SECRETS = Path("/root/.config/comelit/secrets.env")
