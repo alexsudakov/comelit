@@ -22,6 +22,7 @@ from .const import (
     SERVICE_OPEN_DOOR,
     SUPPORTED_DOORS,
 )
+from .oauth import ComelitOAuthManager
 from .runtime import ComelitRingRuntime
 from .test_control import async_register_test_control, async_unregister_test_control
 
@@ -66,12 +67,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         for key in (CONF_DEVICE_UUID, CONF_VIP_TOKEN, CONF_OAUTH_ACCESS_TOKEN)
     )
     if has_direct_credentials:
+        oauth = ComelitOAuthManager(hass, session, entry)
         runtime = ComelitRingRuntime(
             hass,
             session,
             device_uuid=str(entry.data[CONF_DEVICE_UUID]),
             vip_token=str(entry.data[CONF_VIP_TOKEN]),
-            oauth_access_token=str(entry.data[CONF_OAUTH_ACCESS_TOKEN]),
+            oauth=oauth,
         )
         runtimes = domain_data.setdefault(DATA_RUNTIMES, {})
         runtimes[entry.entry_id] = runtime
