@@ -19,10 +19,16 @@ EVENT_RING = "comelit_ring"
 SERVICE_OPEN_DOOR = "open_door"
 ATTR_DOOR = "door"
 DOOR_ENTRANCE = "entrance"
+DOOR_GATE = "gate"
+
+# Only targets with a separately proven actuation profile may be accepted by
+# the public Door service. Gate ring identity is proven, gate actuation is not.
 SUPPORTED_DOORS = (DOOR_ENTRANCE,)
 
 MAIN_ENTRANCE_UNIQUE_ID = "comelit_main_entrance_open_door"
 MAIN_ENTRANCE_ENTITY_ID = "button.comelit_main_entrance_open_door"
+MAIN_GATE_UNIQUE_ID = "comelit_main_gate_open_door"
+MAIN_GATE_ENTITY_ID = "button.comelit_main_gate_open_door"
 
 BRIDGE_PROTOCOL_VERSION = 1
 BRIDGE_PORT = 18014
