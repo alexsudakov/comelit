@@ -10,7 +10,7 @@ mkdir -p "$BUILD"
 chmod 700 "$BUILD"
 
 python3 "$HERE/test_media_protocol_vectors.py"
-python3 "$HERE/generate_media_poc_v1.py"
+python3 "$HERE/run_generate_media_poc_v1.py"
 
 printf '%s\n' '=== SOURCE SAFETY ==='
 
