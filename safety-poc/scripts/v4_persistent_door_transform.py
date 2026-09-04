@@ -6,7 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 
-SOURCE_SHA256 = "7b33945be9bd87fbfff96c2947259e924a113552f2396ee84c77fdb2692082f8"
+SOURCE_SHA256 = "f0f051a54553614f092ac0e51858b5448abe94e72360b25acd7c90fe2c0decfe"
 PAYLOAD_SHA256 = "0d0159f9cc562c1c67bc362b192a30d3fabd634b2b92c3a96d8f318ecd842832"
 TARGET_FP = "832e5c09cf5f8ef79b9af83ba34b38a0a29847570ea37158310369850e2500ce"
 UCFG_SHA256 = "d31dca0fa13a57d3cbc600510149b3ad2a29c43e20949190ec62b44321d310b7"
@@ -439,7 +439,7 @@ def transform(source: str, bodies: tuple[bytes, ...]) -> str:
     for marker in (
         "P12_TX_V4_DOOR_OPEN_CTPP",
         "V4_DOOR_COMMAND_ACCEPTED=true",
-        "V4_DOOR_RESULT=ACKED",
+        "V4_DOOR_RESULT=%s",
         "V4_DOOR_AUTOMATIC_RETRY_ALLOWED=false",
         "V4_DOOR_PHYSICAL_EFFECT_ASSERTED=false",
     ):

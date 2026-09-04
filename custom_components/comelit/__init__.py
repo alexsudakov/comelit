@@ -2,55 +2,52 @@ from __future__ import annotations
 
 import voluptuous as vol
 
-from homeassistant.components.button import DOMAIN as BUTTON_DOMAIN
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, SupportsResponse
-from homeassistant.helpers import service
+from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
 
 from .client import ComelitBridgeClient
 from .const import (
-    ATTR_OPERATION_ID,
+    ATTR_DOOR,
     CONF_BRIDGE_URL,
     CONF_DEVICE_UUID,
     CONF_OAUTH_ACCESS_TOKEN,
     CONF_SHARED_SECRET,
     CONF_VIP_TOKEN,
+    DATA_RUNTIMES,
     DOMAIN,
     PLATFORMS,
     SERVICE_OPEN_DOOR,
+    SUPPORTED_DOORS,
 )
 from .runtime import ComelitRingRuntime
-from .signing import validate_operation_id
 from .test_control import async_register_test_control, async_unregister_test_control
-
-_RING_RUNTIMES = "ring_runtimes"
-
-
-def _operation_id(value: object) -> str:
-    try:
-        return validate_operation_id(str(value))
-    except (ValueError, TypeError, AttributeError) as exc:
-        raise vol.Invalid("operation_id must be p13-hermes-<uuid4>") from exc
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Register the protected transitional Door entity action."""
-    service.async_register_platform_entity_service(
-        hass,
+    """Register direct Comelit services."""
+
+    async def handle_open_door(call: ServiceCall) -> dict[str, object]:
+        runtimes = hass.data.get(DOMAIN, {}).get(DATA_RUNTIMES, {})
+        if len(runtimes) != 1:
+            raise HomeAssistantError("Comelit direct runtime is not uniquely available")
+        runtime: ComelitRingRuntime = next(iter(runtimes.values()))
+        return await runtime.async_open_door(str(call.data[ATTR_DOOR]))
+
+    hass.services.async_register(
         DOMAIN,
         SERVICE_OPEN_DOOR,
-        entity_domain=BUTTON_DOMAIN,
-        schema={vol.Required(ATTR_OPERATION_ID): _operation_id},
-        func="async_open_door",
-        supports_response=SupportsResponse.ONLY,
+        handle_open_door,
+        schema=vol.Schema({vol.Required(ATTR_DOOR): vol.In(SUPPORTED_DOORS)}),
+        supports_response=SupportsResponse.OPTIONAL,
     )
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up direct incoming-ring runtime and optional transitional Door bridge."""
+    """Set up direct Ring/Door runtime and optional legacy bridge client."""
     session = async_get_clientsession(hass)
     domain_data = hass.data.setdefault(DOMAIN, {})
 
@@ -58,18 +55,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.data.get(key) for key in (CONF_BRIDGE_URL, CONF_SHARED_SECRET)
     )
     if has_bridge:
-        client = ComelitBridgeClient(
+        domain_data[entry.entry_id] = ComelitBridgeClient(
             session,
             bridge_url=str(entry.data[CONF_BRIDGE_URL]),
             shared_secret=str(entry.data[CONF_SHARED_SECRET]),
         )
-        domain_data[entry.entry_id] = client
 
-    has_ring_credentials = all(
+    has_direct_credentials = all(
         entry.data.get(key)
         for key in (CONF_DEVICE_UUID, CONF_VIP_TOKEN, CONF_OAUTH_ACCESS_TOKEN)
     )
-    if has_ring_credentials:
+    if has_direct_credentials:
         runtime = ComelitRingRuntime(
             hass,
             session,
@@ -77,15 +73,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             vip_token=str(entry.data[CONF_VIP_TOKEN]),
             oauth_access_token=str(entry.data[CONF_OAUTH_ACCESS_TOKEN]),
         )
-        runtimes = domain_data.setdefault(_RING_RUNTIMES, {})
+        runtimes = domain_data.setdefault(DATA_RUNTIMES, {})
         runtimes[entry.entry_id] = runtime
 
-        # Validation mode: do not auto-start the Comelit registration on HA
-        # startup yet.  The local-only CT120 test-control webhook starts the
-        # persistent listener explicitly when requested through Hermes.
+        # Keep explicit validation start/stop until the reconnect supervisor is
+        # enabled. Door actions may start the same runtime on demand.
         async_register_test_control(hass, runtime)
-
-    if has_bridge:
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     return True
@@ -93,21 +86,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     domain_data = hass.data.get(DOMAIN, {})
-    runtimes = domain_data.get(_RING_RUNTIMES, {})
+    runtimes = domain_data.get(DATA_RUNTIMES, {})
     runtime = runtimes.pop(entry.entry_id, None)
+
+    unloaded = True
     if runtime is not None:
         async_unregister_test_control(hass)
         await runtime.async_stop()
-
-    has_bridge = all(
-        entry.data.get(key) for key in (CONF_BRIDGE_URL, CONF_SHARED_SECRET)
-    )
-    unloaded = True
-    if has_bridge:
         unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
     if unloaded:
         domain_data.pop(entry.entry_id, None)
         if not runtimes:
-            domain_data.pop(_RING_RUNTIMES, None)
+            domain_data.pop(DATA_RUNTIMES, None)
     return unloaded

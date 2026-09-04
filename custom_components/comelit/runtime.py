@@ -6,6 +6,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import signal
 from uuid import uuid4
 
 from aiohttp import ClientSession
@@ -26,6 +27,14 @@ _RUN_DIR = Path("/run/comelit-p2p")
 _OFFER_FILE = _RUN_DIR / "offer.sdp"
 _REMOTE_FILE = _RUN_DIR / "remote.sdp"
 _STOP_FILE = _RUN_DIR / "stop"
+
+_DOOR_STATES = {
+    "ACKED",
+    "REJECTED",
+    "REJECTED_NOT_READY",
+    "FAILED_SAFE",
+    "UNKNOWN_OUTCOME",
+}
 
 _RING_KEYS = {
     "V4_RING_OBSERVED",
@@ -133,6 +142,9 @@ class ComelitRingRuntime:
         self._last_ring_event: dict[str, str] | None = None
         self._last_error: str | None = None
         self._stopping = False
+        self._door_lock = asyncio.Lock()
+        self._door_result_future: asyncio.Future[str] | None = None
+        self._last_door_result: dict[str, object] | None = None
 
     @property
     def running(self) -> bool:
@@ -145,6 +157,10 @@ class ComelitRingRuntime:
     @property
     def ring_observed(self) -> bool:
         return self._last_ring_event is not None
+
+    @property
+    def last_door_result(self) -> dict[str, object] | None:
+        return dict(self._last_door_result) if self._last_door_result else None
 
     def status(self) -> dict[str, object]:
         event = self._last_ring_event or {}
@@ -159,6 +175,8 @@ class ComelitRingRuntime:
             "event_id": event.get("event_id"),
             "timestamp": event.get("timestamp"),
             "last_error": self._last_error,
+            "door_last_operation_id": (self._last_door_result or {}).get("operation_id"),
+            "door_last_state": (self._last_door_result or {}).get("state"),
         }
 
     async def async_start(self) -> None:
@@ -223,7 +241,87 @@ class ComelitRingRuntime:
                 pass
         self._task = None
         self._process = None
+        self._listener_ready.clear()
         await self._hass.async_add_executor_job(_remove_helper_secret)
+
+    async def async_open_door(self, door: str) -> dict[str, object]:
+        """Execute exactly one direct Door attempt on the persistent session."""
+        if door != "entrance":
+            raise ComelitRingRuntimeError("unsupported_door")
+
+        async with self._door_lock:
+            if not self.running:
+                await self.async_start()
+
+            if not await self.async_wait_ready(timeout=30):
+                result = {
+                    "operation_id": None,
+                    "door": door,
+                    "state": "FAILED_SAFE",
+                    "protocol_acked": False,
+                    "write_count": None,
+                    "automatic_retry_allowed": False,
+                    "physical_effect_asserted": False,
+                }
+                self._last_door_result = dict(result)
+                return result
+
+            process = self._process
+            if process is None or process.returncode is not None:
+                result = {
+                    "operation_id": None,
+                    "door": door,
+                    "state": "FAILED_SAFE",
+                    "protocol_acked": False,
+                    "write_count": None,
+                    "automatic_retry_allowed": False,
+                    "physical_effect_asserted": False,
+                }
+                self._last_door_result = dict(result)
+                return result
+
+            loop = asyncio.get_running_loop()
+            future: asyncio.Future[str] = loop.create_future()
+            self._door_result_future = future
+
+            # Generate the operation id immediately before the irreversible
+            # one-shot boundary.  It is HA-local and is never caller supplied.
+            operation_id = f"comelit-ha-{uuid4()}"
+            try:
+                os.kill(process.pid, signal.SIGUSR1)
+            except ProcessLookupError:
+                self._door_result_future = None
+                result = {
+                    "operation_id": operation_id,
+                    "door": door,
+                    "state": "FAILED_SAFE",
+                    "protocol_acked": False,
+                    "write_count": None,
+                    "automatic_retry_allowed": False,
+                    "physical_effect_asserted": False,
+                }
+                self._last_door_result = dict(result)
+                return result
+
+            try:
+                state = await asyncio.wait_for(asyncio.shield(future), timeout=10)
+            except TimeoutError:
+                state = "UNKNOWN_OUTCOME"
+            finally:
+                if self._door_result_future is future:
+                    self._door_result_future = None
+
+            result = {
+                "operation_id": operation_id,
+                "door": door,
+                "state": state,
+                "protocol_acked": state == "ACKED",
+                "write_count": 6 if state == "ACKED" else None,
+                "automatic_retry_allowed": False,
+                "physical_effect_asserted": False,
+            }
+            self._last_door_result = dict(result)
+            return result
 
     async def _async_run_once(self) -> None:
         try:
@@ -238,6 +336,10 @@ class ComelitRingRuntime:
             _LOGGER.exception("Unexpected Comelit ring listener failure")
         finally:
             self._process = None
+            self._listener_ready.clear()
+            future = self._door_result_future
+            if future is not None and not future.done():
+                future.set_result("UNKNOWN_OUTCOME")
             await self._hass.async_add_executor_job(_remove_helper_secret)
 
     async def _async_run_cycle(self) -> None:
@@ -328,6 +430,16 @@ class ComelitRingRuntime:
                 _LOGGER.warning(
                     "Comelit ring listener READY for persistent 3300s cycle"
                 )
+                continue
+
+            if line.startswith("V4_DOOR_RESULT="):
+                state = line.split("=", 1)[1]
+                if state not in _DOOR_STATES:
+                    state = "UNKNOWN_OUTCOME"
+                future = self._door_result_future
+                if future is not None and not future.done():
+                    future.set_result(state)
+                _LOGGER.warning("Comelit Door protocol result: %s", state)
                 continue
 
             if "=" not in line:
