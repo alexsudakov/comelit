@@ -1,80 +1,59 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
-import re
-import runpy
-import tempfile
 
 HERE = Path(__file__).resolve().parent
 SOURCE = HERE / "generate_media_poc_v1.py"
 
-BLOCK_RE = re.compile(
-    r"    recv_anchor = .*?"
-    r"    src = replace_once\(src, recv_anchor, recv_insert, \"RECV_DEMUX\"\)\n",
-    re.DOTALL,
-)
-
-REPLACEMENT = '''    recv_anchor = """    if (sid != stream_id ||
-        component_id != 1) {
-        return;
-    }
-
-    /*
-     * STUN/ICE control packets are consumed internally by libnice.
-     * Data reaching this callback is application payload
-     * carried by the selected ICE component.
-     */
-    if (!pseudo_tcp) {
-"""
-    recv_insert = """    if (sid != stream_id ||
-        component_id != 1) {
-        return;
-    }
-
-    /*
-     * STUN/ICE control packets are consumed internally by libnice.
-     * Data reaching this callback is application payload
-     * carried by the selected ICE component.
-     */
-    /* Raw ViP media is multiplexed beside PseudoTCP on the same ICE component. */
-    if (v4_media_try_handle_raw((const guint8 *)buf, len))
-        return;
-
-    if (!pseudo_tcp) {
-"""
-    src = replace_once(src, recv_anchor, recv_insert, "RECV_DEMUX")
-'''
-
 
 def main() -> int:
-    text = SOURCE.read_text(encoding="utf-8")
+    spec = importlib.util.spec_from_file_location(
+        "comelit_media_generator",
+        SOURCE,
+    )
+    if spec is None or spec.loader is None:
+        raise SystemExit("GENERATOR_LOAD=FAIL")
 
-    matches = list(BLOCK_RE.finditer(text))
-    if len(matches) != 1:
-        raise SystemExit(f"GENERATOR_RECV_BLOCK_FIX=FAIL count={len(matches)}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
 
-    patched = BLOCK_RE.sub(lambda _: REPLACEMENT, text, count=1)
+    original_replace_once = module.replace_once
 
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        suffix=".py",
-        prefix="comelit-media-generator-",
-        dir=HERE,
-        delete=False,
-    ) as handle:
-        handle.write(patched)
-        temp_path = Path(handle.name)
+    def scoped_replace_once(
+        text: str,
+        old: str,
+        new: str,
+        label: str,
+    ) -> str:
+        if label != "RECV_DEMUX":
+            return original_replace_once(text, old, new, label)
 
-    try:
-        print("GENERATOR_RECV_BLOCK_FIX=PASS")
-        namespace = runpy.run_path(str(temp_path), run_name="__main__")
-        _ = namespace
-    finally:
-        temp_path.unlink(missing_ok=True)
+        start_marker = "static void\nrecv_cb(\n"
+        end_marker = "\n\n\nstatic gboolean\nabsolute_timeout_cb("
 
-    return 0
+        start = text.find(start_marker)
+        if start < 0:
+            raise SystemExit("PATCH_RECV_DEMUX=FAIL callback_start=0")
+
+        end = text.find(end_marker, start)
+        if end < 0:
+            raise SystemExit("PATCH_RECV_DEMUX=FAIL callback_end=0")
+
+        callback = text[start:end]
+        count = callback.count(old)
+        if count != 1:
+            raise SystemExit(f"PATCH_RECV_DEMUX=FAIL callback_count={count}")
+
+        patched_callback = callback.replace(old, new, 1)
+        print("GENERATOR_RECV_CALLBACK_SCOPE=PASS")
+        return text[:start] + patched_callback + text[end:]
+
+    module.replace_once = scoped_replace_once
+
+    print("GENERATOR_LOAD=PASS")
+    return int(module.main())
 
 
 if __name__ == "__main__":
