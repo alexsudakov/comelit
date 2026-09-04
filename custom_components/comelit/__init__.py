@@ -17,6 +17,7 @@ from .const import (
     CONF_SHARED_SECRET,
     CONF_VIP_TOKEN,
     DATA_RUNTIMES,
+    DATA_SUPERVISORS,
     DOMAIN,
     PLATFORMS,
     SERVICE_OPEN_DOOR,
@@ -24,6 +25,7 @@ from .const import (
 )
 from .oauth import ComelitOAuthManager
 from .runtime import ComelitRingRuntime
+from .supervisor import ComelitRuntimeSupervisor
 from .test_control import async_register_test_control, async_unregister_test_control
 
 
@@ -78,12 +80,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         runtimes = domain_data.setdefault(DATA_RUNTIMES, {})
         runtimes[entry.entry_id] = runtime
 
+        supervisor = ComelitRuntimeSupervisor(hass, runtime)
+        supervisors = domain_data.setdefault(DATA_SUPERVISORS, {})
+        supervisors[entry.entry_id] = supervisor
+
         # Transitional validation endpoint remains available, but normal
-        # operation no longer depends on CT120/Hermes: the runtime supervisor
-        # starts with the config entry and reconnects inside Home Assistant.
-        async_register_test_control(hass, runtime)
+        # operation no longer depends on CT120/Hermes: the supervisor starts
+        # with the config entry and reconnects entirely inside Home Assistant.
+        async_register_test_control(hass, runtime, supervisor)
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-        await runtime.async_start()
+        await supervisor.async_start()
 
     return True
 
@@ -91,16 +97,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     domain_data = hass.data.get(DOMAIN, {})
     runtimes = domain_data.get(DATA_RUNTIMES, {})
+    supervisors = domain_data.get(DATA_SUPERVISORS, {})
     runtime = runtimes.pop(entry.entry_id, None)
+    supervisor = supervisors.pop(entry.entry_id, None)
 
     unloaded = True
     if runtime is not None:
         async_unregister_test_control(hass)
-        await runtime.async_stop()
+        if supervisor is not None:
+            await supervisor.async_stop()
+        else:
+            await runtime.async_stop()
         unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
     if unloaded:
         domain_data.pop(entry.entry_id, None)
         if not runtimes:
             domain_data.pop(DATA_RUNTIMES, None)
+        if not supervisors:
+            domain_data.pop(DATA_SUPERVISORS, None)
     return unloaded
