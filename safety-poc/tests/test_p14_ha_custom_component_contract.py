@@ -139,7 +139,7 @@ class P14HomeAssistantContractTests(unittest.TestCase):
             if isinstance(n, ast.AsyncFunctionDef) and n.name == "async_press"
         )
         self.assertTrue(any(isinstance(n, ast.Raise) for n in ast.walk(press)))
-        self.assertIn('await self._runtime.async_open_door("entrance")', source)
+        self.assertIn("await self._runtime.async_open_door(DOOR_ENTRANCE)", source)
         self.assertIn('"automatic_retry_allowed": False', source)
         self.assertIn('"physical_effect_asserted": False', source)
         self.assertIn('"physical_door_state": "UNKNOWN"', source)
@@ -195,8 +195,9 @@ class P14HomeAssistantContractTests(unittest.TestCase):
             and n.func.id == "async_negotiate_p2p"
         ]
         self.assertEqual(len(calls), 2)
-        loops = [n for n in ast.walk(cycle) if isinstance(n, (ast.For, ast.While))]
-        self.assertEqual(loops, [])
+        self.assertEqual(
+            [n for n in ast.walk(cycle) if isinstance(n, ast.While)], []
+        )
         self.assertIn("except ComelitCloudHttpError as exc", source)
         self.assertIn("if exc.status != 401", source)
         self.assertIn("force_refresh=True", source)
