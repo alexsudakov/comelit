@@ -7,6 +7,8 @@ DATA_RUNTIMES = "ring_runtimes"
 CONF_DEVICE_UUID = "device_uuid"
 CONF_VIP_TOKEN = "vip_token"
 CONF_OAUTH_ACCESS_TOKEN = "oauth_access_token"
+CONF_OAUTH_REFRESH_TOKEN = "oauth_refresh_token"
+CONF_OAUTH_EXPIRES_AT = "oauth_expires_at"
 
 # Transitional bridge keys retained only for migration compatibility.
 CONF_BRIDGE_URL = "bridge_url"
