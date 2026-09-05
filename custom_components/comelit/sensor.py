@@ -58,6 +58,10 @@ class ComelitListenerStatusSensor(SensorEntity):
             "reconnect_count": status["reconnect_count"],
             "last_ready": status["last_ready"],
             "last_error": status["last_error"],
+            "last_native_exit_code": status["last_native_exit_code"],
+            "last_native_failure_markers": status[
+                "last_native_failure_markers"
+            ],
             "cycle_duration_seconds": status["cycle_duration_seconds"],
         }
 

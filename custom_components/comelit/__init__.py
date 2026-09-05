@@ -73,6 +73,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         runtime = ComelitRingRuntime(
             hass,
             session,
+            entry=entry,
             device_uuid=str(entry.data[CONF_DEVICE_UUID]),
             vip_token=str(entry.data[CONF_VIP_TOKEN]),
             oauth=oauth,
@@ -80,7 +81,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         runtimes = domain_data.setdefault(DATA_RUNTIMES, {})
         runtimes[entry.entry_id] = runtime
 
-        supervisor = ComelitRuntimeSupervisor(hass, runtime)
+        supervisor = ComelitRuntimeSupervisor(
+            hass,
+            runtime,
+            entry=entry,
+        )
         supervisors = domain_data.setdefault(DATA_SUPERVISORS, {})
         supervisors[entry.entry_id] = supervisor
 
