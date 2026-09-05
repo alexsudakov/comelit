@@ -16,13 +16,13 @@ def sha256(path: Path) -> str:
 
 
 class P15HacsPersistentCtppReleaseContract(unittest.TestCase):
-    def test_manifest_is_1_5_3(self):
+    def test_manifest_is_1_5_4(self):
         manifest = json.loads(
             (
                 ROOT / "custom_components/comelit/manifest.json"
             ).read_text(encoding="utf-8")
         )
-        self.assertEqual(manifest["version"], "1.5.3")
+        self.assertEqual(manifest["version"], "1.5.4")
 
     def test_validated_native_artifact_is_installed(self):
         binary = (
