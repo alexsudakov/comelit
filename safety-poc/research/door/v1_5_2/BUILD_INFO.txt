@@ -1,0 +1,6 @@
+Comelit Door reject diagnostic build for HACS integration v1.5.2
+production_base_sha256=531683e2409b2f0f16489f61757708b8c63f6c5892a09013192469b0f6f614c9
+diagnostic_binary_sha256=0e0ccdf11d752dcdff79d643e1d169827d2acf23c804879c25841b257907d608
+interpreter=/lib/ld-musl-x86_64.so.1
+automatic_retry_allowed=false
+physical_effect_asserted=false

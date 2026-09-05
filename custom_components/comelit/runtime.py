@@ -155,6 +155,7 @@ class ComelitRingRuntime:
         self._door_lock = asyncio.Lock()
         self._door_result_future: asyncio.Future[str] | None = None
         self._last_door_result: dict[str, object] | None = None
+        self._door_reject_diagnostic: dict[str, object] = {}
 
     @property
     def running(self) -> bool:
@@ -290,6 +291,9 @@ class ComelitRingRuntime:
                 self._last_door_result = dict(result)
                 return result
 
+            # Diagnostics are scoped to this one-shot Door operation.
+            # Clearing this mapping cannot cause a retry or protocol action.
+            self._door_reject_diagnostic = {}
             loop = asyncio.get_running_loop()
             future: asyncio.Future[str] = loop.create_future()
             self._door_result_future = future
@@ -330,6 +334,7 @@ class ComelitRingRuntime:
                 "automatic_retry_allowed": False,
                 "physical_effect_asserted": False,
             }
+            result.update(self._door_reject_diagnostic)
             self._last_door_result = dict(result)
             return result
 
@@ -462,6 +467,34 @@ class ComelitRingRuntime:
                 _LOGGER.info(
                     "Comelit ring listener READY for persistent 3300s cycle"
                 )
+                continue
+
+            if line.startswith("V4_DOOR_REJECT_STAGE="):
+                self._door_reject_diagnostic["reject_stage"] = (
+                    line.split("=", 1)[1]
+                )
+                continue
+
+            door_numeric_diagnostics = {
+                "V4_DOOR_REJECT_RESPONSE_WORD=": "reject_response_word",
+                "V4_DOOR_REQUESTED_CHANNEL_ID=": "requested_channel_id",
+                "V4_DOOR_RESPONSE_CHANNEL_ID=": "response_channel_id",
+            }
+            numeric_diagnostic_consumed = False
+            for prefix, result_key in door_numeric_diagnostics.items():
+                if not line.startswith(prefix):
+                    continue
+                try:
+                    self._door_reject_diagnostic[result_key] = int(
+                        line.split("=", 1)[1]
+                    )
+                except ValueError:
+                    _LOGGER.warning(
+                        "Ignoring malformed Comelit Door diagnostic: %s", line
+                    )
+                numeric_diagnostic_consumed = True
+                break
+            if numeric_diagnostic_consumed:
                 continue
 
             if line.startswith("V4_DOOR_RESULT="):

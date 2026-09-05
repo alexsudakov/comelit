@@ -64,6 +64,10 @@ class ComelitEntranceDoorButton(ButtonEntity):
             "last_operation_id": result.get("operation_id"),
             "last_protocol_state": result.get("state"),
             "last_protocol_acked": result.get("protocol_acked"),
+            "last_reject_stage": result.get("reject_stage"),
+            "last_reject_response_word": result.get("reject_response_word"),
+            "last_requested_channel_id": result.get("requested_channel_id"),
+            "last_response_channel_id": result.get("response_channel_id"),
         }
 
     async def async_press(self) -> None:

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from pathlib import Path
 import shutil
 
@@ -153,14 +152,14 @@ def main() -> int:
     button_path.write_text(button, encoding="utf-8")
 
     print("\n=== PATCH MANIFEST ===")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("version") != "1.5.1":
-        raise SystemExit(f"MANIFEST_VERSION_GATE=FAIL current={manifest.get('version')}")
-    manifest["version"] = "1.5.2"
-    manifest_path.write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
+    manifest_text = manifest_path.read_text(encoding="utf-8")
+    manifest_text = replace_once(
+        manifest_text,
+        '  "version": "1.5.1",\\n',
+        '  "version": "1.5.2",\\n',
+        "MANIFEST_VERSION_PATCH",
     )
+    manifest_path.write_text(manifest_text, encoding="utf-8")
     print("MANIFEST_VERSION=1.5.2")
 
     print("\n=== INSTALL VERSIONED NATIVE ARTIFACT IN WORKTREE ===")
