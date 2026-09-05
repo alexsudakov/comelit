@@ -10,6 +10,7 @@ import signal
 from uuid import uuid4
 
 from aiohttp import ClientSession
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .cloud import (
@@ -49,6 +50,20 @@ _RING_KEYS = {
     "V4_RING_SOURCE",
 }
 _HEX32_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
+_NATIVE_MARKER_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
+_NATIVE_MARKER_SAFE_VALUE_RE = re.compile(
+    r"^(?:PASS|FAIL|true|false|READY|OPEN|CLOSED|UNKNOWN_OUTCOME|"
+    r"REJECTED|REJECTED_NOT_READY|FAILED_SAFE|[0-9]{1,10})$"
+)
+_NATIVE_MARKER_PREFIXES = (
+    "ICE_",
+    "REMOTE_SDP_",
+    "PSEUDOTCP_",
+    "SELECTED_PAIR_",
+    "V4_",
+    "P12_",
+)
+_NATIVE_MARKER_TAIL_LIMIT = 20
 
 
 class ComelitRingRuntimeError(RuntimeError):
@@ -135,11 +150,13 @@ class ComelitRingRuntime:
         hass: HomeAssistant,
         session: ClientSession,
         *,
+        entry: ConfigEntry,
         device_uuid: str,
         vip_token: str,
         oauth: ComelitOAuthManager,
     ) -> None:
         self._hass = hass
+        self._entry = entry
         self._session = session
         self._device_uuid = device_uuid
         self._vip_token = vip_token
@@ -156,6 +173,9 @@ class ComelitRingRuntime:
         self._door_result_future: asyncio.Future[str] | None = None
         self._last_door_result: dict[str, object] | None = None
         self._door_diagnostic: dict[str, object] = {}
+        self._native_marker_tail: list[str] = []
+        self._last_native_exit_code: int | None = None
+        self._last_native_failure_markers: list[str] = []
 
     @property
     def running(self) -> bool:
@@ -186,9 +206,36 @@ class ComelitRingRuntime:
             "event_id": event.get("event_id"),
             "timestamp": event.get("timestamp"),
             "last_error": self._last_error,
+            "last_native_exit_code": self._last_native_exit_code,
+            "last_native_failure_markers": list(
+                self._last_native_failure_markers
+            ),
             "door_last_operation_id": (self._last_door_result or {}).get("operation_id"),
             "door_last_state": (self._last_door_result or {}).get("state"),
         }
+
+    def _remember_native_marker(self, line: str) -> None:
+        if "=" not in line:
+            return
+
+        key, value = line.split("=", 1)
+        if not _NATIVE_MARKER_KEY_RE.fullmatch(key):
+            return
+        if not key.startswith(_NATIVE_MARKER_PREFIXES):
+            return
+
+        safe_value = (
+            value
+            if _NATIVE_MARKER_SAFE_VALUE_RE.fullmatch(value)
+            else "<redacted>"
+        )
+        self._native_marker_tail.append(f"{key}={safe_value}")
+        if len(self._native_marker_tail) > _NATIVE_MARKER_TAIL_LIMIT:
+            del self._native_marker_tail[:-_NATIVE_MARKER_TAIL_LIMIT]
+
+    def _capture_native_failure(self, returncode: int) -> None:
+        self._last_native_exit_code = returncode
+        self._last_native_failure_markers = list(self._native_marker_tail)
 
     async def async_start(self) -> None:
         if self.running:
@@ -197,9 +244,11 @@ class ComelitRingRuntime:
         self._offer_ready.clear()
         self._listener_ready.clear()
         self._ring_lines.clear()
+        self._native_marker_tail.clear()
         self._last_ring_event = None
         self._last_error = None
-        self._task = self._hass.async_create_task(
+        self._task = self._entry.async_create_background_task(
+            self._hass,
             self._async_run_once(),
             "comelit direct ring listener",
         )
@@ -387,7 +436,19 @@ class ComelitRingRuntime:
             ComelitSdpError,
         ) as exc:
             self._last_error = str(exc)
-            _LOGGER.error("Comelit ring listener stopped: %s", exc)
+            if (
+                isinstance(exc, ComelitRingRuntimeError)
+                and str(exc).startswith(
+                    ("native_exit:", "native_exited_before_offer:")
+                )
+            ):
+                _LOGGER.error(
+                    "Comelit ring listener stopped: %s; safe_native_markers=%s",
+                    exc,
+                    self._last_native_failure_markers,
+                )
+            else:
+                _LOGGER.error("Comelit ring listener stopped: %s", exc)
         except Exception as exc:
             self._last_error = f"unexpected:{type(exc).__name__}"
             _LOGGER.exception("Unexpected Comelit ring listener failure")
@@ -415,7 +476,8 @@ class ComelitRingRuntime:
             env=child_env,
         )
         self._process = process
-        reader_task = self._hass.async_create_task(
+        reader_task = self._entry.async_create_background_task(
+            self._hass,
             self._async_read_output(process),
             "comelit ring helper output",
         )
@@ -433,6 +495,7 @@ class ComelitRingRuntime:
 
             if offer_wait not in done or not offer_wait.result():
                 if process.returncode is not None:
+                    self._capture_native_failure(process.returncode)
                     raise ComelitRingRuntimeError(
                         f"native_exited_before_offer:{process.returncode}"
                     )
@@ -469,6 +532,7 @@ class ComelitRingRuntime:
             rc = await process.wait()
             await reader_task
             if rc != 0 and not self._stopping:
+                self._capture_native_failure(rc)
                 raise ComelitRingRuntimeError(f"native_exit:{rc}")
         finally:
             if process.returncode is None:
@@ -494,6 +558,7 @@ class ComelitRingRuntime:
             if not raw:
                 return
             line = raw.decode("utf-8", errors="replace").strip()
+            self._remember_native_marker(line)
 
             if line == "ICE_GATHER=PASS":
                 self._offer_ready.set()
