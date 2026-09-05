@@ -6,11 +6,11 @@
 #   repository's token-only credential workflow;
 # - this script is executed as root on CT120;
 # - the historical cloud-probe wrapper is still byte-identical to the pinned
-#   baseline.  The wrapper is copied and rebound to a research candidate;
+#   baseline. The wrapper is copied and rebound to a research candidate;
 #   the original is never modified.
 #
 # This script performs exactly one network-capable wrapper invocation and never
-# retries it.  It must not touch Home Assistant, Door, or self-activation.
+# retries it. It must not touch Home Assistant, Door, or self-activation.
 
 set -u -o pipefail
 umask 077
@@ -25,7 +25,6 @@ SOURCE_REL=safety-poc/research/door/v1_5_3/comelit-v4-persistent-ctpp-door.c
 TRANSFORM_REL=safety-poc/research/media/v1/pseudotcp_open_probe_transform.py
 
 FAIL=0
-LIVE_INVOKED=0
 
 fail() {
     echo "$1"
@@ -147,9 +146,7 @@ if [ "$FAIL" -eq 0 ]; then
         echo "CT120_OPEN_PROBE_DOOR_SIGNAL_GATE=PASS"
     fi
 
-    if grep -Fq 'g_timeout_add_seconds('
-        "$CANDIDATE_SOURCE" 2>/dev/null && \
-       grep -Fq '        3300,' "$CANDIDATE_SOURCE"; then
+    if grep -Fq '        3300,' "$CANDIDATE_SOURCE"; then
         fail "CT120_OPEN_PROBE_LONG_TIMEOUT_GATE=FAIL"
     else
         echo "CT120_OPEN_PROBE_LONG_TIMEOUT_GATE=PASS"
@@ -284,7 +281,6 @@ echo "CT120_PSEUDOTCP_OPEN_DOOR_ACTION_ALLOWED=false"
 echo "CT120_PSEUDOTCP_OPEN_SELF_ACTIVATION_ALLOWED=false"
 echo "CT120_PSEUDOTCP_OPEN_MEDIA_SIGNALING_ALLOWED=false"
 
-LIVE_INVOKED=1
 timeout --signal=TERM --kill-after=5s 90s "$CANDIDATE_WRAPPER" 2>&1 | tee "$LOG"
 LIVE_RC=${PIPESTATUS[0]}
 echo "CT120_PSEUDOTCP_OPEN_WRAPPER_RC=$LIVE_RC"
