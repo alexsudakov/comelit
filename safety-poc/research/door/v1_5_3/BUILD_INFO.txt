@@ -1,0 +1,32 @@
+Comelit persistent CTPP Door build for HACS integration v1.5.3
+
+base_commit=7da3b8bf9937700dbfcaf7466a02e78b530694a4
+source_sha256=088e0e23c07404792254f5c18e3f12dbbd499a676bda2d3883988d1d9bb3be6f
+binary_sha256=c171e7d1d342d059858f0cfca4f81dc8a07679f1d18992718bec2d6ead84db86
+replaced_v1_5_2_binary_sha256=0e0ccdf11d752dcdff79d643e1d169827d2acf23c804879c25841b257907d608
+
+build_environment=Alpine 3.24.1
+compiler=gcc (Alpine 15.2.0) 15.2.0
+libnice=0.1.22
+glib=2.88.1
+gobject=2.88.1
+
+build_flags=-O2 -g -Wall -Wextra -Wl,--as-needed
+known_warning=pseudotcp_success_quit_cb defined but not used
+interpreter=/lib/ld-musl-x86_64.so.1
+needed=libc.musl-x86_64.so.1,libglib-2.0.so.0,libgobject-2.0.so.0,libnice.so.10
+
+door_profile=persistent_ctpp_reuse
+operation_write_count=5
+operation_opcodes=0x1800,0x1820,0x18C0,0x1800,0x1820
+secondary_ctpp_open=false
+door_ctpp_close=false
+post_write_settle_ms=1000
+door_specific_ack_proven=false
+terminal_state_without_proven_ack=UNKNOWN_OUTCOME
+automatic_retry_allowed=false
+physical_effect_asserted=false
+
+NETWORK_IO_PERFORMED=false
+DOOR_ACTION_SENT=false
+MEDIA_ACTION_SENT=false

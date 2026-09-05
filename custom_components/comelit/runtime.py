@@ -155,7 +155,7 @@ class ComelitRingRuntime:
         self._door_lock = asyncio.Lock()
         self._door_result_future: asyncio.Future[str] | None = None
         self._last_door_result: dict[str, object] | None = None
-        self._door_reject_diagnostic: dict[str, object] = {}
+        self._door_diagnostic: dict[str, object] = {}
 
     @property
     def running(self) -> bool:
@@ -271,6 +271,7 @@ class ComelitRingRuntime:
                     "state": "FAILED_SAFE",
                     "protocol_acked": False,
                     "write_count": None,
+                    "door_specific_ack_proven": False,
                     "automatic_retry_allowed": False,
                     "physical_effect_asserted": False,
                 }
@@ -285,6 +286,7 @@ class ComelitRingRuntime:
                     "state": "FAILED_SAFE",
                     "protocol_acked": False,
                     "write_count": None,
+                    "door_specific_ack_proven": False,
                     "automatic_retry_allowed": False,
                     "physical_effect_asserted": False,
                 }
@@ -293,7 +295,7 @@ class ComelitRingRuntime:
 
             # Diagnostics are scoped to this one-shot Door operation.
             # Clearing this mapping cannot cause a retry or protocol action.
-            self._door_reject_diagnostic = {}
+            self._door_diagnostic = {}
             loop = asyncio.get_running_loop()
             future: asyncio.Future[str] = loop.create_future()
             self._door_result_future = future
@@ -311,6 +313,7 @@ class ComelitRingRuntime:
                     "state": "FAILED_SAFE",
                     "protocol_acked": False,
                     "write_count": None,
+                    "door_specific_ack_proven": False,
                     "automatic_retry_allowed": False,
                     "physical_effect_asserted": False,
                 }
@@ -325,16 +328,50 @@ class ComelitRingRuntime:
                 if self._door_result_future is future:
                     self._door_result_future = None
 
+            diagnostic = dict(self._door_diagnostic)
+
+            door_specific_ack_proven = (
+                diagnostic.get("door_specific_ack_proven") is True
+            )
+
+            write_count = diagnostic.get("write_count")
+            if (
+                not isinstance(write_count, int)
+                or isinstance(write_count, bool)
+                or not 0 <= write_count <= 5
+            ):
+                write_count = None
+
             result = {
                 "operation_id": operation_id,
                 "door": door,
                 "state": state,
-                "protocol_acked": state == "ACKED",
-                "write_count": 6 if state == "ACKED" else None,
+                # ACKED is not sufficient by itself. The native profile
+                # must also have proven a Door-specific acknowledgement.
+                "protocol_acked": (
+                    state == "ACKED"
+                    and door_specific_ack_proven
+                ),
+                "write_count": write_count,
+                "door_specific_ack_proven": door_specific_ack_proven,
                 "automatic_retry_allowed": False,
                 "physical_effect_asserted": False,
             }
-            result.update(self._door_reject_diagnostic)
+            result.update(diagnostic)
+
+            # Diagnostics may add metadata, but may never replace fields
+            # that were validated or normalized above.
+            result["write_count"] = write_count
+            result["door_specific_ack_proven"] = (
+                door_specific_ack_proven
+            )
+
+            # A raw ACKED state is never enough by itself.
+            result["protocol_acked"] = (
+                state == "ACKED"
+                and result.get("door_specific_ack_proven") is True
+            )
+
             self._last_door_result = dict(result)
             return result
 
@@ -470,22 +507,52 @@ class ComelitRingRuntime:
                 continue
 
             if line.startswith("V4_DOOR_REJECT_STAGE="):
-                self._door_reject_diagnostic["reject_stage"] = (
+                self._door_diagnostic["reject_stage"] = (
                     line.split("=", 1)[1]
                 )
+                continue
+
+            door_boolean_diagnostics = {
+                "V4_DOOR_DOOR_SPECIFIC_ACK_PROVEN=": (
+                    "door_specific_ack_proven"
+                ),
+                "V4_DOOR_EXISTING_CTPP_REUSED=": "existing_ctpp_reused",
+            }
+            boolean_diagnostic_consumed = False
+            for prefix, result_key in door_boolean_diagnostics.items():
+                if not line.startswith(prefix):
+                    continue
+
+                raw_value = line.split("=", 1)[1].lower()
+                if raw_value not in {"true", "false"}:
+                    _LOGGER.warning(
+                        "Ignoring malformed Comelit Door diagnostic: %s",
+                        line,
+                    )
+                else:
+                    self._door_diagnostic[result_key] = (
+                        raw_value == "true"
+                    )
+
+                boolean_diagnostic_consumed = True
+                break
+
+            if boolean_diagnostic_consumed:
                 continue
 
             door_numeric_diagnostics = {
                 "V4_DOOR_REJECT_RESPONSE_WORD=": "reject_response_word",
                 "V4_DOOR_REQUESTED_CHANNEL_ID=": "requested_channel_id",
                 "V4_DOOR_RESPONSE_CHANNEL_ID=": "response_channel_id",
+                "V4_DOOR_WRITE_COUNT=": "write_count",
+                "V4_DOOR_CTPP_CHANNEL_ID=": "ctpp_channel_id",
             }
             numeric_diagnostic_consumed = False
             for prefix, result_key in door_numeric_diagnostics.items():
                 if not line.startswith(prefix):
                     continue
                 try:
-                    self._door_reject_diagnostic[result_key] = int(
+                    self._door_diagnostic[result_key] = int(
                         line.split("=", 1)[1]
                     )
                 except ValueError:
