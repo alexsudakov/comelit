@@ -78,6 +78,10 @@ class P20Ct120PseudoTcpOpenRunnerContract(unittest.TestCase):
         self.assertIn("CT120_OPEN_PROBE_BUILD_RC=$BUILD_RC", self.text)
         self.assertIn("CT120_OPEN_PROBE_DOOR_SIGNAL_GATE=PASS", self.text)
         self.assertIn("CT120_OPEN_PROBE_LONG_TIMEOUT_GATE=PASS", self.text)
+        self.assertIn(
+            "grep -Fq 'signal(SIGUSR1, v4_door_signal_handler);'",
+            self.text,
+        )
 
     def test_live_gate_requires_transport_proof_and_safety_markers(self):
         for marker in (
@@ -91,13 +95,12 @@ class P20Ct120PseudoTcpOpenRunnerContract(unittest.TestCase):
             self.assertIn(marker, self.text)
         self.assertIn("CT120_PSEUDOTCP_OPEN_GATE=$GATE", self.text)
 
-    def test_runner_does_not_manage_home_assistant_or_door(self):
+    def test_runner_does_not_manage_home_assistant_or_actuate_door(self):
         for forbidden in (
             "ha core",
             "hassio",
             "/config/custom_components",
             "button.press",
-            "SIGUSR1",
             "kill -USR1",
             "rsync",
             "scp ",
