@@ -64,6 +64,14 @@ class ComelitEntranceDoorButton(ButtonEntity):
             "last_operation_id": result.get("operation_id"),
             "last_protocol_state": result.get("state"),
             "last_protocol_acked": result.get("protocol_acked"),
+            "last_write_count": result.get("write_count"),
+            "last_door_specific_ack_proven": result.get(
+                "door_specific_ack_proven"
+            ),
+            "last_existing_ctpp_reused": result.get(
+                "existing_ctpp_reused"
+            ),
+            "last_ctpp_channel_id": result.get("ctpp_channel_id"),
             "last_reject_stage": result.get("reject_stage"),
             "last_reject_response_word": result.get("reject_response_word"),
             "last_requested_channel_id": result.get("requested_channel_id"),
@@ -74,10 +82,12 @@ class ComelitEntranceDoorButton(ButtonEntity):
         result = await self._runtime.async_open_door(DOOR_ENTRANCE)
         self._last_result = dict(result)
         self.async_write_ha_state()
-        if result.get("state") != "ACKED":
+        if result.get("protocol_acked") is not True:
             raise HomeAssistantError(
-                "Comelit Door was not protocol-ACKED; automatic retry is forbidden. "
-                f"state={result.get('state')}"
+                "Comelit Door has no proven protocol ACK; automatic retry is "
+                "forbidden. "
+                f"state={result.get('state')} "
+                f"protocol_acked={result.get('protocol_acked')}"
             )
 
 
