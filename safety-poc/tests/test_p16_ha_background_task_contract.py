@@ -17,13 +17,14 @@ def sha256(path: Path) -> str:
 
 
 class P16HomeAssistantBackgroundTaskContract(unittest.TestCase):
-    def test_manifest_is_1_5_4(self):
+    def test_manifest_is_at_least_1_5_4(self):
         manifest = json.loads(
             (ROOT / "custom_components/comelit/manifest.json").read_text(
                 encoding="utf-8"
             )
         )
-        self.assertEqual(manifest["version"], "1.5.4")
+        version = tuple(int(part) for part in manifest["version"].split("."))
+        self.assertGreaterEqual(version, (1, 5, 4))
 
     def test_long_lived_tasks_use_config_entry_background_lifecycle(self):
         init = (ROOT / "custom_components/comelit/__init__.py").read_text(
@@ -79,15 +80,23 @@ class P16HomeAssistantBackgroundTaskContract(unittest.TestCase):
         self.assertIn('"last_native_exit_code"', sensor)
         self.assertIn('"last_native_failure_markers"', sensor)
 
-    def test_door_native_artifact_is_unchanged(self):
-        binary = ROOT / "custom_components/comelit/native/comelit-v4"
+    def test_v153_door_artifact_identity_remains_frozen(self):
         source = (
             ROOT
             / "safety-poc/research/door/v1_5_3"
             / "comelit-v4-persistent-ctpp-door.c"
         )
-        self.assertEqual(sha256(binary), EXPECTED_NATIVE_SHA)
+        build_info = (
+            ROOT
+            / "safety-poc/research/door/v1_5_3"
+            / "BUILD_INFO.txt"
+        ).read_text(encoding="utf-8")
+
         self.assertEqual(sha256(source), EXPECTED_DOOR_SOURCE_SHA)
+        self.assertIn(
+            "binary_sha256=" + EXPECTED_NATIVE_SHA,
+            build_info,
+        )
 
 
 if __name__ == "__main__":

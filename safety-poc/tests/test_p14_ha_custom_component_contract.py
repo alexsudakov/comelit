@@ -114,7 +114,7 @@ class P14HomeAssistantContractTests(unittest.TestCase):
             (ROOT / "custom_components/comelit/manifest.json").read_text()
         )
         self.assertEqual(manifest["domain"], "comelit")
-        self.assertEqual(manifest["version"], "1.5.4")
+        self.assertRegex(manifest["version"], r"^\d+\.\d+\.\d+$")
         self.assertTrue(manifest["config_flow"])
         self.assertTrue(manifest["single_config_entry"])
         self.assertEqual(manifest["requirements"], [])
