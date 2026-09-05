@@ -86,9 +86,20 @@ class P29HaosMuslGracefulBuilderContract(unittest.TestCase):
             "button.press",
             "SIGUSR1",
             "open_door(",
-            "PSEUDOTCP_GRACEFUL_CLOSE_FORCE=true",
         ):
             self.assertNotIn(forbidden, self.text)
+
+        # The dangerous marker may appear only as a negative scan/negative
+        # assertion. The builder must reject a candidate containing it.
+        self.assertIn(
+            "if grep -Fq 'PSEUDOTCP_GRACEFUL_CLOSE_FORCE=true'",
+            self.text,
+        )
+        self.assertIn("V157_RELEASE_FORCE_CLOSE_GATE=FAIL", self.text)
+        self.assertIn(
+            'self.assertNotIn(b"PSEUDOTCP_GRACEFUL_CLOSE_FORCE=true", binary)',
+            self.text,
+        )
 
     def test_github_push_is_explicitly_token_authenticated(self):
         self.assertIn("GIT_TERMINAL_PROMPT=0", self.text)
