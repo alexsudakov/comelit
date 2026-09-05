@@ -1,14 +1,13 @@
 import ast
 import hashlib
-import json
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
 
-EXPECTED_SOURCE_SHA = "088e0e23c07404792254f5c18e3f12dbbd499a676bda2d3883988d1d9bb3be6f"
-EXPECTED_BINARY_SHA = "c171e7d1d342d059858f0cfca4f81dc8a07679f1d18992718bec2d6ead84db86"
+EXPECTED_V153_SOURCE_SHA = "088e0e23c07404792254f5c18e3f12dbbd499a676bda2d3883988d1d9bb3be6f"
+EXPECTED_V153_BINARY_SHA = "c171e7d1d342d059858f0cfca4f81dc8a07679f1d18992718bec2d6ead84db86"
 
 
 def sha256(path: Path) -> str:
@@ -16,28 +15,15 @@ def sha256(path: Path) -> str:
 
 
 class P15HacsPersistentCtppReleaseContract(unittest.TestCase):
-    def test_manifest_is_1_5_4(self):
-        manifest = json.loads(
-            (
-                ROOT / "custom_components/comelit/manifest.json"
-            ).read_text(encoding="utf-8")
-        )
-        self.assertEqual(manifest["version"], "1.5.4")
+    """Freeze the validated v1.5.3 Door semantics independently of later releases."""
 
-    def test_validated_native_artifact_is_installed(self):
-        binary = (
-            ROOT
-            / "custom_components/comelit/native/comelit-v4"
-        )
-        self.assertEqual(sha256(binary), EXPECTED_BINARY_SHA)
-
-    def test_research_source_identity_is_frozen(self):
+    def test_v153_research_source_identity_is_frozen(self):
         source = (
             ROOT
             / "safety-poc/research/door/v1_5_3"
             / "comelit-v4-persistent-ctpp-door.c"
         )
-        self.assertEqual(sha256(source), EXPECTED_SOURCE_SHA)
+        self.assertEqual(sha256(source), EXPECTED_V153_SOURCE_SHA)
 
     def test_runtime_consumes_native_write_count(self):
         source = (
@@ -97,7 +83,7 @@ class P15HacsPersistentCtppReleaseContract(unittest.TestCase):
         ):
             self.assertIn(marker, source)
 
-    def test_binary_has_persistent_ctpp_contract(self):
+    def test_current_binary_preserves_persistent_ctpp_door_contract(self):
         binary = (
             ROOT
             / "custom_components/comelit/native/comelit-v4"
@@ -158,7 +144,7 @@ class P15HacsPersistentCtppReleaseContract(unittest.TestCase):
             source,
         )
 
-    def test_build_info_records_safety_contract(self):
+    def test_v153_build_info_records_frozen_safety_contract(self):
         text = (
             ROOT
             / "safety-poc/research/door/v1_5_3"
@@ -166,11 +152,11 @@ class P15HacsPersistentCtppReleaseContract(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn(
-            "binary_sha256=" + EXPECTED_BINARY_SHA,
+            "binary_sha256=" + EXPECTED_V153_BINARY_SHA,
             text,
         )
         self.assertIn(
-            "source_sha256=" + EXPECTED_SOURCE_SHA,
+            "source_sha256=" + EXPECTED_V153_SOURCE_SHA,
             text,
         )
         self.assertIn(
