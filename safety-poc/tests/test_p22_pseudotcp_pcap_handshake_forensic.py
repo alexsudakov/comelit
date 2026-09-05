@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 import struct
+import sys
 import tempfile
 import unittest
 
@@ -14,6 +15,7 @@ MODULE_PATH = (
 spec = importlib.util.spec_from_file_location("pseudotcp_pcap_handshake_forensic", MODULE_PATH)
 assert spec and spec.loader
 forensic = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = forensic
 spec.loader.exec_module(forensic)
 
 
