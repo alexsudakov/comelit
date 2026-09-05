@@ -5,6 +5,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 import logging
 
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .const import LISTENER_CYCLE_SECONDS
@@ -36,8 +37,15 @@ class ComelitRuntimeSupervisor:
     action and therefore cannot retry an actuation attempt.
     """
 
-    def __init__(self, hass: HomeAssistant, runtime: ComelitRingRuntime) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        runtime: ComelitRingRuntime,
+        *,
+        entry: ConfigEntry,
+    ) -> None:
         self._hass = hass
+        self._entry = entry
         self._runtime = runtime
         self._task: asyncio.Task[None] | None = None
         self._stopping = False
@@ -99,7 +107,8 @@ class ComelitRuntimeSupervisor:
         self._stopping = False
         self._set_state(LISTENER_STATE_STARTING)
         await self._runtime.async_start()
-        self._task = self._hass.async_create_task(
+        self._task = self._entry.async_create_background_task(
+            self._hass,
             self._async_run(),
             "comelit runtime supervisor",
         )
