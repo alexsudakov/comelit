@@ -1,6 +1,5 @@
 import hashlib
 import importlib.util
-import json
 import unittest
 from pathlib import Path
 
@@ -17,34 +16,34 @@ def sha256(path: Path) -> str:
 
 
 class P27HacsGracefulStopReleaseContract(unittest.TestCase):
-    def test_manifest_is_1_5_5(self):
-        manifest = json.loads(
-            (ROOT / "custom_components/comelit/manifest.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        self.assertEqual(manifest["version"], "1.5.5")
-
-    def test_release_source_and_binary_hashes_are_frozen(self):
+    def test_v155_release_source_and_archived_binary_hashes_are_frozen(self):
         source = (
-            ROOT / "safety-poc/research/door/v1_5_5"
+            ROOT
+            / "safety-poc/research/door/v1_5_5"
             / "comelit-v4-persistent-ctpp-door.c"
         )
-        binary = ROOT / "custom_components/comelit/native/comelit-v4"
+        binary = (
+            ROOT
+            / "safety-poc/research/door/v1_5_5"
+            / "comelit-v4-glibc-incompatible"
+        )
         self.assertEqual(sha256(source), EXPECTED_SOURCE_SHA)
         self.assertEqual(sha256(binary), EXPECTED_BINARY_SHA)
 
     def test_release_source_is_exact_reviewed_transform_of_frozen_v153(self):
         base = (
-            ROOT / "safety-poc/research/door/v1_5_3"
+            ROOT
+            / "safety-poc/research/door/v1_5_3"
             / "comelit-v4-persistent-ctpp-door.c"
         )
         transform_path = (
-            ROOT / "safety-poc/research/media/v1"
+            ROOT
+            / "safety-poc/research/media/v1"
             / "pseudotcp_graceful_stop_transform.py"
         )
         release = (
-            ROOT / "safety-poc/research/door/v1_5_5"
+            ROOT
+            / "safety-poc/research/door/v1_5_5"
             / "comelit-v4-persistent-ctpp-door.c"
         )
 
@@ -64,7 +63,8 @@ class P27HacsGracefulStopReleaseContract(unittest.TestCase):
 
     def test_graceful_close_contract_is_present_and_never_force_closes(self):
         source = (
-            ROOT / "safety-poc/research/door/v1_5_5"
+            ROOT
+            / "safety-poc/research/door/v1_5_5"
             / "comelit-v4-persistent-ctpp-door.c"
         ).read_text(encoding="utf-8")
 
@@ -79,9 +79,11 @@ class P27HacsGracefulStopReleaseContract(unittest.TestCase):
         self.assertIn("PSEUDOTCP_GRACEFUL_STOP_TIMEOUT_MS 5000", source)
         self.assertIn("PSEUDOTCP_GRACEFUL_CLOSE_DRAINED_BYTES=%u", source)
 
-    def test_current_binary_contains_graceful_and_door_safety_markers(self):
+    def test_archived_v155_binary_contains_graceful_and_door_safety_markers(self):
         binary = (
-            ROOT / "custom_components/comelit/native/comelit-v4"
+            ROOT
+            / "safety-poc/research/door/v1_5_5"
+            / "comelit-v4-glibc-incompatible"
         ).read_bytes()
 
         for marker in (
@@ -101,7 +103,7 @@ class P27HacsGracefulStopReleaseContract(unittest.TestCase):
             binary,
         )
 
-    def test_build_info_matches_release_artifacts(self):
+    def test_build_info_matches_historical_v155_artifacts(self):
         text = (
             ROOT / "safety-poc/research/door/v1_5_5/BUILD_INFO.txt"
         ).read_text(encoding="utf-8")
@@ -120,6 +122,15 @@ class P27HacsGracefulStopReleaseContract(unittest.TestCase):
             "physical_effect_asserted=false",
         ):
             self.assertIn(marker, text)
+
+    def test_v155_binary_is_archived_as_haos_incompatible_glibc_build(self):
+        binary = (
+            ROOT
+            / "safety-poc/research/door/v1_5_5"
+            / "comelit-v4-glibc-incompatible"
+        ).read_bytes()
+        self.assertIn(b"/lib64/ld-linux-x86-64.so.2", binary)
+        self.assertNotIn(b"/lib/ld-musl-x86_64.so.1", binary)
 
 
 if __name__ == "__main__":
