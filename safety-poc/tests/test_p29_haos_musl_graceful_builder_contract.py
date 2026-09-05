@@ -5,7 +5,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = (
     ROOT
-    / "safety-poc/research/media/v1/ct120_prepare_haos_graceful_stop_v1_5_7.sh"
+    / "safety-poc/research/media/v1/ct120_prepare_haos_graceful_stop_v1_5_7_v2.sh"
 )
 
 
@@ -55,8 +55,8 @@ class P29HaosMuslGracefulBuilderContract(unittest.TestCase):
             self.assertIn(required, self.text)
 
         self.assertIn(
-            "EXPECTED_DIRECT_NEEDED='libnice.so.10,libgobject-2.0.so.0,"
-            "libglib-2.0.so.0,libc.musl-x86_64.so.1'",
+            "EXPECTED_NEEDED_SORTED='libc.musl-x86_64.so.1,"
+            "libglib-2.0.so.0,libgobject-2.0.so.0,libnice.so.10'",
             self.text,
         )
         self.assertIn("V157_RELEASE_GLIBC_INTERPRETER_GATE=PASS", self.text)
@@ -70,6 +70,13 @@ class P29HaosMuslGracefulBuilderContract(unittest.TestCase):
         self.assertIn('echo "candidate_executed=false"', self.text)
         self.assertIn('echo "CANDIDATE_EXECUTED=false"', self.text)
         self.assertIn('echo "COMELIT_NETWORK_SESSION_STARTED=false"', self.text)
+
+    def test_generated_release_test_is_cwd_safe(self):
+        self.assertIn('cd "$WT" || exit 99', self.text)
+        self.assertIn(
+            "safety-poc.tests.test_p29_haos_graceful_stop_release_contract",
+            self.text,
+        )
 
     def test_door_and_media_actions_remain_forbidden(self):
         for required in (
@@ -89,10 +96,8 @@ class P29HaosMuslGracefulBuilderContract(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, self.text)
 
-        # The dangerous marker may appear only as a negative scan/negative
-        # assertion. The builder must reject a candidate containing it.
         self.assertIn(
-            "if grep -Fq 'PSEUDOTCP_GRACEFUL_CLOSE_FORCE=true'",
+            "grep -Fq 'PSEUDOTCP_GRACEFUL_CLOSE_FORCE=true'",
             self.text,
         )
         self.assertIn("V157_RELEASE_FORCE_CLOSE_GATE=FAIL", self.text)
