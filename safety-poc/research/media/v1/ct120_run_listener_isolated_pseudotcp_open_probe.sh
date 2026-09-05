@@ -281,12 +281,15 @@ fi
 echo
 echo "=== 3. STOP ONLY COMELIT LISTENER ==="
 
+# From this point onward, restoration is mandatory even if the HTTP response is
+# lost after HA accepted the stop request. A redundant async_start() is safe;
+# failing to restore after an ambiguous stop is not.
+LISTENER_STOPPED=1
 post_control stop "$STOP_RESPONSE" 20
 STOP_RC=$?
 echo "LISTENER_STOP_REQUESTED=true"
 
 if [ "$STOP_RC" -eq 0 ] && status_stopped "$STOP_RESPONSE"; then
-    LISTENER_STOPPED=1
     echo "LISTENER_STOP_GATE=PASS"
 else
     fail "LISTENER_STOP_GATE=FAIL"
