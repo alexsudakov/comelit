@@ -24,7 +24,10 @@ class P27Ct120ReleaseBuilderContract(unittest.TestCase):
             "BRANCH=fix/graceful-pseudotcp-stop-v1-5-5",
             self.text,
         )
-        self.assertIn('REMOTE_BRANCH != "$RELEASE_SEED_SHA"', self.text)
+        self.assertIn(
+            'if [ "$REMOTE_BRANCH" != "$RELEASE_SEED_SHA" ]; then',
+            self.text,
+        )
         self.assertIn("V155_RELEASE_BRANCH_SEED_IDENTITY=PASS", self.text)
 
     def test_github_fetch_push_boundary_is_token_only(self):
