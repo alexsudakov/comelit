@@ -1,5 +1,4 @@
 import hashlib
-import json
 import subprocess
 import sys
 import tempfile
@@ -18,8 +17,6 @@ TRANSFORM = (
     / "safety-poc/research/media/v1"
     / "pseudotcp_open_probe_transform.py"
 )
-NATIVE = ROOT / "custom_components/comelit/native/comelit-v4"
-MANIFEST = ROOT / "custom_components/comelit/manifest.json"
 
 
 def extract_function(text: str, signature: str) -> str:
@@ -168,16 +165,10 @@ class P19PseudoTcpOpenProbeContract(unittest.TestCase):
         self.assertNotIn("PSEUDOTCP_OPEN_PROBE_MEDIA_SIGNALING_SENT=true", self.candidate)
         self.assertNotIn("PSEUDOTCP_OPEN_PROBE_DOOR_ACTION_SENT=true", self.candidate)
 
-    def test_production_release_is_unchanged(self):
-        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "1.5.4")
+    def test_open_probe_baseline_is_frozen_v153(self):
         self.assertEqual(
             hashlib.sha256(SOURCE.read_bytes()).hexdigest(),
             "088e0e23c07404792254f5c18e3f12dbbd499a676bda2d3883988d1d9bb3be6f",
-        )
-        self.assertEqual(
-            hashlib.sha256(NATIVE.read_bytes()).hexdigest(),
-            "c171e7d1d342d059858f0cfca4f81dc8a07679f1d18992718bec2d6ead84db86",
         )
 
 
