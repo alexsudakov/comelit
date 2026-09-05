@@ -83,6 +83,18 @@ class P20Ct120PseudoTcpOpenRunnerContract(unittest.TestCase):
             self.text,
         )
 
+    def test_binary_marker_gate_is_pipefail_safe(self):
+        self.assertIn('STRINGS_DUMP="$RUN_ROOT/candidate.strings"', self.text)
+        self.assertIn(
+            'strings -a "$CANDIDATE_BINARY" > "$STRINGS_DUMP"',
+            self.text,
+        )
+        self.assertIn('grep -Fq "$marker" "$STRINGS_DUMP"', self.text)
+        self.assertNotIn(
+            'strings -a "$CANDIDATE_BINARY" | grep -Fq "$marker"',
+            self.text,
+        )
+
     def test_live_gate_requires_transport_proof_and_safety_markers(self):
         for marker in (
             "PSEUDOTCP_OPEN=PASS",
@@ -112,10 +124,12 @@ class P20Ct120PseudoTcpOpenRunnerContract(unittest.TestCase):
         self.assertIn("SELF_ACTIVATION_SENT=false", self.text)
         self.assertIn("MEDIA_SIGNALING_SENT=false", self.text)
 
-    def test_runner_keeps_evidence_and_cleans_only_detached_worktree(self):
+    def test_runner_keeps_evidence_and_cleans_detached_worktree(self):
         self.assertIn('RUN_ROOT="/root/comelit-media-open-probe-$STAMP"', self.text)
         self.assertIn('MANIFEST="$RUN_ROOT/MANIFEST.txt"', self.text)
         self.assertIn('LOG="$RUN_ROOT/live.log"', self.text)
+        self.assertIn('cleanup_worktree() {', self.text)
+        self.assertGreaterEqual(self.text.count("cleanup_worktree"), 3)
         self.assertIn('worktree remove --force "$WT"', self.text)
         self.assertNotIn('rm -rf "$RUN_ROOT"', self.text)
 

@@ -106,6 +106,17 @@ MANIFEST="$RUN_ROOT/MANIFEST.txt"
 CANDIDATE_SOURCE="$BUILD/comelit-pseudotcp-open-probe.c"
 CANDIDATE_BINARY="$BUILD/comelit-pseudotcp-open-probe"
 CANDIDATE_WRAPPER="$BUILD/comelit-p2p-cloud-probe-open-probe"
+STRINGS_DUMP="$RUN_ROOT/candidate.strings"
+
+cleanup_worktree() {
+    if [ -e "$WT/.git" ]; then
+        if git -C "$REPO" worktree remove --force "$WT" >/dev/null 2>&1; then
+            echo "CT120_OPEN_PROBE_WORKTREE_CLEANUP=PASS"
+        else
+            echo "CT120_OPEN_PROBE_WORKTREE_CLEANUP=WARNING"
+        fi
+    fi
+}
 
 mkdir -p "$BUILD"
 chmod 700 "$RUN_ROOT" "$BUILD"
@@ -191,13 +202,23 @@ fi
 if [ "$FAIL" -eq 0 ]; then
     chmod 700 "$CANDIDATE_BINARY"
 
+    strings -a "$CANDIDATE_BINARY" > "$STRINGS_DUMP"
+    STRINGS_RC=$?
+    echo "CT120_OPEN_PROBE_STRINGS_RC=$STRINGS_RC"
+
+    if [ "$STRINGS_RC" -ne 0 ]; then
+        fail "CT120_OPEN_PROBE_STRINGS_DUMP=FAIL"
+    fi
+fi
+
+if [ "$FAIL" -eq 0 ]; then
     for marker in \
       'PSEUDOTCP_OPEN_PROBE_RESULT=PASS' \
       'PSEUDOTCP_OPEN_PROBE_SELF_ACTIVATION_SENT=false' \
       'PSEUDOTCP_OPEN_PROBE_MEDIA_SIGNALING_SENT=false' \
       'PSEUDOTCP_OPEN_PROBE_DOOR_ACTION_SENT=false'
     do
-        if strings -a "$CANDIDATE_BINARY" | grep -Fq "$marker"; then
+        if grep -Fq "$marker" "$STRINGS_DUMP"; then
             echo "CT120_OPEN_PROBE_BINARY_MARKER=PASS $marker"
         else
             fail "CT120_OPEN_PROBE_BINARY_MARKER=FAIL $marker"
@@ -264,6 +285,7 @@ EOF
 fi
 
 if [ "$FAIL" -ne 0 ]; then
+    cleanup_worktree
     echo "CT120_PSEUDOTCP_OPEN_PREFLIGHT=FAIL"
     echo "CT120_PSEUDOTCP_OPEN_LIVE_INVOKED=false"
     echo "CT120_PSEUDOTCP_OPEN_AUTO_RETRY=false"
@@ -337,11 +359,7 @@ fi
     echo "CT120_PSEUDOTCP_OPEN_GATE=$GATE"
 } >> "$MANIFEST"
 
-if git -C "$REPO" worktree remove --force "$WT" >/dev/null 2>&1; then
-    echo "CT120_OPEN_PROBE_WORKTREE_CLEANUP=PASS"
-else
-    echo "CT120_OPEN_PROBE_WORKTREE_CLEANUP=WARNING"
-fi
+cleanup_worktree
 
 echo
 echo "=== CT120 PSEUDOTCP OPEN RESULT ==="
