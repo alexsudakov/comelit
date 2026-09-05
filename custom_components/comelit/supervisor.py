@@ -76,6 +76,10 @@ class ComelitRuntimeSupervisor:
             "reconnect_count": self._reconnect_count,
             "last_ready": self._last_ready.isoformat() if self._last_ready else None,
             "last_error": runtime_status.get("last_error"),
+            "last_native_exit_code": runtime_status.get("last_native_exit_code"),
+            "last_native_failure_markers": runtime_status.get(
+                "last_native_failure_markers"
+            ),
             "cycle_duration_seconds": LISTENER_CYCLE_SECONDS,
         }
 
