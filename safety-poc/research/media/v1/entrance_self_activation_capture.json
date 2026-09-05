@@ -1,0 +1,104 @@
+{
+  "schema": "comelit.media.self_activation_capture.v1",
+  "source": {
+    "pcap_sha256": "f15bb1922f55237bfaeb570bd288f7023e0196c05e878dfdaa76ad165bbc044a",
+    "packet_count": 3546,
+    "linktype": 101
+  },
+  "scope": {
+    "target": "entrance",
+    "capture_kind": "official_app_self_activation",
+    "network_io_performed_by_fixture": false,
+    "door_action_sent": false,
+    "media_action_sent": false
+  },
+  "channel_contract": {
+    "ctpp_open_count": 1,
+    "cspb_open_count": 1,
+    "persistent_ctpp_request_id_reused": true,
+    "second_ctpp_open_before_self_activation": false
+  },
+  "sequence": [
+    {
+      "step": "ctpp_registration_init",
+      "pcap_packet": 136,
+      "relative_time_seconds": 0.669482,
+      "direction": "client_to_device",
+      "prefix": "0x18C0",
+      "action": "0x0011",
+      "flags": "0x0040",
+      "body_length": 52,
+      "body_sha256": "362a500bb1f322eb192afef045b25b22dd49e299016fe1ccece0cb62e81a26aa"
+    },
+    {
+      "step": "self_activation_request",
+      "pcap_packet": 173,
+      "relative_time_seconds": 5.662688,
+      "direction": "client_to_device",
+      "prefix": "0x18C0",
+      "action": "0x0028",
+      "flags": "0x0001",
+      "body_length": 72,
+      "body_sha256": "67f31e080257cb67afe499feedbc156a3112677a1fadbf1f4909d96f17118378",
+      "note": "The historical parser called this CALL_INIT_RING. In this capture the direction and user action prove self-activation context; the label alone must not be treated as an incoming-ring semantic."
+    },
+    {
+      "step": "self_activation_ack",
+      "pcap_packet": 174,
+      "relative_time_seconds": 5.768878,
+      "direction": "device_to_client",
+      "prefix": "0x1800",
+      "action": "0x0000",
+      "flags": "0xFFFF",
+      "body_length": 32,
+      "body_sha256": "7c142177dc4800ea81882b0bc5fdda98137fa05c53b6710bc23558f95d764a06"
+    },
+    {
+      "step": "client_video_event",
+      "pcap_packet": 177,
+      "relative_time_seconds": 5.842333,
+      "direction": "client_to_device",
+      "prefix": "0x1840",
+      "action": "0x0008",
+      "flags": "0x0003",
+      "body_length": 40,
+      "body_sha256": "4c4af4d5a6786d284a13e7c172dfdc10ce147c100863c6aea9f1e38d3698294f"
+    },
+    {
+      "step": "client_video_event_ack",
+      "pcap_packet": 196,
+      "relative_time_seconds": 5.968557,
+      "direction": "device_to_client",
+      "prefix": "0x1800",
+      "action": "0x0000",
+      "flags": "0xFFFF",
+      "body_length": 32,
+      "body_sha256": "5713227f1d6f95d5b1f13aabc9ff79cea45ec8a5fb9e7f6bf2edca3b3ae631ee"
+    },
+    {
+      "step": "device_video_event",
+      "pcap_packet": 200,
+      "relative_time_seconds": 6.260549,
+      "direction": "device_to_client",
+      "prefix": "0x1840",
+      "action": "0x0008",
+      "flags": "0x0003",
+      "body_length": 40,
+      "body_sha256": "fbb8884012c7b6f0202a2a1418ffaf0ac06b5cbfe66a823b4d7780e559c4b02b"
+    }
+  ],
+  "observed_transport": {
+    "dominant_peer_to_client_udp_packets": 2491,
+    "dominant_client_to_peer_udp_packets": 883,
+    "large_udp_payload_observed": true,
+    "largest_listed_udp_length": 1438,
+    "classification": "media_like_transport_evidence",
+    "limitation": "This fixture alone does not prove the exact RTP/H264 encapsulation boundary."
+  },
+  "next_live_boundary": {
+    "required_before_signaling": "pseudotcp_open",
+    "previous_live_attempt_reached": "ice_ready_without_pseudotcp_open",
+    "must_not_send_self_activation_before_pseudotcp_open": true,
+    "production_camera_entities_allowed": false
+  }
+}
