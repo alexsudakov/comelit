@@ -2,10 +2,11 @@ from pathlib import Path
 import unittest
 
 
-RUNNER = Path(
+ROOT = Path(__file__).resolve().parents[2]
+RUNNER = ROOT / (
     "safety-poc/research/media/v1/ct120_run_entrance_self_activation_signaling_probe.sh"
 )
-LAUNCHER_V3 = Path(
+LAUNCHER_V3 = ROOT / (
     "safety-poc/research/media/v1/ct120_launch_entrance_self_activation_signaling_probe_v3.sh"
 )
 
