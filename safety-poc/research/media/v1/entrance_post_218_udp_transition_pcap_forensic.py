@@ -25,9 +25,6 @@ import struct
 from typing import Iterable
 
 from pseudotcp_pcap_handshake_forensic import (
-    EXPECTED_PCAP_SHA256 if False else None,
-)
-from pseudotcp_pcap_handshake_forensic import (
     Endpoint,
     _ipv4_udp,
     _pcap_format,
