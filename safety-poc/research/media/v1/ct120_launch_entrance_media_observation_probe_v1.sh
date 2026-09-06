@@ -203,9 +203,21 @@ write_summary() {
 }
 
 finish() {
-    local rc=$?
+    local original_rc=$?
+    local final_rc="$original_rc"
+
     write_summary
-    exit "$rc"
+
+    # The compact summary is itself a fail-closed gate. A successful underlying
+    # runner is not enough if the observation or safety invariants are missing.
+    if ! grep -Fxq 'CT120_ENTRANCE_MEDIA_OBSERVATION_LAUNCH=PASS' "$SUMMARY_FILE"; then
+        if [ "$final_rc" -eq 0 ]; then
+            final_rc=1
+        fi
+    fi
+
+    trap - EXIT
+    exit "$final_rc"
 }
 trap finish EXIT
 
