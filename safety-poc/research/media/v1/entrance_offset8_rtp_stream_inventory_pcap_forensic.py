@@ -107,18 +107,26 @@ def _sequence_counts(metas) -> tuple[int, int, int]:
     return plus1, gaps, duplicates
 
 
-def _timestamp_delta_stats(metas) -> tuple[int | None, int, int]:
+def _timestamp_delta_stats(timestamps: list[int]) -> tuple[int | None, int, int]:
     deltas: list[int] = []
-    previous = None
-    for meta in metas:
+    previous: int | None = None
+    for value in timestamps:
         if previous is not None:
-            deltas.append((meta.timestamp - previous) & 0xFFFFFFFF)
-        previous = meta.timestamp
+            deltas.append((value - previous) & 0xFFFFFFFF)
+        previous = value
     if not deltas:
         return None, 0, 0
     counts = Counter(deltas)
     mode_delta, mode_count = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0]
     return mode_delta, mode_count, len(counts)
+
+
+def _rtp_timestamp(payload: bytes) -> int:
+    start = RTP_OFFSET + 4
+    end = RTP_OFFSET + 8
+    if len(payload) < end:
+        raise ValueError("offset8 RTP timestamp field is truncated")
+    return int.from_bytes(payload[start:end], "big")
 
 
 def analyze(
@@ -134,7 +142,7 @@ def analyze(
     boundary_ts = boundary[0].timestamp
     opaque = _opaque(datagrams, boundary_packet)
 
-    shaped: list[tuple[SelectedDatagram, str, object]] = []
+    shaped: list[tuple[SelectedDatagram, str, object, int]] = []
     residual: list[SelectedDatagram] = []
     for item in opaque:
         if len(item.payload) <= RTP_OFFSET:
@@ -144,29 +152,32 @@ def analyze(
         if meta is None:
             residual.append(item)
             continue
-        shaped.append((item, _direction(item, client, device), meta))
+        shaped.append((item, _direction(item, client, device), meta, _rtp_timestamp(item.payload)))
 
     wrapper_stats = tuple(
-        WrapperByteStat(position=pos, unique_values=len({item.payload[pos] for item, _, _ in shaped}))
+        WrapperByteStat(position=pos, unique_values=len({item.payload[pos] for item, _, _, _ in shaped}))
         for pos in range(RTP_OFFSET)
     )
-    wrapper_distinct_prefixes = len({item.payload[:RTP_OFFSET] for item, _, _ in shaped})
+    wrapper_distinct_prefixes = len({item.payload[:RTP_OFFSET] for item, _, _, _ in shaped})
 
-    grouped: dict[tuple[str, int, int], list[tuple[SelectedDatagram, object]]] = {}
-    for item, flow_direction, meta in shaped:
-        grouped.setdefault((flow_direction, meta.ssrc, meta.payload_type), []).append((item, meta))
+    grouped: dict[tuple[str, int, int], list[tuple[SelectedDatagram, object, int]]] = {}
+    for item, flow_direction, meta, rtp_timestamp in shaped:
+        grouped.setdefault((flow_direction, meta.ssrc, meta.payload_type), []).append(
+            (item, meta, rtp_timestamp)
+        )
 
     ordered_groups = sorted(
         grouped.items(),
-        key=lambda pair: min(item.packet_number for item, _ in pair[1]),
+        key=lambda pair: min(item.packet_number for item, _, _ in pair[1]),
     )
     streams: list[StreamStat] = []
     for ordinal, ((flow_direction, _ssrc, payload_type), pairs) in enumerate(ordered_groups, start=1):
         pairs = sorted(pairs, key=lambda pair: pair[0].packet_number)
-        items = [item for item, _ in pairs]
-        metas = [meta for _, meta in pairs]
+        items = [item for item, _, _ in pairs]
+        metas = [meta for _, meta, _ in pairs]
+        rtp_timestamps = [value for _, _, value in pairs]
         plus1, gaps, duplicates = _sequence_counts(metas)
-        ts_mode, ts_mode_count, ts_distinct = _timestamp_delta_stats(metas)
+        ts_mode, ts_mode_count, ts_distinct = _timestamp_delta_stats(rtp_timestamps)
         interarrival = [
             (items[index].timestamp - items[index - 1].timestamp) * 1000.0
             for index in range(1, len(items))
@@ -216,8 +227,8 @@ def analyze(
         opaque_count=len(opaque),
         opaque_bytes=sum(len(item.payload) for item in opaque),
         shaped_count=len(shaped),
-        shaped_bytes=sum(len(item.payload) for item, _, _ in shaped),
-        shaped_media_bytes=sum(meta.media_data_length for _, _, meta in shaped),
+        shaped_bytes=sum(len(item.payload) for item, _, _, _ in shaped),
+        shaped_media_bytes=sum(meta.media_data_length for _, _, meta, _ in shaped),
         residual_count=len(residual),
         residual_bytes=sum(len(item.payload) for item in residual),
         wrapper_distinct_prefixes=wrapper_distinct_prefixes,
