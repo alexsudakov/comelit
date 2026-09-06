@@ -293,7 +293,7 @@ def report(result: Result) -> str:
 
     lines.extend(
         [
-            "PAYLOAD_CONTENT_INSPECTED=false",
+            "OPAQUE_MEDIA_CONTENT_INSPECTED=false",
             "SEQUENCE_VALUES_EMITTED=false",
             "ENDPOINTS_EMITTED=false",
             "PORTS_EMITTED=false",
