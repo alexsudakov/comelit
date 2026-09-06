@@ -212,15 +212,23 @@ def _is_structural_ack(frame: VipFrame) -> bool:
 
 
 def _address_relation_matches(anchor: VipFrame, ack: VipFrame) -> bool:
-    """Compare address roles without emitting either address value."""
+    """Compare capture-derived address-role reversal without emitting values.
+
+    P43 correlation against the frozen capture showed the same relation for
+    three immediate device->ACK pairs: the ACK's first 9-byte address field is
+    copied from the device frame's second 9-byte field, and the ACK's second
+    field is copied from the device frame's first field. Both ACK address fields
+    are NUL terminated. This function intentionally checks only that relation;
+    it never emits either address value.
+    """
     device = anchor.body
     body = ack.body
     return bool(
         len(device) == 40
         and len(body) == 32
-        and body[12:20] == device[20:28]
-        and body[20:22] == b"\x00\x00"
-        and body[22:31] == device[30:39]
+        and body[12:21] == device[30:39]
+        and body[21] == 0x00
+        and body[22:31] == device[20:29]
         and body[31] == 0x00
     )
 
