@@ -60,17 +60,17 @@ class P60ContractTests(unittest.TestCase):
         c000a = body(44, sequence=0x22000000, action=0x000A, flags=0x0011)
         c000a[12:21] = self.address_b
         c000a[22:31] = self.address_a
-        c000a[32:44] = b"COMMONBLOCK12"
+        c000a[32:44] = b"COMMONBLOCK1"
 
         d000a = body(44, sequence=0x11020000, action=0x000A, flags=0x0011)
         d000a[12:21] = self.address_a
         d000a[22:31] = self.address_b
-        d000a[32:44] = b"COMMONBLOCK12"
+        d000a[32:44] = b"COMMONBLOCK1"
 
         c001a = body(60, sequence=0x22010000, action=0x001A, flags=0x0011)
         c001a[12:21] = self.address_b
         c001a[22:31] = self.address_a
-        c001a[32:44] = b"COMMONBLOCK12"
+        c001a[32:44] = b"COMMONBLOCK1"
         c001a[44:60] = b"EXTENSION-000001"
 
         frames = (
