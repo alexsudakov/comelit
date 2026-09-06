@@ -110,14 +110,17 @@ class P49EntrancePostAckStructuralLauncherContract(unittest.TestCase):
         ):
             self.assertIn(marker, self.patched_launcher)
 
+        # P47 stores runner transform paths inside its embedded Python patch as
+        # adjacent string literals. The previous test proves byte-for-byte that
+        # only the reviewed new_transform and informational marker changed.
         self.assertIn(
-            "TRANSFORM_REL=safety-poc/research/media/v1/entrance_post_ack_structural_classifier_transform.py",
+            '"entrance_post_ack_structural_classifier_transform.py"',
             self.patched_launcher,
         )
-        self.assertNotIn(
-            "TRANSFORM_REL=safety-poc/research/media/v1/entrance_self_activation_signaling_transform.py",
-            self.patched_launcher,
-        )
+        runner_invocation = '"$PATCHED_RUNNER" > "$DETAIL_LOG" 2>&1'
+        self.assertEqual(self.patched_launcher.count(runner_invocation), 1)
+        self.assertNotIn("for attempt in", self.patched_launcher)
+        self.assertNotIn("while true", self.patched_launcher)
 
     def test_wrapper_invokes_patched_p47_exactly_once_and_has_no_retry(self):
         invocation = '"$PATCHED_LAUNCHER" > "$BASE_OUTPUT" 2>&1'
