@@ -406,7 +406,7 @@ p12_tx_completed(P12TxKind kind)
 
             break;
 """
-    registration_replacement = """            p12_stage =
+    registration_replacement = r"""            p12_stage =
                 P12_STAGE_V4_LISTEN_RING;
 
 
