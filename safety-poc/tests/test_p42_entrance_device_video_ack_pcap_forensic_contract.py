@@ -67,9 +67,9 @@ class P42EntranceDeviceVideoAckPcapForensicContract(unittest.TestCase):
         device_body[6:8] = b"\x00\x08"
         device_body[8:10] = b"\x00\x03"
         device_body[16:20] = b"\xff\xff\xff\xff"
-        device_body[20:28] = b"A8TOKEN!"
-        device_body[28:30] = b"\x00\x00"
-        device_body[30:39] = b"A9TOKEN!!"
+        device_body[20:29] = b"ADDRONE01"
+        device_body[29] = 0
+        device_body[30:39] = b"ADDRTWO02"
         device_body[39] = 0
 
         ack_body = bytearray(32)
@@ -77,9 +77,10 @@ class P42EntranceDeviceVideoAckPcapForensicContract(unittest.TestCase):
         ack_body[2:6] = (0x11233344).to_bytes(4, "little")
         ack_body[6:8] = b"\x00\x00"
         ack_body[8:12] = b"\xff\xff\xff\xff"
-        ack_body[12:20] = device_body[20:28]
-        ack_body[20:22] = b"\x00\x00"
-        ack_body[22:31] = device_body[30:39]
+        # Capture-derived P43 relation: ACK reverses the two address roles.
+        ack_body[12:21] = device_body[30:39]
+        ack_body[21] = 0
+        ack_body[22:31] = device_body[20:29]
         ack_body[31] = 0
 
         device_frame = self._vip_frame(request_id, bytes(device_body))
@@ -131,7 +132,7 @@ class P42EntranceDeviceVideoAckPcapForensicContract(unittest.TestCase):
         self.assertEqual(evidence.matching_acks[0].first_packet, 201)
         self.assertEqual(evidence.matching_acks[0].last_packet, 202)
 
-    def test_ack_shape_address_relation_and_sequence_delta_are_structural_only(self):
+    def test_ack_shape_reversed_address_relation_and_sequence_delta_are_structural_only(self):
         analysis, device_body, ack_body, request_id = self._synthetic_analysis()
         evidence = module.derive_ack_evidence(
             module.collect_vip_frames(analysis),
@@ -150,8 +151,30 @@ class P42EntranceDeviceVideoAckPcapForensicContract(unittest.TestCase):
         self.assertIn("ACK_ADDRESS_RELATION_MATCH=true", output)
         self.assertIn("CAPTURE_DERIVED_ACK_CONTRACT=PASS", output)
         self.assertNotIn(str(request_id), output)
-        self.assertNotIn("A8TOKEN!", output)
-        self.assertNotIn("A9TOKEN!!", output)
+        self.assertNotIn("ADDRONE01", output)
+        self.assertNotIn("ADDRTWO02", output)
+
+    def test_old_non_reversed_address_assumption_is_rejected(self):
+        analysis, device_body, _ack_body, _request_id = self._synthetic_analysis()
+        evidence = module.derive_ack_evidence(
+            module.collect_vip_frames(analysis),
+            anchor_body_sha256=hashlib.sha256(device_body).hexdigest(),
+        )
+        good_ack = evidence.matching_acks[0]
+
+        old_body = bytearray(good_ack.body)
+        old_body[12:21] = evidence.anchor.body[20:29]
+        old_body[22:31] = evidence.anchor.body[30:39]
+        old_ack = module.VipFrame(
+            direction=good_ack.direction,
+            first_packet=good_ack.first_packet,
+            last_packet=good_ack.last_packet,
+            timestamp=good_ack.timestamp,
+            request_id=good_ack.request_id,
+            body=bytes(old_body),
+        )
+        self.assertTrue(module._is_structural_ack(old_ack))
+        self.assertFalse(module._address_relation_matches(evidence.anchor, old_ack))
 
     def test_conflicting_retransmission_fails_closed(self):
         analysis, _device_body, _ack_body, _request_id = self._synthetic_analysis()
