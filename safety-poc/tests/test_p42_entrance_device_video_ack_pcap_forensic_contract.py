@@ -67,9 +67,9 @@ class P42EntranceDeviceVideoAckPcapForensicContract(unittest.TestCase):
         device_body[6:8] = b"\x00\x08"
         device_body[8:10] = b"\x00\x03"
         device_body[16:20] = b"\xff\xff\xff\xff"
-        device_body[20:28] = b"ENTRANCE"
+        device_body[20:28] = b"A8TOKEN!"
         device_body[28:30] = b"\x00\x00"
-        device_body[30:39] = b"FULLADDR9"
+        device_body[30:39] = b"A9TOKEN!!"
         device_body[39] = 0
 
         ack_body = bytearray(32)
@@ -150,8 +150,8 @@ class P42EntranceDeviceVideoAckPcapForensicContract(unittest.TestCase):
         self.assertIn("ACK_ADDRESS_RELATION_MATCH=true", output)
         self.assertIn("CAPTURE_DERIVED_ACK_CONTRACT=PASS", output)
         self.assertNotIn(str(request_id), output)
-        self.assertNotIn("ENTRANCE", output)
-        self.assertNotIn("FULLADDR9", output)
+        self.assertNotIn("A8TOKEN!", output)
+        self.assertNotIn("A9TOKEN!!", output)
 
     def test_conflicting_retransmission_fails_closed(self):
         analysis, _device_body, _ack_body, _request_id = self._synthetic_analysis()
