@@ -93,7 +93,6 @@ def _rtp_media(payload: bytes):
 
 
 def _parse_stap_a(media: bytes) -> H264Shape | None:
-    # RFC 6184 STAP-A: 1-byte indicator, then repeated 16-bit length + NAL.
     if len(media) < 4 or (media[0] & 0x1F) != 24:
         return None
     pos = 1
@@ -275,6 +274,8 @@ def report(result: Result) -> str:
             f"stap_inner_nals={stream.h264_stap_total_inner_nals}"
         )
     lines.extend([
+        "CODEC_IDENTIFICATION_PERFORMED=true",
+        "H264_PACKETIZATION_INSPECTION_PERFORMED=true",
         "MEDIA_ACCESS_UNITS_RECONSTRUCTED=false",
         "VIDEO_FRAMES_DECODED=false",
         "AUDIO_DECODED=false",
