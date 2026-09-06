@@ -39,11 +39,14 @@ class P30Ct120EntranceSignalingRunnerContract(unittest.TestCase):
         self.assertIn('echo "ENTRANCE_SIGNALING_DOOR_ACTION_ALLOWED=false"', self.text)
         self.assertIn('echo "DOOR_ACTION_SENT=false"', self.text)
         self.assertIn("DOOR_RESULT_COUNT=", self.text)
+        # The literal SIGUSR1 source token is expected only because preflight
+        # scans the generated candidate and rejects the production Door hook.
+        self.assertIn("ENTRANCE_SIGNALING_DOOR_SIGNAL_GATE=FAIL", self.text)
+        self.assertIn("signal(SIGUSR1, v4_door_signal_handler);", self.text)
         for forbidden in (
             "button.press",
             "os.kill",
             "kill -USR1",
-            "SIGUSR1",
         ):
             self.assertNotIn(forbidden, self.text)
 
