@@ -9,7 +9,7 @@ payloads.
 
 It reports only anonymized flow ordinals, packet ranges/timing, whether a flow
 existed before packet 218, coarse relation to the already selected ViP client
-or device endpoint, packet/byte counts, payload-length bounds, and STUN-header
+or device host, packet/byte counts, payload-length bounds, and STUN-header
 counts. It never emits addresses, ports, payload bytes, credentials, request
 ids, RTP/H264 classification, codec information, or media contents.
 
@@ -61,8 +61,8 @@ class FlowSummary:
     min_payload_bytes: int
     max_payload_bytes: int
     stun_like_packets: int
-    from_vip_client_packets: int
-    from_vip_device_packets: int
+    from_vip_client_host_packets: int
+    from_vip_device_host_packets: int
 
 
 @dataclass(frozen=True)
@@ -140,14 +140,16 @@ def _relation(
     vip_key = tuple(sorted((vip_client, vip_device)))
     if key == vip_key:
         return "SELECTED_VIP_FLOW"
-    has_client = vip_client in key
-    has_device = vip_device in key
-    if has_client and has_device:
-        return "SELECTED_VIP_FLOW"
-    if has_client:
-        return "SHARES_VIP_CLIENT"
-    if has_device:
-        return "SHARES_VIP_DEVICE"
+
+    addresses = {endpoint.address for endpoint in key}
+    has_client_host = vip_client.address in addresses
+    has_device_host = vip_device.address in addresses
+    if has_client_host and has_device_host:
+        return "SAME_VIP_HOSTS_NEW_PORTS"
+    if has_client_host:
+        return "SHARES_VIP_CLIENT_HOST"
+    if has_device_host:
+        return "SHARES_VIP_DEVICE_HOST"
     return "OTHER"
 
 
@@ -209,11 +211,11 @@ def analyze(
                 min_payload_bytes=min(payload_lengths),
                 max_payload_bytes=max(payload_lengths),
                 stun_like_packets=sum(1 for item in items if item.stun_like),
-                from_vip_client_packets=sum(
-                    1 for item in items if item.source == vip_client
+                from_vip_client_host_packets=sum(
+                    1 for item in items if item.source.address == vip_client.address
                 ),
-                from_vip_device_packets=sum(
-                    1 for item in items if item.source == vip_device
+                from_vip_device_host_packets=sum(
+                    1 for item in items if item.source.address == vip_device.address
                 ),
             )
         )
@@ -256,8 +258,8 @@ def report(result: ForensicResult) -> str:
             f"min_payload_bytes={item.min_payload_bytes} "
             f"max_payload_bytes={item.max_payload_bytes} "
             f"stun_like_packets={item.stun_like_packets} "
-            f"from_vip_client_packets={item.from_vip_client_packets} "
-            f"from_vip_device_packets={item.from_vip_device_packets}"
+            f"from_vip_client_host_packets={item.from_vip_client_host_packets} "
+            f"from_vip_device_host_packets={item.from_vip_device_host_packets}"
         )
 
     if new_flows:
