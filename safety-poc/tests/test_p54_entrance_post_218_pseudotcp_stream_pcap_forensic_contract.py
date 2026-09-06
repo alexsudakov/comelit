@@ -1,24 +1,16 @@
-import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
+import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 MEDIA = ROOT / "safety-poc" / "research" / "media" / "v1"
 MODULE_PATH = MEDIA / "entrance_post_218_pseudotcp_stream_pcap_forensic.py"
-BASE_PATH = MEDIA / "pseudotcp_pcap_handshake_forensic.py"
 
+sys.path.insert(0, str(MEDIA))
 
-def _load(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
-
-
-base = _load("p54_base", BASE_PATH)
-p54 = _load("p54_module", MODULE_PATH)
+import pseudotcp_pcap_handshake_forensic as base
+import entrance_post_218_pseudotcp_stream_pcap_forensic as p54
 
 
 class P54ContractTest(unittest.TestCase):
