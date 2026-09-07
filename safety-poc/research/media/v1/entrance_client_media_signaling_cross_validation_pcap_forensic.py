@@ -12,6 +12,10 @@ values.  It checks:
 * video-config geometry as LE16 semantic values;
 * previously established client sequence and address-role relations.
 
+Sequence validation is relative to the nearest preceding same-request client
+CTPP frame for each target action.  This is required because the real capture
+contains an intervening client ACK between 0x000a and 0x001a.
+
 No network I/O, media decoding, payload extraction, or signaling is performed.
 """
 from __future__ import annotations
@@ -50,6 +54,8 @@ class Result:
     c001a_tag_ok: bool
     c000a_reserved_ok: bool
     c001a_reserved_ok: bool
+    c000a_sequence_delta_ok: bool
+    c001a_sequence_delta_ok: bool
     sequence_contract_ok: bool
     address_contract_ok: bool
     width: int
@@ -100,16 +106,22 @@ def _binding_ordinal(value: bytes, opens: tuple[VipFrame, ...]) -> int | None:
     return matches[0] if len(matches) == 1 else None
 
 
-def _previous_client_ctpp(frames: tuple[VipFrame, ...], target: VipFrame) -> VipFrame | None:
+def _sequence_delta_previous_client_ctpp(
+    frames: tuple[VipFrame, ...], target: VipFrame
+) -> int | None:
     candidates = [
         frame
         for frame in frames
         if frame.direction == "CLIENT_TO_DEVICE"
         and frame.request_id == target.request_id
         and frame.timestamp < target.timestamp
-        and frame.body_length >= 6
+        and frame.sequence is not None
     ]
-    return max(candidates, key=lambda frame: (frame.timestamp, frame.first_packet)) if candidates else None
+    if not candidates or target.sequence is None:
+        return None
+    previous = max(candidates, key=lambda frame: (frame.timestamp, frame.first_packet))
+    assert previous.sequence is not None
+    return (target.sequence - previous.sequence) & 0xFFFFFFFF
 
 
 def analyze(frames: Iterable[VipFrame]) -> Result:
@@ -154,17 +166,11 @@ def analyze(frames: Iterable[VipFrame]) -> Result:
     fps = int.from_bytes(c001a.body[32:34], "little")
     geometry = (width, height, secondary_width, secondary_height, fps)
 
-    previous = _previous_client_ctpp(ordered, c000a)
-    if previous is None:
-        sequence_ok = False
-    else:
-        prev_seq = int.from_bytes(previous.body[2:6], "little")
-        seq_000a = int.from_bytes(c000a.body[2:6], "little")
-        seq_001a = int.from_bytes(c001a.body[2:6], "little")
-        sequence_ok = (
-            seq_000a == prev_seq
-            and ((seq_001a - seq_000a) & 0xFFFFFFFF) == 0x00010000
-        )
+    c000a_delta = _sequence_delta_previous_client_ctpp(ordered, c000a)
+    c001a_delta = _sequence_delta_previous_client_ctpp(ordered, c001a)
+    c000a_sequence_ok = c000a_delta == 0x00000000
+    c001a_sequence_ok = c001a_delta == 0x00010000
+    sequence_ok = c000a_sequence_ok and c001a_sequence_ok
 
     role_a = anchor.body[20:29]
     role_b = anchor.body[30:39]
@@ -186,6 +192,8 @@ def analyze(frames: Iterable[VipFrame]) -> Result:
         c001a_tag_ok=c001a_tag_ok,
         c000a_reserved_ok=c000a_reserved_ok,
         c001a_reserved_ok=c001a_reserved_ok,
+        c000a_sequence_delta_ok=c000a_sequence_ok,
+        c001a_sequence_delta_ok=c001a_sequence_ok,
         sequence_contract_ok=sequence_ok,
         address_contract_ok=address_ok,
         width=width,
@@ -213,6 +221,8 @@ def report(result: Result) -> str:
         f"CLIENT_001A_VIDEO_CONFIG_TAG_CONTRACT={'PASS' if result.c001a_tag_ok else 'FAIL'}",
         f"CLIENT_000A_RESERVED_CONTRACT={'PASS' if result.c000a_reserved_ok else 'FAIL'}",
         f"CLIENT_001A_RESERVED_VARIANT_CONTRACT={'PASS' if result.c001a_reserved_ok else 'FAIL'}",
+        f"CLIENT_000A_SEQUENCE_DELTA_PREVIOUS_CONTRACT={'PASS' if result.c000a_sequence_delta_ok else 'FAIL'}",
+        f"CLIENT_001A_SEQUENCE_DELTA_PREVIOUS_CONTRACT={'PASS' if result.c001a_sequence_delta_ok else 'FAIL'}",
         f"CLIENT_SEQUENCE_CONTRACT={'PASS' if result.sequence_contract_ok else 'FAIL'}",
         f"CLIENT_ADDRESS_ROLE_CONTRACT={'PASS' if result.address_contract_ok else 'FAIL'}",
         (
