@@ -45,6 +45,10 @@ class P63CrossValidationTests(unittest.TestCase):
         data = self.base_body(32, prefix=0x1800, sequence=0x22000000, action=0x0000)
         return self.frame("CLIENT_TO_DEVICE", 204, 1.220, self.ctpp, bytes(data))
 
+    def intervening_ack(self) -> VipFrame:
+        data = self.base_body(32, prefix=0x1800, sequence=0x33000000, action=0x0000)
+        return self.frame("CLIENT_TO_DEVICE", 210, 1.550, self.ctpp, bytes(data))
+
     def control_open(self, ts: float, request_bytes: bytes) -> VipFrame:
         data = bytearray(15)
         data[0:2] = (0xABCD).to_bytes(2, "little")
@@ -65,7 +69,9 @@ class P63CrossValidationTests(unittest.TestCase):
         return self.frame("CLIENT_TO_DEVICE", 206, 1.330, self.ctpp, bytes(data))
 
     def c001a(self, *, geometry=(800, 480, 320, 240, 16), bad_tag: bool = False) -> VipFrame:
-        data = self.base_body(60, prefix=0x1840, sequence=0x22010000, action=0x001A, flags=0x0011)
+        # Intentionally not +0x00010000 from c000a.  The real protocol has an
+        # intervening client ACK; the delta contract is relative to that ACK.
+        data = self.base_body(60, prefix=0x1840, sequence=0x33010000, action=0x001A, flags=0x0011)
         data[10:16] = bytes((0x15 if bad_tag else 0x14, 0x32, 0, 0, 0, 0))
         data[16:18] = self.rtpc2
         data[18:24] = b"\xff\xff\x00\x00\x00\x00"
@@ -89,10 +95,11 @@ class P63CrossValidationTests(unittest.TestCase):
             self.control_open(1.320, self.rtpc1),
             self.control_open(1.321, self.rtpc2),
             self.c000a(),
+            self.intervening_ack(),
             self.c001a(geometry=geometry, bad_tag=bad_tag),
         )
 
-    def test_full_cross_validation_passes(self) -> None:
+    def test_full_cross_validation_passes_with_intervening_ack(self) -> None:
         anchor, frames = self.frames()
         with patch(
             "entrance_client_media_signaling_cross_validation_pcap_forensic._find_anchor",
@@ -100,11 +107,15 @@ class P63CrossValidationTests(unittest.TestCase):
         ):
             result = analyze(frames)
         self.assertTrue(result.generation_contract_ok)
+        self.assertTrue(result.c000a_sequence_delta_ok)
+        self.assertTrue(result.c001a_sequence_delta_ok)
         self.assertEqual(result.rtpc_open_count, 2)
         self.assertEqual(result.c000a_rtpc_open_ordinal, 1)
         self.assertEqual(result.c001a_rtpc_open_ordinal, 2)
         self.assertEqual((result.width, result.height, result.secondary_width, result.secondary_height, result.fps), (800, 480, 320, 240, 16))
         text = report(result)
+        self.assertIn("CLIENT_000A_SEQUENCE_DELTA_PREVIOUS_CONTRACT=PASS", text)
+        self.assertIn("CLIENT_001A_SEQUENCE_DELTA_PREVIOUS_CONTRACT=PASS", text)
         self.assertIn("LIVE_BODY_GENERATION_CONTRACT=PASS", text)
         self.assertIn("REQUEST_ID_VALUES_EMITTED=false", text)
         self.assertIn("RAW_PAYLOAD_EMITTED=false", text)
