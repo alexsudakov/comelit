@@ -7,7 +7,9 @@ OPEN body (three samples in the frozen `self_activation.pcap`) and deliberately
 kept `OPEN_TRAILER_SEMANTICS=NOT_PROVEN`. This phase answers, from offline static
 provenance only: what generates byte 14 of the RTPC OPEN body, and under which rule?
 
-No live experiment was run; P69 already established `LIVE_EXPERIMENT_REQUIRED=NO`.
+No live experiment was run. P69 intentionally left the generation contract
+`NOT_PROVEN`; P70 resolves the remaining trailer question statically, so no
+additional live experiment is required for this promotion.
 This is a pure offline reverse-engineering follow-up on staged proprietary
 artifacts (APK-derived DEX files and native ARM64 libraries from the official
 Comelit Android client) plus the frozen capture.
