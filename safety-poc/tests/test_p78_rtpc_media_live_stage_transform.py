@@ -77,11 +77,17 @@ class P78RtpcMediaLiveStageTransformTests(unittest.TestCase):
         handler = self.p78_section.split(
             "p78_handle_rtpc_control_frame", 1
         )[1]
-        media_start = handler.split("P78_RTPC_CLIENT_000A_TX", 1)[1]
-        queue_000a = media_start.split("return TRUE;", 1)[0]
-        self.assertIn("P78_TX_RTPC_CLIENT_000A", queue_000a)
-        self.assertIn("p12_flush_tx()", queue_000a)
-        self.assertNotIn("P78_TX_RTPC_CLIENT_001A", queue_000a)
+        stage_pos = handler.index("p78_rtpc_stage = P78_RTPC_CLIENT_000A_TX;")
+        queue_pos = handler.index("P78_TX_RTPC_CLIENT_000A", stage_pos)
+        flush_pos = handler.index("p12_flush_tx()", queue_pos)
+        success_return_pos = handler.index("return TRUE;", flush_pos)
+        self.assertLess(stage_pos, queue_pos)
+        self.assertLess(queue_pos, flush_pos)
+        self.assertLess(flush_pos, success_return_pos)
+        self.assertNotIn(
+            "P78_TX_RTPC_CLIENT_001A",
+            handler[stage_pos:success_return_pos],
+        )
 
         case_000a = self.candidate.split(
             "case P78_TX_RTPC_CLIENT_000A:", 1
