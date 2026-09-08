@@ -33,10 +33,22 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Register direct Comelit services."""
 
     async def handle_open_door(call: ServiceCall) -> dict[str, object]:
-        runtimes = hass.data.get(DOMAIN, {}).get(DATA_RUNTIMES, {})
+        domain_data = hass.data.get(DOMAIN, {})
+        runtimes = domain_data.get(DATA_RUNTIMES, {})
+        supervisors = domain_data.get(DATA_SUPERVISORS, {})
         if len(runtimes) != 1:
             raise HomeAssistantError("Comelit direct runtime is not uniquely available")
-        runtime: ComelitRingRuntime = next(iter(runtimes.values()))
+
+        entry_id, runtime = next(iter(runtimes.items()))
+        supervisor: ComelitRuntimeSupervisor | None = supervisors.get(entry_id)
+        if supervisor is None:
+            raise HomeAssistantError("Comelit runtime supervisor is unavailable")
+        if supervisor.media_paused:
+            raise HomeAssistantError(
+                "Comelit Door is temporarily unavailable while the intercom "
+                "media session owns the exclusive Comelit connection"
+            )
+
         return await runtime.async_open_door(str(call.data[ATTR_DOOR]))
 
     hass.services.async_register(
