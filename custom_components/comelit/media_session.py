@@ -7,6 +7,7 @@ import math
 from typing import Any, Protocol
 
 MEDIA_SESSION_HARD_LIMIT_SECONDS = 180
+MEDIA_TRANSPORT_WATCH_INTERVAL_SECONDS = 0.5
 MEDIA_PHASE_INACTIVE = "inactive"
 MEDIA_PHASE_STARTING = "starting"
 MEDIA_PHASE_ACTIVE = "active"
@@ -75,15 +76,21 @@ class ComelitMediaSessionManager:
         listener: ListenerController,
         transport: MediaTransport,
         *,
-        hard_limit_seconds: int = MEDIA_SESSION_HARD_LIMIT_SECONDS,
+        hard_limit_seconds: float = MEDIA_SESSION_HARD_LIMIT_SECONDS,
+        transport_watch_interval_seconds: float = (
+            MEDIA_TRANSPORT_WATCH_INTERVAL_SECONDS
+        ),
         task_factory: TaskFactory | None = None,
     ) -> None:
         if hard_limit_seconds <= 0:
             raise ValueError("hard_limit_seconds must be positive")
+        if transport_watch_interval_seconds <= 0:
+            raise ValueError("transport_watch_interval_seconds must be positive")
 
         self._listener = listener
         self._transport = transport
         self._hard_limit_seconds = hard_limit_seconds
+        self._transport_watch_interval_seconds = transport_watch_interval_seconds
         self._task_factory = task_factory or _default_task_factory
         self._lock = asyncio.Lock()
         self._phase = MEDIA_PHASE_INACTIVE
@@ -93,6 +100,7 @@ class ComelitMediaSessionManager:
         self._expires_at: datetime | None = None
         self._deadline_monotonic: float | None = None
         self._expiry_task: asyncio.Task[None] | None = None
+        self._watchdog_task: asyncio.Task[None] | None = None
         self._last_error: str | None = None
 
     @property
@@ -176,6 +184,10 @@ class ComelitMediaSessionManager:
                 self._async_expire_after_deadline(),
                 "comelit media hard timeout",
             )
+            self._watchdog_task = self._task_factory(
+                self._async_watch_transport(),
+                "comelit media transport watchdog",
+            )
             return self.status()
 
     async def async_release(self, *, reason: str) -> dict[str, object]:
@@ -209,6 +221,28 @@ class ComelitMediaSessionManager:
         except asyncio.CancelledError:
             raise
 
+    async def _async_watch_transport(self) -> None:
+        """Restore the listener promptly when the native media process is gone."""
+        try:
+            while True:
+                await asyncio.sleep(self._transport_watch_interval_seconds)
+                async with self._lock:
+                    if self._phase != MEDIA_PHASE_ACTIVE:
+                        return
+                    if self._transport.active:
+                        continue
+
+                    # active=False is defined by the concrete transport only
+                    # after the media process is no longer alive, so local
+                    # socket ownership has been released. Restore normal
+                    # listener ownership instead of waiting until T0+180.
+                    self._leases.clear()
+                    self._last_error = "transport_ended"
+                    await self._async_stop_locked("transport_ended")
+                    return
+        except asyncio.CancelledError:
+            raise
+
     async def _recover_failed_start(self, exc: Exception) -> None:
         self._last_error = f"start_failed:{type(exc).__name__}"
 
@@ -229,6 +263,19 @@ class ComelitMediaSessionManager:
 
         self._reset_inactive()
 
+    async def _cancel_background_task(
+        self,
+        task: asyncio.Task[None] | None,
+    ) -> None:
+        current_task = asyncio.current_task()
+        if task is None or task is current_task:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
     async def _async_stop_locked(self, reason: str) -> None:
         if self._phase == MEDIA_PHASE_INACTIVE:
             if self._listener.media_paused:
@@ -237,14 +284,11 @@ class ComelitMediaSessionManager:
 
         self._phase = MEDIA_PHASE_STOPPING
         expiry_task = self._expiry_task
+        watchdog_task = self._watchdog_task
         self._expiry_task = None
-        current_task = asyncio.current_task()
-        if expiry_task is not None and expiry_task is not current_task:
-            expiry_task.cancel()
-            try:
-                await expiry_task
-            except asyncio.CancelledError:
-                pass
+        self._watchdog_task = None
+        await self._cancel_background_task(expiry_task)
+        await self._cancel_background_task(watchdog_task)
 
         try:
             if self._transport.active:
@@ -266,7 +310,6 @@ class ComelitMediaSessionManager:
             self._phase = MEDIA_PHASE_ERROR
             return
 
-        self._last_error = None
         self._reset_inactive()
 
     def _reset_inactive(self) -> None:
@@ -277,3 +320,5 @@ class ComelitMediaSessionManager:
         self._expires_at = None
         self._deadline_monotonic = None
         self._expiry_task = None
+        self._watchdog_task = None
+        self._last_error = None
