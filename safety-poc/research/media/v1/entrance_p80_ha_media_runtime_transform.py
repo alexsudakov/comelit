@@ -345,12 +345,25 @@ def transform(source: str) -> str:
         '#define RUN_DIR     "/run/comelit-media"',
         "media run directory",
     )
-    out = _replace_once(
-        out,
-        'signal(SIGUSR1, v4_door_signal_handler);',
-        'signal(SIGUSR1, SIG_IGN);',
-        "disable Door signal entrypoint",
-    )
+
+    # The P30 signaling transform, which is already part of the P78 chain,
+    # removes the reachable SIGUSR1 Door handler and its timer. Older sources
+    # may still expose the legacy install line, so accept either proven state:
+    # remove it here if present, otherwise require the inherited false marker.
+    legacy_door_signal = 'signal(SIGUSR1, v4_door_signal_handler);'
+    if legacy_door_signal in out:
+        out = _replace_once(
+            out,
+            legacy_door_signal,
+            'signal(SIGUSR1, SIG_IGN);',
+            "disable Door signal entrypoint",
+        )
+    elif "ENTRANCE_SIGNALING_DOOR_SIGNAL_INSTALLED=false" not in out:
+        raise RuntimeError("Door signal disable provenance missing")
+
+    if legacy_door_signal in out:
+        raise RuntimeError("Door signal entrypoint remains reachable")
+
     out = _replace_once(
         out,
         'static guint64 pseudotcp_app_bytes_in = 0;\n',
