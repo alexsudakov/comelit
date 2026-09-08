@@ -58,9 +58,18 @@ class FakeTransport:
             raise RuntimeError("stop failed")
         self._active = False
 
+    def simulate_process_exit(self) -> None:
+        self.events.append("media_process_exit")
+        self._active = False
+
 
 class P80MediaSessionManagerTests(unittest.IsolatedAsyncioTestCase):
-    def make_manager(self, *, hard_limit_seconds: float = 180):
+    def make_manager(
+        self,
+        *,
+        hard_limit_seconds: float = 180,
+        watch_interval_seconds: float = 0.01,
+    ):
         events: list[str] = []
         listener = FakeListener(events)
         transport = FakeTransport(events)
@@ -68,6 +77,7 @@ class P80MediaSessionManagerTests(unittest.IsolatedAsyncioTestCase):
             listener,
             transport,
             hard_limit_seconds=hard_limit_seconds,
+            transport_watch_interval_seconds=watch_interval_seconds,
         )
         return manager, listener, transport, events
 
@@ -142,6 +152,21 @@ class P80MediaSessionManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager.phase, media.MEDIA_PHASE_INACTIVE)
         self.assertFalse(listener.media_paused)
         self.assertFalse(transport.active)
+
+    async def test_confirmed_transport_exit_restores_listener_before_hard_timeout(self) -> None:
+        manager, listener, transport, events = self.make_manager(
+            hard_limit_seconds=10,
+            watch_interval_seconds=0.005,
+        )
+        await manager.async_acquire(panel="entrance", reason="manual")
+        transport.simulate_process_exit()
+        await asyncio.sleep(0.03)
+
+        self.assertEqual(manager.phase, media.MEDIA_PHASE_INACTIVE)
+        self.assertFalse(listener.media_paused)
+        self.assertFalse(transport.active)
+        self.assertIn("media_process_exit", events)
+        self.assertEqual(events[-1], "listener_resume")
 
     async def test_unsupported_panel_fails_before_listener_pause(self) -> None:
         manager, listener, transport, events = self.make_manager()
