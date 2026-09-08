@@ -26,8 +26,8 @@ class P80HaMediaRuntimeTransformTests(unittest.TestCase):
         self.assertIn('printf("P80_RUN_DIR=/run/comelit-media\\n")', self.candidate)
 
     def test_door_signal_entrypoint_is_disabled(self) -> None:
-        self.assertIn("signal(SIGUSR1, SIG_IGN);", self.candidate)
         self.assertNotIn("signal(SIGUSR1, v4_door_signal_handler);", self.candidate)
+        self.assertIn("ENTRANCE_SIGNALING_DOOR_SIGNAL_INSTALLED=false", self.candidate)
         self.assertIn('printf("P80_DOOR_SIGNAL_ENTRYPOINT=false\\n")', self.candidate)
 
     def test_p78_three_second_media_autoclose_is_not_started(self) -> None:
