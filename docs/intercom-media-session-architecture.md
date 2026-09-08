@@ -16,7 +16,7 @@ The previous pre-live assumption that media `must not stop or recreate the persi
 2. Home Assistant startup must not open a camera session just to keep `camera.*` live.
 3. One media session has a hard limit of **180 seconds** from successful upstream start.
 4. The **deadline is absolute**. New viewers, snapshots, recordings or leases never extend it.
-5. At most one active intercom media session across the whole Comelit integration is allowed until a different concurrency model is independently proven.
+5. The integration permits **at most one active intercom media session across the whole Comelit integration** until a different concurrency model is independently proven.
 6. Persistent listener and on-demand media must never own concurrent upstream Comelit sessions.
 7. Before media bootstrap: stop the listener runtime, inhibit supervisor reconnect, and confirm listener not running/not ready.
 8. After media teardown: confirm media inactive, release the pause, restart the persistent listener, and let it return to READY.
