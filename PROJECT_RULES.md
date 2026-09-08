@@ -481,7 +481,7 @@ Safety имеет приоритет над попыткой «довести э
 
 ## 25. Один узкий следующий шаг
 
-В рабочих диалогах использовать итерационный режим.
+В рабочих диалогах использовать пошаговый режим.
 
 Предпочтительно:
 
@@ -492,6 +492,8 @@ Safety имеет приоритет над попыткой «довести э
 → анализ результата
 → следующий шаг
 ```
+
+Этот пошаговый режим общения не является определением «итерационной задачи» из §27.
 
 Не выдавать пользователю одновременно длинную цепочку live-команд, где результат шага 2 зависит от неизвестного результата шага 1.
 
@@ -513,7 +515,61 @@ Offline preparation можно объединять шире, если она н
 
 ---
 
-## 27. Hermes task prompts
+## 27. Hermes, Codex и итерационные задачи
+
+### 27.1 Документация
+
+Все задачи, результатом которых является только создание, редактирование, консолидация или актуализация документации, выполняет ChatGPT самостоятельно.
+
+Для чистой DOCS-задачи не требуется запускать Hermes/Codex только ради соблюдения процесса разработки кода.
+
+Документ всё равно должен проходить обычный Git workflow проекта: отдельная ветка → PR → CI/review → merge, если он сохраняется в репозитории.
+
+### 27.2 Что считается итерационной задачей
+
+Под **итерационной задачей** в этом проекте понимается задача, которая в рамках одной рабочей сессии может многократно проходить цикл:
+
+```text
+изменить code / JSON / script
+→ выполнить или протестировать через tool calling
+→ получить фактический результат
+→ проанализировать результат
+→ скорректировать code / JSON / script
+→ снова выполнить/протестировать
+→ повторять до получения финального результата или доказанного BLOCKED
+```
+
+Ключевой признак — не количество сообщений и не наличие нескольких research phases, а наличие feedback loop между изменением **исполняемого/машиночитаемого артефакта** и его фактическим выполнением/тестированием через tools.
+
+Чистая работа с документацией не считается такой итерационной задачей.
+
+### 27.3 Роли Hermes и Codex
+
+Для итерационных DEV/RESEARCH задач:
+
+- **Hermes = orchestrator**;
+- **Codex = обязательный исполнитель изменения code/JSON/script и связанных итерационных корректировок**;
+- Hermes запускает Codex, передаёт ему задачу и evidence, организует tool calling/host-side execution, собирает фактический output и возвращает его в следующий цикл;
+- Hermes может выполнять preflight, branch/worktree preparation, host-side verification, tests, diff/status checks, commit/push/PR handoff;
+- Hermes не должен молча заменять Codex собственной реализацией, если задача требует итерационного изменения code/JSON/script.
+
+Для таких задач prompt должен явно содержать:
+
+```text
+EXECUTION_AGENT=CODEX
+REQUIRED_EXECUTOR=codex-cli
+HERMES_ROLE=ORCHESTRATOR_ONLY
+CODEX_REQUIRED=true
+```
+
+Если Codex недоступен, задача останавливается с явным статусом, например:
+
+```text
+CODEX_EXECUTION=UNAVAILABLE
+TASK_COMPLETED=false
+```
+
+### 27.4 Требования к Hermes task prompt
 
 Если для Comelit используется Hermes, пользователь должен получать полный готовый task prompt одним copy-paste блоком.
 
@@ -524,29 +580,83 @@ Prompt должен явно фиксировать:
 - allowed files/scope;
 - prohibited actions;
 - offline/live authorization;
+- web-research authorization;
 - Door guard;
 - listener guard;
-- expected tests;
+- expected tests/tool calls;
 - required output markers;
-- PR/merge boundary, если применимо.
+- PR/merge boundary, если применимо;
+- обязательность Codex, если задача соответствует определению итерационной задачи выше.
 
 Не оставлять критические safety-правила подразумеваемыми.
 
 ---
 
-## 28. Web research
+## 28. Web research разрешён
 
-Не выполнять внешний web search без практической необходимости.
+Read-only web research является штатным разрешённым инструментом исследования проекта Comelit и не требует отдельного разрешения пользователя на каждый поиск.
 
-Приоритет источников для reverse engineering:
+Его следует использовать, когда внешняя информация может помочь подтвердить, опровергнуть или уточнить техническую гипотезу, найти документацию, исходный код, спецификацию, issue/discussion, release notes или сведения о совместимости.
 
-1. код проекта;
-2. сохранённые captures/artifacts;
-3. официальные app binaries/static provenance;
-4. runtime logs;
-5. только затем внешние материалы, если они действительно нужны.
+### 28.1 Разрешённые источники
 
-Внешний источник не должен автоматически заменять локально доказанный protocol contract.
+Приоритет отдавать первичным и технически проверяемым источникам:
+
+1. официальный сайт Comelit, официальные manuals/support/download/documentation pages;
+2. официальные или связанные с Comelit GitHub repositories и опубликованный исходный код;
+3. GitHub repositories/issues/discussions/releases других проектов, если они содержат релевантную реализацию или evidence;
+4. Home Assistant, HACS и upstream-library documentation/source repositories;
+5. standards/specifications/vendor documentation;
+6. качественные вторичные технические источники — только как дополнительный evidence или указатель на первичный источник.
+
+Локальные источники проекта — repository code, captures, static provenance, runtime logs и promoted Pxx contracts — остаются обязательной частью evidence chain и не должны игнорироваться только потому, что найден внешний материал.
+
+### 28.2 OFFLINE_ONLY не запрещает обычный web research
+
+Маркер:
+
+```text
+EXECUTION_MODE=OFFLINE_ONLY
+```
+
+означает отсутствие live-взаимодействия с исследуемой Comelit системой/устройством/облаком на protocol/runtime уровне.
+
+Он **не запрещает** обычный read-only HTTPS web search документации, GitHub, release notes и других публично доступных технических материалов.
+
+Для ясности в Hermes/Codex task можно указывать:
+
+```text
+WEB_RESEARCH_ALLOWED=true
+WEB_RESEARCH_MODE=READ_ONLY
+```
+
+### 28.3 Что запрещено web research
+
+Без отдельного явного разрешения нельзя:
+
+- логиниться в пользовательский Comelit account;
+- использовать пользовательские credentials/tokens/cookies для исследования web endpoints;
+- отправлять команды устройствам или Comelit services;
+- создавать ICE/STUN/TURN/P2P/PseudoTCP/CTPP/RTPC sessions;
+- выполнять packet replay/injection;
+- передавать secrets, account identifiers, tokens, raw authorization material или чувствительные capture fragments в поисковые запросы/внешние сервисы.
+
+### 28.4 Evidence discipline для внешних источников
+
+Web/source evidence должен быть воспроизводимым настолько, насколько это возможно:
+
+- для GitHub фиксировать repository, path и commit/tag/release, если это существенно;
+- для Comelit documentation фиксировать URL, название документа и version/date, если они доступны;
+- различать official documentation, upstream source, third-party implementation и community hypothesis;
+- не превращать внешний пример implementation автоматически в доказанный wire/runtime contract;
+- не повышать найденный target ID/address/sequence/scalar до runtime constant без независимого protocol evidence;
+- при конфликте внешнего описания с уже доказанным локальным contract явно разбирать конфликт, а не молча заменять локальное доказательство.
+
+### 28.5 Приватный GitHub repository
+
+Для приватного `alexsudakov/comelit` использовать авторизованный GitHub connector/token/App с явно предоставленным repository access.
+
+Обычный публичный web search не заменяет authenticated GitHub access к private repository.
 
 ---
 
@@ -647,7 +757,7 @@ Research iteration завершена, когда применимые пунк�
 - negative/fail-closed tests PASS;
 - proprietary artifacts/secrets не попали в Git/logs;
 - `DOOR_ACTION_SENT=false` для media research;
-- `NETWORK_IO_PERFORMED=false`, если фаза offline-only;
+- `NETWORK_IO_PERFORMED=false`, если фаза offline-only относительно Comelit runtime/protocol interaction;
 - live не выполнялся без approval;
 - diff reviewed;
 - CI PASS;
@@ -706,6 +816,9 @@ safety-poc/research/media/v1/
 [ ] Прочитан latest promoted Pxx contract
 [ ] Сформулирован один конкретный unknown
 [ ] Проверено: можно ли закрыть его offline/static
+[ ] Web research разрешён и использован, если внешние источники могут помочь
+[ ] Для итерационного изменения code/JSON/script явно требуется Codex через Hermes
+[ ] Чистую документацию выполняет ChatGPT самостоятельно
 [ ] Создана отдельная branch
 [ ] Capture literals не становятся generation constants
 [ ] Door path не затрагивается
