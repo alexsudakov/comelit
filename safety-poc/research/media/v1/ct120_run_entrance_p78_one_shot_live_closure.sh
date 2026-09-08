@@ -233,11 +233,11 @@ PY
 
 [[ "${EUID}" -eq 0 ]] || fail 'P78_PREFLIGHT=FAIL reason=ROOT_REQUIRED'
 mkdir -p "$RUN_ROOT" "$MEDIA_OUT" || fail 'P78_PREFLIGHT=FAIL reason=SCRATCH_CREATE'
-chmod 700 "$RUN_ROOT" "$MEDIA_OUT"
-: >"$DETAIL_LOG"
-chmod 600 "$DETAIL_LOG"
+chmod 700 "$RUN_ROOT" "$MEDIA_OUT" || fail 'P78_PREFLIGHT=FAIL reason=SCRATCH_MODE'
+: >"$DETAIL_LOG" || fail 'P78_PREFLIGHT=FAIL reason=DETAIL_LOG_CREATE'
+chmod 600 "$DETAIL_LOG" || fail 'P78_PREFLIGHT=FAIL reason=DETAIL_LOG_MODE'
 
-for command in git python3 cc pkg-config sha256sum timeout grep awk curl tcpdump ffprobe ffmpeg; do
+for command in git python3 cc pkg-config sha256sum timeout grep awk curl tcpdump ffprobe ffmpeg tee; do
     command -v "$command" >/dev/null 2>&1 || fail "P78_PREFLIGHT=FAIL reason=MISSING_$command"
 done
 
@@ -290,14 +290,11 @@ echo 'P78_REVIEW_PIN=PASS'
 
 [[ "${P78_REVIEWED_LIVE_RUN:-}" == "YES" ]] || fail 'P78_PREFLIGHT=FAIL reason=REVIEWED_LIVE_RUN_ENV_REQUIRED'
 
-# CT120 preflight proved `any` supports LINUX_SLL2 and not RAW. Re-check the
-# exact DLT capability before the sentinel/live boundary without capturing.
 tcpdump -i any -y "$CAPTURE_DLT" -d udp >/dev/null 2>&1 || fail 'P78_MEDIA_CAPTURE_DLT_GATE=FAIL'
 echo 'P78_MEDIA_CAPTURE_DLT_GATE=PASS'
-echo 'P78_PREFLIGHT=PASS'
 
 status_before="$RUN_ROOT/listener-before.json"
-status_only "$status_before"
+status_only "$status_before" || fail 'P78_LISTENER_STATUS_BEFORE=FAIL reason=STATUS_REQUEST'
 require_status_running_ready "$status_before" || fail 'P78_LISTENER_STATUS_BEFORE=FAIL'
 echo 'P78_LISTENER_STATUS_BEFORE=RUNNING_READY'
 
@@ -316,7 +313,7 @@ cc -O2 -g -Wall -Wextra "$CANDIDATE_C" \
     -o "$CANDIDATE_HOLDER" \
     $(pkg-config --cflags --libs nice glib-2.0 gio-2.0 gobject-2.0) \
     || fail 'P78_CANDIDATE_BUILD=FAIL'
-chmod 700 "$CANDIDATE_HOLDER"
+chmod 700 "$CANDIDATE_HOLDER" || fail 'P78_CANDIDATE_MODE=FAIL'
 echo 'P78_CANDIDATE_BUILD=PASS'
 
 [[ -f "$BASE_WRAPPER" ]] || fail 'P78_BASE_WRAPPER_PRESENT=false'
@@ -324,7 +321,7 @@ base_wrapper_actual="$(sha256sum "$BASE_WRAPPER" | awk '{print $1}')"
 [[ "$base_wrapper_actual" == "$BASE_WRAPPER_SHA256" ]] || fail 'P78_BASE_WRAPPER_PIN=FAIL'
 echo 'P78_BASE_WRAPPER_PIN=PASS'
 
-python3 - "$BASE_WRAPPER" "$CANDIDATE_WRAPPER" "$CANDIDATE_HOLDER" <<'PY'
+if ! python3 - "$BASE_WRAPPER" "$CANDIDATE_WRAPPER" "$CANDIDATE_HOLDER" <<'PY'
 from pathlib import Path
 import os
 import sys
@@ -340,7 +337,13 @@ text = text.replace(needle, f'"{holder}"', 1)
 output.write_text(text, encoding="utf-8")
 os.chmod(output, 0o700)
 PY
+then
+    fail 'P78_WRAPPER_DERIVATION=FAIL'
+fi
+[[ -x "$CANDIDATE_WRAPPER" ]] || fail 'P78_WRAPPER_DERIVATION=FAIL reason=NOT_EXECUTABLE'
 echo 'P78_WRAPPER_DERIVATION=PASS'
+
+echo 'P78_PREFLIGHT=PASS'
 
 capture_pid=""
 cleanup_capture() {
@@ -368,7 +371,8 @@ if ! kill -0 "$capture_pid" 2>/dev/null; then
     fail 'P78_MEDIA_CAPTURE_START=FAIL'
 fi
 
-chmod 600 "$PCAP_PATH" 2>/dev/null || true
+[[ -f "$PCAP_PATH" ]] || fail 'P78_MEDIA_CAPTURE_START=FAIL reason=PCAP_NOT_CREATED'
+chmod 600 "$PCAP_PATH" || fail 'P78_MEDIA_CAPTURE_START=FAIL reason=PCAP_MODE'
 echo 'P78_MEDIA_CAPTURE_STARTED=true'
 echo 'P78_MEDIA_CAPTURE_READY=true'
 echo "P78_MEDIA_CAPTURE_WINDOW_SECONDS=$CAPTURE_WINDOW_SECONDS"
