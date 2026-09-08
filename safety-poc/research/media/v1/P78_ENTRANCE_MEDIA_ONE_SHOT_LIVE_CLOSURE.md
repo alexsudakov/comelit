@@ -134,9 +134,12 @@ P78 verifier больше не использует P77 frozen `BOUNDARY_PACKET=
 1. исключает PseudoTCP-shaped UDP;
 2. исключает STUN-shaped UDP;
 3. оставшийся selected-flow UDP обязан пройти строгий P77 offset-8 RTP parser;
-4. неизвестный payload type, malformed wrapper, inconsistent wrapper profile
-   или residual selected-flow UDP дают fail-closed;
-5. H264 собирается только из `DEVICE_TO_CLIENT` PT99 через P77 single-NAL,
+4. неизвестный payload type, malformed wrapper, изменение wrapper profile
+   внутри одного анонимного RTP stream `(direction, SSRC, payload type)` или
+   residual selected-flow UDP дают fail-closed;
+5. разные RTP streams могут иметь разные wrapper profiles — это соответствует
+   P77 границе доказательства `per-stream invariant fields`;
+6. H264 собирается только из `DEVICE_TO_CLIENT` PT99 через P77 single-NAL,
    STAP-A и FU-A reconstruction.
 
 Raw/hex/base64 media payload не выводится.
@@ -234,11 +237,15 @@ P78 tests должны доказывать:
 - отсутствие second CTPP OPEN и Door entrypoint;
 - отсутствие frozen packet-218 dependency;
 - synthetic RAW/SLL/SLL2 PCAP acceptance;
+- wrapper profile stability per stream при допустимом различии profiles между
+  разными streams;
 - unsupported linktype и residual traffic fail-closed;
 - ffprobe/ffmpeg/JPEG decode gates;
 - live launcher всегда использует `--decode`;
 - strict final PASS conjunction;
-- atomic sentinel, no retry и status-only listener lifecycle.
+- atomic sentinel, no retry и status-only listener lifecycle;
+- любая ошибка подготовки wrapper/candidate/capture до live boundary не может
+  потребить one-shot sentinel.
 
 ## LIVE_ONLY facts
 
