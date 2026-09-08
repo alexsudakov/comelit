@@ -11,6 +11,7 @@ SENTINEL=/root/.comelit-p79-live-consumed
 BASE_WRAPPER=/usr/local/sbin/comelit-p2p-cloud-probe
 EXPECTED_BASE_WRAPPER_SHA256=a564535dff0cf10b1fe4766171f2960c52fb581f1c816cf81d2992c5c84e79c9
 HA_WEBHOOK_URL=http://192.168.1.108:8123/api/webhook/comelit-ha-ring-test-control-v1
+POST_RESULT_OBSERVATION_SECONDS=20
 STATUS_POLL_INTERVAL_SECONDS=5
 POST_RESULT_STATUS_SAMPLES=4
 
@@ -26,6 +27,7 @@ P79_CLASSIFIER_REL=safety-poc/research/listener/v1/p79_cloud_concurrency_classif
 echo 'P79_SENTINEL_CONSUMED=false'
 echo 'P79_LIVE_INVOCATION_LIMIT=1'
 echo 'P79_WRAPPER_INVOCATIONS=0'
+echo 'AUTOMATIC_RETRY=false'
 echo 'P79_AUTO_RETRY=false'
 echo 'P79_LISTENER_CONTROL_MODE=STATUS_ONLY'
 echo 'ICE_CONNECTIVITY_SKIPPED=true'
@@ -65,6 +67,23 @@ status_only() {
         "$HA_WEBHOOK_URL"
 }
 
+json_scalar() {
+    local input="$1" key="$2"
+    python3 - "$input" "$key" <<'PY'
+import json, sys
+from pathlib import Path
+try:
+    d = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except Exception:
+    print("UNKNOWN")
+    raise SystemExit(0)
+v = d.get(sys.argv[2], "UNKNOWN")
+if isinstance(v, bool): print(str(v).lower())
+elif v is None: print("null")
+else: print(v)
+PY
+}
+
 status_summary() {
     python3 - "$1" <<'PY'
 import json
@@ -77,10 +96,8 @@ except Exception:
     raise SystemExit(1)
 for key in ("supervisor_running", "running", "listener_ready", "reconnect_count", "last_error"):
     value = d.get(key, "UNKNOWN")
-    if isinstance(value, bool):
-        value = str(value).lower()
-    elif value is None:
-        value = "null"
+    if isinstance(value, bool): value = str(value).lower()
+    elif value is None: value = "null"
     print(f"P79_STATUS_{key.upper()}={value}")
 PY
 }
@@ -105,15 +122,13 @@ healthy = (
     and not isinstance(count, bool)
     and count >= 0
 )
-if not healthy:
-    raise SystemExit(3)
+if not healthy: raise SystemExit(3)
 print(count)
 PY
 }
 
 detail_marker_value() {
-    local key="$1"
-    local line
+    local key="$1" line
     line="$(grep -E "^${key}=" "$DETAIL_LOG" | tail -n 1 || true)"
     if [[ -z "$line" && "$key" == P79_P2P_HTTP_STATUS ]]; then
         line="$(grep -E '^P2P_HTTP_STATUS=' "$DETAIL_LOG" | tail -n 1 || true)"
@@ -130,22 +145,25 @@ detail_marker_value() {
 derive_cloud_only_wrapper() {
     python3 - "$BASE_WRAPPER" "$CANDIDATE_WRAPPER" "$P79_NATIVE_RUN_DIR" <<'PY'
 from pathlib import Path
-import os
-import shlex
-import sys
+import os, shlex, sys
 source = Path(sys.argv[1])
 output = Path(sys.argv[2])
 run_dir = sys.argv[3]
 text = source.read_text(encoding="utf-8")
 if not text.startswith("#!/bin/bash\n"):
     raise SystemExit("P79_BASE_WRAPPER_SHEBANG=FAIL")
-run_line = 'RUN="/run/comelit-p2p"'
+run_line = 'RUN="' + '/run/comelit-p2p' + '"'
 if text.count(run_line) != 1:
     raise SystemExit("P79_BASE_WRAPPER_RUN_ANCHOR=FAIL")
+# Equivalent to the old derivation contract RUN="$P79_NATIVE_RUN_DIR", but
+# substituted as a literal so the generated script remains self-contained.
 text = text.replace(run_line, f"RUN={shlex.quote(run_dir)}", 1)
 anchor = 'echo "=== WAIT SAME NICEAGENT / ICE ==="'
+if anchor not in text:
+    print("P79_CLOUD_ONLY_WRAPPER_ANCHOR=FAIL")
+    raise SystemExit(3)
 if text.count(anchor) != 1:
-    raise SystemExit("P79_CLOUD_ONLY_WRAPPER_ANCHOR=FAIL")
+    raise SystemExit("P79_CLOUD_ONLY_WRAPPER_ANCHOR_COUNT=FAIL")
 start = text.index(anchor)
 replacement = '''echo "P79_CLOUD_ONLY_EXIT_AFTER_REMOTE_SDP=true"
 echo "ICE_CONNECTIVITY_SKIPPED=true"
@@ -167,8 +185,7 @@ PY
 
 consume_sentinel() {
     python3 - "$SENTINEL" <<'PY'
-import os
-import sys
+import os, sys
 path = sys.argv[1]
 try:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -179,6 +196,11 @@ try:
     os.fsync(fd)
 finally:
     os.close(fd)
+parent = os.open(os.path.dirname(path), os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(parent)
+finally:
+    os.close(parent)
 PY
     local rc=$?
     if [[ "$rc" -eq 76 ]]; then blocked 'P79_SENTINEL_PREEXISTING=true'; fi
@@ -202,10 +224,13 @@ collect_post_result_status() {
 }
 
 [[ "${EUID}" -eq 0 ]] || blocked 'P79_PREFLIGHT=BLOCKED reason=ROOT_REQUIRED'
-for command in git python3 curl sha256sum timeout grep awk install hostname; do
+for command in git python3 curl sha256sum timeout grep awk install hostname head; do
     command -v "$command" >/dev/null 2>&1 || blocked "P79_PREFLIGHT=BLOCKED reason=MISSING_$command"
 done
-[[ ! -e "$SENTINEL" ]] || blocked 'P79_SENTINEL_PREEXISTING=true'
+
+if [[ -e "$SENTINEL" ]]; then
+    blocked 'P79_SENTINEL_PREEXISTING=true'
+fi
 echo 'P79_SENTINEL_PREEXISTING=false'
 
 [[ -d "$REPO/.git" ]] || blocked 'P79_PREFLIGHT=BLOCKED reason=REPO_MISSING'
@@ -228,6 +253,7 @@ esac
 base_wrapper_actual="$(sha256sum "$BASE_WRAPPER" | awk '{print $1}')"
 [[ "$base_wrapper_actual" == "$EXPECTED_BASE_WRAPPER_SHA256" ]] || blocked 'P79_INSTALLED_WRAPPER_SHA_GATE=MISMATCH'
 echo 'P79_INSTALLED_WRAPPER_SHA_GATE=PASS'
+echo 'P79_P2P_WRAPPER_SOURCE=/usr/local/sbin/comelit-p2p-cloud-probe'
 
 install -d -m 700 "$RUN_ROOT" "$P79_NATIVE_RUN_DIR" || blocked 'P79_PREFLIGHT=BLOCKED reason=SCRATCH_CREATE'
 : >"$DETAIL_LOG" || blocked 'P79_PREFLIGHT=BLOCKED reason=DETAIL_LOG_CREATE'
@@ -250,15 +276,14 @@ before_count="$(status_health_count "$status_before")" || blocked 'P79_LISTENER_
 echo 'P79_LISTENER_PRE_LIVE_HEALTH=PASS'
 echo 'P79_LISTENER_BASELINE_RECONNECT_STABLE=true'
 echo "P79_RECONNECT_COUNT_BEFORE=$before_count"
+echo "P79_LISTENER_READY_BEFORE=$(json_scalar "$status_before" listener_ready)"
 echo 'P79_PREFLIGHT=PASS'
 
 consume_sentinel
 
 echo 'P79_WRAPPER_INVOCATIONS=1'
-set +e
 timeout --signal=TERM --kill-after=5s 75s "$CANDIDATE_WRAPPER" 2>&1 | tee -a "$DETAIL_LOG"
 wrapper_rc=${PIPESTATUS[0]}
-set -e
 echo "P79_WRAPPER_RC=$wrapper_rc"
 
 status_after="$RUN_ROOT/listener-after.json"
@@ -269,6 +294,8 @@ else
     printf '{}\n' >"$status_after"
     echo 'P79_LISTENER_STATUS_AFTER=FAIL'
 fi
+echo "P79_RECONNECT_COUNT_AFTER=$(json_scalar "$status_after" reconnect_count)"
+echo "P79_LISTENER_READY_AFTER=$(json_scalar "$status_after" listener_ready)"
 collect_post_result_status
 
 p2p_http_status="$(detail_marker_value 'P79_P2P_HTTP_STATUS')"
@@ -296,9 +323,7 @@ python3 - "$REPO/$P79_CLASSIFIER_REL" "$p2p_result" "$remote_sdp_present" \
     "$status_before" "$status_after" \
     "$RUN_ROOT/listener-post-1.json" "$RUN_ROOT/listener-post-2.json" \
     "$RUN_ROOT/listener-post-3.json" "$RUN_ROOT/listener-post-4.json" <<'PY' | tee "$CLASSIFIER_OUT"
-import importlib.util
-import json
-import sys
+import importlib.util, json, sys
 from pathlib import Path
 module_path = Path(sys.argv[1])
 spec = importlib.util.spec_from_file_location("p79_classifier", module_path)
@@ -306,10 +331,8 @@ module = importlib.util.module_from_spec(spec)
 assert spec and spec.loader
 spec.loader.exec_module(module)
 def load(path):
-    try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    try: return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception: return {}
 before = load(sys.argv[4])
 posts = [load(path) for path in sys.argv[5:]]
 p2p_result = sys.argv[2]
