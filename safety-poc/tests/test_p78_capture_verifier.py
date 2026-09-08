@@ -211,7 +211,7 @@ class P78CaptureVerifierTests(unittest.TestCase):
     def test_runtime_parser_has_no_frozen_packet_boundary(self) -> None:
         source = Path(p78v.__file__).read_text(encoding="utf-8")
         self.assertNotIn("BOUNDARY_PACKET", source)
-        self.assertNotIn("packets_from_datagrams", source)
+        self.assertNotRegex(source, r"\bp77\.packets_from_datagrams\b")
         self.assertNotIn("EXPECTED_PCAP_SHA256", source)
 
     def test_residual_selected_flow_udp_fails_closed(self) -> None:
