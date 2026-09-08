@@ -55,6 +55,7 @@ class ComelitListenerStatusSensor(SensorEntity):
             "supervisor_running": status["supervisor_running"],
             "runtime_running": status["runtime_running"],
             "listener_ready": status["listener_ready"],
+            "media_paused": status["media_paused"],
             "reconnect_count": status["reconnect_count"],
             "last_ready": status["last_ready"],
             "last_error": status["last_error"],
