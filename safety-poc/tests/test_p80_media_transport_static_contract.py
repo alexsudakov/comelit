@@ -29,16 +29,12 @@ class P80MediaTransportStaticContractTests(unittest.TestCase):
         self.assertIn("a=rtpmap:8 PCMA/8000/1", self.source)
         self.assertIn("127.0.0.1", self.source)
 
-    def test_media_bootstrap_has_no_generic_retry_loop(self) -> None:
+    def test_media_bootstrap_has_exactly_one_cloud_negotiation(self) -> None:
         method = next(
             node
             for node in ast.walk(self.tree)
             if isinstance(node, ast.AsyncFunctionDef)
             and node.name == "_async_run_cycle"
-        )
-        self.assertEqual(
-            [node for node in ast.walk(method) if isinstance(node, (ast.For, ast.While))],
-            [],
         )
         calls = [
             node
@@ -49,6 +45,8 @@ class P80MediaTransportStaticContractTests(unittest.TestCase):
         ]
         self.assertEqual(len(calls), 1)
         self.assertNotIn("force_refresh=True", self.source)
+        self.assertNotIn("for attempt", self.source)
+        self.assertNotIn("while True:\n            remote = await async_negotiate_p2p", self.source)
 
     def test_transport_has_no_door_or_listener_control_surface(self) -> None:
         for forbidden in (
