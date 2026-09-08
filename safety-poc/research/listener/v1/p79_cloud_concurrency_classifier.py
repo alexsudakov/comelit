@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pure classifier for COMELIT-P79 cloud-only listener concurrency evidence."""
+"""Pure classifier for the COMELIT-P79 cloud/listener concurrency PoC."""
 
 from __future__ import annotations
 
@@ -25,8 +25,6 @@ RUN_RESULT_TO_PROCESS_RC = {
 
 @dataclass(frozen=True)
 class Classification:
-    """Итоговая P79 классификация без live side effects."""
-
     P79_CLOUD_CONCURRENCY: str
     P79_LISTENER_STABILITY: str
     P79_TIMEOUT_RECONNECT_ASSOCIATION: str
@@ -37,9 +35,7 @@ class Classification:
         return {
             "P79_CLOUD_CONCURRENCY": self.P79_CLOUD_CONCURRENCY,
             "P79_LISTENER_STABILITY": self.P79_LISTENER_STABILITY,
-            "P79_TIMEOUT_RECONNECT_ASSOCIATION": (
-                self.P79_TIMEOUT_RECONNECT_ASSOCIATION
-            ),
+            "P79_TIMEOUT_RECONNECT_ASSOCIATION": self.P79_TIMEOUT_RECONNECT_ASSOCIATION,
             "P79_RUN_RESULT": self.P79_RUN_RESULT,
             "P79_PROCESS_RC": str(self.process_rc),
         }
@@ -50,22 +46,32 @@ def _as_bool(value: Any) -> bool:
         return value
     if isinstance(value, str):
         return value.strip().lower() == "true"
-    return bool(value)
+    return False
 
 
 def _as_int(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
     try:
-        return int(value)
+        result = int(value)
     except (TypeError, ValueError):
         return None
+    return result if result >= 0 else None
+
+
+def _sample_valid(sample: Mapping[str, Any] | None) -> bool:
+    if not isinstance(sample, Mapping):
+        return False
+    return (
+        isinstance(sample.get("supervisor_running"), bool)
+        and isinstance(sample.get("running"), bool)
+        and isinstance(sample.get("listener_ready"), bool)
+        and _as_int(sample.get("reconnect_count")) is not None
+    )
 
 
 def _sample_running(sample: Mapping[str, Any]) -> bool:
-    return _as_bool(sample.get("supervisor_running")) and _as_bool(
-        sample.get("running")
-    )
+    return _as_bool(sample.get("supervisor_running")) and _as_bool(sample.get("running"))
 
 
 def _sample_ready(sample: Mapping[str, Any]) -> bool:
@@ -76,34 +82,48 @@ def reconnect_count_changed(
     before: Mapping[str, Any] | None,
     after: Mapping[str, Any] | None,
 ) -> bool | None:
-    if before is None or after is None:
+    if not _sample_valid(before) or not _sample_valid(after):
         return None
     before_count = _as_int(before.get("reconnect_count"))
     after_count = _as_int(after.get("reconnect_count"))
-    if before_count is None or after_count is None:
-        return None
+    assert before_count is not None and after_count is not None
     return after_count != before_count
 
 
 def listener_remained_running(samples: Sequence[Mapping[str, Any]]) -> bool:
-    return bool(samples) and all(_sample_running(sample) for sample in samples)
+    return bool(samples) and all(_sample_valid(sample) and _sample_running(sample) for sample in samples)
 
 
 def listener_ready_returned_or_stayed(samples: Sequence[Mapping[str, Any]]) -> bool:
-    if not samples:
-        return False
-    return _sample_ready(samples[-1])
+    return bool(samples) and _sample_valid(samples[-1]) and _sample_ready(samples[-1])
+
+
+def _unknown() -> Classification:
+    return Classification(
+        P79_CLOUD_CONCURRENCY="UNKNOWN",
+        P79_LISTENER_STABILITY="UNKNOWN",
+        P79_TIMEOUT_RECONNECT_ASSOCIATION="NOT_EVALUATED",
+        P79_RUN_RESULT="UNKNOWN_OUTCOME",
+        process_rc=RUN_RESULT_TO_PROCESS_RC["UNKNOWN_OUTCOME"],
+    )
 
 
 def classify(
     *,
     p2p_result: str | None,
     remote_sdp_present: bool | str | None,
-    listener_samples: Sequence[Mapping[str, Any]],
+    before_sample: Mapping[str, Any] | None = None,
+    post_samples: Sequence[Mapping[str, Any]] | None = None,
+    listener_samples: Sequence[Mapping[str, Any]] | None = None,
     preflight_blocked: bool = False,
     terminal_marker_present: bool = True,
 ) -> Classification:
-    """Map cloud outcome and listener samples onto the P79 A-E contract."""
+    """Classify one P79 cloud request against a bounded listener observation window.
+
+    `before_sample` + `post_samples` is the preferred API. `listener_samples` is
+    retained only for compatibility with the original offline tests: its first
+    item is the baseline and the remaining items are post-result observations.
+    """
 
     if preflight_blocked:
         return Classification(
@@ -114,25 +134,34 @@ def classify(
             process_rc=RUN_RESULT_TO_PROCESS_RC["BLOCKED"],
         )
 
-    if not terminal_marker_present or p2p_result is None:
-        return Classification(
-            P79_CLOUD_CONCURRENCY="UNKNOWN",
-            P79_LISTENER_STABILITY="UNKNOWN",
-            P79_TIMEOUT_RECONNECT_ASSOCIATION="NOT_EVALUATED",
-            P79_RUN_RESULT="UNKNOWN_OUTCOME",
-            process_rc=RUN_RESULT_TO_PROCESS_RC["UNKNOWN_OUTCOME"],
-        )
+    if before_sample is None and listener_samples is not None:
+        before_sample = listener_samples[0] if listener_samples else None
+        post_samples = list(listener_samples[1:]) if len(listener_samples) > 1 else []
 
-    before = listener_samples[0] if listener_samples else None
-    after = listener_samples[-1] if listener_samples else None
-    reconnect_changed = reconnect_count_changed(before, after)
-    remained_running = listener_remained_running(listener_samples)
-    ready_returned = listener_ready_returned_or_stayed(listener_samples)
+    posts = list(post_samples or [])
+
+    if not terminal_marker_present or p2p_result is None:
+        return _unknown()
+
+    # A P79 PASS is meaningful only if the listener was healthy at the baseline
+    # and every intended post-result sample is parseable.
+    if not _sample_valid(before_sample) or not posts or not all(_sample_valid(s) for s in posts):
+        return _unknown()
+
+    assert before_sample is not None
+    baseline_count = _as_int(before_sample.get("reconnect_count"))
+    assert baseline_count is not None
+
+    baseline_healthy = _sample_running(before_sample) and _sample_ready(before_sample)
+    remained_running = all(_sample_running(sample) for sample in posts)
+    final_ready = _sample_ready(posts[-1])
+    reconnect_changed = any(_as_int(sample.get("reconnect_count")) != baseline_count for sample in posts)
+
     normalized_result = p2p_result.strip().upper()
     has_remote_sdp = _as_bool(remote_sdp_present)
 
     if normalized_result == "SUCCESS" and has_remote_sdp:
-        if remained_running and reconnect_changed is False and ready_returned:
+        if baseline_healthy and remained_running and not reconnect_changed and final_ready:
             return Classification(
                 P79_CLOUD_CONCURRENCY="PROVEN",
                 P79_LISTENER_STABILITY="PROVEN",
@@ -149,19 +178,7 @@ def classify(
         )
 
     if normalized_result == "TIMEOUT":
-        if reconnect_changed is False:
-            return Classification(
-                P79_CLOUD_CONCURRENCY="INCONCLUSIVE_TRANSIENT_TIMEOUT",
-                P79_LISTENER_STABILITY=(
-                    "PROVEN" if remained_running and ready_returned else "NOT_PROVEN"
-                ),
-                P79_TIMEOUT_RECONNECT_ASSOCIATION="NOT_OBSERVED",
-                P79_RUN_RESULT="INCONCLUSIVE_TRANSIENT_TIMEOUT",
-                process_rc=RUN_RESULT_TO_PROCESS_RC[
-                    "INCONCLUSIVE_TRANSIENT_TIMEOUT"
-                ],
-            )
-        if reconnect_changed is True:
+        if reconnect_changed:
             return Classification(
                 P79_CLOUD_CONCURRENCY="INCONCLUSIVE",
                 P79_LISTENER_STABILITY="NOT_PROVEN",
@@ -169,6 +186,15 @@ def classify(
                 P79_RUN_RESULT="INCONCLUSIVE",
                 process_rc=RUN_RESULT_TO_PROCESS_RC["INCONCLUSIVE"],
             )
+        return Classification(
+            P79_CLOUD_CONCURRENCY="INCONCLUSIVE_TRANSIENT_TIMEOUT",
+            P79_LISTENER_STABILITY=(
+                "PROVEN" if baseline_healthy and remained_running and final_ready else "NOT_PROVEN"
+            ),
+            P79_TIMEOUT_RECONNECT_ASSOCIATION="NOT_OBSERVED",
+            P79_RUN_RESULT="INCONCLUSIVE_TRANSIENT_TIMEOUT",
+            process_rc=RUN_RESULT_TO_PROCESS_RC["INCONCLUSIVE_TRANSIENT_TIMEOUT"],
+        )
 
     if normalized_result == "FAIL":
         return Classification(
@@ -179,13 +205,7 @@ def classify(
             process_rc=RUN_RESULT_TO_PROCESS_RC["FAIL"],
         )
 
-    return Classification(
-        P79_CLOUD_CONCURRENCY="UNKNOWN",
-        P79_LISTENER_STABILITY="UNKNOWN",
-        P79_TIMEOUT_RECONNECT_ASSOCIATION="NOT_EVALUATED",
-        P79_RUN_RESULT="UNKNOWN_OUTCOME",
-        process_rc=RUN_RESULT_TO_PROCESS_RC["UNKNOWN_OUTCOME"],
-    )
+    return _unknown()
 
 
 def sanitize_marker(key: str, value: object) -> tuple[str, str]:
