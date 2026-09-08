@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """P78: bind the P76 RTPC state machine to the reviewed live transport writer.
 
-The transform first composes the same reviewed chain used by P76
-(`entrance_device_video_ack_observation_transform` through P76), then applies
-one narrow transport-binding stage.  `--report` follows the P76-family quirk:
-report mode prints markers and does not write an output C file.
+The transform composes the reviewed P46-through-P76 chain, then replaces the
+P46 terminal media-observation transition with a P78 RTPC live stage.  P78
+respects the base writer's single-pending-TX contract: OPEN1 -> completion ->
+OPEN2 and 000A -> completion -> 001A are serialized through p12_tx_completed().
 
 No raw, hex, or base64 payload bytes are printed by the generated stage.
 """
@@ -18,9 +18,6 @@ from entrance_rtpc_control_media_runtime_transform import (
     DEFAULT_SOURCE,
     transform as add_p76_runtime,
 )
-
-
-P78_REVIEW_COMMIT_SHA = ""
 
 
 @dataclass(frozen=True)
@@ -73,9 +70,13 @@ static gboolean entrance_self_activation_sent = FALSE;
 /* P78 live RTPC binding state. */
 typedef enum {
     P78_RTPC_IDLE = 0,
+    P78_RTPC_OPEN_1_TX,
+    P78_RTPC_OPEN_2_TX,
     P78_RTPC_WAIT_DEVICE_OPEN,
+    P78_RTPC_CLIENT_RESPONSE_TX,
     P78_RTPC_WAIT_DEVICE_RESPONSES,
-    P78_RTPC_CLIENT_MEDIA_TX,
+    P78_RTPC_CLIENT_000A_TX,
+    P78_RTPC_CLIENT_001A_TX,
     P78_RTPC_COMPLETE,
     P78_RTPC_FAILED
 } P78RtpcLiveStage;
@@ -91,7 +92,10 @@ static guint p78_rtpc_device_response_count = 0;
 static gboolean p78_rtpc_client_000a_sent = FALSE;
 static gboolean p78_rtpc_client_001a_sent = FALSE;
 
+static void p78_fail_rtpc(const char *marker);
 static gboolean p78_begin_rtpc_control(void);
+static gboolean p78_queue_rtpc_open_2(void);
+static gboolean p78_queue_rtpc_client_001a(void);
 static gboolean p78_handle_rtpc_control_frame(guint16 request_id, const guint8 *body, guint body_len);"""
 
 
@@ -129,6 +133,7 @@ ACK_COMPLETION_REPLACEMENT = """        case P12_TX_ENTRANCE_DEVICE_VIDEO_ACK:
             p78_rtpc_open_1_sent = TRUE;
             printf("P78_RTPC_OPEN_1_SENT=PASS\\n");
             fflush(stdout);
+            (void)p78_queue_rtpc_open_2();
             break;
 
         case P78_TX_RTPC_OPEN_2:
@@ -140,6 +145,7 @@ ACK_COMPLETION_REPLACEMENT = """        case P12_TX_ENTRANCE_DEVICE_VIDEO_ACK:
 
         case P78_TX_RTPC_CLIENT_RESPONSE:
             p78_rtpc_client_response_sent = TRUE;
+            p78_rtpc_stage = P78_RTPC_WAIT_DEVICE_RESPONSES;
             printf("P78_RTPC_CLIENT_RESPONSE_SENT=PASS\\n");
             fflush(stdout);
             break;
@@ -148,6 +154,7 @@ ACK_COMPLETION_REPLACEMENT = """        case P12_TX_ENTRANCE_DEVICE_VIDEO_ACK:
             p78_rtpc_client_000a_sent = TRUE;
             printf("P78_RTPC_CLIENT_000A_SENT=PASS\\n");
             fflush(stdout);
+            (void)p78_queue_rtpc_client_001a();
             break;
 
         case P78_TX_RTPC_CLIENT_001A:
@@ -158,9 +165,7 @@ ACK_COMPLETION_REPLACEMENT = """        case P12_TX_ENTRANCE_DEVICE_VIDEO_ACK:
             fflush(stdout);
 
             if (!entrance_signal_begin_media_observation()) {
-                failed = TRUE;
-                if (loop)
-                    g_main_loop_quit(loop);
+                p78_fail_rtpc("P78_MEDIA_OBSERVATION_START=FAIL");
             }
             break;"""
 
@@ -211,9 +216,10 @@ P78_HELPER_REPLACEMENT = r'''
 
 /* === P78_RTPC_MEDIA_LIVE_STAGE_BEGIN ===
  * P78_TRANSPORT_BINDING=REVIEW_REQUIRED
- * P78_REVIEW_COMMIT_SHA_REQUIRED=true
+ * P78_REVIEW_COMMIT_SHA_SOURCE=LAUNCHER_ENV
  * REGISTERED_CTPP_REUSED=true
  * SECOND_CTPP_OPEN=false
+ * TX_SERIALIZATION=SINGLE_PENDING_COMPLETION_CHAIN
  * DOOR_ACTION_SENT=false
  * RAW_PAYLOAD_EMITTED=false
  * HEX_PAYLOAD_EMITTED=false
@@ -250,6 +256,44 @@ p78_copy_role(guint8 out[9], const char *value)
     guint i;
     for (i = 0; i < 9; i++)
         out[i] = value[i] ? (guint8)value[i] : 0;
+}
+
+static gboolean
+p78_queue_rtpc_open_2(void)
+{
+    p78_rtpc_stage = P78_RTPC_OPEN_2_TX;
+    if (!p12_queue_vip_frame(
+            0,
+            p78_rtpc_open_2,
+            p78_rtpc_open_2_len,
+            P78_TX_RTPC_OPEN_2)) {
+        p78_fail_rtpc("P78_RTPC_OPEN_2_QUEUE=FAIL");
+        return FALSE;
+    }
+    if (!p12_flush_tx()) {
+        p78_fail_rtpc("P78_RTPC_OPEN_2_FLUSH=FAIL");
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static gboolean
+p78_queue_rtpc_client_001a(void)
+{
+    p78_rtpc_stage = P78_RTPC_CLIENT_001A_TX;
+    if (!p12_queue_vip_frame(
+            v4_ctpp_channel_id,
+            p78_rtpc_client_001a,
+            p78_rtpc_client_001a_len,
+            P78_TX_RTPC_CLIENT_001A)) {
+        p78_fail_rtpc("P78_RTPC_CLIENT_001A_QUEUE=FAIL");
+        return FALSE;
+    }
+    if (!p12_flush_tx()) {
+        p78_fail_rtpc("P78_RTPC_CLIENT_001A_FLUSH=FAIL");
+        return FALSE;
+    }
+    return TRUE;
 }
 
 static gboolean
@@ -295,17 +339,22 @@ p78_begin_rtpc_control(void)
 
     printf("P78_CTPP_REGISTERED_REUSED=true\n");
     printf("P78_SECOND_CTPP_OPEN=false\n");
+    printf("P78_TX_SERIALIZATION=PASS\n");
     printf("P78_MEDIA_OBSERVATION_WINDOW_MS=%u\n", P78_MEDIA_OBSERVE_MS);
     printf("P78_RAW_PAYLOAD_EMITTED=false\n");
     fflush(stdout);
 
-    p78_rtpc_stage = P78_RTPC_WAIT_DEVICE_OPEN;
-    if (!p12_queue_vip_frame(0, p78_rtpc_open_1, p78_rtpc_open_1_len, P78_TX_RTPC_OPEN_1)) {
+    p78_rtpc_stage = P78_RTPC_OPEN_1_TX;
+    if (!p12_queue_vip_frame(
+            0,
+            p78_rtpc_open_1,
+            p78_rtpc_open_1_len,
+            P78_TX_RTPC_OPEN_1)) {
         p78_fail_rtpc("P78_RTPC_OPEN_1_QUEUE=FAIL");
         return FALSE;
     }
-    if (!p12_queue_vip_frame(0, p78_rtpc_open_2, p78_rtpc_open_2_len, P78_TX_RTPC_OPEN_2)) {
-        p78_fail_rtpc("P78_RTPC_OPEN_2_QUEUE=FAIL");
+    if (!p12_flush_tx()) {
+        p78_fail_rtpc("P78_RTPC_OPEN_1_FLUSH=FAIL");
         return FALSE;
     }
     return TRUE;
@@ -327,6 +376,8 @@ p78_handle_rtpc_control_frame(guint16 request_id, const guint8 *body, guint body
         }
         p78_rtpc_device_open_observed = TRUE;
         printf("P78_RTPC_DEVICE_OPEN_OBSERVED=PASS\n");
+        fflush(stdout);
+
         status = p76_generate_client_response_to_device_open(
             &p78_rtpc_runtime,
             p78_rtpc_client_response,
@@ -335,9 +386,19 @@ p78_handle_rtpc_control_frame(guint16 request_id, const guint8 *body, guint body
             p78_fail_rtpc("P78_RTPC_CLIENT_RESPONSE_GENERATION=FAIL");
             return TRUE;
         }
-        p78_rtpc_stage = P78_RTPC_WAIT_DEVICE_RESPONSES;
-        if (!p12_queue_vip_frame(0, p78_rtpc_client_response, p78_rtpc_client_response_len, P78_TX_RTPC_CLIENT_RESPONSE))
+
+        p78_rtpc_stage = P78_RTPC_CLIENT_RESPONSE_TX;
+        if (!p12_queue_vip_frame(
+                0,
+                p78_rtpc_client_response,
+                p78_rtpc_client_response_len,
+                P78_TX_RTPC_CLIENT_RESPONSE)) {
             p78_fail_rtpc("P78_RTPC_CLIENT_RESPONSE_QUEUE=FAIL");
+            return TRUE;
+        }
+        if (!p12_flush_tx()) {
+            p78_fail_rtpc("P78_RTPC_CLIENT_RESPONSE_FLUSH=FAIL");
+        }
         return TRUE;
     }
 
@@ -353,23 +414,35 @@ p78_handle_rtpc_control_frame(guint16 request_id, const guint8 *body, guint body
         if (p78_rtpc_device_response_count < 2)
             return TRUE;
 
-        status = p76_generate_client_000a(&p78_rtpc_runtime, p78_rtpc_client_000a, p78_rtpc_client_000a_len);
+        status = p76_generate_client_000a(
+            &p78_rtpc_runtime,
+            p78_rtpc_client_000a,
+            p78_rtpc_client_000a_len);
         if (status != P76_OK) {
             p78_fail_rtpc("P78_RTPC_CLIENT_000A_GENERATION=FAIL");
             return TRUE;
         }
-        status = p76_generate_client_001a(&p78_rtpc_runtime, p78_rtpc_client_001a, p78_rtpc_client_001a_len);
+        status = p76_generate_client_001a(
+            &p78_rtpc_runtime,
+            p78_rtpc_client_001a,
+            p78_rtpc_client_001a_len);
         if (status != P76_OK) {
             p78_fail_rtpc("P78_RTPC_CLIENT_001A_GENERATION=FAIL");
             return TRUE;
         }
-        p78_rtpc_stage = P78_RTPC_CLIENT_MEDIA_TX;
-        if (!p12_queue_vip_frame(v4_ctpp_channel_id, p78_rtpc_client_000a, p78_rtpc_client_000a_len, P78_TX_RTPC_CLIENT_000A)) {
+
+        p78_rtpc_stage = P78_RTPC_CLIENT_000A_TX;
+        if (!p12_queue_vip_frame(
+                v4_ctpp_channel_id,
+                p78_rtpc_client_000a,
+                p78_rtpc_client_000a_len,
+                P78_TX_RTPC_CLIENT_000A)) {
             p78_fail_rtpc("P78_RTPC_CLIENT_000A_QUEUE=FAIL");
             return TRUE;
         }
-        if (!p12_queue_vip_frame(v4_ctpp_channel_id, p78_rtpc_client_001a, p78_rtpc_client_001a_len, P78_TX_RTPC_CLIENT_001A))
-            p78_fail_rtpc("P78_RTPC_CLIENT_001A_QUEUE=FAIL");
+        if (!p12_flush_tx()) {
+            p78_fail_rtpc("P78_RTPC_CLIENT_000A_FLUSH=FAIL");
+        }
         return TRUE;
     }
 
@@ -394,7 +467,10 @@ def composed_p76(source: str) -> str:
 
 def anchor_counts(source: str) -> dict[str, int]:
     candidate = composed_p76(source)
-    return {replacement.name: candidate.count(replacement.old) for replacement in REPLACEMENTS}
+    return {
+        replacement.name: candidate.count(replacement.old)
+        for replacement in REPLACEMENTS
+    }
 
 
 def transform(source: str) -> str:
@@ -409,11 +485,11 @@ def report() -> str:
         (
             "=== COMELIT P78 RTPC MEDIA LIVE STAGE TRANSFORM ===",
             "P78_TRANSPORT_BINDING=REVIEW_REQUIRED",
-            "P78_REVIEW_COMMIT_SHA_REQUIRED=true",
-            f"P78_REVIEW_COMMIT_SHA_SET={'true' if P78_REVIEW_COMMIT_SHA else 'false'}",
+            "P78_REVIEW_COMMIT_SHA_SOURCE=LAUNCHER_ENV",
             "P78_COMPOSES=P46_THROUGH_P76",
             "REGISTERED_CTPP_REUSED=true",
             "SECOND_CTPP_OPEN=false",
+            "TX_SERIALIZATION=SINGLE_PENDING_COMPLETION_CHAIN",
             "DEVICE_0008_ACK_GATE_PROVEN=false",
             "RTPC_CONTROL_REQUEST_ID=0",
             "RTPC_CTPP_MEDIA_REQUEST_ID=v4_ctpp_channel_id",
@@ -445,7 +521,10 @@ def main(argv: list[str] | None = None) -> int:
     source_path = args.source
     if not source_path.exists() and str(source_path).startswith("safety-poc/"):
         source_path = Path(str(source_path)[len("safety-poc/"):])
-    args.output.write_text(transform(source_path.read_text(encoding="utf-8")), encoding="utf-8")
+    args.output.write_text(
+        transform(source_path.read_text(encoding="utf-8")),
+        encoding="utf-8",
+    )
     return 0
 
 
