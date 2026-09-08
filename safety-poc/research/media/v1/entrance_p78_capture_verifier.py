@@ -9,6 +9,11 @@ selected-flow UDP structurally, reconstructs offset-8 RTP/H264 through P77's
 low-level packet/H264 helpers, and optionally performs bounded ffprobe/ffmpeg
 decode validation plus one scratch JPEG.
 
+Wrapper profile stability is enforced per anonymous RTP stream
+(direction, SSRC, payload type), matching the P77 evidence boundary. Distinct
+streams may use distinct wrapper profiles; a profile change inside one stream is
+rejected fail-closed.
+
 No network I/O is performed and no raw/hex/base64 media payload is emitted.
 """
 from __future__ import annotations
@@ -91,30 +96,33 @@ def _ipv4_from_capture_frame(frame: bytes, linktype: int) -> bytes | None:
     if linktype == PCAP_LINKTYPE_LINUX_SLL:
         if len(frame) < 16:
             raise P78RejectedInput("SLL_HEADER_TRUNCATED")
-        protocol = int.from_bytes(frame[14:16], "big")
-        if protocol != ETH_P_IP:
+        if int.from_bytes(frame[14:16], "big") != ETH_P_IP:
             return None
         return frame[16:]
 
     if linktype == PCAP_LINKTYPE_LINUX_SLL2:
         if len(frame) < 20:
             raise P78RejectedInput("SLL2_HEADER_TRUNCATED")
-        protocol = int.from_bytes(frame[0:2], "big")
-        if protocol != ETH_P_IP:
+        if int.from_bytes(frame[0:2], "big") != ETH_P_IP:
             return None
         return frame[20:]
 
     raise P78RejectedInput(f"UNSUPPORTED_PCAP_LINKTYPE_{linktype}")
 
 
-def _read_udp_datagrams(path: Path) -> tuple[int, int, tuple[CapturedDatagram, ...]]:
+def _read_udp_datagrams(
+    path: Path,
+) -> tuple[int, int, tuple[CapturedDatagram, ...]]:
     blob = path.read_bytes()
     if len(blob) < 24:
         raise P78RejectedInput("PCAP_GLOBAL_HEADER_TRUNCATED")
 
     try:
         endian, timestamp_scale = _pcap_format(blob[:4])
-        _, _, _, _, _, _, linktype = struct.unpack(endian + "IHHIIII", blob[:24])
+        _, _, _, _, _, _, linktype = struct.unpack(
+            endian + "IHHIIII",
+            blob[:24],
+        )
     except Exception as exc:
         raise P78RejectedInput("PCAP_GLOBAL_HEADER_REJECTED") from exc
 
@@ -134,7 +142,8 @@ def _read_udp_datagrams(path: Path) -> tuple[int, int, tuple[CapturedDatagram, .
             raise P78RejectedInput("PCAP_PACKET_HEADER_TRUNCATED")
 
         ts_sec, ts_frac, captured_len, _original_len = struct.unpack(
-            endian + "IIII", blob[offset : offset + 16]
+            endian + "IIII",
+            blob[offset : offset + 16],
         )
         offset += 16
 
@@ -208,7 +217,11 @@ def _select_vip_datagrams(
     return analysis.client, analysis.device, selected
 
 
-def _direction(item: CapturedDatagram, client: Endpoint, device: Endpoint) -> str:
+def _direction(
+    item: CapturedDatagram,
+    client: Endpoint,
+    device: Endpoint,
+) -> str:
     if item.source == client and item.target == device:
         return "CLIENT_TO_DEVICE"
     if item.source == device and item.target == client:
@@ -224,7 +237,6 @@ def _runtime_packets_from_datagrams(
 ) -> tuple[tuple[p77.WrappedRtpPacket, ...], int]:
     packets: list[p77.WrappedRtpPacket] = []
     residual = 0
-    profiles: dict[tuple[str, int, int], tuple[int, int, int, int, int, int]] = {}
 
     for item in datagrams:
         if (
@@ -241,19 +253,11 @@ def _runtime_packets_from_datagrams(
         if _stun_like(item.payload):
             continue
 
-        direction = _direction(item, client, device)
         try:
-            first = p77.parse_wrapped_rtp(
-                item.payload,
-                packet_number=item.packet_number,
-                direction=direction,
-            )
-            key = (first.direction, first.ssrc, first.payload_type)
             packet = p77.parse_wrapped_rtp(
                 item.payload,
                 packet_number=item.packet_number,
-                direction=direction,
-                expected_profile=profiles.setdefault(key, first.wrapper_profile),
+                direction=_direction(item, client, device),
             )
         except p77.RejectedInput:
             residual += 1
@@ -262,6 +266,26 @@ def _runtime_packets_from_datagrams(
         packets.append(packet)
 
     return tuple(packets), residual
+
+
+def _validate_per_stream_profiles(
+    packets: tuple[p77.WrappedRtpPacket, ...],
+) -> set[tuple[int, int, int, int, int, int]]:
+    """Require wrapper-profile stability within each anonymous RTP stream."""
+    by_stream: dict[
+        tuple[str, int, int],
+        tuple[int, int, int, int, int, int],
+    ] = {}
+    distinct_profiles: set[tuple[int, int, int, int, int, int]] = set()
+
+    for packet in packets:
+        key = (packet.direction, packet.ssrc, packet.payload_type)
+        expected = by_stream.setdefault(key, packet.wrapper_profile)
+        if packet.wrapper_profile != expected:
+            raise P78RejectedInput("WRAPPER_PROFILE_INCONSISTENT_WITHIN_STREAM")
+        distinct_profiles.add(packet.wrapper_profile)
+
+    return distinct_profiles
 
 
 def _run_command(
@@ -391,7 +415,6 @@ def _classify_packets(
     pcap_linktype: int | None = None,
     decode: bool = False,
 ) -> VerificationResult:
-    profiles = {packet.wrapper_profile for packet in packets}
     unknown = tuple(
         packet
         for packet in packets
@@ -404,8 +427,8 @@ def _classify_packets(
         raise P78RejectedInput("UNKNOWN_PAYLOAD_TYPE")
     if not packets:
         raise P78RejectedInput("NO_OFFSET8_RTP")
-    if len(profiles) != 1:
-        raise P78RejectedInput("WRAPPER_PROFILE_INCONSISTENT")
+
+    profiles = _validate_per_stream_profiles(packets)
 
     extraction = p77.extract_from_packets(
         packets,
@@ -530,6 +553,7 @@ def report(result: VerificationResult) -> str:
                 "P78_WRAPPER_PROFILE_CONSISTENT="
                 f"{'true' if result.wrapper_profile_consistent else 'false'}"
             ),
+            "P78_WRAPPER_PROFILE_SCOPE=PER_STREAM",
             f"P78_H264_ACCESS_UNITS={result.h264_access_units}",
             f"P78_H264_REJECTED_ACCESS_UNITS={result.h264_rejected_units}",
             f"P78_H264_ANNEXB_BYTES={result.h264_bytes}",
