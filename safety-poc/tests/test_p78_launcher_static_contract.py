@@ -56,6 +56,35 @@ class P78LauncherStaticContractTests(unittest.TestCase):
         )
         self.assertNotRegex(self.text, r"rm\s+.*SENTINEL")
 
+    def test_pre_live_artifact_preparation_fails_closed_before_sentinel(self) -> None:
+        live_boundary = self.text.rindex("\nconsume_sentinel\n")
+        pre_live = self.text[:live_boundary]
+        self.assertIn(
+            'chmod 700 "$RUN_ROOT" "$MEDIA_OUT" || fail',
+            pre_live,
+        )
+        self.assertIn(
+            'chmod 700 "$CANDIDATE_HOLDER" || fail \'P78_CANDIDATE_MODE=FAIL\'',
+            pre_live,
+        )
+        self.assertIn("P78_WRAPPER_DERIVATION=FAIL", pre_live)
+        self.assertIn(
+            '[[ -x "$CANDIDATE_WRAPPER" ]] || fail',
+            pre_live,
+        )
+        self.assertIn(
+            '[[ -f "$PCAP_PATH" ]] || fail',
+            pre_live,
+        )
+        self.assertIn(
+            'chmod 600 "$PCAP_PATH" || fail',
+            pre_live,
+        )
+        self.assertLess(
+            pre_live.index("P78_WRAPPER_DERIVATION=PASS"),
+            pre_live.index("P78_MEDIA_CAPTURE_READY=true"),
+        )
+
     def test_exactly_one_wrapper_no_retry_and_bounded_sll2_capture(self) -> None:
         self.assertEqual(
             self.text.count(
