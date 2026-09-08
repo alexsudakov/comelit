@@ -1,135 +1,259 @@
 # P78 Entrance Media One-Shot Live Closure
 
-TASK_ID=COMELIT-P78-ENTRANCE-MEDIA-ONE-SHOT-LIVE-CLOSURE
-BASE_MAIN_SHA=661f9d4c26350f2fdbce0a1c55b04ad1e5c86ee2
-EXECUTION_MODE=OFFLINE_IMPLEMENTATION_ONLY
+TASK_ID=COMELIT-P78-ENTRANCE-MEDIA-ONE-SHOT-LIVE-CLOSURE  
+BASE_MAIN_SHA=661f9d4c26350f2fdbce0a1c55b04ad1e5c86ee2  
+EXECUTION_MODE=OFFLINE_IMPLEMENTATION_ONLY  
 LIVE_EXECUTION_AUTHORIZED=false
-C_CANDIDATE_COMPILE=NOT_AVAILABLE
 
-## Базовая точка
+## Назначение
 
-Эта итерация добавляет только новые артефакты P78 поверх `661f9d4c26350f2fdbce0a1c55b04ad1e5c86ee2`. Исторические файлы P73-P77, старые трансформы, анализаторы, лаунчеры и production `custom_components/` не изменяются.
+P78 закрывает последний live-only разрыв между уже доказанной signaling/control
+цепочкой P46-P76 и доказанным P77 media receive/oracle path. Эта итерация не
+выполняет live запуск и не меняет persistent ring listener.
 
-Для собственных новых файлов P78 используется константа `P78_REVIEW_COMMIT_SHA=""`. Будущий лаунчер обязан завершиться fail-closed с `P78_REVIEW_PIN=FAIL` до появления reviewed-коммита; фиктивные SHA не используются.
+Архитектурные ограничения остаются прежними:
 
-## Матрица grounded transport-hook
+- listener и on-demand media имеют независимый lifecycle;
+- listener не останавливается, не запускается и не перезапускается P78;
+- разрешён максимум один live wrapper invocation;
+- автоматический retry запрещён;
+- второй CTPP OPEN запрещён;
+- Door path недоступен;
+- live session state генерируется заново, capture payload не replay'ится.
 
-Кодовая база уже доказывает несколько границ:
+## Reviewed commit pin
 
-- `p12_queue_vip_frame()` является проверенным writer для ViP application frame поверх зарегистрированного CTPP.
-- Единственный CTPP OPEN остается в базовой регистрации; P78 не добавляет второй `open_ctpp`.
-- P46 доказывает отправку ровно одного session-derived `0x1800` ACK после device `0x0008`, но причинность ACK не доказана: `DEVICE_0008_ACK_GATE_PROVEN=false`.
-- P76 доказывает offline generation/state parity для RTPC OPEN x2, client RESPONSE, client `0x000A` и client `0x001A`.
-- P77 доказывает offline receive/oracle path для frozen capture: media идет как non-PseudoTCP UDP с offset-8 RTP wrapper.
+Launcher не содержит самоссылочный embedded commit SHA. После PR/CI/merge
+фактический reviewed `main` SHA передаётся через:
 
-Остающийся новый участок P78 узкий: после P46 ACK перейти к RTPC CONTROL progression и отправить P76-generated тела через proven writer.
+```text
+P78_REVIEW_COMMIT_SHA=<merged-reviewed-main-sha>
+P78_REVIEWED_LIVE_RUN=YES
+```
 
-## Новые артефакты
+До live launcher требует одновременно:
 
-`entrance_p78_rtpc_media_live_stage_transform.py` композирует цепочку P46-P76 и заменяет старый terminal observation transition после `P12_TX_ENTRANCE_DEVICE_VIDEO_ACK`. Новая стадия:
+- `origin/main == P78_REVIEW_COMMIT_SHA`;
+- local `HEAD == P78_REVIEW_COMMIT_SHA`;
+- P77 base `661f9d4...` является ancestor reviewed SHA;
+- launcher, P78 transform и P78 verifier в рабочем дереве имеют blob именно из
+  reviewed SHA;
+- исторические P46-P77/base inputs имеют зафиксированные blob SHA.
 
-- отправляет `P78_TX_RTPC_OPEN_1` и `P78_TX_RTPC_OPEN_2` через `p12_queue_vip_frame(0, ...)`;
-- принимает device RTPC OPEN на `request_id == 0`;
-- отправляет `P78_TX_RTPC_CLIENT_RESPONSE` через `p12_queue_vip_frame(0, ...)`;
-- принимает две device RESPONSE;
-- отправляет `P78_TX_RTPC_CLIENT_000A` и `P78_TX_RTPC_CLIENT_001A` через `p12_queue_vip_frame(v4_ctpp_channel_id, ...)`;
-- после завершения включает bounded observation и штатный graceful close path `pseudo_tcp_socket_close(..., FALSE)`.
+Любое несовпадение завершает preflight fail-closed до live boundary.
 
-`ct120_run_entrance_p78_one_shot_live_closure.sh` является top-level future launcher. Он выполняет status-only listener checks, blob-pin базовых входов к `661f9d4c`, требует непустой reviewed `P78_REVIEW_COMMIT_SHA`, проверяет `tcpdump` до sentinel, создает `/root/.comelit-p78-live-consumed` атомарно через noclobber+fsync непосредственно перед live wrapper invocation и запускает wrapper ровно один раз под `timeout --signal=TERM --kill-after=5s 75s`. Лаунчер не выполнялся в этой задаче.
+## One-shot sentinel
 
-`entrance_p78_capture_verifier.py` является additive verifier для caller-supplied pcap. Он импортирует P77 helpers, но не использует frozen SHA gate. Default CLI offline-safe: без `--decode` нет subprocess decode check. Отчеты содержат только semantic markers, counts и hashes reconstructed output, без raw/hex/base64 payload.
+Sentinel:
 
-## Marker set
+```text
+/root/.comelit-p78-live-consumed
+```
 
-Основные маркеры будущего запуска:
+создаётся атомарно через `O_CREAT|O_EXCL`, затем fsync файла и родительского
+каталога. Он создаётся непосредственно перед единственным вызовом Comelit
+wrapper.
 
-`P78_PREFLIGHT=PASS`
-`P78_LISTENER_STATUS_BEFORE=RUNNING_READY`
-`P78_LISTENER_CONTROL_MODE=STATUS_ONLY`
-`P78_LISTENER_STOP_START_RESTART=false`
-`P78_BASE_WRAPPER_PIN=PASS`
-`P78_WRAPPER_DERIVATION=PASS`
-`P78_BUILD_DEPS=PASS`
-`P78_CANDIDATE_BUILD=PASS`
-`P78_SENTINEL_PREEXISTING=false`
-`P78_LIVE_CONSUMED_SENTINEL=CREATED_BEFORE_LIVE`
-`P78_LIVE_INVOCATION_LIMIT=1`
-`P78_AUTO_RETRY=false`
-`P78_WRAPPER_INVOCATIONS=1`
-`P78_CTPP_REGISTERED_REUSED=true`
-`P78_SECOND_CTPP_OPEN=false`
-`P78_SELF_ACTIVATION_SENT=PASS`
-`P78_CLIENT_VIDEO_EVENT_SENT=PASS`
-`P78_DEVICE_0008_EVENT=PASS`
-`P78_DEVICE_0008_ACK_SENT=true`
-`P78_DEVICE_0008_ACK_GATE_PROVEN=false`
-`P78_RTPC_OPEN_1_SENT=PASS`
-`P78_RTPC_OPEN_2_SENT=PASS`
-`P78_RTPC_DEVICE_OPEN_OBSERVED=PASS`
-`P78_RTPC_CLIENT_RESPONSE_SENT=PASS`
-`P78_RTPC_DEVICE_RESPONSE_1=PASS`
-`P78_RTPC_DEVICE_RESPONSE_2=PASS`
-`P78_RTPC_CLIENT_000A_SENT=PASS`
-`P78_RTPC_CLIENT_001A_SENT=PASS`
-`P78_RTPC_SIGNALING_RESULT=<PASS|FAIL|UNKNOWN>`
-`P78_MEDIA_CAPTURE_STARTED=true`
-`P78_MEDIA_CAPTURE_WINDOW_SECONDS<=12`
-`P78_MEDIA_PAYLOAD_STDOUT=false`
-`P78_RAW_PAYLOAD_EMITTED=false`
-`P78_H264_ORACLE=<PASS|NOT_PROVIDED|REJECTED_INPUT|NOT_PROVEN>`
-`P78_PSEUDOTCP_GRACEFUL_CLOSE_FORCE=false`
-`P78_PSEUDOTCP_GRACEFUL_CLOSE_FORCE_RST_SENT=false`
-`P78_DOOR_ACTION_SENT=false`
-`P78_HOME_ASSISTANT_CORE_STOPPED=false`
-`P78_HOME_ASSISTANT_CORE_RESTARTED=false`
-`P78_LISTENER_STATUS_AFTER=RUNNING_READY`
-`P78_RUN_RESULT=<PASS|FAIL|UNKNOWN_OUTCOME>`
+Семантика:
 
-Task-level invariant markers in offline/preflight context:
+- уже существующий sentinel -> отказ до runtime;
+- ошибка подготовки до live -> one-shot не считается потреблённым;
+- после начала live sentinel никогда автоматически не удаляется;
+- concurrent second invocation не может пройти atomic create;
+- `LIVE_INVOCATIONS <= 1`;
+- automatic retry отсутствует.
 
-`LISTENER_CHANGED=NO`
-`P78_SENTINEL_CONSUMED=false`
-`DOOR_ACTION_SENT_COUNT=0`
-`AUTOMATIC_RETRY=false`
-`SECOND_CTPP_OPEN=false`
-`LIVE_INVOCATIONS=0`
+## Serialized TX progression
+
+Base writer допускает только один `p12_tx_pending`. Поэтому P78 не ставит две
+ViP frame подряд.
+
+RTPC OPEN:
+
+```text
+OPEN_1 queue/flush
+-> P12_TX_RTPC_OPEN_1 completion
+-> OPEN_2 queue/flush
+-> P12_TX_RTPC_OPEN_2 completion
+-> WAIT_DEVICE_OPEN
+```
+
+Media control:
+
+```text
+device OPEN
+-> client RESPONSE queue/flush
+-> RESPONSE completion
+-> WAIT_DEVICE_RESPONSES
+-> two paired device RESPONSE
+-> 000A queue/flush
+-> 000A completion
+-> 001A queue/flush
+-> 001A completion
+-> signaling PASS / bounded media observation
+```
+
+Таким образом progression привязан к фактическому `p12_tx_completed()`, а не к
+двум back-to-back queue calls.
+
+## Runtime media capture
+
+CT120 preflight доказал:
+
+```text
+ANY_RAW_RC=1
+ANY_LINUX_SLL2_RC=0
+ANY_LINUX_SLL_RC=0
+```
+
+Поэтому launcher явно использует:
+
+```text
+tcpdump -i any -y LINUX_SLL2
+```
+
+и перед sentinel повторно проверяет поддержку DLT через compile-only `tcpdump
+-d`, без packet capture.
+
+Сам capture process ограничен `CAPTURE_WINDOW_SECONDS=12`; это именно граница
+процесса tcpdump, а не `wrapper timeout + 12 seconds`.
+
+## Runtime PCAP verifier
+
+P78 verifier больше не использует P77 frozen `BOUNDARY_PACKET=218` и не
+использует исторический packet number/timestamp как runtime criterion.
+
+Поддерживаются classic PCAP linktypes:
+
+- `LINKTYPE_RAW = 101`;
+- `LINKTYPE_LINUX_SLL = 113`;
+- `LINKTYPE_LINUX_SLL2 = 276`.
+
+Для выбранного ViP flow verifier структурно:
+
+1. исключает PseudoTCP-shaped UDP;
+2. исключает STUN-shaped UDP;
+3. оставшийся selected-flow UDP обязан пройти строгий P77 offset-8 RTP parser;
+4. неизвестный payload type, malformed wrapper, inconsistent wrapper profile
+   или residual selected-flow UDP дают fail-closed;
+5. H264 собирается только из `DEVICE_TO_CLIENT` PT99 через P77 single-NAL,
+   STAP-A и FU-A reconstruction.
+
+Raw/hex/base64 media payload не выводится.
+
+## Mandatory live decode gate
+
+Default verifier invocation остаётся offline-safe: без `--decode` external
+codec tools не запускаются.
+
+P78 live launcher всегда вызывает verifier с `--decode`.
+
+Для live PASS требуются:
+
+1. `P78_H264_ORACLE=PASS` и ненулевой reconstructed Annex-B H264;
+2. `ffprobe` находит video stream `codec_name=h264`;
+3. bounded `ffmpeg` decode с `-xerror` завершается успешно;
+4. после успешного decode `ffmpeg` извлекает ровно один scratch JPEG;
+5. JPEG имеет mode `0600`;
+6. verifier возвращает `0`.
+
+Основные markers:
+
+```text
+P78_FFPROBE_STATUS=PASS
+P78_FFMPEG_DECODE_STATUS=PASS
+P78_SCRATCH_JPEG_CREATED=true
+P78_SCRATCH_JPEG_COUNT=1
+P78_DECODE_STATUS=PASS
+```
+
+Ошибки ffprobe, ffmpeg decode или frame extraction не маскируются и не могут
+дать финальный PASS.
+
+## Listener contract
+
+До live и после teardown launcher выполняет только HA webhook action `status` и
+требует:
+
+```text
+supervisor_running=true
+running=true
+listener_ready=true
+last_error=null
+```
+
+Запрещены listener start/stop/restart и Home Assistant restart/stop.
+
+Итоговый invariant:
+
+```text
+LISTENER_CHANGED=NO
+```
+
+## Final live PASS gate
+
+`P78_RUN_RESULT=PASS` возможен только при одновременном выполнении:
+
+```text
+wrapper_rc == 0
+P78_RTPC_SIGNALING_RESULT == PASS
+capture bound == PASS
+verifier_rc == 0
+P78_H264_ORACLE == PASS
+P78_FFPROBE_STATUS == PASS
+P78_FFMPEG_DECODE_STATUS == PASS
+P78_DECODE_STATUS == PASS
+P78_SCRATCH_JPEG_COUNT == 1
+listener after == RUNNING_READY
+```
+
+Иначе результат `UNKNOWN_OUTCOME`/`FAIL`; автоматического повторного live запуска
+нет.
+
+## Safety invariants
+
+```text
+DOOR_ACTION_SENT_COUNT=0
+P78_DOOR_ACTION_SENT=false
+SECOND_CTPP_OPEN=false
+P78_SECOND_CTPP_OPEN=false
+AUTOMATIC_RETRY=false
+P78_AUTO_RETRY=false
+P78_MEDIA_PAYLOAD_STDOUT=false
+P78_RAW_PAYLOAD_EMITTED=false
+P78_HOME_ASSISTANT_CORE_STOPPED=false
+P78_HOME_ASSISTANT_CORE_RESTARTED=false
+P78_PSEUDOTCP_GRACEFUL_CLOSE_FORCE=false
+```
 
 ## Offline tests
 
-Добавлены focused tests:
+P78 tests должны доказывать:
 
-- transform anchor counts and generated bridge markers;
-- static launcher contract: sentinel, no retry loop, status-only listener checks, timeout bound, capture window, pins, marker completeness;
-- verifier synthetic offset-8 RTP happy path, malformed/unknown fail-closed behavior, no raw payload report, and opt-in decode path.
-
-Проверки выполнены offline only:
-
-- `python3 -m py_compile` для новых Python модулей;
-- `bash -n` для P78 launcher;
-- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_p78*.py'`;
-- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -p '*entrance*.py'`.
-
-Полная компиляция C-кандидата на CT122 не выполняется: отсутствуют dev headers `nice/glib`, поэтому `C_CANDIDATE_COMPILE=NOT_AVAILABLE`.
+- serialized OPEN1 -> OPEN2 и 000A -> 001A через TX completion;
+- отсутствие second CTPP OPEN и Door entrypoint;
+- отсутствие frozen packet-218 dependency;
+- synthetic RAW/SLL/SLL2 PCAP acceptance;
+- unsupported linktype и residual traffic fail-closed;
+- ffprobe/ffmpeg/JPEG decode gates;
+- live launcher всегда использует `--decode`;
+- strict final PASS conjunction;
+- atomic sentinel, no retry и status-only listener lifecycle.
 
 ## LIVE_ONLY facts
 
-Следующие факты остаются только для отдельного future live approval:
+До отдельного explicitly authorized one-shot всё ещё не доказаны:
 
-- реальная панель примет generated P78 RTPC CONTROL sequence;
-- runtime UDP media 5-tuple появится в bounded capture window;
-- новый pcap пройдет P78 verifier и даст декодируемые H264 access units;
-- `0x1800` ACK действительно нужен для старта media;
-- graceful close освободит upstream media resources без вреда listener readiness;
-- Home Assistant listener останется `RUNNING_READY` до и после live attempt.
+- panel acceptance generated RTPC sequence;
+- появление runtime offset-8 RTP/H264;
+- реальный ffmpeg decode и screenshot;
+- необходимость 0x1800 ACK как причинного media gate;
+- release upstream media resources после graceful close;
+- listener readiness после фактического live attempt.
 
-## References
+До merge reviewed P78 commit:
 
-- `P73_RTPC_TARGET_ID_STATIC_PROVENANCE.md`
-- `P74_ALLOCATOR_BACKED_RTPC_MEDIA_GENERATION.md`
-- `P75_RTPC_CONTROL_MEDIA_STATE_MACHINE.md`
-- `P76_RTPC_C_RUNTIME_PARITY.md`
-- `P77_ENTRANCE_MEDIA_OFFLINE_INTEGRATION_AND_LIVE_GAP_ANALYSIS.md`
-
-## Next steps
-
-Локальный review должен проверить новые P78 файлы, затем отдельный commit/push/PR зафиксирует `P78_REVIEW_COMMIT_SHA`. Только после этого возможен отдельный live approval. В этой задаче live run не выполняется.
+```text
+LIVE_SCRIPT_RUNNABLE=false
+LIVE_EXECUTION_AUTHORIZED=false
+```
