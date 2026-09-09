@@ -67,6 +67,8 @@ class ComelitEntranceMediaSwitch(SwitchEntity):
             "remaining_seconds": status["remaining_seconds"],
             "listener_paused": status["listener_paused"],
             "last_error": status["last_error"] or self._transport.last_error,
+            "last_native_exit_code": self._transport.last_native_exit_code,
+            "last_native_failure_markers": self._transport.last_native_failure_markers,
             "video_forwarding": self._transport.video_forwarding,
             "audio_forwarding": self._transport.audio_forwarding,
             "hard_limit_seconds": 180,
