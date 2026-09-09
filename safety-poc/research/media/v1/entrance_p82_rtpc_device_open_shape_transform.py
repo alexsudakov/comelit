@@ -36,23 +36,23 @@ DEVICE_OPEN_FAILURE_REPLACEMENT = r'''        status = p76_observe_device_open(&
                 p82_tag_match = body[8] == 'R' && body[9] == 'T' &&
                     body[10] == 'P' && body[11] == 'C';
 
-            printf("P82_RTPC_DEVICE_OPEN_BODY_LEN=%u\n", (unsigned)body_len);
-            printf("P82_RTPC_DEVICE_OPEN_MAGIC_MATCH=%s\n",
+            printf("P80_RTPC_DEVICE_OPEN_BODY_LEN=%u\n", (unsigned)body_len);
+            printf("P80_RTPC_DEVICE_OPEN_MAGIC_MATCH=%s\n",
                 p82_magic_match ? "true" : "false");
             if (body && body_len >= 4u)
-                printf("P82_RTPC_DEVICE_OPEN_OPCODE=%u\n",
+                printf("P80_RTPC_DEVICE_OPEN_OPCODE=%u\n",
                     (unsigned)p76_read_le16(body + 2u));
             if (body && body_len >= 6u)
-                printf("P82_RTPC_DEVICE_OPEN_DECLARED_LEN=%u\n",
+                printf("P80_RTPC_DEVICE_OPEN_DECLARED_LEN=%u\n",
                     (unsigned)p76_read_le16(body + 4u));
-            printf("P82_RTPC_DEVICE_OPEN_TAG_MATCH=%s\n",
+            printf("P80_RTPC_DEVICE_OPEN_TAG_MATCH=%s\n",
                 p82_tag_match ? "true" : "false");
-            printf("P82_RTPC_DEVICE_OPEN_TRAILER_PRESENT=%s\n",
+            printf("P80_RTPC_DEVICE_OPEN_TRAILER_PRESENT=%s\n",
                 body && body_len >= 15u ? "true" : "false");
             if (body && body_len >= 15u)
-                printf("P82_RTPC_DEVICE_OPEN_TRAILER=%u\n",
+                printf("P80_RTPC_DEVICE_OPEN_TRAILER=%u\n",
                     (unsigned)body[14]);
-            printf("P82_RTPC_DEVICE_OPEN_VALIDATION_STATUS=%u\n",
+            printf("P80_RTPC_DEVICE_OPEN_VALIDATION_STATUS=%u\n",
                 (unsigned)status);
             fflush(stdout);
 
