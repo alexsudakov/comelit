@@ -17,7 +17,8 @@ class P91MediaRxStageDiagnosticsTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         from entrance_p88_disarm_v4_listener_timeout_transform import DEFAULT_SOURCE
 
-        cls.candidate = transform(DEFAULT_SOURCE.read_text(encoding="utf-8"))
+        source = DEFAULT_SOURCE if DEFAULT_SOURCE.is_absolute() else ROOT / DEFAULT_SOURCE
+        cls.candidate = transform(source.read_text(encoding="utf-8"))
 
     def test_composes_p88_lifetime_and_signaling_fixes(self) -> None:
         self.assertIn("P80_SIGNALING_WATCHDOG_DISARMED=true", self.candidate)
