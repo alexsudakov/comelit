@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
@@ -16,6 +18,8 @@ from .const import (
     CONF_OAUTH_ACCESS_TOKEN,
     CONF_SHARED_SECRET,
     CONF_VIP_TOKEN,
+    DATA_MEDIA_SESSIONS,
+    DATA_MEDIA_TRANSPORTS,
     DATA_RUNTIMES,
     DATA_SUPERVISORS,
     DOMAIN,
@@ -23,10 +27,14 @@ from .const import (
     SERVICE_OPEN_DOOR,
     SUPPORTED_DOORS,
 )
+from .media_session import ComelitMediaSessionManager
+from .media_transport import ComelitEntranceMediaTransport
 from .oauth import ComelitOAuthManager
 from .runtime import ComelitRingRuntime
 from .supervisor import ComelitRuntimeSupervisor
 from .test_control import async_register_test_control, async_unregister_test_control
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -82,12 +90,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     if has_direct_credentials:
         oauth = ComelitOAuthManager(hass, session, entry)
+        device_uuid = str(entry.data[CONF_DEVICE_UUID])
+        vip_token = str(entry.data[CONF_VIP_TOKEN])
+
         runtime = ComelitRingRuntime(
             hass,
             session,
             entry=entry,
-            device_uuid=str(entry.data[CONF_DEVICE_UUID]),
-            vip_token=str(entry.data[CONF_VIP_TOKEN]),
+            device_uuid=device_uuid,
+            vip_token=vip_token,
             oauth=oauth,
         )
         runtimes = domain_data.setdefault(DATA_RUNTIMES, {})
@@ -100,6 +111,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         supervisors = domain_data.setdefault(DATA_SUPERVISORS, {})
         supervisors[entry.entry_id] = supervisor
+
+        media_transport = ComelitEntranceMediaTransport(
+            hass,
+            session,
+            entry=entry,
+            device_uuid=device_uuid,
+            vip_token=vip_token,
+            oauth=oauth,
+        )
+        media_transports = domain_data.setdefault(DATA_MEDIA_TRANSPORTS, {})
+        media_transports[entry.entry_id] = media_transport
+
+        media_manager = ComelitMediaSessionManager(
+            supervisor,
+            media_transport,
+            task_factory=lambda coro, name: entry.async_create_background_task(
+                hass, coro, name
+            ),
+        )
+        media_sessions = domain_data.setdefault(DATA_MEDIA_SESSIONS, {})
+        media_sessions[entry.entry_id] = media_manager
 
         # Transitional validation endpoint remains available, but normal
         # operation no longer depends on CT120/Hermes: the supervisor starts
@@ -115,17 +147,39 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     domain_data = hass.data.get(DOMAIN, {})
     runtimes = domain_data.get(DATA_RUNTIMES, {})
     supervisors = domain_data.get(DATA_SUPERVISORS, {})
+    media_sessions = domain_data.get(DATA_MEDIA_SESSIONS, {})
+    media_transports = domain_data.get(DATA_MEDIA_TRANSPORTS, {})
+
     runtime = runtimes.pop(entry.entry_id, None)
     supervisor = supervisors.pop(entry.entry_id, None)
+    media_manager = media_sessions.pop(entry.entry_id, None)
+    media_transport = media_transports.pop(entry.entry_id, None)
 
     unloaded = True
     if runtime is not None:
         async_unregister_test_control(hass)
+
+        # Tear down media first without resuming the listener; then stop the
+        # supervisor. This avoids creating a short-lived replacement listener
+        # during config-entry unload.
+        try:
+            if media_manager is not None:
+                await media_manager.async_shutdown()
+            elif media_transport is not None:
+                await media_transport.async_stop()
+        except Exception:
+            _LOGGER.exception("Failed to shut down Comelit media during unload")
+            unloaded = False
+
         if supervisor is not None:
             await supervisor.async_stop()
         else:
             await runtime.async_stop()
-        unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+        platforms_unloaded = await hass.config_entries.async_unload_platforms(
+            entry, PLATFORMS
+        )
+        unloaded = unloaded and platforms_unloaded
 
     if unloaded:
         domain_data.pop(entry.entry_id, None)
@@ -133,4 +187,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             domain_data.pop(DATA_RUNTIMES, None)
         if not supervisors:
             domain_data.pop(DATA_SUPERVISORS, None)
+        if not media_sessions:
+            domain_data.pop(DATA_MEDIA_SESSIONS, None)
+        if not media_transports:
+            domain_data.pop(DATA_MEDIA_TRANSPORTS, None)
     return unloaded
