@@ -102,6 +102,7 @@ class ComelitMediaSessionManager:
         self._expiry_task: asyncio.Task[None] | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
         self._last_error: str | None = None
+        self._status_listeners: set[Callable[[], None]] = set()
 
     @property
     def phase(self) -> str:
@@ -140,6 +141,25 @@ class ComelitMediaSessionManager:
             "listener_paused": self._listener.media_paused,
         }
 
+    def async_add_status_listener(self, callback: Callable[[], None]) -> Callable[[], None]:
+        """Register an in-process entity status listener and return its remover."""
+        self._status_listeners.add(callback)
+
+        def remove() -> None:
+            self._status_listeners.discard(callback)
+
+        return remove
+
+    def _notify_status(self) -> None:
+        for callback in tuple(self._status_listeners):
+            callback()
+
+    def _set_phase(self, phase: str) -> None:
+        if phase == self._phase:
+            return
+        self._phase = phase
+        self._notify_status()
+
     async def async_acquire(self, *, panel: str, reason: str) -> dict[str, object]:
         if panel != "entrance":
             raise ComelitMediaSessionError("unsupported_media_panel")
@@ -151,15 +171,16 @@ class ComelitMediaSessionManager:
                 if self._panel != panel or not self._transport.active:
                     raise ComelitMediaSessionError("media_session_state_mismatch")
                 self._leases[reason] = self._leases.get(reason, 0) + 1
+                self._notify_status()
                 return self.status()
 
             if self._phase in {MEDIA_PHASE_STARTING, MEDIA_PHASE_STOPPING}:
                 raise ComelitMediaSessionError("media_session_transition_busy")
 
-            self._phase = MEDIA_PHASE_STARTING
             self._panel = panel
             self._leases = {reason: 1}
             self._last_error = None
+            self._set_phase(MEDIA_PHASE_STARTING)
 
             try:
                 await self._listener.async_pause_for_media()
@@ -179,7 +200,7 @@ class ComelitMediaSessionManager:
             self._deadline_monotonic = (
                 asyncio.get_running_loop().time() + self._hard_limit_seconds
             )
-            self._phase = MEDIA_PHASE_ACTIVE
+            self._set_phase(MEDIA_PHASE_ACTIVE)
             self._expiry_task = self._task_factory(
                 self._async_expire_after_deadline(),
                 "comelit media hard timeout",
@@ -200,6 +221,8 @@ class ComelitMediaSessionManager:
 
             if self._phase == MEDIA_PHASE_ACTIVE and not self._leases:
                 await self._async_stop_locked("last_lease_released")
+            else:
+                self._notify_status()
             return self.status()
 
     async def async_force_stop(self, *, reason: str) -> dict[str, object]:
@@ -209,6 +232,27 @@ class ComelitMediaSessionManager:
             self._leases.clear()
             await self._async_stop_locked(reason)
             return self.status()
+
+    async def async_shutdown(self) -> None:
+        """Tear media down for config-entry unload without restarting listener."""
+        async with self._lock:
+            self._leases.clear()
+            expiry_task = self._expiry_task
+            watchdog_task = self._watchdog_task
+            self._expiry_task = None
+            self._watchdog_task = None
+            await self._cancel_background_task(expiry_task)
+            await self._cancel_background_task(watchdog_task)
+
+            if self._phase != MEDIA_PHASE_INACTIVE:
+                self._set_phase(MEDIA_PHASE_STOPPING)
+            try:
+                await self._transport.async_stop()
+            except Exception as exc:
+                self._last_error = f"shutdown_teardown_failed:{type(exc).__name__}"
+                self._set_phase(MEDIA_PHASE_ERROR)
+                raise
+            self._reset_inactive()
 
     async def _async_expire_after_deadline(self) -> None:
         try:
@@ -251,14 +295,14 @@ class ComelitMediaSessionManager:
                 await self._transport.async_stop()
             except Exception as stop_exc:
                 self._last_error = f"start_cleanup_failed:{type(stop_exc).__name__}"
-                self._phase = MEDIA_PHASE_ERROR
+                self._set_phase(MEDIA_PHASE_ERROR)
                 return
 
         try:
             await self._listener.async_resume_after_media()
         except Exception as resume_exc:
             self._last_error = f"listener_restore_failed:{type(resume_exc).__name__}"
-            self._phase = MEDIA_PHASE_ERROR
+            self._set_phase(MEDIA_PHASE_ERROR)
             return
 
         self._reset_inactive()
@@ -282,7 +326,7 @@ class ComelitMediaSessionManager:
                 await self._listener.async_resume_after_media()
             return
 
-        self._phase = MEDIA_PHASE_STOPPING
+        self._set_phase(MEDIA_PHASE_STOPPING)
         expiry_task = self._expiry_task
         watchdog_task = self._watchdog_task
         self._expiry_task = None
@@ -300,20 +344,19 @@ class ComelitMediaSessionManager:
             # restart the persistent listener and create two concurrent Comelit
             # sessions. Manual recovery can inspect the error state instead.
             self._last_error = f"teardown_failed:{type(exc).__name__}"
-            self._phase = MEDIA_PHASE_ERROR
+            self._set_phase(MEDIA_PHASE_ERROR)
             return
 
         try:
             await self._listener.async_resume_after_media()
         except Exception as exc:
             self._last_error = f"listener_restore_failed:{type(exc).__name__}"
-            self._phase = MEDIA_PHASE_ERROR
+            self._set_phase(MEDIA_PHASE_ERROR)
             return
 
         self._reset_inactive()
 
     def _reset_inactive(self) -> None:
-        self._phase = MEDIA_PHASE_INACTIVE
         self._panel = None
         self._leases.clear()
         self._started_at = None
@@ -322,3 +365,4 @@ class ComelitMediaSessionManager:
         self._expiry_task = None
         self._watchdog_task = None
         self._last_error = None
+        self._set_phase(MEDIA_PHASE_INACTIVE)
