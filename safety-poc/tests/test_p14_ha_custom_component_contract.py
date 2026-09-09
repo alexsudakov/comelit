@@ -144,7 +144,10 @@ class P14HomeAssistantContractTests(unittest.TestCase):
         sensor = (ROOT / "custom_components/comelit/sensor.py").read_text()
         ast.parse(supervisor)
         ast.parse(sensor)
-        self.assertIn('PLATFORMS = ["button", "sensor"]', const)
+        self.assertRegex(
+            const,
+            r'PLATFORMS\s*=\s*\[[^\]]*"button"[^\]]*"sensor"[^\]]*\]',
+        )
         self.assertIn(
             'LISTENER_STATUS_ENTITY_ID = "sensor.comelit_listener_status"', const
         )
