@@ -1,9 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from typing import Any
 
-from homeassistant.components.camera import Camera, CameraEntityFeature
+from homeassistant.components.camera import (
+    Camera,
+    CameraEntityFeature,
+    get_dynamic_camera_stream_settings,
+)
+from homeassistant.components.stream import (
+    ATTR_SETTINGS,
+    ATTR_STREAMS,
+    DOMAIN as STREAM_DOMAIN,
+    Stream,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -59,9 +70,6 @@ class ComelitEntranceCamera(Camera):
         self._transport = transport
         self._stream_reset_task: asyncio.Task[None] | None = None
         self.entity_id = ENTRANCE_CAMERA_ENTITY_ID
-        # The source is a local SDP file which references only loopback RTP.
-        # PyAV/FFmpeg must explicitly allow those nested protocols.
-        self.stream_options["protocol_whitelist"] = "file,udp,rtp"
 
     @property
     def use_stream_for_stills(self) -> bool:
@@ -100,6 +108,41 @@ class ComelitEntranceCamera(Camera):
         if not exists:
             return None
         return str(path)
+
+    async def async_create_stream(self) -> Stream | None:
+        """Create HA Stream while passing SDP protocol permissions to PyAV.
+
+        Current Home Assistant validates camera ``stream_options`` and no longer
+        accepts arbitrary FFmpeg/PyAV keys such as ``protocol_whitelist``.
+        A local SDP file which references RTP/UDP still requires that whitelist
+        at the libavformat layer, so construct the standard HA Stream directly
+        with the required PyAV option instead of placing it in stream_options.
+        """
+        if not self._manager.active:
+            return None
+        if not self._create_stream_lock:
+            self._create_stream_lock = asyncio.Lock()
+        async with self._create_stream_lock:
+            if self.stream is None:
+                source = await self.stream_source()
+                if source is None:
+                    return None
+                stream = Stream(
+                    self.hass,
+                    source,
+                    pyav_options={"protocol_whitelist": "file,udp,rtp"},
+                    stream_settings=copy.copy(
+                        self.hass.data[STREAM_DOMAIN][ATTR_SETTINGS]
+                    ),
+                    dynamic_stream_settings=await get_dynamic_camera_stream_settings(
+                        self.hass, self.entity_id
+                    ),
+                    stream_label=self.entity_id,
+                )
+                self.hass.data[STREAM_DOMAIN][ATTR_STREAMS].append(stream)
+                stream.set_update_callback(self.async_write_ha_state)
+                self.stream = stream
+            return self.stream
 
     async def async_camera_image(
         self,
