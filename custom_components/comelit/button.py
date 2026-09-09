@@ -10,6 +10,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
     DATA_RUNTIMES,
+    DATA_SUPERVISORS,
     DOMAIN,
     DOOR_ENTRANCE,
     DOOR_GATE,
@@ -19,6 +20,7 @@ from .const import (
     MAIN_GATE_UNIQUE_ID,
 )
 from .runtime import ComelitRingRuntime
+from .supervisor import ComelitRuntimeSupervisor
 
 
 async def async_setup_entry(
@@ -29,10 +31,13 @@ async def async_setup_entry(
     runtime: ComelitRingRuntime | None = (
         hass.data.get(DOMAIN, {}).get(DATA_RUNTIMES, {}).get(entry.entry_id)
     )
-    if runtime is not None:
+    supervisor: ComelitRuntimeSupervisor | None = (
+        hass.data.get(DOMAIN, {}).get(DATA_SUPERVISORS, {}).get(entry.entry_id)
+    )
+    if runtime is not None and supervisor is not None:
         async_add_entities(
             [
-                ComelitEntranceDoorButton(runtime),
+                ComelitEntranceDoorButton(runtime, supervisor),
                 ComelitGateDoorButton(runtime),
             ]
         )
@@ -46,16 +51,29 @@ class ComelitEntranceDoorButton(ButtonEntity):
     _attr_icon = "mdi:door-open"
     _attr_should_poll = False
 
-    def __init__(self, runtime: ComelitRingRuntime) -> None:
+    def __init__(
+        self,
+        runtime: ComelitRingRuntime,
+        supervisor: ComelitRuntimeSupervisor,
+    ) -> None:
         self._runtime = runtime
+        self._supervisor = supervisor
         self.entity_id = MAIN_ENTRANCE_ENTITY_ID
         self._last_result: dict[str, object] | None = None
+
+    @property
+    def available(self) -> bool:
+        # Media owns the only allowed Comelit session while the listener is
+        # intentionally paused. Door must fail closed rather than restarting
+        # the Ring/Door runtime behind the media manager's back.
+        return not self._supervisor.media_paused
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         result = self._last_result or self._runtime.last_door_result or {}
         return {
-            "standard_press_allowed": True,
+            "standard_press_allowed": not self._supervisor.media_paused,
+            "blocked_by_media_session": self._supervisor.media_paused,
             "one_shot_operation_required": True,
             "automatic_retry_allowed": False,
             "physical_effect_asserted": False,
@@ -78,7 +96,22 @@ class ComelitEntranceDoorButton(ButtonEntity):
             "last_response_channel_id": result.get("response_channel_id"),
         }
 
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            self._supervisor.async_add_status_listener(self._handle_status_update)
+        )
+
+    def _handle_status_update(self) -> None:
+        self.async_write_ha_state()
+
     async def async_press(self) -> None:
+        if self._supervisor.media_paused:
+            raise HomeAssistantError(
+                "Comelit Door is temporarily unavailable while the intercom "
+                "media session owns the exclusive Comelit connection"
+            )
+
         result = await self._runtime.async_open_door(DOOR_ENTRANCE)
         self._last_result = dict(result)
         self.async_write_ha_state()

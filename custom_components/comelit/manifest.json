@@ -12,7 +12,8 @@
   "integration_type": "hub",
   "iot_class": "cloud_push",
   "dependencies": [
-    "webhook"
+    "webhook",
+    "stream"
   ],
   "requirements": []
 }
