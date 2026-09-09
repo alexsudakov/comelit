@@ -473,7 +473,7 @@ class ComelitEntranceMediaTransport:
             reader = self._reader_task
             if reader is not None:
                 await reader
-            if rc != 0 and not self._stopping:
+            if not self._stopping:
                 self._capture_native_failure(rc)
                 raise ComelitMediaTransportError(f"media_native_exit:{rc}")
         finally:
