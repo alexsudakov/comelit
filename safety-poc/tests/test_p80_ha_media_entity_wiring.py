@@ -74,10 +74,12 @@ class P80HaMediaEntityWiringTests(unittest.TestCase):
 
     def test_camera_never_starts_or_extends_comelit_session(self) -> None:
         self.assertIn("CameraEntityFeature.STREAM", self.camera)
+        self.assertNotIn('self.stream_options["protocol_whitelist"]', self.camera)
         self.assertIn(
-            'self.stream_options["protocol_whitelist"] = "file,udp,rtp"',
+            'pyav_options={"protocol_whitelist": "file,udp,rtp"}',
             self.camera,
         )
+        self.assertIn("self.hass.data[STREAM_DOMAIN][ATTR_STREAMS].append(stream)", self.camera)
         self.assertIn("if not self._manager.active:\n            return None", self.camera)
         self.assertIn("return str(path)", self.camera)
         self.assertIn('"automatic_session_start": False', self.camera)
@@ -101,6 +103,18 @@ class P80HaMediaEntityWiringTests(unittest.TestCase):
         self.assertIn("await stream.async_get_image", image_method)
         self.assertNotIn("async_acquire", image_method)
         self.assertNotIn("async_negotiate_p2p", image_method)
+
+    def test_camera_stream_adapter_bypasses_removed_ha_stream_option_only(self) -> None:
+        method = self.camera.split("async def async_create_stream", 1)[1].split(
+            "async def async_camera_image", 1
+        )[0]
+        self.assertIn('pyav_options={"protocol_whitelist": "file,udp,rtp"}', method)
+        self.assertIn("self.hass.data[STREAM_DOMAIN][ATTR_SETTINGS]", method)
+        self.assertIn("get_dynamic_camera_stream_settings", method)
+        self.assertIn("self.hass.data[STREAM_DOMAIN][ATTR_STREAMS].append(stream)", method)
+        self.assertNotIn("self.stream_options[", method)
+        self.assertNotIn("async_acquire", method)
+        self.assertNotIn("async_negotiate_p2p", method)
 
     def test_camera_stream_is_reset_when_explicit_media_session_ends(self) -> None:
         self.assertIn("if not self._manager.active and self.stream is not None:", self.camera)
