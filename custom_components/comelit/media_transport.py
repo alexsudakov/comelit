@@ -34,6 +34,27 @@ MEDIA_VIDEO_RTP_PORT = 17899
 MEDIA_AUDIO_RTP_PORT = 17808
 
 _HEX32_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
+_MEDIA_NATIVE_MARKER_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,79}$")
+_MEDIA_NATIVE_MARKER_SAFE_VALUE_RE = re.compile(
+    r"^(?:PASS|FAIL|true|false|READY|OPEN|CLOSED|UNKNOWN_OUTCOME|"
+    r"REJECTED|REJECTED_NOT_READY|FAILED_SAFE|[0-9]{1,10})$"
+)
+_MEDIA_NATIVE_MARKER_PREFIXES = (
+    "ICE_",
+    "REMOTE_SDP_",
+    "PSEUDOTCP_",
+    "SELECTED_PAIR_",
+    "V4_",
+    "P12_",
+    "CTPP_",
+    "ENTRANCE_",
+    "SELF_ACTIVATION_",
+    "CLIENT_VIDEO_",
+    "DEVICE_VIDEO_",
+    "P78_",
+    "P80_",
+)
+_MEDIA_NATIVE_MARKER_TAIL_LIMIT = 40
 
 _LOCAL_RTP_SDP = f"""v=0\r
 o=- 0 0 IN IP4 127.0.0.1\r
@@ -191,6 +212,9 @@ class ComelitEntranceMediaTransport:
         self._audio_forwarding = asyncio.Event()
         self._stopping = False
         self._last_error: str | None = None
+        self._native_marker_tail: list[str] = []
+        self._last_native_exit_code: int | None = None
+        self._last_native_failure_markers: list[str] = []
 
     @property
     def active(self) -> bool:
@@ -217,6 +241,35 @@ class ComelitEntranceMediaTransport:
     def last_error(self) -> str | None:
         return self._last_error
 
+    @property
+    def last_native_exit_code(self) -> int | None:
+        return self._last_native_exit_code
+
+    @property
+    def last_native_failure_markers(self) -> list[str]:
+        return list(self._last_native_failure_markers)
+
+    def _remember_native_marker(self, line: str) -> None:
+        if "=" not in line:
+            return
+        key, value = line.split("=", 1)
+        if not _MEDIA_NATIVE_MARKER_KEY_RE.fullmatch(key):
+            return
+        if not key.startswith(_MEDIA_NATIVE_MARKER_PREFIXES):
+            return
+        safe_value = (
+            value
+            if _MEDIA_NATIVE_MARKER_SAFE_VALUE_RE.fullmatch(value)
+            else "<redacted>"
+        )
+        self._native_marker_tail.append(f"{key}={safe_value}")
+        if len(self._native_marker_tail) > _MEDIA_NATIVE_MARKER_TAIL_LIMIT:
+            del self._native_marker_tail[:-_MEDIA_NATIVE_MARKER_TAIL_LIMIT]
+
+    def _capture_native_failure(self, returncode: int) -> None:
+        self._last_native_exit_code = returncode
+        self._last_native_failure_markers = list(self._native_marker_tail)
+
     async def async_start(self, panel: str) -> None:
         if panel != "entrance":
             raise ComelitMediaTransportError("unsupported_media_panel")
@@ -227,6 +280,9 @@ class ComelitEntranceMediaTransport:
 
         self._stopping = False
         self._last_error = None
+        self._native_marker_tail.clear()
+        self._last_native_exit_code = None
+        self._last_native_failure_markers = []
         self._offer_ready.clear()
         self._media_active.clear()
         self._video_forwarding.clear()
@@ -311,7 +367,21 @@ class ComelitEntranceMediaTransport:
         ) as exc:
             self._last_error = str(exc)
             if not self._stopping:
-                _LOGGER.error("Comelit entrance media transport stopped: %s", exc)
+                if str(exc).startswith(
+                    (
+                        "media_native_exited_before_offer:",
+                        "media_native_exited_before_active:",
+                        "media_native_exit:",
+                    )
+                ):
+                    _LOGGER.error(
+                        "Comelit entrance media transport stopped: %s; "
+                        "safe_native_markers=%s",
+                        exc,
+                        self._last_native_failure_markers,
+                    )
+                else:
+                    _LOGGER.error("Comelit entrance media transport stopped: %s", exc)
         except Exception as exc:
             self._last_error = f"unexpected:{type(exc).__name__}"
             if not self._stopping:
@@ -353,6 +423,10 @@ class ComelitEntranceMediaTransport:
                 pending_task.cancel()
             if offer_wait not in done or not offer_wait.result():
                 if process.returncode is not None:
+                    reader = self._reader_task
+                    if reader is not None:
+                        await reader
+                    self._capture_native_failure(process.returncode)
                     raise ComelitMediaTransportError(
                         f"media_native_exited_before_offer:{process.returncode}"
                     )
@@ -384,6 +458,10 @@ class ComelitEntranceMediaTransport:
                 pending_task.cancel()
             if active_wait not in done or not active_wait.result():
                 if process.returncode is not None:
+                    reader = self._reader_task
+                    if reader is not None:
+                        await reader
+                    self._capture_native_failure(process.returncode)
                     raise ComelitMediaTransportError(
                         f"media_native_exited_before_active:{process.returncode}"
                     )
@@ -396,6 +474,7 @@ class ComelitEntranceMediaTransport:
             if reader is not None:
                 await reader
             if rc != 0 and not self._stopping:
+                self._capture_native_failure(rc)
                 raise ComelitMediaTransportError(f"media_native_exit:{rc}")
         finally:
             if process.returncode is None:
@@ -427,6 +506,7 @@ class ComelitEntranceMediaTransport:
             if not raw:
                 return
             line = raw.decode("utf-8", errors="replace").strip()
+            self._remember_native_marker(line)
 
             if line == "ICE_GATHER=PASS":
                 self._offer_ready.set()
