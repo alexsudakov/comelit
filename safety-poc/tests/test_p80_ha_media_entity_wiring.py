@@ -65,6 +65,13 @@ class P80HaMediaEntityWiringTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, self.switch)
 
+    def test_switch_exposes_only_transport_safe_failure_diagnostics(self) -> None:
+        self.assertIn('"last_native_exit_code": self._transport.last_native_exit_code', self.switch)
+        self.assertIn(
+            '"last_native_failure_markers": self._transport.last_native_failure_markers',
+            self.switch,
+        )
+
     def test_camera_never_starts_or_extends_comelit_session(self) -> None:
         self.assertIn("CameraEntityFeature.STREAM", self.camera)
         self.assertIn(
@@ -83,6 +90,17 @@ class P80HaMediaEntityWiringTests(unittest.TestCase):
             "SIGUSR1",
         ):
             self.assertNotIn(forbidden, self.camera)
+
+    def test_camera_mjpeg_still_fallback_uses_only_already_active_local_stream(self) -> None:
+        image_method = self.camera.split("async def async_camera_image", 1)[1].split(
+            "async def async_added_to_hass", 1
+        )[0]
+        self.assertIn("if not self._manager.active:", image_method)
+        self.assertIn("return None", image_method)
+        self.assertIn("self.stream or await self.async_create_stream()", image_method)
+        self.assertIn("await stream.async_get_image", image_method)
+        self.assertNotIn("async_acquire", image_method)
+        self.assertNotIn("async_negotiate_p2p", image_method)
 
     def test_camera_stream_is_reset_when_explicit_media_session_ends(self) -> None:
         self.assertIn("if not self._manager.active and self.stream is not None:", self.camera)
