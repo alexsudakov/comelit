@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 from pathlib import Path
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 TRANSPORT = ROOT / "custom_components" / "comelit" / "media_transport.py"
+BINARY = ROOT / "custom_components" / "comelit" / "native" / "comelit-media"
+EXPECTED_SHA256 = "0420098ceaddb6655ded8ff27304ffe2001457b358f19894f9b02920fae2fc0c"
 
 
 class P80MediaTransportStaticContractTests(unittest.TestCase):
@@ -19,6 +22,30 @@ class P80MediaTransportStaticContractTests(unittest.TestCase):
         self.assertIn('/ "comelit-media"', self.source)
         self.assertIn('Path("/run/comelit-media")', self.source)
         self.assertNotIn('Path("/run/comelit-p2p")', self.source)
+
+    def test_packaged_binary_sha256_is_pinned_and_matches_repository_artifact(self) -> None:
+        self.assertIn("MEDIA_NATIVE_BINARY_SHA256 = (", self.source)
+        self.assertIn(EXPECTED_SHA256, self.source)
+        self.assertTrue(BINARY.is_file())
+        self.assertEqual(hashlib.sha256(BINARY.read_bytes()).hexdigest(), EXPECTED_SHA256)
+
+    def test_native_gate_hashes_before_chmod_or_process_launch(self) -> None:
+        gate_start = self.source.index("def _native_gate() -> None:")
+        gate_end = self.source.index("\n\n\nclass ComelitEntranceMediaTransport", gate_start)
+        gate = self.source[gate_start:gate_end]
+        self.assertIn("actual_sha256 = _sha256_file(_MEDIA_NATIVE_BINARY)", gate)
+        self.assertIn("media_native_binary_sha256_unreadable", gate)
+        self.assertIn("media_native_binary_sha256_mismatch", gate)
+        self.assertLess(
+            gate.index("actual_sha256 = _sha256_file(_MEDIA_NATIVE_BINARY)"),
+            gate.index("os.chmod(_MEDIA_NATIVE_BINARY, 0o700)"),
+        )
+        cycle_start = self.source.index("async def _async_run_cycle(self) -> None:")
+        cycle = self.source[cycle_start:]
+        self.assertLess(
+            cycle.index("await self._hass.async_add_executor_job(_native_gate)"),
+            cycle.index("asyncio.create_subprocess_exec("),
+        )
 
     def test_local_rtp_sdp_matches_native_forward_ports_and_codecs(self) -> None:
         self.assertIn("MEDIA_VIDEO_RTP_PORT = 17899", self.source)
