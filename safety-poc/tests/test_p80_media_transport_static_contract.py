@@ -110,6 +110,21 @@ class P80MediaTransportStaticContractTests(unittest.TestCase):
         self.assertIn('"P80_WRAPPER_PROFILE_MISMATCH=true"', self.source)
         self.assertNotIn("print(raw", self.source)
 
+    def test_native_failure_diagnostics_are_allowlisted_redacted_and_bounded(self) -> None:
+        self.assertIn("_MEDIA_NATIVE_MARKER_SAFE_VALUE_RE", self.source)
+        self.assertIn('"P78_",', self.source)
+        self.assertIn('"P80_",', self.source)
+        self.assertIn('"PSEUDOTCP_",', self.source)
+        self.assertIn('else "<redacted>"', self.source)
+        self.assertIn("_MEDIA_NATIVE_MARKER_TAIL_LIMIT = 40", self.source)
+        self.assertIn("self._remember_native_marker(line)", self.source)
+        self.assertIn("self._capture_native_failure(process.returncode)", self.source)
+        self.assertIn("self._capture_native_failure(rc)", self.source)
+        self.assertIn("safe_native_markers=%s", self.source)
+        self.assertIn("last_native_failure_markers", self.source)
+        self.assertNotIn("_LOGGER.error(line", self.source)
+        self.assertNotIn("_LOGGER.info(line", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()
