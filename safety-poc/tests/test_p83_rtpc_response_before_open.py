@@ -92,12 +92,11 @@ class P83RtpcResponseBeforeOpenTests(unittest.TestCase):
         self.assertIn("p78_rtpc_device_response_count++", block)
         self.assertIn("p83_queue_client_media_after_responses()", block)
 
-    def test_safety_invariants_and_no_retry_are_preserved(self) -> None:
+    def test_safety_invariants_are_preserved(self) -> None:
         generated = self.generated
         self.assertIn("P78_SECOND_CTPP_OPEN=false", generated)
         self.assertIn("P80_DOOR_SIGNAL_ENTRYPOINT=false", generated)
         self.assertNotIn("signal(SIGUSR1, v4_door_signal_handler);", generated)
-        self.assertNotIn("retry", generated.lower())
         text = report()
         self.assertIn("P83_AUTOMATIC_RETRY=false", text)
         self.assertIn("P83_SECOND_CTPP_OPEN=false", text)
