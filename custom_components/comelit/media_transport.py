@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 from pathlib import Path
@@ -26,6 +27,9 @@ _MEDIA_REMOTE_FILE = _MEDIA_RUN_DIR / "remote.sdp"
 _MEDIA_STOP_FILE = _MEDIA_RUN_DIR / "stop"
 _MEDIA_LOCAL_SDP_FILE = _MEDIA_RUN_DIR / "local-rtp.sdp"
 
+MEDIA_NATIVE_BINARY_SHA256 = (
+    "0420098ceaddb6655ded8ff27304ffe2001457b358f19894f9b02920fae2fc0c"
+)
 MEDIA_VIDEO_RTP_PORT = 17899
 MEDIA_AUDIO_RTP_PORT = 17808
 
@@ -125,9 +129,23 @@ def _touch_stop() -> None:
     os.chmod(_MEDIA_STOP_FILE, 0o600)
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _native_gate() -> None:
     if not _MEDIA_NATIVE_BINARY.is_file():
         raise ComelitMediaTransportError("media_native_binary_missing")
+    try:
+        actual_sha256 = _sha256_file(_MEDIA_NATIVE_BINARY)
+    except OSError as exc:
+        raise ComelitMediaTransportError("media_native_binary_sha256_unreadable") from exc
+    if actual_sha256 != MEDIA_NATIVE_BINARY_SHA256:
+        raise ComelitMediaTransportError("media_native_binary_sha256_mismatch")
     if not _NATIVE_LIB.is_dir():
         raise ComelitMediaTransportError("native_library_dir_missing")
     if not os.access(_MEDIA_NATIVE_BINARY, os.X_OK):
