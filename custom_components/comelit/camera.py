@@ -70,7 +70,7 @@ class ComelitEntranceCamera(Camera):
 
     @property
     def available(self) -> bool:
-        return self._manager.phase != MEDIA_PHASE_ERROR
+        return super().available and self._manager.phase != MEDIA_PHASE_ERROR
 
     @property
     def is_streaming(self) -> bool:
@@ -100,6 +100,19 @@ class ComelitEntranceCamera(Camera):
         if not exists:
             return None
         return str(path)
+
+    async def async_camera_image(
+        self,
+        width: int | None = None,
+        height: int | None = None,
+    ) -> bytes | None:
+        """Return a still only from an already-active local media stream."""
+        if not self._manager.active:
+            return None
+        stream = self.stream or await self.async_create_stream()
+        if stream is None:
+            return None
+        return await stream.async_get_image(width=width, height=height)
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
