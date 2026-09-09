@@ -176,6 +176,33 @@ class P80MediaSessionManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(transport.active)
         self.assertEqual(events, [])
 
+    async def test_shutdown_stops_media_without_resuming_listener(self) -> None:
+        manager, listener, transport, events = self.make_manager()
+        await manager.async_acquire(panel="entrance", reason="manual")
+
+        await manager.async_shutdown()
+
+        self.assertFalse(manager.active)
+        self.assertFalse(transport.active)
+        self.assertTrue(listener.media_paused)
+        self.assertEqual(manager.phase, media.MEDIA_PHASE_INACTIVE)
+        self.assertEqual(events[-1], "media_stop")
+        self.assertNotIn("listener_resume", events)
+
+    async def test_status_listener_observes_lifecycle_changes(self) -> None:
+        manager, _, _, _ = self.make_manager()
+        phases: list[str] = []
+        remove = manager.async_add_status_listener(lambda: phases.append(manager.phase))
+
+        await manager.async_acquire(panel="entrance", reason="manual")
+        await manager.async_force_stop(reason="manual_off")
+        remove()
+
+        self.assertIn(media.MEDIA_PHASE_STARTING, phases)
+        self.assertIn(media.MEDIA_PHASE_ACTIVE, phases)
+        self.assertIn(media.MEDIA_PHASE_STOPPING, phases)
+        self.assertEqual(phases[-1], media.MEDIA_PHASE_INACTIVE)
+
 
 if __name__ == "__main__":
     unittest.main()
