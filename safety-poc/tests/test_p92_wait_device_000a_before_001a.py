@@ -79,8 +79,12 @@ class P92WaitDevice000ABefore001ATests(unittest.TestCase):
         self.assertIn("P92_DEVICE_000A_OBSERVED=PASS", self.candidate)
 
     def test_001a_requires_both_observation_and_tx_completion(self) -> None:
-        start = self.candidate.index("p92_handle_device_000a")
-        handler = self.candidate[start : start + 2600]
+        start = self.candidate.index(
+            "static gboolean\n"
+            "p92_handle_device_000a(guint16 request_id, const guint8 *body, guint body_len)\n"
+            "{"
+        )
+        handler = self.candidate[start : start + 1800]
         self.assertIn("p92_device_000a_observed = TRUE;", handler)
         self.assertIn("if (!p78_rtpc_client_000a_sent)", handler)
         self.assertIn("P92_DEVICE_000A_BEFORE_TX_COMPLETE=true", handler)
