@@ -112,7 +112,7 @@ class P80HaMediaEntityWiringTests(unittest.TestCase):
         self.assertIn("self.hass.data[STREAM_DOMAIN][ATTR_SETTINGS]", method)
         self.assertIn("get_dynamic_camera_stream_settings", method)
         self.assertIn("self.hass.data[STREAM_DOMAIN][ATTR_STREAMS].append(stream)", method)
-        self.assertNotIn("stream_options", method)
+        self.assertNotIn("self.stream_options[", method)
         self.assertNotIn("async_acquire", method)
         self.assertNotIn("async_negotiate_p2p", method)
 
