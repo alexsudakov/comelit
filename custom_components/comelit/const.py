@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 DOMAIN = "comelit"
-PLATFORMS = ["button", "sensor"]
+PLATFORMS = ["button", "sensor", "switch", "camera"]
 DATA_RUNTIMES = "ring_runtimes"
 DATA_SUPERVISORS = "runtime_supervisors"
+DATA_MEDIA_TRANSPORTS = "media_transports"
+DATA_MEDIA_SESSIONS = "media_sessions"
 
 CONF_DEVICE_UUID = "device_uuid"
 CONF_VIP_TOKEN = "vip_token"
@@ -32,6 +34,10 @@ MAIN_GATE_UNIQUE_ID = "comelit_main_gate_open_door"
 MAIN_GATE_ENTITY_ID = "button.comelit_main_gate_open_door"
 LISTENER_STATUS_UNIQUE_ID = "comelit_listener_status"
 LISTENER_STATUS_ENTITY_ID = "sensor.comelit_listener_status"
+ENTRANCE_MEDIA_SWITCH_UNIQUE_ID = "comelit_entrance_media_session"
+ENTRANCE_MEDIA_SWITCH_ENTITY_ID = "switch.comelit_entrance_camera"
+ENTRANCE_CAMERA_UNIQUE_ID = "comelit_entrance_camera"
+ENTRANCE_CAMERA_ENTITY_ID = "camera.comelit_entrance"
 LISTENER_CYCLE_SECONDS = 3300
 
 BRIDGE_PROTOCOL_VERSION = 1
