@@ -4,7 +4,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +29,9 @@ SUMMARY_KEYS = [
     "P105_CAMPAIGN_PROCESSES_REMAINING",
     "P105_CTPP_OPEN_COUNT",
     "P105_SECOND_CTPP_OPEN",
+    "P105_RTPC_OPEN_1_COUNT",
+    "P105_RTPC_OPEN_2_COUNT",
+    "P105_RTPC_OPEN_TOTAL_COUNT",
     "P105_DOOR_RESULT_COUNT",
     "P78_RTPC_SIGNALING_RESULT",
     "P80_DEVICE_ACK_000A_OBSERVED",
@@ -78,6 +83,10 @@ POST_ENTRY_MARKERS = [
 
 def function_body(text: str, name: str) -> str:
     return text.split(f"{name}() {{", 1)[1].split("\n}", 1)[0]
+
+
+def function_text(text: str, name: str) -> str:
+    return f"{name}() {{" + function_body(text, name) + "\n}\n"
 
 
 def without_shell_comments(text: str) -> str:
@@ -226,6 +235,124 @@ class P105CT120LiveRunnerContractTests(unittest.TestCase):
         block = block.split('echo "=== END COMELIT P105 CT120 LIVE RUN SUMMARY ==="', 1)[0]
         keys = re.findall(r'echo "([A-Z0-9_]+)=', block)
         self.assertEqual(keys, SUMMARY_KEYS)
+
+    def test_open_accounting_uses_ctpp_marker_and_not_rtpc_markers(self) -> None:
+        derive_body = without_shell_comments(function_body(self.text, "derive_open_accounting"))
+        ctpp_assignments = re.findall(
+            r'CTPP_OPEN_COUNT="\$\(count_log_literal \'([^\']+)\'\)"',
+            derive_body,
+        )
+        self.assertEqual(ctpp_assignments, ["V4_CTPP_OPEN_SENT=PASS"])
+        second_decision = derive_body.split('if [ "$CTPP_OPEN_COUNT" -gt 1 ]; then', 1)[1]
+        second_decision = second_decision.split("fi", 1)[0]
+        self.assertNotIn("P78_RTPC_OPEN_1_SENT=PASS", second_decision)
+        self.assertNotIn("P78_RTPC_OPEN_2_SENT=PASS", second_decision)
+        self.assertIn("RTPC_OPEN_TOTAL_COUNT=$((RTPC_OPEN_1_COUNT + RTPC_OPEN_2_COUNT))", derive_body)
+
+    @unittest.skipUnless(shutil.which("bash"), "bash is required")
+    def test_open_accounting_drives_extracted_runner_code(self) -> None:
+        extracted = (
+            function_text(self.text, "count_log_literal")
+            + "\n"
+            + function_text(self.text, "derive_open_accounting")
+        )
+        cases = [
+            (
+                "one_ctpp",
+                "V4_CTPP_OPEN_SENT=PASS\n",
+                {
+                    "CTPP_OPEN_COUNT": "1",
+                    "SECOND_CTPP_OPEN": "false",
+                    "RTPC_OPEN_1_COUNT": "0",
+                    "RTPC_OPEN_2_COUNT": "0",
+                    "RTPC_OPEN_TOTAL_COUNT": "0",
+                },
+            ),
+            (
+                "live_shape",
+                "\n".join(
+                    [
+                        "P78_RTPC_OPEN_1_SENT=PASS",
+                        "P78_RTPC_OPEN_2_SENT=PASS",
+                        "V4_CTPP_OPEN_SENT=PASS",
+                    ]
+                )
+                + "\n",
+                {
+                    "CTPP_OPEN_COUNT": "1",
+                    "SECOND_CTPP_OPEN": "false",
+                    "RTPC_OPEN_1_COUNT": "1",
+                    "RTPC_OPEN_2_COUNT": "1",
+                    "RTPC_OPEN_TOTAL_COUNT": "2",
+                },
+            ),
+            (
+                "two_ctpp",
+                "V4_CTPP_OPEN_SENT=PASS\nV4_CTPP_OPEN_SENT=PASS\n",
+                {
+                    "CTPP_OPEN_COUNT": "2",
+                    "SECOND_CTPP_OPEN": "true",
+                    "RTPC_OPEN_1_COUNT": "0",
+                    "RTPC_OPEN_2_COUNT": "0",
+                    "RTPC_OPEN_TOTAL_COUNT": "0",
+                },
+            ),
+            (
+                "empty",
+                "",
+                {
+                    "CTPP_OPEN_COUNT": "0",
+                    "SECOND_CTPP_OPEN": "false",
+                    "RTPC_OPEN_1_COUNT": "0",
+                    "RTPC_OPEN_2_COUNT": "0",
+                    "RTPC_OPEN_TOTAL_COUNT": "0",
+                },
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            script = tmp_path / "drive_open_accounting.sh"
+            script.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -u -o pipefail\n"
+                + extracted
+                + "\n"
+                'LOG="$1"\n'
+                "derive_open_accounting\n"
+                'printf "CTPP_OPEN_COUNT=%s\\n" "$CTPP_OPEN_COUNT"\n'
+                'printf "SECOND_CTPP_OPEN=%s\\n" "$SECOND_CTPP_OPEN"\n'
+                'printf "RTPC_OPEN_1_COUNT=%s\\n" "$RTPC_OPEN_1_COUNT"\n'
+                'printf "RTPC_OPEN_2_COUNT=%s\\n" "$RTPC_OPEN_2_COUNT"\n'
+                'printf "RTPC_OPEN_TOTAL_COUNT=%s\\n" "$RTPC_OPEN_TOTAL_COUNT"\n',
+                encoding="utf-8",
+            )
+            for name, log_text, expected in cases:
+                log = tmp_path / f"{name}.log"
+                log.write_text(log_text, encoding="utf-8")
+                result = subprocess.run(
+                    ["bash", str(script), str(log)],
+                    cwd=ROOT,
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                values = dict(line.split("=", 1) for line in result.stdout.splitlines())
+                for key, value in expected.items():
+                    self.assertEqual(values[key], value, name)
+
+            missing = tmp_path / "missing.log"
+            result = subprocess.run(
+                ["bash", str(script), str(missing)],
+                cwd=ROOT,
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            values = dict(line.split("=", 1) for line in result.stdout.splitlines())
+            self.assertEqual(values["CTPP_OPEN_COUNT"], "0")
+            self.assertEqual(values["SECOND_CTPP_OPEN"], "false")
 
     def test_only_documented_url_literal_and_no_extra_network_capability(self) -> None:
         urls = re.findall(r"https?://[^\"'\s]+", self.text)

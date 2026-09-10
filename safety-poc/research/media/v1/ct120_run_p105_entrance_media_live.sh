@@ -74,6 +74,9 @@ LISTENER_RECONNECT_COUNT_AFTER=UNKNOWN
 CAMPAIGN_PROCESSES_REMAINING=FOUND
 CTPP_OPEN_COUNT=0
 SECOND_CTPP_OPEN=false
+RTPC_OPEN_1_COUNT=0
+RTPC_OPEN_2_COUNT=0
+RTPC_OPEN_TOTAL_COUNT=0
 DOOR_RESULT_COUNT=0
 UPSTREAM_MEDIA_ACTIVE_AT_EXIT=false
 FFMPEG_PRESENT=false
@@ -287,6 +290,19 @@ count_log_literal() {
     fi
 }
 
+derive_open_accounting() {
+    CTPP_OPEN_COUNT="$(count_log_literal 'V4_CTPP_OPEN_SENT=PASS')"
+    RTPC_OPEN_1_COUNT="$(count_log_literal 'P78_RTPC_OPEN_1_SENT=PASS')"
+    RTPC_OPEN_2_COUNT="$(count_log_literal 'P78_RTPC_OPEN_2_SENT=PASS')"
+    RTPC_OPEN_TOTAL_COUNT=$((RTPC_OPEN_1_COUNT + RTPC_OPEN_2_COUNT))
+    # Two RTPC OPEN operations are protocol-required and must never set SECOND_CTPP_OPEN.
+    if [ "$CTPP_OPEN_COUNT" -gt 1 ]; then
+        SECOND_CTPP_OPEN=true
+    else
+        SECOND_CTPP_OPEN=false
+    fi
+}
+
 emit_len24_lines() {
     if [ -f "$LOG" ]; then
         awk -v max="$LEN24_FALLBACK_SUMMARY_MAX" '
@@ -315,14 +331,7 @@ collect_log_markers() {
     P80_WRAPPER_PROFILE_MISMATCH_STATE="$(last_marker P80_WRAPPER_PROFILE_MISMATCH_STATE NOT_OBSERVED)"
     PSEUDOTCP_NOTIFY_PACKET="$(last_marker PSEUDOTCP_NOTIFY_PACKET NOT_OBSERVED)"
     PSEUDOTCP_NOTIFY_PACKET_FAIL_LEN="$(last_marker PSEUDOTCP_NOTIFY_PACKET_FAIL_LEN NOT_OBSERVED)"
-    CTPP_OPEN_COUNT="$(count_log_literal 'P78_RTPC_OPEN_1_SENT=PASS')"
-    local open2_count
-    open2_count="$(count_log_literal 'P78_RTPC_OPEN_2_SENT=PASS')"
-    if [ "$open2_count" -eq 0 ]; then
-        SECOND_CTPP_OPEN=false
-    else
-        SECOND_CTPP_OPEN=true
-    fi
+    derive_open_accounting
     DOOR_RESULT_COUNT="$(count_log_literal 'V4_DOOR_RESULT=')"
     LEN24_FALLBACK_LINES_EMITTED="$(emit_len24_lines | awk -F= '/^LEN24_FALLBACK_LINES_EMITTED=/{print $2}')"
 }
@@ -638,6 +647,9 @@ print_summary() {
     echo "P105_CAMPAIGN_PROCESSES_REMAINING=$CAMPAIGN_PROCESSES_REMAINING"
     echo "P105_CTPP_OPEN_COUNT=$CTPP_OPEN_COUNT"
     echo "P105_SECOND_CTPP_OPEN=$SECOND_CTPP_OPEN"
+    echo "P105_RTPC_OPEN_1_COUNT=$RTPC_OPEN_1_COUNT"
+    echo "P105_RTPC_OPEN_2_COUNT=$RTPC_OPEN_2_COUNT"
+    echo "P105_RTPC_OPEN_TOTAL_COUNT=$RTPC_OPEN_TOTAL_COUNT"
     echo "P105_DOOR_RESULT_COUNT=$DOOR_RESULT_COUNT"
     echo "P78_RTPC_SIGNALING_RESULT=$P78_RTPC_SIGNALING_RESULT"
     echo "P80_DEVICE_ACK_000A_OBSERVED=$P80_DEVICE_ACK_000A_OBSERVED"
@@ -798,7 +810,8 @@ if [ "$FAIL" -eq 0 ]; then
       'P80_PREACTIVE_MEDIA_PROFILE_ACCEPT=PASS' \
       'P80_WRAPPER_PROFILE_MISMATCH_STATE=%s' \
       'LEN24_FALLBACK_DIAGNOSTIC_ONLY=true' \
-      'P80_DOOR_SIGNAL_ENTRYPOINT=false'
+      'P80_DOOR_SIGNAL_ENTRYPOINT=false' \
+      'V4_CTPP_OPEN_SENT=PASS'
     do
         grep -Fq "$marker" "$CANDIDATE_SOURCE" || fail "P105_SOURCE_MARKER_GATE=FAIL marker=$marker"
     done
@@ -831,7 +844,8 @@ if [ "$FAIL" -eq 0 ]; then
       'P80_PREACTIVE_MEDIA_PROFILE_ACCEPT=PASS' \
       'P80_WRAPPER_PROFILE_MISMATCH_STATE=%s' \
       'LEN24_FALLBACK_DIAGNOSTIC_ONLY=true' \
-      'P80_DOOR_SIGNAL_ENTRYPOINT=false'
+      'P80_DOOR_SIGNAL_ENTRYPOINT=false' \
+      'V4_CTPP_OPEN_SENT=PASS'
     do
         grep -Fq "$marker" "$RUN_ROOT/candidate.strings" || fail "P105_BINARY_MARKER_GATE=FAIL marker=$marker"
     done
