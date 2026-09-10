@@ -76,6 +76,16 @@ POST_ENTRY_MARKERS = [
 ]
 
 
+def function_body(text: str, name: str) -> str:
+    return text.split(f"{name}() {{", 1)[1].split("\n}", 1)[0]
+
+
+def without_shell_comments(text: str) -> str:
+    return "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
 class P105CT120LiveRunnerContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -99,6 +109,7 @@ class P105CT120LiveRunnerContractTests(unittest.TestCase):
         self.assertIn('"${OUTER_TIMEOUT_SECONDS}s" "$CANDIDATE_WRAPPER"', self.text)
         self.assertIn("P105_LIVE_INVOCATION_LIMIT=1", self.text)
         self.assertIn("LIVE_INVOCATIONS=1", self.text)
+        self.assertEqual(re.findall(r"^LIVE_INVOCATIONS=1$", self.text, re.MULTILINE), ["LIVE_INVOCATIONS=1"])
         self.assertIn("P105_EXACTLY_ONCE_GATE=PASS", self.text)
         self.assertIn('[ "$LIVE_INVOCATIONS" -eq 1 ] || fail "P105_EXACTLY_ONCE_GATE=FAIL"', self.text)
         self.assertEqual(self.text.count('timeout --signal=TERM --kill-after=5s "${OUTER_TIMEOUT_SECONDS}s" "$CANDIDATE_WRAPPER"'), 1)
@@ -150,14 +161,46 @@ class P105CT120LiveRunnerContractTests(unittest.TestCase):
         invoke = self.text.index('timeout --signal=TERM --kill-after=5s "${OUTER_TIMEOUT_SECONDS}s" "$CANDIDATE_WRAPPER"')
         self.assertLess(ready, stop)
         self.assertLess(stop, invoke)
-        restore_body = self.text.split("restore_listener() {", 1)[1].split("\n}", 1)[0]
+        restore_body = function_body(self.text, "restore_listener")
         self.assertIn('[ "$TEARDOWN_CONFIDENCE" != CONFIRMED ]', restore_body)
         self.assertIn("LISTENER_RESTART_SUPPRESSED=true", restore_body)
         self.assertIn("LISTENER_RESTORE_FINAL_GATE=FAIL", restore_body)
         self.assertIn("return 90", restore_body)
+        self.assertLess(
+            restore_body.index('[ "$TEARDOWN_CONFIDENCE" != CONFIRMED ]'),
+            restore_body.index("post_control start"),
+        )
         confirmed_branch = self.text.split('if [ "$TEARDOWN_CONFIDENCE" = CONFIRMED ]; then', 1)[1]
         self.assertLess(confirmed_branch.index("restore_listener"), confirmed_branch.index("else"))
+        uncertain_branch = confirmed_branch.split("else", 1)[1].split("fi", 1)[0]
+        self.assertIn("LISTENER_RESTART_SUPPRESSED=true", uncertain_branch)
+        self.assertIn("LISTENER_RESTORE_FINAL_GATE=FAIL", uncertain_branch)
         self.assertIn("exit 90", self.text)
+        self.assertEqual(self.text.count("post_control start"), 1)
+
+    def test_teardown_confidence_is_exit_state_not_historical_markers(self) -> None:
+        collect_body = function_body(self.text, "collect_log_markers")
+        derive_body = function_body(self.text, "derive_teardown_confidence")
+        derive_logic = without_shell_comments(derive_body)
+
+        self.assertIn('P80_MEDIA_ACTIVE="$(last_marker P80_MEDIA_ACTIVE NOT_REACHED)"', collect_body)
+        self.assertIn('PSEUDOTCP_NOTIFY_PACKET="$(last_marker PSEUDOTCP_NOTIFY_PACKET NOT_OBSERVED)"', collect_body)
+        self.assertNotRegex(collect_body, r"UPSTREAM_MEDIA_ACTIVE_AT_EXIT=.*")
+
+        self.assertNotIn("P80_MEDIA_ACTIVE", derive_logic)
+        self.assertNotIn("PSEUDOTCP_NOTIFY_PACKET", derive_logic)
+        for token in (
+            "UPSTREAM_MEDIA_ACTIVE_AT_EXIT",
+            "CAMPAIGN_PROCESSES_REMAINING",
+            "124",
+            "137",
+        ):
+            self.assertIn(token, derive_body)
+        self.assertIn('UPSTREAM_MEDIA_ACTIVE_AT_EXIT=false', derive_body)
+        self.assertIn('UPSTREAM_MEDIA_ACTIVE_AT_EXIT=true', derive_body)
+        self.assertIn('[ "$UPSTREAM_MEDIA_ACTIVE_AT_EXIT" = false ]', derive_body)
+        self.assertIn('[ "$WRAPPER_RC" != 124 ]', derive_body)
+        self.assertIn('[ "$WRAPPER_RC" != 137 ]', derive_body)
 
     def test_wrapper_derived_markers_have_fallbacks_and_no_unconditional_pass(self) -> None:
         self.assertIn("last_marker() {", self.text)

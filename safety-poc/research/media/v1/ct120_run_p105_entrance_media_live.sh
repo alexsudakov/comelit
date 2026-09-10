@@ -325,11 +325,6 @@ collect_log_markers() {
     fi
     DOOR_RESULT_COUNT="$(count_log_literal 'V4_DOOR_RESULT=')"
     LEN24_FALLBACK_LINES_EMITTED="$(emit_len24_lines | awk -F= '/^LEN24_FALLBACK_LINES_EMITTED=/{print $2}')"
-    if [ "$P80_MEDIA_ACTIVE" = true ]; then
-        UPSTREAM_MEDIA_ACTIVE_AT_EXIT=true
-    else
-        UPSTREAM_MEDIA_ACTIVE_AT_EXIT=false
-    fi
 }
 
 campaign_processes_remaining() {
@@ -346,12 +341,24 @@ derive_teardown_confidence() {
     if [ -n "$WRAPPER_PID" ] && kill -0 "$WRAPPER_PID" 2>/dev/null; then
         wrapper_gone=false
     fi
+
+    # The media session is owned by the candidate helper process. Once the
+    # helper is provably gone and no campaign-owned process remains, upstream
+    # ownership is released. P80_MEDIA_ACTIVE=true is a historical in-run
+    # observation and MUST NOT by itself force UNCERTAIN. WRAPPER_RC=124 (outer
+    # timeout expiry) or 137 (SIGKILL) means graceful close is NOT proven, so
+    # fail closed: no listener start. A PSEUDOTCP_NOTIFY_PACKET=FAIL observation
+    # must not by itself force UNCERTAIN either.
     if [ "$wrapper_gone" = true ] &&
-       [ "$CAMPAIGN_PROCESSES_REMAINING" = NONE ] &&
+       [ "$CAMPAIGN_PROCESSES_REMAINING" = NONE ]; then
+        UPSTREAM_MEDIA_ACTIVE_AT_EXIT=false
+    else
+        UPSTREAM_MEDIA_ACTIVE_AT_EXIT=true
+    fi
+
+    if [ "$UPSTREAM_MEDIA_ACTIVE_AT_EXIT" = false ] &&
        [ "$WRAPPER_RC" != 124 ] &&
-       [ "$WRAPPER_RC" != 137 ] &&
-       [ "$P80_MEDIA_ACTIVE" != true ] &&
-       [ "$PSEUDOTCP_NOTIFY_PACKET" = NOT_OBSERVED ]; then
+       [ "$WRAPPER_RC" != 137 ]; then
         TEARDOWN_CONFIDENCE=CONFIRMED
     else
         TEARDOWN_CONFIDENCE=UNCERTAIN
