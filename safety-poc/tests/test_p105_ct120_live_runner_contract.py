@@ -45,6 +45,10 @@ SUMMARY_KEYS = [
     "P80_VIDEO_RTP_FORWARDING",
     "P80_AUDIO_RTP_FORWARDING",
     "P80_WRAPPER_PROFILE_MISMATCH",
+    "PSEUDOTCP_NOTIFY_PACKET_CLASS",
+    "PSEUDOTCP_NOTIFY_PACKET_SOCKET_CLOSED",
+    "PSEUDOTCP_NOTIFY_PACKET_GRACEFUL_STARTED",
+    "PSEUDOTCP_GRACEFUL_CLOSE_COMPLETE",
     "PSEUDOTCP_NOTIFY_PACKET_FAIL_LEN",
     "LEN24_FALLBACK_LINES_EMITTED",
     "P105_H264_SPS_COUNT",
@@ -196,6 +200,10 @@ class P105CT120LiveRunnerContractTests(unittest.TestCase):
 
         self.assertIn('P80_MEDIA_ACTIVE="$(last_marker P80_MEDIA_ACTIVE NOT_REACHED)"', collect_body)
         self.assertIn('PSEUDOTCP_NOTIFY_PACKET="$(last_marker PSEUDOTCP_NOTIFY_PACKET NOT_OBSERVED)"', collect_body)
+        self.assertIn('PSEUDOTCP_NOTIFY_PACKET_CLASS="$(last_marker PSEUDOTCP_NOTIFY_PACKET_CLASS NOT_OBSERVED)"', collect_body)
+        self.assertIn('PSEUDOTCP_NOTIFY_PACKET_SOCKET_CLOSED="$(last_marker PSEUDOTCP_NOTIFY_PACKET_SOCKET_CLOSED NOT_OBSERVED)"', collect_body)
+        self.assertIn('PSEUDOTCP_NOTIFY_PACKET_GRACEFUL_STARTED="$(last_marker PSEUDOTCP_NOTIFY_PACKET_GRACEFUL_STARTED NOT_OBSERVED)"', collect_body)
+        self.assertIn('PSEUDOTCP_GRACEFUL_CLOSE_COMPLETE="$(last_marker PSEUDOTCP_GRACEFUL_CLOSE_COMPLETE NOT_OBSERVED)"', collect_body)
         self.assertIn('P2_HOLDER_TERMINAL_RC="$(last_marker P2_HOLDER_TERMINAL_RC NOT_OBSERVED)"', collect_body)
         self.assertIn('P2_HOLDER_TERMINAL_RESULT="$(last_marker P2_HOLDER_TERMINAL_RESULT NOT_OBSERVED)"', collect_body)
         self.assertNotRegex(collect_body, r"UPSTREAM_MEDIA_ACTIVE_AT_EXIT=.*")
@@ -228,6 +236,10 @@ class P105CT120LiveRunnerContractTests(unittest.TestCase):
             "P80_WRAPPER_PROFILE_MISMATCH",
             "P80_WRAPPER_PROFILE_MISMATCH_STATE",
             "PSEUDOTCP_NOTIFY_PACKET",
+            "PSEUDOTCP_NOTIFY_PACKET_CLASS",
+            "PSEUDOTCP_NOTIFY_PACKET_SOCKET_CLOSED",
+            "PSEUDOTCP_NOTIFY_PACKET_GRACEFUL_STARTED",
+            "PSEUDOTCP_GRACEFUL_CLOSE_COMPLETE",
             "PSEUDOTCP_NOTIFY_PACKET_FAIL_LEN",
             "P2_HOLDER_TERMINAL_RC",
             "P2_HOLDER_TERMINAL_RESULT",
@@ -382,6 +394,9 @@ class P105CT120LiveRunnerContractTests(unittest.TestCase):
         self.assertIn("ICE_HOLDER_STOP=true", self.text)
         self.assertIn("PSEUDOTCP_GRACEFUL_CLOSE_FORCE_RST_SENT=false", self.text)
         self.assertIn("PSEUDOTCP_GRACEFUL_CLOSE_COMPLETE=true", self.text)
+        self.assertIn("PSEUDOTCP_NOTIFY_PACKET_CLASS=FATAL", self.text)
+        self.assertIn("PSEUDOTCP_GRACEFUL_CLOSE_TIMEOUT=true", self.text)
+        self.assertIn("P105_WRAPPER_TERMINAL_PROOF_STATIC=FAIL", self.text)
 
     def test_wrapper_decoupling_drives_extracted_rewrite_code(self) -> None:
         rewrite = self.text.split(
@@ -414,14 +429,39 @@ exit 27
                 6,
                 "VIP_UAUT_OPEN_RESPONSE=PASS\n",
                 27,
-                {"P2_VIP_UAUT_OPEN": "PASS", "P2_HOLDER_TERMINAL_RESULT": "FAIL"},
+                {
+                    "P2_VIP_UAUT_OPEN": "PASS",
+                    "P2_HOLDER_TERMINAL_RESULT": "FAIL",
+                    "P2_HOLDER_TERMINAL_PROOF_GRACEFUL_COMPLETE": "false",
+                    "P2_HOLDER_TERMINAL_PROOF_NOTIFY_FATAL": "false",
+                    "P2_HOLDER_TERMINAL_PROOF_TIMEOUT": "false",
+                },
             ),
             (
-                "uaut_missing",
+                "uaut_fail_rc0",
                 0,
                 "",
                 27,
                 {"P2_VIP_UAUT_OPEN": "FAIL", "P2_HOLDER_TERMINAL_RESULT": "PASS"},
+            ),
+            (
+                "uaut_pass_rc6_historical_only",
+                6,
+                "\n".join(
+                    [
+                        "VIP_UAUT_OPEN_RESPONSE=PASS",
+                        "PSEUDOTCP_GRACEFUL_CLOSE_REQUESTED=true",
+                        "ICE_HOLDER_STOP=true",
+                        "PSEUDOTCP_GRACEFUL_CLOSE_FORCE_RST_SENT=false",
+                    ]
+                )
+                + "\n",
+                27,
+                {
+                    "P2_VIP_UAUT_OPEN": "PASS",
+                    "P2_HOLDER_TERMINAL_RESULT": "FAIL",
+                    "P2_HOLDER_TERMINAL_PROOF_GRACEFUL_COMPLETE": "false",
+                },
             ),
             (
                 "uaut_pass_expected_shutdown",
@@ -437,7 +477,55 @@ exit 27
                 )
                 + "\n",
                 0,
-                {"P2_VIP_UAUT_OPEN": "PASS", "P2_HOLDER_TERMINAL_RESULT": "EXPECTED_SHUTDOWN"},
+                {
+                    "P2_VIP_UAUT_OPEN": "PASS",
+                    "P2_HOLDER_TERMINAL_RESULT": "EXPECTED_SHUTDOWN",
+                    "P2_HOLDER_TERMINAL_PROOF_GRACEFUL_COMPLETE": "true",
+                    "P2_HOLDER_TERMINAL_PROOF_NOTIFY_FATAL": "false",
+                    "P2_HOLDER_TERMINAL_PROOF_TIMEOUT": "false",
+                },
+            ),
+            (
+                "uaut_pass_fatal_notify",
+                6,
+                "\n".join(
+                    [
+                        "VIP_UAUT_OPEN_RESPONSE=PASS",
+                        "PSEUDOTCP_GRACEFUL_CLOSE_REQUESTED=true",
+                        "ICE_HOLDER_STOP=true",
+                        "PSEUDOTCP_GRACEFUL_CLOSE_FORCE_RST_SENT=false",
+                        "PSEUDOTCP_GRACEFUL_CLOSE_COMPLETE=true",
+                        "PSEUDOTCP_NOTIFY_PACKET_CLASS=FATAL",
+                    ]
+                )
+                + "\n",
+                27,
+                {
+                    "P2_VIP_UAUT_OPEN": "PASS",
+                    "P2_HOLDER_TERMINAL_RESULT": "FAIL",
+                    "P2_HOLDER_TERMINAL_PROOF_GRACEFUL_COMPLETE": "true",
+                    "P2_HOLDER_TERMINAL_PROOF_NOTIFY_FATAL": "true",
+                },
+            ),
+            (
+                "uaut_pass_timeout_without_complete",
+                6,
+                "\n".join(
+                    [
+                        "VIP_UAUT_OPEN_RESPONSE=PASS",
+                        "PSEUDOTCP_GRACEFUL_CLOSE_REQUESTED=true",
+                        "ICE_HOLDER_STOP=true",
+                        "PSEUDOTCP_GRACEFUL_CLOSE_FORCE_RST_SENT=false",
+                        "PSEUDOTCP_GRACEFUL_CLOSE_TIMEOUT=true",
+                    ]
+                )
+                + "\n",
+                27,
+                {
+                    "P2_VIP_UAUT_OPEN": "PASS",
+                    "P2_HOLDER_TERMINAL_RESULT": "FAIL",
+                    "P2_HOLDER_TERMINAL_PROOF_TIMEOUT": "true",
+                },
             ),
             (
                 "uaut_pass_rc0",
@@ -452,6 +540,22 @@ exit 27
                 None,
                 27,
                 {"P2_VIP_UAUT_OPEN": "FAIL", "P2_HOLDER_TERMINAL_RESULT": "UNKNOWN"},
+            ),
+            (
+                "uaut_pass_len24_irrelevant",
+                6,
+                "\n".join(
+                    [
+                        "VIP_UAUT_OPEN_RESPONSE=PASS",
+                        "PSEUDOTCP_NOTIFY_PACKET=FAIL LEN=24",
+                        "PSEUDOTCP_GRACEFUL_CLOSE_REQUESTED=true",
+                        "ICE_HOLDER_STOP=true",
+                        "PSEUDOTCP_GRACEFUL_CLOSE_FORCE_RST_SENT=false",
+                    ]
+                )
+                + "\n",
+                27,
+                {"P2_VIP_UAUT_OPEN": "PASS", "P2_HOLDER_TERMINAL_RESULT": "FAIL"},
             ),
         ]
         with tempfile.TemporaryDirectory() as tmp:
