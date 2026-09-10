@@ -305,6 +305,7 @@ RECV_PROLOGUE = r'''
 typedef struct _NiceAgent NiceAgent;
 static guint stream_id = 1u;
 static gpointer pseudo_tcp = (gpointer)0x1;
+static gboolean pseudotcp_graceful_stop_started = FALSE;
 static guint64 pseudotcp_packets_in = 0;
 static guint pseudotcp_prestart_count = 0;
 #define PSEUDOTCP_PRESTART_MAX_LEN 1600u
@@ -313,6 +314,7 @@ static guint8 pseudotcp_prestart_packets[PSEUDOTCP_PRESTART_MAX_PACKETS][PSEUDOT
 static guint16 pseudotcp_prestart_lengths[PSEUDOTCP_PRESTART_MAX_PACKETS];
 static guint p101_harness_notify_calls = 0;
 static gboolean p101_harness_notify_result = TRUE;
+static gboolean p101_harness_socket_closed = FALSE;
 
 static gboolean pseudo_tcp_socket_notify_packet(gpointer tcp, const gchar *buf, guint len)
 {
@@ -321,6 +323,12 @@ static gboolean pseudo_tcp_socket_notify_packet(gpointer tcp, const gchar *buf, 
     (void)len;
     p101_harness_notify_calls++;
     return p101_harness_notify_result;
+}
+
+static gboolean pseudo_tcp_socket_is_closed(gpointer tcp)
+{
+    (void)tcp;
+    return p101_harness_socket_closed;
 }
 '''
 

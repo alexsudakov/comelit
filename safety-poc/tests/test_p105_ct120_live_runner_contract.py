@@ -18,6 +18,8 @@ SUMMARY_KEYS = [
     "P105_BRANCH_HEAD",
     "P105_LIVE_INVOCATIONS",
     "P105_WRAPPER_RC",
+    "P2_HOLDER_TERMINAL_RC",
+    "P2_HOLDER_TERMINAL_RESULT",
     "P105_OBSERVATION_SECONDS",
     "P105_REPO_HEAD",
     "LISTENER_READY_BEFORE",
@@ -194,6 +196,8 @@ class P105CT120LiveRunnerContractTests(unittest.TestCase):
 
         self.assertIn('P80_MEDIA_ACTIVE="$(last_marker P80_MEDIA_ACTIVE NOT_REACHED)"', collect_body)
         self.assertIn('PSEUDOTCP_NOTIFY_PACKET="$(last_marker PSEUDOTCP_NOTIFY_PACKET NOT_OBSERVED)"', collect_body)
+        self.assertIn('P2_HOLDER_TERMINAL_RC="$(last_marker P2_HOLDER_TERMINAL_RC NOT_OBSERVED)"', collect_body)
+        self.assertIn('P2_HOLDER_TERMINAL_RESULT="$(last_marker P2_HOLDER_TERMINAL_RESULT NOT_OBSERVED)"', collect_body)
         self.assertNotRegex(collect_body, r"UPSTREAM_MEDIA_ACTIVE_AT_EXIT=.*")
 
         self.assertNotIn("P80_MEDIA_ACTIVE", derive_logic)
@@ -225,6 +229,8 @@ class P105CT120LiveRunnerContractTests(unittest.TestCase):
             "P80_WRAPPER_PROFILE_MISMATCH_STATE",
             "PSEUDOTCP_NOTIFY_PACKET",
             "PSEUDOTCP_NOTIFY_PACKET_FAIL_LEN",
+            "P2_HOLDER_TERMINAL_RC",
+            "P2_HOLDER_TERMINAL_RESULT",
         ):
             self.assertIn(f"{marker}=NOT_OBSERVED", self.text)
         self.assertIn("LEN24_FALLBACK_SUMMARY_MAX=32", self.text)
@@ -364,6 +370,130 @@ class P105CT120LiveRunnerContractTests(unittest.TestCase):
         self.assertIn('"$HA_WEBHOOK_URL"', self.text)
         for forbidden in ("nc ", "ncat", "socat", "wget ", "requests", "urllib", "/dev/tcp"):
             self.assertNotIn(forbidden, self.text)
+
+    def test_p106_transform_and_wrapper_decoupling_markers_are_present(self) -> None:
+        self.assertIn("entrance_p106_teardown_state_classification_transform.py", self.text)
+        self.assertIn("PSEUDOTCP_NOTIFY_PACKET_CLASS=%s", self.text)
+        self.assertIn("P105_WRAPPER_UAUT_DECOUPLE_ANCHOR=FAIL", self.text)
+        self.assertIn("P105_WRAPPER_UAUT_DECOUPLE=PASS", self.text)
+        self.assertIn("P2_HOLDER_TERMINAL_RC=$HOLDER_RC", self.text)
+        self.assertIn("P2_HOLDER_TERMINAL_RESULT=$HOLDER_TERMINAL_RESULT", self.text)
+        self.assertIn("PSEUDOTCP_GRACEFUL_CLOSE_REQUESTED=true", self.text)
+        self.assertIn("ICE_HOLDER_STOP=true", self.text)
+        self.assertIn("PSEUDOTCP_GRACEFUL_CLOSE_FORCE_RST_SENT=false", self.text)
+        self.assertIn("PSEUDOTCP_GRACEFUL_CLOSE_COMPLETE=true", self.text)
+
+    def test_wrapper_decoupling_drives_extracted_rewrite_code(self) -> None:
+        rewrite = self.text.split(
+            'python3 - "$BASE_WRAPPER" "$CANDIDATE_WRAPPER" "$CANDIDATE_BINARY" <<\'PY\'',
+            1,
+        )[1].split("\nPY\n", 1)[0]
+        base_template = '''#!/usr/bin/env bash
+BASE=/unused
+RUN="${RUN_DIR:?}"
+HOLDER_BIN="$BASE/bin/comelit_ice_offer_holder"
+HOLDER_RC="${TEST_HOLDER_RC:?}"
+echo "ICE_HOLDER_RC=$HOLDER_RC"
+UAUT_OPEN_PASS=false
+grep -q '^VIP_UAUT_OPEN_RESPONSE=PASS$'   "$RUN/ice-holder.log"   && UAUT_OPEN_PASS=true
+echo "VIP_UAUT_OPEN_PASS=$UAUT_OPEN_PASS"
+echo "/run/comelit-p2p"
+if [ "$HOLDER_RC" -eq 0 ] \\
+   && [ "$UAUT_OPEN_PASS" = true ]; then
+
+    echo "P2_VIP_UAUT_OPEN=PASS"
+    exit 0
+fi
+
+echo "P2_VIP_UAUT_OPEN=FAIL"
+exit 27
+'''
+        cases = [
+            (
+                "uaut_pass_rc6_no_evidence",
+                6,
+                "VIP_UAUT_OPEN_RESPONSE=PASS\n",
+                27,
+                {"P2_VIP_UAUT_OPEN": "PASS", "P2_HOLDER_TERMINAL_RESULT": "FAIL"},
+            ),
+            (
+                "uaut_missing",
+                0,
+                "",
+                27,
+                {"P2_VIP_UAUT_OPEN": "FAIL", "P2_HOLDER_TERMINAL_RESULT": "PASS"},
+            ),
+            (
+                "uaut_pass_expected_shutdown",
+                6,
+                "\n".join(
+                    [
+                        "VIP_UAUT_OPEN_RESPONSE=PASS",
+                        "PSEUDOTCP_GRACEFUL_CLOSE_REQUESTED=true",
+                        "ICE_HOLDER_STOP=true",
+                        "PSEUDOTCP_GRACEFUL_CLOSE_FORCE_RST_SENT=false",
+                        "PSEUDOTCP_GRACEFUL_CLOSE_COMPLETE=true",
+                    ]
+                )
+                + "\n",
+                0,
+                {"P2_VIP_UAUT_OPEN": "PASS", "P2_HOLDER_TERMINAL_RESULT": "EXPECTED_SHUTDOWN"},
+            ),
+            (
+                "uaut_pass_rc0",
+                0,
+                "VIP_UAUT_OPEN_RESPONSE=PASS\n",
+                0,
+                {"P2_VIP_UAUT_OPEN": "PASS", "P2_HOLDER_TERMINAL_RESULT": "PASS"},
+            ),
+            (
+                "uaut_pass_missing_log",
+                6,
+                None,
+                27,
+                {"P2_VIP_UAUT_OPEN": "FAIL", "P2_HOLDER_TERMINAL_RESULT": "UNKNOWN"},
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            rewrite_py = tmp_path / "rewrite.py"
+            rewrite_py.write_text(rewrite, encoding="utf-8")
+            base = tmp_path / "base-wrapper"
+            out = tmp_path / "candidate-wrapper"
+            holder = tmp_path / "holder"
+            base.write_text(base_template, encoding="utf-8")
+            subprocess.run(
+                ["python3", str(rewrite_py), str(base), str(out), str(holder)],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            derived = out.read_text(encoding="utf-8")
+            self.assertNotIn('&& [ "$UAUT_OPEN_PASS" = true ]; then\n\n    echo "P2_VIP_UAUT_OPEN=PASS"', derived)
+
+            for name, holder_rc, log_text, expected_rc, expected in cases:
+                run_dir = tmp_path / name
+                run_dir.mkdir()
+                if log_text is not None:
+                    (run_dir / "ice-holder.log").write_text(log_text, encoding="utf-8")
+                env = os.environ.copy()
+                env["RUN_DIR"] = str(run_dir)
+                env["TEST_HOLDER_RC"] = str(holder_rc)
+                result = subprocess.run(
+                    ["bash", str(out)],
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                    env=env,
+                )
+                self.assertEqual(result.returncode, expected_rc, name + result.stderr)
+                values = dict(
+                    line.split("=", 1)
+                    for line in result.stdout.splitlines()
+                    if line.startswith(("P2_VIP_UAUT_OPEN=", "P2_HOLDER_TERMINAL_"))
+                )
+                for key, value in expected.items():
+                    self.assertEqual(values[key], value, name)
 
     def test_capture_and_media_postprocessing_contract(self) -> None:
         for token in (

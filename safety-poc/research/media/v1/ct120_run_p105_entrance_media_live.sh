@@ -30,7 +30,7 @@ BASE_WRAPPER=/usr/local/sbin/comelit-p2p-cloud-probe
 BASE_WRAPPER_SHA256=a564535dff0cf10b1fe4766171f2960c52fb581f1c816cf81d2992c5c84e79c9
 SECRETS_FILE=/root/.config/comelit/secrets.env
 SOURCE_REL=safety-poc/research/door/v1_5_7/comelit-v4-persistent-ctpp-door.c
-TRANSFORM_REL=safety-poc/research/media/v1/entrance_p105_len24_fallback_diagnostic_transform.py
+TRANSFORM_REL=safety-poc/research/media/v1/entrance_p106_teardown_state_classification_transform.py
 RUN_DIR=/run/comelit-media
 STOP_FILE="$RUN_DIR/stop"
 VIDEO_RTP_PORT=17899
@@ -42,7 +42,7 @@ WRAPPER_NAME=comelit-p2p-cloud-probe-p105
 ARTIFACT_ROOT=/root/comelit-artifacts
 
 LIVE_RUN="${LIVE_RUN:-1}"
-HYPOTHESIS_ID="${HYPOTHESIS_ID:-p105-p101-profile-gate-plus-len24-classification}"
+HYPOTHESIS_ID="${HYPOTHESIS_ID:-p106-teardown-state-aware-notify-classification}"
 LEN24_FALLBACK_SUMMARY_MAX=32
 
 FAIL=0
@@ -113,6 +113,8 @@ P80_WRAPPER_PROFILE_MISMATCH=NOT_OBSERVED
 P80_WRAPPER_PROFILE_MISMATCH_STATE=NOT_OBSERVED
 PSEUDOTCP_NOTIFY_PACKET=NOT_OBSERVED
 PSEUDOTCP_NOTIFY_PACKET_FAIL_LEN=NOT_OBSERVED
+P2_HOLDER_TERMINAL_RC=NOT_OBSERVED
+P2_HOLDER_TERMINAL_RESULT=NOT_OBSERVED
 
 fail() {
     echo "$1"
@@ -331,6 +333,8 @@ collect_log_markers() {
     P80_WRAPPER_PROFILE_MISMATCH_STATE="$(last_marker P80_WRAPPER_PROFILE_MISMATCH_STATE NOT_OBSERVED)"
     PSEUDOTCP_NOTIFY_PACKET="$(last_marker PSEUDOTCP_NOTIFY_PACKET NOT_OBSERVED)"
     PSEUDOTCP_NOTIFY_PACKET_FAIL_LEN="$(last_marker PSEUDOTCP_NOTIFY_PACKET_FAIL_LEN NOT_OBSERVED)"
+    P2_HOLDER_TERMINAL_RC="$(last_marker P2_HOLDER_TERMINAL_RC NOT_OBSERVED)"
+    P2_HOLDER_TERMINAL_RESULT="$(last_marker P2_HOLDER_TERMINAL_RESULT NOT_OBSERVED)"
     derive_open_accounting
     DOOR_RESULT_COUNT="$(count_log_literal 'V4_DOOR_RESULT=')"
     LEN24_FALLBACK_LINES_EMITTED="$(emit_len24_lines | awk -F= '/^LEN24_FALLBACK_LINES_EMITTED=/{print $2}')"
@@ -636,6 +640,8 @@ print_summary() {
     echo "P105_BRANCH_HEAD=$CURRENT_HEAD"
     echo "P105_LIVE_INVOCATIONS=$LIVE_INVOCATIONS"
     echo "P105_WRAPPER_RC=$WRAPPER_RC"
+    echo "P2_HOLDER_TERMINAL_RC=$P2_HOLDER_TERMINAL_RC"
+    echo "P2_HOLDER_TERMINAL_RESULT=$P2_HOLDER_TERMINAL_RESULT"
     echo "P105_OBSERVATION_SECONDS=$OBSERVATION_SECONDS"
     echo "P105_REPO_HEAD=$REPO_HEAD"
     echo "LISTENER_READY_BEFORE=$LISTENER_READY_BEFORE"
@@ -810,6 +816,7 @@ if [ "$FAIL" -eq 0 ]; then
       'P80_PREACTIVE_MEDIA_PROFILE_ACCEPT=PASS' \
       'P80_WRAPPER_PROFILE_MISMATCH_STATE=%s' \
       'LEN24_FALLBACK_DIAGNOSTIC_ONLY=true' \
+      'PSEUDOTCP_NOTIFY_PACKET_CLASS=%s' \
       'P80_DOOR_SIGNAL_ENTRYPOINT=false' \
       'V4_CTPP_OPEN_SENT=PASS'
     do
@@ -844,6 +851,7 @@ if [ "$FAIL" -eq 0 ]; then
       'P80_PREACTIVE_MEDIA_PROFILE_ACCEPT=PASS' \
       'P80_WRAPPER_PROFILE_MISMATCH_STATE=%s' \
       'LEN24_FALLBACK_DIAGNOSTIC_ONLY=true' \
+      'PSEUDOTCP_NOTIFY_PACKET_CLASS=%s' \
       'P80_DOOR_SIGNAL_ENTRYPOINT=false' \
       'V4_CTPP_OPEN_SENT=PASS'
     do
@@ -865,15 +873,63 @@ needle = '"$BASE/bin/comelit_ice_offer_holder"'
 if text.count(needle) != 1:
     raise SystemExit("P105_WRAPPER_HOLDER_ANCHOR=FAIL")
 text = text.replace(needle, f'"{holder}"', 1)
+result_block = '''if [ "$HOLDER_RC" -eq 0 ] \\
+   && [ "$UAUT_OPEN_PASS" = true ]; then
+
+    echo "P2_VIP_UAUT_OPEN=PASS"
+    exit 0
+fi
+
+echo "P2_VIP_UAUT_OPEN=FAIL"
+exit 27
+'''
+replacement_block = '''if [ "$UAUT_OPEN_PASS" = true ]; then
+    echo "P2_VIP_UAUT_OPEN=PASS"
+else
+    echo "P2_VIP_UAUT_OPEN=FAIL"
+fi
+
+echo "P2_HOLDER_TERMINAL_RC=$HOLDER_RC"
+
+HOLDER_TERMINAL_RESULT=FAIL
+if [ "$HOLDER_RC" -eq 0 ]; then
+    HOLDER_TERMINAL_RESULT=PASS
+elif [ ! -r "$RUN/ice-holder.log" ]; then
+    HOLDER_TERMINAL_RESULT=UNKNOWN
+elif grep -q '^PSEUDOTCP_GRACEFUL_CLOSE_REQUESTED=true$' "$RUN/ice-holder.log" \\
+   && grep -q '^ICE_HOLDER_STOP=true$' "$RUN/ice-holder.log" \\
+   && grep -q '^PSEUDOTCP_GRACEFUL_CLOSE_FORCE_RST_SENT=false$' "$RUN/ice-holder.log"; then
+    HOLDER_TERMINAL_RESULT=EXPECTED_SHUTDOWN
+fi
+if [ "$HOLDER_TERMINAL_RESULT" = EXPECTED_SHUTDOWN ] \\
+   && grep -q '^PSEUDOTCP_GRACEFUL_CLOSE_COMPLETE=true$' "$RUN/ice-holder.log"; then
+    echo "P2_HOLDER_TERMINAL_GRACEFUL_COMPLETE=true"
+fi
+echo "P2_HOLDER_TERMINAL_RESULT=$HOLDER_TERMINAL_RESULT"
+
+if [ "$UAUT_OPEN_PASS" = true ] \\
+   && { [ "$HOLDER_TERMINAL_RESULT" = PASS ] || [ "$HOLDER_TERMINAL_RESULT" = EXPECTED_SHUTDOWN ]; }; then
+    exit 0
+fi
+
+exit 27
+'''
+if text.count(result_block) != 1:
+    raise SystemExit("P105_WRAPPER_UAUT_DECOUPLE_ANCHOR=FAIL")
+text = text.replace(result_block, replacement_block, 1)
 legacy_run_dir = "/run/comelit-p2p"
 media_run_dir = "/run/comelit-media"
 run_dir_count = text.count(legacy_run_dir)
 if run_dir_count < 1:
     raise SystemExit("P105_WRAPPER_RUN_DIR_ANCHOR=FAIL")
 text = text.replace(legacy_run_dir, media_run_dir)
+conflation = 'if [ "$HOLDER_RC" -eq 0 ]'
+if conflation in text and 'P2_VIP_UAUT_OPEN=FAIL' in text.split(conflation, 1)[1]:
+    raise SystemExit("P105_WRAPPER_UAUT_DECOUPLE_STATIC=FAIL")
 out.write_text(text, encoding="utf-8")
 os.chmod(out, 0o700)
 print(f"P105_WRAPPER_RUN_DIR_REPLACEMENTS={run_dir_count}")
+print("P105_WRAPPER_UAUT_DECOUPLE=PASS")
 PY
     REWRITE_RC=$?
     echo "P105_WRAPPER_REWRITE_RC=$REWRITE_RC"
