@@ -354,6 +354,17 @@ class ComelitEntranceMediaTransport:
         self._last_native_exit_code = returncode
         self._last_native_failure_markers = list(self._native_marker_tail)
 
+    def _emit_native_success_summary(self) -> None:
+        p116_markers = [
+            marker
+            for marker in self._native_marker_tail
+            if marker.startswith("P116_")
+        ]
+        _LOGGER.info(
+            "Comelit entrance media transport completed: p116_native_markers=%s",
+            p116_markers,
+        )
+
     async def async_start(self, panel: str) -> None:
         if panel != "entrance":
             raise ComelitMediaTransportError("unsupported_media_panel")
@@ -563,6 +574,8 @@ class ComelitEntranceMediaTransport:
             reader = self._reader_task
             if reader is not None:
                 await reader
+            if self._stopping:
+                self._emit_native_success_summary()
             if not self._stopping:
                 self._capture_native_failure(rc)
                 raise ComelitMediaTransportError(f"media_native_exit:{rc}")
