@@ -146,8 +146,8 @@ jobs:
         run: |
           set -euo pipefail
           git diff --check
-          test "$(git diff -- custom_components/comelit/media_transport.py | grep -c 'MEDIA_VIDEO_RTP_PORT = 17899' || true)" -eq 0
-          test "$(git diff -- custom_components/comelit/media_transport.py | grep -c 'MEDIA_AUDIO_RTP_PORT = 17808' || true)" -eq 0
+          test "$(git diff -U0 -- custom_components/comelit/media_transport.py | grep -Ec '^[+-][^+-].*MEDIA_VIDEO_RTP_PORT = 17899' || true)" -eq 0
+          test "$(git diff -U0 -- custom_components/comelit/media_transport.py | grep -Ec '^[+-][^+-].*MEDIA_AUDIO_RTP_PORT = 17808' || true)" -eq 0
           ! git diff | grep -E '^\+.*(async_open_door|SIGUSR1|Gate|GATE_ACTION_SENT=true)'
 
       - name: Commit generated P114 code and binary to PR head
