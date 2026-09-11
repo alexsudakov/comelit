@@ -81,6 +81,7 @@ class P80HaMediaEntityWiringTests(unittest.TestCase):
         )
         self.assertIn("self.hass.data[STREAM_DOMAIN][ATTR_STREAMS].append(stream)", self.camera)
         self.assertIn("if not self._manager.active:\n            return None", self.camera)
+        self.assertIn("self._transport.local_sdp_ready", self.camera)
         self.assertIn("return str(path)", self.camera)
         self.assertIn('"automatic_session_start": False', self.camera)
         for forbidden in (

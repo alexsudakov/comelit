@@ -67,6 +67,7 @@ c=IN IP4 127.0.0.1\r
 t=0 0\r
 m=video {MEDIA_VIDEO_RTP_PORT} RTP/AVP 99\r
 a=rtpmap:99 H264/90000\r
+a=fmtp:99 packetization-mode=1\r
 a=recvonly\r
 m=audio {MEDIA_AUDIO_RTP_PORT} RTP/AVP 8\r
 a=rtpmap:8 PCMA/8000/1\r
@@ -146,6 +147,13 @@ def _write_remote(remote: str) -> None:
 
 def _write_local_sdp() -> None:
     _atomic_write(_MEDIA_LOCAL_SDP_FILE, _LOCAL_RTP_SDP.encode("ascii"))
+
+
+def _remove_local_sdp() -> None:
+    try:
+        _MEDIA_LOCAL_SDP_FILE.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def _touch_stop() -> None:
@@ -236,6 +244,10 @@ class ComelitEntranceMediaTransport:
     @property
     def local_sdp_path(self) -> Path:
         return _MEDIA_LOCAL_SDP_FILE
+
+    @property
+    def local_sdp_ready(self) -> bool:
+        return self.active and _MEDIA_LOCAL_SDP_FILE.is_file()
 
     @property
     def video_forwarding(self) -> bool:
@@ -428,6 +440,7 @@ class ComelitEntranceMediaTransport:
         self._audio_forwarding.clear()
         self._cancel_status_notify()
         await self._hass.async_add_executor_job(_remove_helper_secret)
+        await self._hass.async_add_executor_job(_remove_local_sdp)
 
     async def _async_run_once(self) -> None:
         try:
@@ -465,6 +478,7 @@ class ComelitEntranceMediaTransport:
             self._media_active.clear()
             self._process = None
             await self._hass.async_add_executor_job(_remove_helper_secret)
+            await self._hass.async_add_executor_job(_remove_local_sdp)
 
     async def _async_run_cycle(self) -> None:
         await self._hass.async_add_executor_job(_native_gate)

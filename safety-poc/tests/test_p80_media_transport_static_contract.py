@@ -52,9 +52,12 @@ class P80MediaTransportStaticContractTests(unittest.TestCase):
         self.assertIn("MEDIA_AUDIO_RTP_PORT = 17808", self.source)
         self.assertIn("RTP/AVP 99", self.source)
         self.assertIn("a=rtpmap:99 H264/90000", self.source)
+        self.assertIn("a=fmtp:99 packetization-mode=1", self.source)
         self.assertIn("RTP/AVP 8", self.source)
         self.assertIn("a=rtpmap:8 PCMA/8000/1", self.source)
         self.assertIn("127.0.0.1", self.source)
+        self.assertIn("_LOCAL_RTP_SDP.encode(\"ascii\")", self.source)
+        self.assertIn("_atomic_write(_MEDIA_LOCAL_SDP_FILE", self.source)
 
     def test_media_bootstrap_has_exactly_one_cloud_negotiation(self) -> None:
         method = next(

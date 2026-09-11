@@ -114,8 +114,10 @@ class ComelitEntranceCamera(Camera):
         if not self._manager.active:
             return None
         path = self._transport.local_sdp_path
-        exists = await self.hass.async_add_executor_job(path.is_file)
-        if not exists:
+        ready = await self.hass.async_add_executor_job(
+            lambda: self._transport.local_sdp_ready
+        )
+        if not ready:
             return None
         return str(path)
 
