@@ -5,8 +5,9 @@ import re
 import time
 
 _PROGRESS_MARKER_RE = re.compile(
-    r"^P80_(VIDEO|AUDIO)_RTP_PACKETS=([0-9]{1,10})$"
+    r"^P80_(VIDEO|AUDIO)_RTP_PACKETS=([0-9]{1,20})$"
 )
+_GUINT64_MAX = (1 << 64) - 1
 
 
 class MediaProgressDiagnostics:
@@ -60,6 +61,8 @@ class MediaProgressDiagnostics:
 
         media_kind, raw_count = match.groups()
         count = int(raw_count)
+        if count > _GUINT64_MAX:
+            return False
         now = self._clock()
 
         if media_kind == "VIDEO":

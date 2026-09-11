@@ -43,6 +43,13 @@ class P114MediaProgressDiagnosticsTests(unittest.TestCase):
         self.assertEqual(self.progress.video_packet_count, 50)
         self.assertEqual(self.progress.last_video_progress_monotonic, 102.0)
 
+    def test_guint64_maximum_is_accepted(self) -> None:
+        maximum = (1 << 64) - 1
+        self.assertTrue(
+            self.progress.update_marker(f"P80_VIDEO_RTP_PACKETS={maximum}")
+        )
+        self.assertEqual(self.progress.video_packet_count, maximum)
+
     def test_repeat_or_regression_does_not_refresh_last_progress(self) -> None:
         self.assertTrue(self.progress.update_marker("P80_VIDEO_RTP_PACKETS=50"))
         self.clock.now = 110.0
@@ -55,7 +62,7 @@ class P114MediaProgressDiagnosticsTests(unittest.TestCase):
     def test_malformed_or_unsafe_markers_are_ignored(self) -> None:
         for marker in (
             "P80_VIDEO_RTP_PACKETS=-1",
-            "P80_VIDEO_RTP_PACKETS=12345678901",
+            "P80_VIDEO_RTP_PACKETS=18446744073709551616",
             "P80_VIDEO_RTP_PACKETS=1 secret",
             "P80_VIDEO_RTP_PACKETS=1=2",
             "P80_VIDEO_RTP_PACKETS=",
