@@ -109,6 +109,80 @@ media active. HA camera stream creation additionally requires
 `transport.local_sdp_ready`, and cleanup removes the SDP on stop/final failure.
 Before readiness, `stream_source()` returns `None` and no HA Stream is created.
 
+## Round 3 native RTP telemetry
+
+Owner decision: semantic RTP telemetry is collected inside the native helper
+transform chain. External packet taps on `127.0.0.1:17899/17808` are not used:
+the helper already sees every accepted inner RTP packet immediately before and
+after the forwarding call, without adding a second UDP consumer or depending on
+the HA Core network namespace.
+
+The instrumentation is diagnostic-only. It parses RTP headers and, for PT99
+H264 only, the first NAL header byte or FU-A indicator/header pair. It never
+prints or stores raw RTP payload, SPS/PPS contents, base64, hex dumps, OAuth
+material, or session material. The existing forwarding call remains:
+`sendto(*fd, inner, inner_len, 0, (const struct sockaddr *)target, sizeof(*target))`.
+Telemetry is updated after that call succeeds, using the same `inner` and
+`inner_len`, and does not allocate sockets, create threads, read files, or drive
+media lifecycle state.
+
+Emission scheme:
+
+- First observation: summary is emitted when a VIDEO or AUDIO stream reaches
+  packet count 1.
+- Bounded periodic summary: cadence is `P116_RTP_TELEMETRY_CADENCE=50`; periodic
+  summaries are capped by `P116_RTP_TELEMETRY_MAX_PERIODIC_SUMMARIES=12` per
+  stream, so P116 log growth is bounded independent of session length.
+- Final summary: both VIDEO and AUDIO summaries are emitted once during normal
+  helper teardown before process exit.
+
+VIDEO markers:
+`P116_VIDEO_COUNT`, `P116_VIDEO_FIRST_SEQ`, `P116_VIDEO_LAST_SEQ`,
+`P116_VIDEO_SEQ_GAPS`, `P116_VIDEO_DUPLICATES`,
+`P116_VIDEO_OUT_OF_ORDER`, `P116_VIDEO_FIRST_TS`, `P116_VIDEO_LAST_TS`,
+`P116_VIDEO_TIMESTAMP_REGRESSIONS`, `P116_VIDEO_SSRC_COUNT`,
+`P116_VIDEO_SSRC_CHANGES`, `P116_VIDEO_PT_SET`,
+`P116_VIDEO_MARKER_COUNT`, `P116_VIDEO_FIRST_MONOTONIC_MS`,
+`P116_VIDEO_LAST_MONOTONIC_MS`,
+`P116_VIDEO_FIRST_KEYFRAME_MONOTONIC_MS`, `P116_VIDEO_SPS_COUNT`,
+`P116_VIDEO_PPS_COUNT`, `P116_VIDEO_FUA_COUNT`,
+`P116_VIDEO_SINGLE_NAL_COUNT`.
+
+AUDIO markers:
+`P116_AUDIO_COUNT`, `P116_AUDIO_FIRST_SEQ`, `P116_AUDIO_LAST_SEQ`,
+`P116_AUDIO_SEQ_GAPS`, `P116_AUDIO_DUPLICATES`,
+`P116_AUDIO_OUT_OF_ORDER`, `P116_AUDIO_FIRST_TS`, `P116_AUDIO_LAST_TS`,
+`P116_AUDIO_TIMESTAMP_REGRESSIONS`, `P116_AUDIO_SSRC_COUNT`,
+`P116_AUDIO_SSRC_CHANGES`, `P116_AUDIO_PT_SET`,
+`P116_AUDIO_FIRST_MONOTONIC_MS`, `P116_AUDIO_LAST_MONOTONIC_MS`.
+
+Python side: `P116_` is admitted only into the bounded native marker tail with
+the scalar-safe value allowlist. These markers are not media-state-driving:
+activation remains exclusively `P80_MEDIA_ACTIVE=true`, and progress entities
+continue to advance only from the legacy `P80_*_RTP_PACKETS` markers.
+
+### Live correlation plan
+
+Use one bounded production validation run and correlate scalar timestamps/events
+in this order:
+
+`MEDIA_START -> FIRST_VIDEO_RTP -> FIRST_KEYFRAME -> HA_STREAM_WORKER_START -> FIRST_HLS_OUTPUT_IF_ANY -> ERROR_DEMUXING_STREAM_IF_ANY -> LAST_VIDEO_RTP -> MEDIA_STOP -> LISTENER_READY_AFTER`
+
+Decision classes from the owner:
+
+- A: native VIDEO telemetry shows no packet gap, no timestamp regression, a
+  first keyframe, and continuing RTP after HA worker start, but HA still times
+  out. This points above native forwarding: HA demux/remux, SDP/extradata, or
+  stream worker behavior.
+- B: VIDEO has gaps, duplicates, out-of-order packets, SSRC churn, or timestamp
+  regressions around the worker timeout. This points to native bridge input or
+  upstream media continuity.
+- C: VIDEO reaches a keyframe and then stops while AUDIO continues or both media
+  stop before `MEDIA_STOP`. This points to device/upstream media production or
+  lifecycle timing, not HA decoding alone.
+- D: native telemetry is healthy through `MEDIA_STOP` and HA emits HLS output.
+  This resolves the P116 failure class for the tested build as not reproduced.
+
 ## Открытые вопросы (для bounded production validation)
 
 - Точный триггер `Operation timed out` на чтении следующего пакета после первого keyframe

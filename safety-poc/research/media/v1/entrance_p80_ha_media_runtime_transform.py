@@ -100,6 +100,10 @@ P80_RTP_RUNTIME = rf'''
 #define P80_VIDEO_RTP_PORT {VIDEO_RTP_PORT}
 #define P80_AUDIO_RTP_PORT {AUDIO_RTP_PORT}
 #define P80_RTP_PROGRESS_CADENCE 50u
+#define P116_RTP_TELEMETRY_CADENCE 50u
+#define P116_RTP_TELEMETRY_MAX_PERIODIC_SUMMARIES 12u
+#define P116_RTP_PT_WORD_BITS 128u
+#define P116_RTP_MAX_TRACKED_SSRC 8u
 
 static gboolean p80_media_forwarding_enabled = FALSE;
 static int p80_video_rtp_fd = -1;
@@ -115,6 +119,46 @@ static guint8 p80_audio_profile[6] = {{0}};
 static guint64 p80_video_rtp_packets = 0;
 static guint64 p80_audio_rtp_packets = 0;
 
+typedef struct {{
+    guint8 payload_type;
+    gboolean is_video;
+    guint64 packet_count;
+    long long first_monotonic_ms;
+    long long last_monotonic_ms;
+    long long first_keyframe_monotonic_ms;
+    guint16 first_seq;
+    guint16 last_seq;
+    guint16 max_seq;
+    guint32 first_timestamp;
+    guint32 last_timestamp;
+    guint64 sequence_gaps;
+    guint64 duplicates;
+    guint64 out_of_order;
+    guint64 timestamp_regressions;
+    guint64 marker_count;
+    guint64 sps_count;
+    guint64 pps_count;
+    guint64 fua_count;
+    guint64 single_nal_count;
+    guint64 ssrc_changes;
+    guint32 last_ssrc;
+    guint32 tracked_ssrc[P116_RTP_MAX_TRACKED_SSRC];
+    guint tracked_ssrc_count;
+    guint64 ssrc_overflow_count;
+    guint64 pt_seen_hi;
+    guint64 pt_seen_lo;
+    guint periodic_summary_count;
+}} P116RtpTelemetry;
+
+static P116RtpTelemetry p116_video_rtp = {{
+    .payload_type = 99u,
+    .is_video = TRUE
+}};
+static P116RtpTelemetry p116_audio_rtp = {{
+    .payload_type = 8u,
+    .is_video = FALSE
+}};
+
 static guint16
 p80_read_le16(const guint8 *p)
 {{
@@ -125,6 +169,237 @@ static guint16
 p80_read_be16(const guint8 *p)
 {{
     return (guint16)(((guint16)p[0] << 8) | (guint16)p[1]);
+}}
+
+static guint32
+p116_read_be32(const guint8 *p)
+{{
+    return ((guint32)p[0] << 24) |
+           ((guint32)p[1] << 16) |
+           ((guint32)p[2] << 8) |
+           (guint32)p[3];
+}}
+
+static long long
+p116_monotonic_ms(void)
+{{
+#ifdef G_USEC_PER_SEC
+    return (long long)(g_get_monotonic_time() / 1000);
+#else
+    static long long fallback_monotonic_ms = 0;
+    return ++fallback_monotonic_ms;
+#endif
+}}
+
+static guint
+p116_rtp_payload_offset(const guint8 *packet, guint len)
+{{
+    if (!packet || len < 12u || (packet[0] >> 6) != 2)
+        return 0u;
+
+    guint csrc_count = packet[0] & 0x0f;
+    guint offset = 12u + 4u * csrc_count;
+    if (offset > len)
+        return 0u;
+
+    if ((packet[0] & 0x10) != 0) {{
+        if (offset + 4u > len)
+            return 0u;
+        guint extension_words = p80_read_be16(packet + offset + 2u);
+        if (extension_words > (G_MAXUINT - offset - 4u) / 4u)
+            return 0u;
+        offset += 4u + 4u * extension_words;
+        if (offset > len)
+            return 0u;
+    }}
+
+    if ((packet[0] & 0x20) != 0) {{
+        guint padding_len = packet[len - 1u];
+        if (padding_len == 0u || padding_len > len - offset)
+            return 0u;
+        if (len - offset - padding_len == 0u)
+            return 0u;
+    }} else if (offset == len) {{
+        return 0u;
+    }}
+
+    return offset;
+}}
+
+static void
+p116_note_pt(P116RtpTelemetry *stream, guint8 payload_type)
+{{
+    if (payload_type < 64u)
+        stream->pt_seen_lo |= ((guint64)1u << payload_type);
+    else
+        stream->pt_seen_hi |= ((guint64)1u << (payload_type - 64u));
+}}
+
+static void
+p116_print_pt_set(P116RtpTelemetry *stream)
+{{
+    gboolean first = TRUE;
+    for (guint pt = 0; pt < P116_RTP_PT_WORD_BITS; pt++) {{
+        gboolean seen = pt < 64u
+            ? ((stream->pt_seen_lo & ((guint64)1u << pt)) != 0)
+            : ((stream->pt_seen_hi & ((guint64)1u << (pt - 64u))) != 0);
+        if (seen) {{
+            printf("%s%u", first ? "" : ",", pt);
+            first = FALSE;
+        }}
+    }}
+    if (first)
+        printf("NONE");
+}}
+
+static void
+p116_note_ssrc(P116RtpTelemetry *stream, guint32 ssrc)
+{{
+    if (stream->packet_count > 1u && stream->last_ssrc != ssrc)
+        stream->ssrc_changes++;
+    stream->last_ssrc = ssrc;
+
+    for (guint i = 0; i < stream->tracked_ssrc_count; i++) {{
+        if (stream->tracked_ssrc[i] == ssrc)
+            return;
+    }}
+    if (stream->tracked_ssrc_count < P116_RTP_MAX_TRACKED_SSRC) {{
+        stream->tracked_ssrc[stream->tracked_ssrc_count++] = ssrc;
+    }} else {{
+        stream->ssrc_overflow_count++;
+    }}
+}}
+
+static void
+p116_print_summary(P116RtpTelemetry *stream, const char *prefix)
+{{
+    printf("P116_%s_COUNT=%llu\n", prefix, (unsigned long long)stream->packet_count);
+    if (stream->packet_count == 0u) {{
+        printf("P116_%s_FIRST_SEQ=0\n", prefix);
+        printf("P116_%s_LAST_SEQ=0\n", prefix);
+        printf("P116_%s_FIRST_TS=0\n", prefix);
+        printf("P116_%s_LAST_TS=0\n", prefix);
+        printf("P116_%s_FIRST_MONOTONIC_MS=0\n", prefix);
+        printf("P116_%s_LAST_MONOTONIC_MS=0\n", prefix);
+    }} else {{
+        printf("P116_%s_FIRST_SEQ=%u\n", prefix, stream->first_seq);
+        printf("P116_%s_LAST_SEQ=%u\n", prefix, stream->last_seq);
+        printf("P116_%s_FIRST_TS=%u\n", prefix, stream->first_timestamp);
+        printf("P116_%s_LAST_TS=%u\n", prefix, stream->last_timestamp);
+        printf("P116_%s_FIRST_MONOTONIC_MS=%lld\n", prefix, (long long)stream->first_monotonic_ms);
+        printf("P116_%s_LAST_MONOTONIC_MS=%lld\n", prefix, (long long)stream->last_monotonic_ms);
+    }}
+    printf("P116_%s_SEQ_GAPS=%llu\n", prefix, (unsigned long long)stream->sequence_gaps);
+    printf("P116_%s_DUPLICATES=%llu\n", prefix, (unsigned long long)stream->duplicates);
+    printf("P116_%s_OUT_OF_ORDER=%llu\n", prefix, (unsigned long long)stream->out_of_order);
+    printf("P116_%s_TIMESTAMP_REGRESSIONS=%llu\n", prefix, (unsigned long long)stream->timestamp_regressions);
+    printf("P116_%s_SSRC_COUNT=%u\n", prefix, stream->tracked_ssrc_count);
+    printf("P116_%s_SSRC_CHANGES=%llu\n", prefix, (unsigned long long)stream->ssrc_changes);
+    printf("P116_%s_PT_SET=", prefix);
+    p116_print_pt_set(stream);
+    printf("\n");
+    if (stream->is_video) {{
+        printf("P116_VIDEO_MARKER_COUNT=%llu\n", (unsigned long long)stream->marker_count);
+        printf("P116_VIDEO_FIRST_KEYFRAME_MONOTONIC_MS=%lld\n", (long long)stream->first_keyframe_monotonic_ms);
+        printf("P116_VIDEO_SPS_COUNT=%llu\n", (unsigned long long)stream->sps_count);
+        printf("P116_VIDEO_PPS_COUNT=%llu\n", (unsigned long long)stream->pps_count);
+        printf("P116_VIDEO_FUA_COUNT=%llu\n", (unsigned long long)stream->fua_count);
+        printf("P116_VIDEO_SINGLE_NAL_COUNT=%llu\n", (unsigned long long)stream->single_nal_count);
+    }}
+    fflush(stdout);
+}}
+
+static void
+p116_print_final_rtp_summary(void)
+{{
+    p116_print_summary(&p116_video_rtp, "VIDEO");
+    p116_print_summary(&p116_audio_rtp, "AUDIO");
+}}
+
+static void
+p116_classify_h264(P116RtpTelemetry *stream, const guint8 *packet, guint len, long long now_ms)
+{{
+    guint payload_offset = p116_rtp_payload_offset(packet, len);
+    if (payload_offset == 0u || payload_offset >= len)
+        return;
+
+    guint8 nal_header = packet[payload_offset];
+    guint8 nal_type = nal_header & 0x1fu;
+    if (nal_type >= 1u && nal_type <= 23u) {{
+        stream->single_nal_count++;
+        if (nal_type == 5u && stream->first_keyframe_monotonic_ms == 0)
+            stream->first_keyframe_monotonic_ms = now_ms;
+        else if (nal_type == 7u)
+            stream->sps_count++;
+        else if (nal_type == 8u)
+            stream->pps_count++;
+        return;
+    }}
+
+    if (nal_type == 28u) {{
+        stream->fua_count++;
+        if (payload_offset + 1u < len) {{
+            guint8 fu_header = packet[payload_offset + 1u];
+            guint8 fu_start = fu_header & 0x80u;
+            guint8 original_nal_type = fu_header & 0x1fu;
+            if (fu_start && original_nal_type == 5u &&
+                stream->first_keyframe_monotonic_ms == 0) {{
+                stream->first_keyframe_monotonic_ms = now_ms;
+            }}
+        }}
+    }}
+}}
+
+static void
+p116_observe_rtp(const guint8 *packet, guint len, guint8 payload_type)
+{{
+    P116RtpTelemetry *stream = payload_type == 99u
+        ? &p116_video_rtp : &p116_audio_rtp;
+    const char *prefix = payload_type == 99u ? "VIDEO" : "AUDIO";
+    long long now_ms = p116_monotonic_ms();
+    guint16 seq = p80_read_be16(packet + 2u);
+    guint32 timestamp = p116_read_be32(packet + 4u);
+    guint32 ssrc = p116_read_be32(packet + 8u);
+    gboolean marker = (packet[1] & 0x80u) != 0;
+
+    stream->packet_count++;
+    if (stream->packet_count == 1u) {{
+        stream->first_monotonic_ms = now_ms;
+        stream->first_seq = seq;
+        stream->max_seq = seq;
+        stream->first_timestamp = timestamp;
+    }} else {{
+        guint16 expected = (guint16)(stream->max_seq + 1u);
+        if (seq == stream->max_seq) {{
+            stream->duplicates++;
+        }} else if ((guint16)(seq - stream->max_seq) < 0x8000u) {{
+            if (seq != expected)
+                stream->sequence_gaps += (guint16)(seq - expected);
+            stream->max_seq = seq;
+        }} else {{
+            stream->out_of_order++;
+        }}
+        if (timestamp < stream->last_timestamp)
+            stream->timestamp_regressions++;
+    }}
+
+    stream->last_monotonic_ms = now_ms;
+    stream->last_seq = seq;
+    stream->last_timestamp = timestamp;
+    if (marker)
+        stream->marker_count++;
+    p116_note_pt(stream, payload_type);
+    p116_note_ssrc(stream, ssrc);
+    if (payload_type == 99u)
+        p116_classify_h264(stream, packet, len, now_ms);
+
+    if (stream->packet_count == 1u) {{
+        p116_print_summary(stream, prefix);
+    }} else if (stream->packet_count % P116_RTP_TELEMETRY_CADENCE == 0u &&
+        stream->periodic_summary_count < P116_RTP_TELEMETRY_MAX_PERIODIC_SUMMARIES) {{
+        stream->periodic_summary_count++;
+        p116_print_summary(stream, prefix);
+    }}
 }}
 
 static gboolean
@@ -266,6 +541,8 @@ p80_try_forward_wrapped_rtp(const guint8 *packet, guint len)
             g_main_loop_quit(loop);
         return TRUE;
     }}
+
+    p116_observe_rtp(inner, inner_len, payload_type);
 
     if (payload_type == 99u) {{
         p80_video_rtp_packets++;
@@ -409,6 +686,12 @@ def transform(source: str) -> str:
         out,
         "static gboolean\nentrance_signal_begin_media_observation(void)\n",
         P80_MEDIA_ACTIVE_FUNCTION,
+    )
+    out = _replace_once(
+        out,
+        "    return failed ? 6 : 0;\n}",
+        "    p116_print_final_rtp_summary();\n\n    return failed ? 6 : 0;\n}",
+        "P116 final RTP summary",
     )
 
     count = out.count(OBSERVATION_READABLE_BRANCH)

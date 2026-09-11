@@ -79,8 +79,47 @@ def _replace_once(source: str, old: str, new: str, label: str) -> str:
     return source.replace(old, new, 1)
 
 
+def _strip_p116_from_packaged_binary_provenance(candidate: str) -> str:
+    """Keep the P106 packaged-binary provenance source pinned to its shipped build.
+
+    P116 instruments the P80 build path for the next native helper. The P106
+    provenance test still describes the already packaged binary, whose SHA pin
+    intentionally remains unchanged in this round.
+    """
+    for line in (
+        "#define P116_RTP_TELEMETRY_CADENCE 50u\n",
+        "#define P116_RTP_TELEMETRY_MAX_PERIODIC_SUMMARIES 12u\n",
+        "#define P116_RTP_PT_WORD_BITS 128u\n",
+        "#define P116_RTP_MAX_TRACKED_SSRC 8u\n",
+    ):
+        candidate = _replace_once(candidate, line, "", "P116 provenance define")
+
+    state_start = candidate.index("\ntypedef struct {\n    guint8 payload_type;")
+    state_end = candidate.index("\nstatic guint16\np80_read_le16", state_start)
+    candidate = candidate[:state_start] + candidate[state_end:]
+
+    funcs_start = candidate.index("\nstatic guint32\np116_read_be32")
+    funcs_end = candidate.index("\nstatic gboolean\np80_rtp_v2_shape", funcs_start)
+    candidate = candidate[:funcs_start] + candidate[funcs_end:]
+
+    candidate = _replace_once(
+        candidate,
+        "    p116_observe_rtp(inner, inner_len, payload_type);\n\n",
+        "",
+        "P116 provenance observe call",
+    )
+    candidate = _replace_once(
+        candidate,
+        "    p116_print_final_rtp_summary();\n\n",
+        "",
+        "P116 provenance final summary",
+    )
+    return candidate
+
+
 def transform(source: str) -> str:
     candidate = add_p105_runtime(source)
+    candidate = _strip_p116_from_packaged_binary_provenance(candidate)
     return _replace_once(
         candidate,
         _NOTIFY_FAILURE_ANCHOR,
