@@ -98,18 +98,46 @@ T4 (детерминизм session-derived параметров) — `NOT_APPLIC
 FFmpeg SDP `sprop-parameter-sets` is the SDP path that seeds H264 extradata.
 По host-прогону выше in-band SPS/PPS достаточно для remux/fMP4-avcC, поэтому
 session-derived `sprop-parameter-sets` в этой фазе НЕ реализуется
-(`SPS_PPS_REQUIREMENT=NOT_REQUIRED` для проверенного пути). Запиненный native helper не
-менялся: `comelit-media` и `MEDIA_NATIVE_BINARY_SHA256`
-(`91335b4490bc58910c78cb58b9c2d3eccc13f40dcfff7651995ad428cd71ddc7`) неизменны.
+(`SPS_PPS_REQUIREMENT=NOT_REQUIRED` для проверенного пути).
+P116-пин теперь указывает на установленный воспроизводимый native helper:
+`MEDIA_NATIVE_BINARY_SHA256=35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622`.
 
 ## Native build provenance
 
+Pinned P116 native artifact:
+
+```
+canonical_generator=entrance_p106_teardown_state_classification_transform.py (include_p116=1)
+generated_source_sha256=93756730fd088b9227f37c4e0e3edbd18ac30c110db03b75bcc63f1c93952e66
+generator_tree_commit=6fe4413861e7f597bb2f05f445eeb6513d7e8406
+toolchain=Alpine 3.24.1 chroot (cached), cc (Alpine 15.2.0) 15.2.0, glib/gobject 2.88.1, libnice 0.1.22
+flags=-O2 -g -Wall -Wextra -Wl,--as-needed
+interpreter=/lib/ld-musl-x86_64.so.1
+needed=libc.musl-x86_64.so.1,libglib-2.0.so.0,libgobject-2.0.so.0,libnice.so.10
+binary_sha256=35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622
+size=270184
+mode=755
+glibc_interpreter=ABSENT
+P116_STRING_COUNT=26
+gates=MUSL_INTERPRETER_GATE=PASS, NO_GLIBC_DEPENDENCY=PASS, NO_NEW_RUNTIME_DEPENDENCY=PASS, LIB_IDENTICAL=PASS
+reproducibility=two independent clean builds produced byte-identical 35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622
+historical=f17ad2d6efbe002335a658c075da84677ced44246d556afe80953a8f59129841 same source vs pinned 91335b4490bc58910c78cb58b9c2d3eccc13f40dcfff7651995ad428cd71ddc7 -> HISTORICAL_HASH_MISMATCH_CLASS=NON_RUNTIME_BUILD_METADATA
+```
+
+The historical packaged hash
+`91335b4490bc58910c78cb58b9c2d3eccc13f40dcfff7651995ad428cd71ddc7`
+does not reproduce byte-for-byte from the same historical source because of
+non-runtime build metadata: BuildID, DWARF, and build-path strings differ.
+Runtime sections and ABI are identical for that historical comparison:
+`.text`, `.rodata`, `.data`, dynamic section, interpreter, NEEDED libraries,
+symbols, relocations, and PT_LOAD geometry match.
+
 Packaged native pin:
 
-- `MEDIA_NATIVE_BINARY_SHA256=91335b4490bc58910c78cb58b9c2d3eccc13f40dcfff7651995ad428cd71ddc7`
-- `GENERATED_SOURCE_SHA256=0c15927dbc40bdb1f7c522f063a8a2f38c557f9eb735cdd981cdd49449595c79`
+- `MEDIA_NATIVE_BINARY_SHA256=35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622`
+- `GENERATED_SOURCE_SHA256=93756730fd088b9227f37c4e0e3edbd18ac30c110db03b75bcc63f1c93952e66`
 - Generator: `safety-poc/research/media/v1/entrance_p106_teardown_state_classification_transform.py`
-  (P106 teardown-state classification composition), not the standalone P80 transform.
+  (P106 teardown-state classification composition, `include_p116=1`), not the standalone P80 transform.
 
 The generator has an explicit P116 provenance switch:
 
@@ -131,13 +159,13 @@ the selected generator emits different C. Every builder run records
 `P80_BUILD_TRANSFORM=`, `P80_BUILD_INCLUDE_P116=`, `P80_BUILD_EXPECTED_SOURCE_SHA=`,
 `GENERATED_SOURCE_SHA256=`, and `NATIVE_BINARY_SHA256=` in `build-meta.txt`.
 
-Provenance table for the current pin/future P116 pin:
+Provenance table for historical evidence and the current P116 pin:
 
 | Build | Canonical generator commit | include_p116 | Generated source SHA256 | Toolchain identity | Binary SHA256 | Build gates |
 |---|---|---:|---|---|---|---|
-| Packaged historical pin | `6fe4413861e7f597bb2f05f445eeb6513d7e8406` | `0` | `0c15927dbc40bdb1f7c522f063a8a2f38c557f9eb735cdd981cdd49449595c79` | Alpine `3.24.1`, GCC `(Alpine 15.2.0) 15.2.0`, musl interpreter `/lib/ld-musl-x86_64.so.1`, C flags `-O2 -g -Wall -Wextra -Wl,--as-needed`, NEEDED `libc.musl-x86_64.so.1,libglib-2.0.so.0,libgobject-2.0.so.0,libnice.so.10` | `91335b4490bc58910c78cb58b9c2d3eccc13f40dcfff7651995ad428cd71ddc7` | Host full suite/static gates passed; source gate is historical default |
+| Packaged historical pin | `6fe4413861e7f597bb2f05f445eeb6513d7e8406` | `0` | `0c15927dbc40bdb1f7c522f063a8a2f38c557f9eb735cdd981cdd49449595c79` | Alpine `3.24.1`, GCC `(Alpine 15.2.0) 15.2.0`, musl interpreter `/lib/ld-musl-x86_64.so.1`, C flags `-O2 -g -Wall -Wextra -Wl,--as-needed`, NEEDED `libc.musl-x86_64.so.1,libglib-2.0.so.0,libgobject-2.0.so.0,libnice.so.10` | `91335b4490bc58910c78cb58b9c2d3eccc13f40dcfff7651995ad428cd71ddc7` | Historical reference only after P116 pin |
 | Rebuilt historical source evidence | `6fe4413861e7f597bb2f05f445eeb6513d7e8406` | `0` | `0c15927dbc40bdb1f7c522f063a8a2f38c557f9eb735cdd981cdd49449595c79` | Same runtime toolchain identity as packaged pin; BuildID/debug path metadata differ | `f17ad2d6efbe002335a658c075da84677ced44246d556afe80953a8f59129841` | Runtime equivalence PASS; hash mismatch class `NON_RUNTIME_BUILD_METADATA` |
-| P116 current evidence | `6fe4413861e7f597bb2f05f445eeb6513d7e8406` | `1` | `93756730fd088b9227f37c4e0e3edbd18ac30c110db03b75bcc63f1c93952e66` | Alpine `3.24.1`/GCC `(Alpine 15.2.0) 15.2.0` builder path | `35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622` | Candidate staged only; packaged pin unchanged |
+| P116 current pin | `6fe4413861e7f597bb2f05f445eeb6513d7e8406` | `1` | `93756730fd088b9227f37c4e0e3edbd18ac30c110db03b75bcc63f1c93952e66` | Alpine `3.24.1`, GCC `(Alpine 15.2.0) 15.2.0`, glib/gobject `2.88.1`, libnice `0.1.22`, musl interpreter `/lib/ld-musl-x86_64.so.1`, C flags `-O2 -g -Wall -Wextra -Wl,--as-needed`, NEEDED `libc.musl-x86_64.so.1,libglib-2.0.so.0,libgobject-2.0.so.0,libnice.so.10` | `35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622` | MUSL_INTERPRETER_GATE PASS; NO_GLIBC_DEPENDENCY PASS; NO_NEW_RUNTIME_DEPENDENCY PASS; LIB_IDENTICAL PASS; two clean builds byte-identical |
 
 Pinned vs rebuilt-historical binary diagnosis: full-file SHA256 is not
 reproducible, but runtime semantics are equivalent. `.text`, `.rodata`,

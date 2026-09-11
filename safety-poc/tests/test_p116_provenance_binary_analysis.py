@@ -11,8 +11,15 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 PINNED = ROOT / "custom_components" / "comelit" / "native" / "comelit-media"
+MEDIA_TRANSPORT = ROOT / "custom_components" / "comelit" / "media_transport.py"
+P116_BUILD_META = ROOT / "safety-poc" / "research" / "media" / "v1" / "p116_media_telemetry_build_meta.txt"
+P114_BUILD_META = ROOT / "safety-poc" / "research" / "media" / "v1" / "p114_media_diagnostics_build_meta.txt"
+HISTORICAL_PINNED = ROOT / ".p116-evidence" / "bin" / "pinned-historical.bin"
 REBUILT = ROOT / ".p116-evidence" / "bin" / "rebuilt-historical-source.bin"
-PINNED_SHA256 = "91335b4490bc58910c78cb58b9c2d3eccc13f40dcfff7651995ad428cd71ddc7"
+PINNED_SHA256 = "35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622"
+HISTORICAL_PINNED_SHA256 = "91335b4490bc58910c78cb58b9c2d3eccc13f40dcfff7651995ad428cd71ddc7"
+HISTORICAL_SOURCE_SHA256 = "0c15927dbc40bdb1f7c522f063a8a2f38c557f9eb735cdd981cdd49449595c79"
+P116_SOURCE_SHA256 = "93756730fd088b9227f37c4e0e3edbd18ac30c110db03b75bcc63f1c93952e66"
 REBUILT_SHA256 = "f17ad2d6efbe002335a658c075da84677ced44246d556afe80953a8f59129841"
 EXPECTED_NEEDED = [
     "libc.musl-x86_64.so.1",
@@ -79,6 +86,16 @@ def _run(*args: str) -> str:
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _metadata(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key] = value
+    return values
 
 
 def _sections(path: Path) -> dict[str, Section]:
@@ -166,30 +183,69 @@ def _program_headers(path: Path) -> list[str]:
 
 
 class P116ProvenanceBinaryAnalysisTests(unittest.TestCase):
-    def test_rebuilt_historical_binary_mismatch_is_non_runtime_metadata(self) -> None:
+    def test_packaged_binary_matches_current_pin_and_contains_p116_markers(self) -> None:
         self.assertTrue(PINNED.is_file())
-        self.assertTrue(REBUILT.is_file())
         self.assertEqual(_sha256(PINNED), PINNED_SHA256)
-        self.assertEqual(_sha256(REBUILT), REBUILT_SHA256)
-        self.assertEqual(PINNED.stat().st_size - REBUILT.stat().st_size, 32)
 
-        pinned_sections = _sections(PINNED)
+        media_transport = MEDIA_TRANSPORT.read_text(encoding="utf-8")
+        match = re.search(
+            r"MEDIA_NATIVE_BINARY_SHA256\s*=\s*\(\s*\"([0-9a-f]{64})\"\s*\)",
+            media_transport,
+        )
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group(1), PINNED_SHA256)
+
+        binary = PINNED.read_bytes()
+        self.assertGreater(binary.count(b"P116_"), 0)
+
+    def test_committed_build_metadata_records_historical_non_runtime_mismatch(self) -> None:
+        p116_meta = _metadata(P116_BUILD_META)
+        p114_meta = _metadata(P114_BUILD_META)
+
+        self.assertEqual(p116_meta["NATIVE_BINARY_SHA256"], PINNED_SHA256)
+        self.assertEqual(p116_meta["GENERATED_SOURCE_SHA256"], P116_SOURCE_SHA256)
+        self.assertEqual(p114_meta["NATIVE_BINARY_SHA256"], HISTORICAL_PINNED_SHA256)
+        self.assertEqual(p114_meta["GENERATED_SOURCE_SHA256"], HISTORICAL_SOURCE_SHA256)
+
+        historical = p116_meta["historical"]
+        match = re.fullmatch(
+            r"([0-9a-f]{64}) same source vs pinned ([0-9a-f]{64}) -> "
+            r"HISTORICAL_HASH_MISMATCH_CLASS=([A-Z_]+)",
+            historical,
+        )
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group(1), REBUILT_SHA256)
+        self.assertEqual(match.group(2), HISTORICAL_PINNED_SHA256)
+        self.assertEqual(match.group(3), "NON_RUNTIME_BUILD_METADATA")
+
+    def test_rebuilt_historical_binary_mismatch_is_non_runtime_metadata(self) -> None:
+        if not HISTORICAL_PINNED.is_file():
+            self.skipTest(
+                f"historical pinned artifact not present at {HISTORICAL_PINNED}; "
+                "committed build metadata records NON_RUNTIME_BUILD_METADATA"
+            )
+        self.assertTrue(REBUILT.is_file())
+        self.assertEqual(_sha256(HISTORICAL_PINNED), HISTORICAL_PINNED_SHA256)
+        self.assertEqual(_sha256(REBUILT), REBUILT_SHA256)
+        self.assertEqual(HISTORICAL_PINNED.stat().st_size - REBUILT.stat().st_size, 32)
+
+        pinned_sections = _sections(HISTORICAL_PINNED)
         rebuilt_sections = _sections(REBUILT)
         self.assertEqual(pinned_sections.keys(), rebuilt_sections.keys())
-        self.assertEqual(_program_headers(PINNED), _program_headers(REBUILT))
-        self.assertEqual(_interpreter(PINNED), "/lib/ld-musl-x86_64.so.1")
-        self.assertEqual(_interpreter(PINNED), _interpreter(REBUILT))
-        self.assertEqual(_needed(PINNED), EXPECTED_NEEDED)
-        self.assertEqual(_needed(PINNED), _needed(REBUILT))
-        self.assertEqual(_comment(PINNED), "GCC: (Alpine 15.2.0) 15.2.0")
-        self.assertEqual(_comment(PINNED), _comment(REBUILT))
-        self.assertNotEqual(_build_id(PINNED), _build_id(REBUILT))
-        self.assertEqual(_symbol_count(PINNED), 340)
-        self.assertEqual(_symbol_count(PINNED), _symbol_count(REBUILT))
-        self.assertEqual(_symbol_count(PINNED, dynamic=True), 104)
-        self.assertEqual(_symbol_count(PINNED, dynamic=True), _symbol_count(REBUILT, dynamic=True))
-        self.assertEqual(_relocation_count(PINNED), 107)
-        self.assertEqual(_relocation_count(PINNED), _relocation_count(REBUILT))
+        self.assertEqual(_program_headers(HISTORICAL_PINNED), _program_headers(REBUILT))
+        self.assertEqual(_interpreter(HISTORICAL_PINNED), "/lib/ld-musl-x86_64.so.1")
+        self.assertEqual(_interpreter(HISTORICAL_PINNED), _interpreter(REBUILT))
+        self.assertEqual(_needed(HISTORICAL_PINNED), EXPECTED_NEEDED)
+        self.assertEqual(_needed(HISTORICAL_PINNED), _needed(REBUILT))
+        self.assertEqual(_comment(HISTORICAL_PINNED), "GCC: (Alpine 15.2.0) 15.2.0")
+        self.assertEqual(_comment(HISTORICAL_PINNED), _comment(REBUILT))
+        self.assertNotEqual(_build_id(HISTORICAL_PINNED), _build_id(REBUILT))
+        self.assertEqual(_symbol_count(HISTORICAL_PINNED), 340)
+        self.assertEqual(_symbol_count(HISTORICAL_PINNED), _symbol_count(REBUILT))
+        self.assertEqual(_symbol_count(HISTORICAL_PINNED, dynamic=True), 104)
+        self.assertEqual(_symbol_count(HISTORICAL_PINNED, dynamic=True), _symbol_count(REBUILT, dynamic=True))
+        self.assertEqual(_relocation_count(HISTORICAL_PINNED), 107)
+        self.assertEqual(_relocation_count(HISTORICAL_PINNED), _relocation_count(REBUILT))
 
         for name in RUNTIME_SECTIONS:
             with self.subTest(section=name):

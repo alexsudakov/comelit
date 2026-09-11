@@ -25,7 +25,7 @@ SERVICES = COMPONENT / "services.yaml"
 BINARY = COMPONENT / "native" / "comelit-media"
 SOURCE = SAFETY / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-ctpp-door.c"
 HARNESS = MEDIA / "entrance_p116_sdp_rtp_bridge_harness.py"
-EXPECTED_SHA256 = "91335b4490bc58910c78cb58b9c2d3eccc13f40dcfff7651995ad428cd71ddc7"
+EXPECTED_SHA256 = "35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622"
 
 
 class P116HaStreamRtpBridgeTests(unittest.TestCase):
@@ -121,7 +121,7 @@ class P116HaStreamRtpBridgeTests(unittest.TestCase):
         self.assertNotIn("async_open_door(DOOR_GATE", self.button)
         self.assertIn('ENTRANCE_CAMERA_ENTITY_ID = "camera.comelit_entrance"', (COMPONENT / "const.py").read_text(encoding="utf-8"))
 
-    def test_t8_native_binary_pin_is_unchanged_and_transform_invariants_remain(self) -> None:
+    def test_t8_native_binary_pin_matches_installed_artifact_and_transform_invariants_remain(self) -> None:
         self.assertIn(EXPECTED_SHA256, self.transport)
         self.assertEqual(hashlib.sha256(BINARY.read_bytes()).hexdigest(), EXPECTED_SHA256)
         intercept = self.candidate.index("p80_try_forward_wrapped_rtp")

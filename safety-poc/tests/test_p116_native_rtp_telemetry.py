@@ -20,7 +20,7 @@ import entrance_p80_ha_media_runtime_transform as p80
 SOURCE = SAFETY / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-ctpp-door.c"
 TRANSPORT = COMPONENT / "media_transport.py"
 BINARY = COMPONENT / "native" / "comelit-media"
-EXPECTED_SHA256 = "91335b4490bc58910c78cb58b9c2d3eccc13f40dcfff7651995ad428cd71ddc7"
+EXPECTED_SHA256 = "35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622"
 
 VIDEO_MARKERS = (
     "P116_VIDEO_COUNT",
@@ -171,9 +171,32 @@ class P116NativeRtpTelemetryTests(unittest.TestCase):
         self.assertNotIn('line == "P116_', reader)
         self.assertNotIn('line.startswith(("P116_', reader)
 
-    def test_native_binary_and_sha_pin_are_unchanged_this_round(self) -> None:
+    def test_native_binary_and_sha_pin_match_installed_artifact(self) -> None:
         self.assertIn(EXPECTED_SHA256, self.transport)
         self.assertEqual(hashlib.sha256(BINARY.read_bytes()).hexdigest(), EXPECTED_SHA256)
+
+    def test_installed_native_binary_contains_p116_marker_strings(self) -> None:
+        binary = BINARY.read_bytes()
+        for marker in (
+            b"P116_%s_COUNT=%llu",
+            b"P116_%s_FIRST_SEQ=%u",
+            b"P116_%s_LAST_SEQ=%u",
+            b"P116_%s_SEQ_GAPS=%llu",
+            b"P116_%s_DUPLICATES=%llu",
+            b"P116_%s_OUT_OF_ORDER=%llu",
+            b"P116_%s_TIMESTAMP_REGRESSIONS=%llu",
+            b"P116_%s_SSRC_COUNT=%u",
+            b"P116_%s_SSRC_CHANGES=%llu",
+            b"P116_%s_PT_SET=",
+            b"P116_VIDEO_MARKER_COUNT=%llu",
+            b"P116_VIDEO_FIRST_KEYFRAME_MONOTONIC_MS=%lld",
+            b"P116_VIDEO_SPS_COUNT=%llu",
+            b"P116_VIDEO_PPS_COUNT=%llu",
+            b"P116_VIDEO_FUA_COUNT=%llu",
+            b"P116_VIDEO_SINGLE_NAL_COUNT=%llu",
+        ):
+            self.assertIn(marker, binary)
+        self.assertEqual(binary.count(b"P116_"), 26)
 
     def test_builder_has_offline_cached_rootfs_mode_and_required_gates(self) -> None:
         script = (MEDIA / "ct120_build_p80_haos_media_helper.sh").read_text(encoding="utf-8")
