@@ -67,8 +67,9 @@ class P80MediaSessionManagerTests(unittest.IsolatedAsyncioTestCase):
     def make_manager(
         self,
         *,
-        hard_limit_seconds: float = 180,
+        hard_limit_seconds: float = media.MEDIA_SESSION_HARD_LIMIT_SECONDS,
         watch_interval_seconds: float = 0.01,
+        task_factory: media.TaskFactory | None = None,
     ):
         events: list[str] = []
         listener = FakeListener(events)
@@ -78,6 +79,7 @@ class P80MediaSessionManagerTests(unittest.IsolatedAsyncioTestCase):
             transport,
             hard_limit_seconds=hard_limit_seconds,
             transport_watch_interval_seconds=watch_interval_seconds,
+            task_factory=task_factory,
         )
         return manager, listener, transport, events
 
@@ -105,6 +107,37 @@ class P80MediaSessionManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second["leases"], {"manual": 1, "snapshot": 1})
 
         await manager.async_force_stop(reason="test_cleanup")
+
+    async def test_default_hard_limit_is_600_and_deadline_is_not_rearmed(
+        self,
+    ) -> None:
+        created_coros = []
+
+        def task_factory(coro, name):
+            created_coros.append((coro, name))
+            return None
+
+        manager, _, _, _ = self.make_manager(task_factory=task_factory)
+        self.assertEqual(manager.hard_limit_seconds, 600)
+
+        first = await manager.async_acquire(panel="entrance", reason="manual")
+        first_deadline = manager._deadline_monotonic
+        first_expires_at = manager._expires_at
+        first_task_count = len(created_coros)
+
+        second = await manager.async_acquire(panel="entrance", reason="snapshot")
+
+        self.assertEqual(manager.hard_limit_seconds, media.MEDIA_SESSION_HARD_LIMIT_SECONDS)
+        self.assertEqual(first["expires_at"], second["expires_at"])
+        self.assertEqual(manager._deadline_monotonic, first_deadline)
+        self.assertEqual(manager._expires_at, first_expires_at)
+        self.assertEqual(len(created_coros), first_task_count)
+        self.assertEqual(manager._expiry_task, None)
+        self.assertEqual(manager._watchdog_task, None)
+
+        await manager.async_force_stop(reason="test_cleanup")
+        for coro, _ in created_coros:
+            coro.close()
 
     async def test_last_lease_release_tears_down_and_restores_listener(self) -> None:
         manager, listener, _, events = self.make_manager()

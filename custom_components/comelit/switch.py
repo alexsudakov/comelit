@@ -38,9 +38,9 @@ async def async_setup_entry(
 class ComelitEntranceMediaSwitch(SwitchEntity):
     """Explicit owner of the on-demand entrance intercom media session."""
 
-    _attr_name = "Comelit — Камера подъезда"
+    _attr_name = "Comelit — Подъезд"
     _attr_unique_id = ENTRANCE_MEDIA_SWITCH_UNIQUE_ID
-    _attr_icon = "mdi:video"
+    _attr_icon = "mdi:doorbell-video"
     _attr_should_poll = False
 
     def __init__(
@@ -71,7 +71,7 @@ class ComelitEntranceMediaSwitch(SwitchEntity):
             "last_native_failure_markers": self._transport.last_native_failure_markers,
             "video_forwarding": self._transport.video_forwarding,
             "audio_forwarding": self._transport.audio_forwarding,
-            "hard_limit_seconds": 180,
+            "hard_limit_seconds": self._manager.hard_limit_seconds,
             "automatic_retry_allowed": False,
             "door_action_available_during_media": False,
         }
