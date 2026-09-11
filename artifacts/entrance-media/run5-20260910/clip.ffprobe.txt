@@ -1,0 +1,10 @@
+index=0
+codec_name=h264
+codec_type=video
+width=320
+height=240
+pix_fmt=yuv420p
+avg_frame_rate=218100000/600203
+format_name=mov,mp4,m4a,3gp,3g2,mj2
+duration=2.000677
+size=1414545

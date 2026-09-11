@@ -1,0 +1,8 @@
+index=0
+codec_name=mjpeg
+codec_type=video
+width=320
+height=240
+pix_fmt=yuvj420p
+format_name=image2
+size=9965
