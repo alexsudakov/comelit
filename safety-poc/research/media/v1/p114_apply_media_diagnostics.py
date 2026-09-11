@@ -15,9 +15,14 @@ TEST_CAMERA = ROOT / "tests" / "test_p80_ha_media_entity_wiring.py"
 
 
 def replace_once_or_applied(text: str, old: str, new: str, label: str) -> str:
-    if new in text:
-        if old in text:
-            raise RuntimeError(f"{label}: both old and new anchors present")
+    applied_count = text.count(new)
+    if applied_count:
+        if applied_count != 1:
+            raise RuntimeError(
+                f"{label}: expected one applied anchor, found {applied_count}"
+            )
+        if old in text.replace(new, "", 1):
+            raise RuntimeError(f"{label}: old anchor remains outside applied anchor")
         return text
     count = text.count(old)
     if count != 1:
