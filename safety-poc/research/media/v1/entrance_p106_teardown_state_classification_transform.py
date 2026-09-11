@@ -80,12 +80,7 @@ def _replace_once(source: str, old: str, new: str, label: str) -> str:
 
 
 def _strip_p116_from_packaged_binary_provenance(candidate: str) -> str:
-    """Keep the P106 packaged-binary provenance source pinned to its shipped build.
-
-    P116 instruments the P80 build path for the next native helper. The P106
-    provenance test still describes the already packaged binary, whose SHA pin
-    intentionally remains unchanged in this round.
-    """
+    """Keep programmatic packaged-binary provenance pinned to the shipped build."""
     for line in (
         "#define P116_RTP_TELEMETRY_CADENCE 50u\n",
         "#define P116_RTP_TELEMETRY_MAX_PERIODIC_SUMMARIES 12u\n",
@@ -117,9 +112,10 @@ def _strip_p116_from_packaged_binary_provenance(candidate: str) -> str:
     return candidate
 
 
-def transform(source: str) -> str:
+def transform(source: str, *, include_p116: bool = False) -> str:
     candidate = add_p105_runtime(source)
-    candidate = _strip_p116_from_packaged_binary_provenance(candidate)
+    if not include_p116:
+        candidate = _strip_p116_from_packaged_binary_provenance(candidate)
     return _replace_once(
         candidate,
         _NOTIFY_FAILURE_ANCHOR,
@@ -163,7 +159,10 @@ def main(argv: list[str] | None = None) -> int:
     if not source_path.exists() and str(source_path).startswith("safety-poc/"):
         source_path = Path(str(source_path)[len("safety-poc/"):])
 
-    args.output.write_text(transform(source_path.read_text(encoding="utf-8")), encoding="utf-8")
+    args.output.write_text(
+        transform(source_path.read_text(encoding="utf-8"), include_p116=True),
+        encoding="utf-8",
+    )
     print("P106_TEARDOWN_STATE_TRANSFORM=PASS")
     print("P106_NOTIFY_CLASSIFIER=EVIDENCE_GATED")
     print("P106_BLANKET_SUPPRESSION=false")
