@@ -108,6 +108,7 @@ LISTENER_STOPPED_FOR_MEDIA=false
 LISTENER_RESTORE_ATTEMPTED=false
 LIVE_BLOCKED_AMBIGUOUS_TEARDOWN=false
 P115_PRE_MEDIA_AMBIGUOUS=false
+P115_QUIESCENCE_SELFTEST=UNKNOWN
 TEMPORARY_TEST_HARNESS=true
 HARNESS_EQUIVALENCE=PROVEN_STATIC
 HARNESS_NOT_IDENTICAL_TO_PRODUCTION="reported_state_label_differs_paused_media_vs_stopped;door_fail_closed_media_gating_is_enforced_by_integration_not_harness"
@@ -220,12 +221,29 @@ wait_for_listener_ready_after_restore() {
     return 1
 }
 
-pre_media_quiescent() {
-    if python3 - "$PACKAGED_BINARY" <<'PY'
+helper_process_absent() {
+    P115_HELPER_NEEDLE="$1" python3 - <<'PY'
 from pathlib import Path
-import sys
-needle = sys.argv[1].encode()
+import os
+
+needle = os.environ["P115_HELPER_NEEDLE"].encode()
+own_pid = os.getpid()
+parent_pid = os.getppid()
+own_cmdline = Path("/proc/self/cmdline").resolve()
+parent_cmdline = Path(f"/proc/{parent_pid}/cmdline").resolve(strict=False)
 for cmdline in Path("/proc").glob("[0-9]*/cmdline"):
+    try:
+        pid = int(cmdline.parent.name)
+    except ValueError:
+        continue
+    if pid in (own_pid, parent_pid):
+        continue
+    try:
+        resolved_cmdline = cmdline.resolve()
+    except OSError:
+        continue
+    if resolved_cmdline in (own_cmdline, parent_cmdline):
+        continue
     try:
         data = cmdline.read_bytes()
     except OSError:
@@ -234,10 +252,55 @@ for cmdline in Path("/proc").glob("[0-9]*/cmdline"):
         raise SystemExit(1)
 raise SystemExit(0)
 PY
-    then
+}
+
+quiescence_selftest_passes() {
+    local selftest_token="P115_QUIESCENCE_SELFTEST_TOKEN_$$"
+    P115_HELPER_NEEDLE="$selftest_token" python3 - "$selftest_token" <<'PY'
+from pathlib import Path
+import os
+
+needle = os.environ["P115_HELPER_NEEDLE"].encode()
+own_pid = os.getpid()
+parent_pid = os.getppid()
+own_cmdline = Path("/proc/self/cmdline").resolve()
+parent_cmdline = Path(f"/proc/{parent_pid}/cmdline").resolve(strict=False)
+for cmdline in Path("/proc").glob("[0-9]*/cmdline"):
+    try:
+        pid = int(cmdline.parent.name)
+    except ValueError:
+        continue
+    if pid in (own_pid, parent_pid):
+        continue
+    try:
+        resolved_cmdline = cmdline.resolve()
+    except OSError:
+        continue
+    if resolved_cmdline in (own_cmdline, parent_cmdline):
+        continue
+    try:
+        data = cmdline.read_bytes()
+    except OSError:
+        continue
+    if needle in data:
+        raise SystemExit(1)
+raise SystemExit(0)
+PY
+}
+
+pre_media_quiescent() {
+    if helper_process_absent "$PACKAGED_BINARY"; then
         :
     else
         echo "P115_PRE_MEDIA_HELPER_PROCESS_PRESENT=true"
+        return 1
+    fi
+    if quiescence_selftest_passes; then
+        P115_QUIESCENCE_SELFTEST=PASS
+        echo "P115_QUIESCENCE_SELFTEST=PASS"
+    else
+        P115_QUIESCENCE_SELFTEST=FAIL
+        echo "P115_QUIESCENCE_SELFTEST=FAIL"
         return 1
     fi
     if python3 - "$MEDIA_VIDEO_RTP_PORT" "$MEDIA_AUDIO_RTP_PORT" <<'PY'
@@ -833,6 +896,7 @@ print_summary() {
     echo "LISTENER_RESTART_SUPPRESSED=$LISTENER_RESTART_SUPPRESSED"
     echo "LIVE_BLOCKED_AMBIGUOUS_TEARDOWN=$LIVE_BLOCKED_AMBIGUOUS_TEARDOWN"
     echo "P115_PRE_MEDIA_AMBIGUOUS=$P115_PRE_MEDIA_AMBIGUOUS"
+    echo "P115_QUIESCENCE_SELFTEST=$P115_QUIESCENCE_SELFTEST"
     echo "TEMPORARY_TEST_HARNESS=$TEMPORARY_TEST_HARNESS"
     echo "HARNESS_EQUIVALENCE=$HARNESS_EQUIVALENCE"
     echo "HARNESS_NOT_IDENTICAL_TO_PRODUCTION=$HARNESS_NOT_IDENTICAL_TO_PRODUCTION"

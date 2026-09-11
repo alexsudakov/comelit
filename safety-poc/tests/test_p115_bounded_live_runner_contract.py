@@ -26,6 +26,17 @@ class P115BoundedLiveRunnerContractTests(unittest.TestCase):
         end = self.runner.index("\n}\n\nrequired_libs_present()", start) + 3
         return self.runner[start:end]
 
+    def shell_function_body(self, name: str, next_name: str) -> str:
+        start = self.runner.index(f"{name}() {{")
+        end = self.runner.index(f"\n}}\n\n{next_name}() {{", start) + 3
+        return self.runner[start:end]
+
+    def helper_process_absent_body(self) -> str:
+        return self.shell_function_body("helper_process_absent", "quiescence_selftest_passes")
+
+    def quiescence_selftest_body(self) -> str:
+        return self.shell_function_body("quiescence_selftest_passes", "pre_media_quiescent")
+
     def test_pause_mode_declared_and_default(self) -> None:
         self.assertIn("DEFAULT MODE: PAUSE_FOR_MEDIA_VIA_TEST_HARNESS", self.runner)
         self.assertIn('P115_LISTENER_MODE="${P115_LISTENER_MODE:-PAUSE_FOR_MEDIA_VIA_TEST_HARNESS}"', self.runner)
@@ -107,6 +118,7 @@ class P115BoundedLiveRunnerContractTests(unittest.TestCase):
             "LISTENER_RESTART_SUPPRESSED=",
             "LIVE_BLOCKED_AMBIGUOUS_TEARDOWN=",
             "P115_PRE_MEDIA_AMBIGUOUS=",
+            "P115_QUIESCENCE_SELFTEST=",
             "TEMPORARY_TEST_HARNESS=",
             "HARNESS_EQUIVALENCE=",
             "HARNESS_NOT_IDENTICAL_TO_PRODUCTION=",
@@ -185,8 +197,10 @@ class P115BoundedLiveRunnerContractTests(unittest.TestCase):
 
     def test_quiescence_hard_fails_only_on_process_or_bound_port(self) -> None:
         body = self.pre_media_quiescent_body()
-        self.assertIn('needle = sys.argv[1].encode()', body)
-        self.assertIn('if needle in data:', body)
+        process_probe = self.helper_process_absent_body()
+        self.assertIn('needle = os.environ["P115_HELPER_NEEDLE"].encode()', process_probe)
+        self.assertIn('if needle in data:', process_probe)
+        self.assertIn('if helper_process_absent "$PACKAGED_BINARY"; then', body)
         self.assertIn('sock.bind(("127.0.0.1", port))', body)
         self.assertIn("P115_PRE_MEDIA_HELPER_PROCESS_PRESENT=true", body)
         self.assertIn("P115_PRE_MEDIA_RTP_PORT_BOUND=true", body)
@@ -211,11 +225,62 @@ class P115BoundedLiveRunnerContractTests(unittest.TestCase):
 
     def test_normalization_is_after_process_and_port_checks(self) -> None:
         body = self.pre_media_quiescent_body()
-        process_check = body.index('needle = sys.argv[1].encode()')
+        process_check = body.index('if helper_process_absent "$PACKAGED_BINARY"; then')
         port_check = body.index('sock.bind(("127.0.0.1", port))')
         stale_normalization = body.index('if [ -d "$RUN_DIR" ]; then')
         self.assertLess(process_check, port_check)
         self.assertLess(port_check, stale_normalization)
+
+    def test_helper_probe_needle_not_in_argv(self) -> None:
+        body = self.helper_process_absent_body()
+        self.assertIn('P115_HELPER_NEEDLE="$1" python3 - <<', body)
+        self.assertIn('needle = os.environ["P115_HELPER_NEEDLE"].encode()', body)
+        self.assertNotIn("sys.argv", body)
+        self.assertNotIn('python3 - "$PACKAGED_BINARY"', body)
+
+    def test_helper_probe_skips_own_pid_and_parent(self) -> None:
+        body = self.helper_process_absent_body()
+        self.assertIn("own_pid = os.getpid()", body)
+        self.assertIn("parent_pid = os.getppid()", body)
+        self.assertIn("if pid in (own_pid, parent_pid):", body)
+        self.assertLess(body.index("if pid in (own_pid, parent_pid):"), body.index("data = cmdline.read_bytes()"))
+
+    def test_quiescence_selftest_present_and_gates_before_listener_action(self) -> None:
+        selftest = self.quiescence_selftest_body()
+        self.assertIn("P115_QUIESCENCE_SELFTEST_TOKEN_$$", selftest)
+        self.assertIn('needle = os.environ["P115_HELPER_NEEDLE"].encode()', selftest)
+        self.assertIn('python3 - "$selftest_token"', selftest)
+        pre_media = self.pre_media_quiescent_body()
+        self.assertIn("P115_QUIESCENCE_SELFTEST=PASS", pre_media)
+        self.assertIn("P115_QUIESCENCE_SELFTEST=FAIL", pre_media)
+        selftest_failure = pre_media.index("P115_QUIESCENCE_SELFTEST=FAIL")
+        port_check = pre_media.index('sock.bind(("127.0.0.1", port))')
+        self.assertLess(selftest_failure, port_check)
+        failure_marker = self.runner.index("P115_QUIESCENCE_SELFTEST=FAIL")
+        first_stop = self.runner.index('{"action":"stop"}')
+        self.assertLess(failure_marker, first_stop)
+
+    def test_helper_process_hard_fail_still_effective(self) -> None:
+        body = self.pre_media_quiescent_body()
+        hard_fail = body.index("P115_PRE_MEDIA_HELPER_PROCESS_PRESENT=true")
+        self.assertIn("if helper_process_absent \"$PACKAGED_BINARY\"; then", body)
+        self.assertIn("return 1", body[hard_fail:body.index("if quiescence_selftest_passes")])
+        main_gate = self.runner.index("if ! pre_media_quiescent; then")
+        first_stop = self.runner.index('{"action":"stop"}')
+        self.assertLess(main_gate, first_stop)
+
+    def test_quiescence_probe_is_invoked_without_argv_needle(self) -> None:
+        result = subprocess.run(
+            ["bash", "-n", str(RUNNER)],
+            cwd=REPO_ROOT,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('P115_HELPER_NEEDLE="$1" python3 - <<', self.runner)
+        self.assertIn('helper_process_absent "$PACKAGED_BINARY"', self.runner)
+        self.assertNotIn('python3 - "$PACKAGED_BINARY"', self.runner)
 
     def test_quiescence_recheck_before_listener_stop(self) -> None:
         recheck = self.runner.index("P115_PRE_MEDIA_QUIESCENT_AFTER_NORMALIZATION=")
