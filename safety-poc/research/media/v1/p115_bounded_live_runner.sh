@@ -221,10 +221,6 @@ wait_for_listener_ready_after_restore() {
 }
 
 pre_media_quiescent() {
-    if [ -e "$STOP_FILE" ]; then
-        echo "P115_PRE_MEDIA_STOP_FILE_PRESENT=true"
-        return 1
-    fi
     if python3 - "$PACKAGED_BINARY" <<'PY'
 from pathlib import Path
 import sys
@@ -244,7 +240,7 @@ PY
         echo "P115_PRE_MEDIA_HELPER_PROCESS_PRESENT=true"
         return 1
     fi
-    python3 - "$MEDIA_VIDEO_RTP_PORT" "$MEDIA_AUDIO_RTP_PORT" <<'PY'
+    if python3 - "$MEDIA_VIDEO_RTP_PORT" "$MEDIA_AUDIO_RTP_PORT" <<'PY'
 import socket
 import sys
 for port in map(int, sys.argv[1:]):
@@ -257,6 +253,43 @@ for port in map(int, sys.argv[1:]):
         sock.close()
 raise SystemExit(0)
 PY
+    then
+        :
+    else
+        echo "P115_PRE_MEDIA_RTP_PORT_BOUND=true"
+        return 1
+    fi
+    if [ -d "$RUN_DIR" ]; then
+        echo "P115_STALE_RUN_DIR_PRESENT=true"
+        python3 - "$RUN_DIR" <<'PY'
+from pathlib import Path
+import sys
+import time
+root = Path(sys.argv[1])
+newest = root.stat().st_mtime
+for path in root.rglob("*"):
+    try:
+        newest = max(newest, path.stat().st_mtime)
+    except OSError:
+        pass
+age = max(0, int(time.time() - newest))
+print(f"P115_STALE_RUN_DIR_AGE_SECONDS={age}")
+PY
+        if [ -e "$STOP_FILE" ]; then
+            echo "P115_PRE_MEDIA_STOP_FILE_PRESENT=true"
+            echo "P115_STALE_RUN_DIR_STOP_FILE_PRESENT=true"
+        else
+            echo "P115_STALE_RUN_DIR_STOP_FILE_PRESENT=false"
+        fi
+        if rm -rf "$RUN_DIR"; then
+            echo "P115_STALE_RUN_DIR_NORMALIZED=true"
+        else
+            echo "P115_STALE_RUN_DIR_NORMALIZED=false"
+            return 1
+        fi
+    else
+        echo "P115_STALE_RUN_DIR_PRESENT=false"
+    fi
 }
 
 required_libs_present() {
@@ -948,6 +981,16 @@ fi
 
 if ! pre_media_quiescent; then
     P115_PRE_MEDIA_AMBIGUOUS=true
+    echo "P115_PRE_MEDIA_AMBIGUOUS=true"
+    echo "LIVE_INVOCATIONS_THIS_TASK=0"
+    P115_RESULT=BLOCKED
+    exit 3
+fi
+if pre_media_quiescent; then
+    echo "P115_PRE_MEDIA_QUIESCENT_AFTER_NORMALIZATION=PASS"
+else
+    P115_PRE_MEDIA_AMBIGUOUS=true
+    echo "P115_PRE_MEDIA_QUIESCENT_AFTER_NORMALIZATION=FAIL"
     echo "P115_PRE_MEDIA_AMBIGUOUS=true"
     echo "LIVE_INVOCATIONS_THIS_TASK=0"
     P115_RESULT=BLOCKED

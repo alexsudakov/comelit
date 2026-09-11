@@ -21,6 +21,11 @@ class P115BoundedLiveRunnerContractTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.runner = RUNNER.read_text(encoding="utf-8")
 
+    def pre_media_quiescent_body(self) -> str:
+        start = self.runner.index("pre_media_quiescent() {")
+        end = self.runner.index("\n}\n\nrequired_libs_present()", start) + 3
+        return self.runner[start:end]
+
     def test_pause_mode_declared_and_default(self) -> None:
         self.assertIn("DEFAULT MODE: PAUSE_FOR_MEDIA_VIA_TEST_HARNESS", self.runner)
         self.assertIn('P115_LISTENER_MODE="${P115_LISTENER_MODE:-PAUSE_FOR_MEDIA_VIA_TEST_HARNESS}"', self.runner)
@@ -178,6 +183,62 @@ class P115BoundedLiveRunnerContractTests(unittest.TestCase):
         self.assertLess(listener_ready, first_stop)
         self.assertLess(media_quiescent, first_stop)
 
+    def test_quiescence_hard_fails_only_on_process_or_bound_port(self) -> None:
+        body = self.pre_media_quiescent_body()
+        self.assertIn('needle = sys.argv[1].encode()', body)
+        self.assertIn('if needle in data:', body)
+        self.assertIn('sock.bind(("127.0.0.1", port))', body)
+        self.assertIn("P115_PRE_MEDIA_HELPER_PROCESS_PRESENT=true", body)
+        self.assertIn("P115_PRE_MEDIA_RTP_PORT_BOUND=true", body)
+        self.assertIn("P115_PRE_MEDIA_STOP_FILE_PRESENT=true", body)
+        self.assertNotIn('if [ -e "$STOP_FILE" ]; then\n        echo "P115_PRE_MEDIA_STOP_FILE_PRESENT=true"\n        return 1', body)
+        self.assertNotRegex(body, r"P115_PRE_MEDIA_STOP_FILE_PRESENT=true[\s\S]{0,120}return 1")
+
+    def test_stale_run_dir_normalization_markers_present(self) -> None:
+        body = self.pre_media_quiescent_body()
+        for marker in (
+            "P115_STALE_RUN_DIR_PRESENT=true",
+            "P115_STALE_RUN_DIR_AGE_SECONDS=",
+            "P115_STALE_RUN_DIR_STOP_FILE_PRESENT=",
+            "P115_STALE_RUN_DIR_NORMALIZED=true",
+            "P115_STALE_RUN_DIR_NORMALIZED=false",
+        ):
+            self.assertIn(marker, body)
+        self.assertIn('if [ -d "$RUN_DIR" ]; then', body)
+        self.assertIn('if rm -rf "$RUN_DIR"; then', body)
+        self.assertNotIn('rm -rf "$RUN_DIR/"*', body)
+        self.assertIn("return 1", body[body.index("P115_STALE_RUN_DIR_NORMALIZED=false"):])
+
+    def test_normalization_is_after_process_and_port_checks(self) -> None:
+        body = self.pre_media_quiescent_body()
+        process_check = body.index('needle = sys.argv[1].encode()')
+        port_check = body.index('sock.bind(("127.0.0.1", port))')
+        stale_normalization = body.index('if [ -d "$RUN_DIR" ]; then')
+        self.assertLess(process_check, port_check)
+        self.assertLess(port_check, stale_normalization)
+
+    def test_quiescence_recheck_before_listener_stop(self) -> None:
+        recheck = self.runner.index("P115_PRE_MEDIA_QUIESCENT_AFTER_NORMALIZATION=")
+        first_stop = self.runner.index('{"action":"stop"}')
+        self.assertLess(recheck, first_stop)
+        self.assertIn("P115_PRE_MEDIA_QUIESCENT_AFTER_NORMALIZATION=PASS", self.runner)
+        self.assertIn("P115_PRE_MEDIA_QUIESCENT_AFTER_NORMALIZATION=FAIL", self.runner)
+
+    def test_no_listener_action_on_any_quiescence_failure(self) -> None:
+        main_gate = self.runner.index("if ! pre_media_quiescent; then")
+        first_stop = self.runner.index("post_control stop", main_gate)
+        first_start = self.runner.index("restore_listener_if_allowed", main_gate)
+        first_listener_action = min(first_stop, first_start)
+        first_failure = main_gate
+        second_failure = self.runner.index("P115_PRE_MEDIA_QUIESCENT_AFTER_NORMALIZATION=FAIL")
+        self.assertLess(first_failure, first_listener_action)
+        self.assertLess(second_failure, first_listener_action)
+        for failure in (first_failure, second_failure):
+            block = self.runner[failure:first_listener_action]
+            self.assertIn("P115_PRE_MEDIA_AMBIGUOUS=true", block)
+            self.assertIn("LIVE_INVOCATIONS_THIS_TASK=0", block)
+            self.assertIn("exit 3", block)
+
     def test_harness_equivalence_proof_documented(self) -> None:
         self.assertIn("TEMPORARY_TEST_HARNESS=true", self.runner)
         self.assertIn("HARNESS_EQUIVALENCE=", self.runner)
@@ -191,9 +252,10 @@ class P115BoundedLiveRunnerContractTests(unittest.TestCase):
         self.assertIn("PRODUCTION_LIFECYCLE_VALIDATED=false", self.runner)
 
     def test_no_door_or_gate_action_in_pause_mode(self) -> None:
+        pause_start = self.runner.index('if [ "$P115_LISTENER_MODE" = PAUSE_FOR_MEDIA_VIA_TEST_HARNESS ]; then')
         pause_branch = self.runner[
-            self.runner.index('if [ "$P115_LISTENER_MODE" = PAUSE_FOR_MEDIA_VIA_TEST_HARNESS ]; then'):
-            self.runner.index('rm -rf "$RUN_DIR"')
+            pause_start:
+            self.runner.index('rm -rf "$RUN_DIR"', pause_start)
         ]
         for forbidden in ("--door", "--gate", "open_door", "DOOR_GATE"):
             self.assertNotIn(forbidden, pause_branch)
