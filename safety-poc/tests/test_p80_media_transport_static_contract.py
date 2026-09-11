@@ -121,6 +121,8 @@ class P80MediaTransportStaticContractTests(unittest.TestCase):
         self.assertIn('"P80_AUDIO_RTP_PACKETS="', self.source)
         self.assertIn("self._progress.update_marker(line)", self.source)
         self.assertIn("loop.call_later(delay, self._notify_status_now)", self.source)
+        self.assertIn("if self.active and self._status_listeners:", self.source)
+        self.assertIn("_MEDIA_STATUS_NOTIFY_MIN_INTERVAL_SECONDS,", self.source)
         self.assertIn("self._progress.reset()", self.source)
         self.assertIn("self._cancel_status_notify()", self.source)
 

@@ -298,9 +298,15 @@ class ComelitEntranceMediaTransport:
 
     def _notify_status_now(self) -> None:
         self._status_notify_handle = None
-        self._last_status_notify_monotonic = asyncio.get_running_loop().time()
+        loop = asyncio.get_running_loop()
+        self._last_status_notify_monotonic = loop.time()
         for callback in tuple(self._status_listeners):
             callback()
+        if self.active and self._status_listeners:
+            self._status_notify_handle = loop.call_later(
+                _MEDIA_STATUS_NOTIFY_MIN_INTERVAL_SECONDS,
+                self._notify_status_now,
+            )
 
     def _notify_status_bounded(self) -> None:
         loop = asyncio.get_running_loop()
