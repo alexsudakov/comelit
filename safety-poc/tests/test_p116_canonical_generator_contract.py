@@ -21,6 +21,7 @@ TRANSFORM_REL = Path(
 )
 HISTORICAL_COMMIT = "a54fe39e18c9d97c515a7145d63c4e1ce7fa3afc"
 HISTORICAL_SOURCE_SHA256 = "0c15927dbc40bdb1f7c522f063a8a2f38c557f9eb735cdd981cdd49449595c79"
+P116_SOURCE_SHA256 = "93756730fd088b9227f37c4e0e3edbd18ac30c110db03b75bcc63f1c93952e66"
 P80_REQUIRED_MARKERS = (
     "P80_MEDIA_ACTIVE=true",
     "P80_VIDEO_RTP_FORWARDING=PASS",
@@ -47,7 +48,7 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _generate_with_script(tree: Path, output: Path) -> str:
+def _generate_with_script(tree: Path, output: Path, *generator_args: str) -> str:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(tree / "safety-poc" / "research" / "media" / "v1")
     subprocess.run(
@@ -58,6 +59,7 @@ def _generate_with_script(tree: Path, output: Path) -> str:
             str(tree / SOURCE_REL),
             "--output",
             str(output),
+            *generator_args,
         ],
         check=True,
         text=True,
@@ -105,7 +107,7 @@ class P116CanonicalGeneratorContractTests(unittest.TestCase):
         )
         sha = _sha256_bytes(candidate.encode("utf-8"))
 
-        self.assertNotEqual(sha, HISTORICAL_SOURCE_SHA256)
+        self.assertEqual(sha, P116_SOURCE_SHA256)
         self.assertGreater(candidate.count("P116_"), 0)
         for marker in P116_REQUIRED_MARKERS:
             self.assertIn(marker, candidate)
@@ -125,6 +127,22 @@ class P116CanonicalGeneratorContractTests(unittest.TestCase):
             sha2 = _generate_with_script(REPO, run2)
 
         self.assertEqual(sha1, sha2)
+        self.assertEqual(sha1, HISTORICAL_SOURCE_SHA256)
+
+    def test_head_cli_include_p116_switches_canonical_source_hash(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p116-cli-") as tmp:
+            tmp_path = Path(tmp)
+            historical = tmp_path / "historical.c"
+            explicit_historical = tmp_path / "explicit-historical.c"
+            p116 = tmp_path / "p116.c"
+
+            default_sha = _generate_with_script(REPO, historical)
+            no_p116_sha = _generate_with_script(REPO, explicit_historical, "--no-include-p116")
+            p116_sha = _generate_with_script(REPO, p116, "--include-p116")
+
+        self.assertEqual(default_sha, HISTORICAL_SOURCE_SHA256)
+        self.assertEqual(no_p116_sha, HISTORICAL_SOURCE_SHA256)
+        self.assertEqual(p116_sha, P116_SOURCE_SHA256)
 
     def test_canonical_path_uses_p106_entrypoint(self) -> None:
         self.assertTrue((REPO / TRANSFORM_REL).is_file())

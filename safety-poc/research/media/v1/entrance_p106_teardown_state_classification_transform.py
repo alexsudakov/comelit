@@ -147,6 +147,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--report", action="store_true")
+    p116 = parser.add_mutually_exclusive_group()
+    p116.add_argument(
+        "--include-p116",
+        dest="include_p116",
+        action="store_true",
+        help="include P116 RTP telemetry in the generated source",
+    )
+    p116.add_argument(
+        "--no-include-p116",
+        dest="include_p116",
+        action="store_false",
+        help="emit historical/P106 source without P116 RTP telemetry",
+    )
+    parser.set_defaults(include_p116=False)
     args = parser.parse_args(argv)
 
     if args.report:
@@ -160,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
         source_path = Path(str(source_path)[len("safety-poc/"):])
 
     args.output.write_text(
-        transform(source_path.read_text(encoding="utf-8"), include_p116=True),
+        transform(source_path.read_text(encoding="utf-8"), include_p116=args.include_p116),
         encoding="utf-8",
     )
     print("P106_TEARDOWN_STATE_TRANSFORM=PASS")

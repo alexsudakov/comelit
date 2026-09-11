@@ -111,19 +111,42 @@ Packaged native pin:
 - Generator: `safety-poc/research/media/v1/entrance_p106_teardown_state_classification_transform.py`
   (P106 teardown-state classification composition), not the standalone P80 transform.
 
+The generator has an explicit P116 provenance switch:
+
+| Mode | Generator invocation | Builder env | Generated source SHA256 |
+|---|---|---|---|
+| Historical/reproduction | no flag, or `--no-include-p116` | `P80_BUILD_INCLUDE_P116=0` (default) | `0c15927dbc40bdb1f7c522f063a8a2f38c557f9eb735cdd981cdd49449595c79` |
+| P116/current | `--include-p116` | `P80_BUILD_INCLUDE_P116=1` | `93756730fd088b9227f37c4e0e3edbd18ac30c110db03b75bcc63f1c93952e66` |
+
+The programmatic API remains `transform(source, *, include_p116=False)`, so direct
+historical generator use without a flag continues to emit the pinned historical C.
+The CT120 builder default is also historical: `P80_BUILD_INCLUDE_P116=${P80_BUILD_INCLUDE_P116:-0}`.
+P116 telemetry builds must opt in explicitly with `P80_BUILD_INCLUDE_P116=1`; the
+builder records that value in `build-meta.txt` and in the summary.
+
 Reproducibility is now an explicit CT120 builder gate: set
 `P80_BUILD_EXPECTED_SOURCE_SHA=<sha256>` and the build fails closed with
 `P80_BUILD_EXPECTED_SOURCE_SHA_GATE=FAIL expected=<expected> actual=<actual>` if
 the selected generator emits different C. Every builder run records
-`P80_BUILD_TRANSFORM=`, `P80_BUILD_EXPECTED_SOURCE_SHA=`,
+`P80_BUILD_TRANSFORM=`, `P80_BUILD_INCLUDE_P116=`, `P80_BUILD_EXPECTED_SOURCE_SHA=`,
 `GENERATED_SOURCE_SHA256=`, and `NATIVE_BINARY_SHA256=` in `build-meta.txt`.
 
-For the current P116 instrumented build, the generated C and native binary are
-expected to have new hashes because P116 RTP telemetry changes the generated
-source. Оркестратор/следующий раунд должен заполнить фактические значения:
+Provenance table for the current pin/future P116 pin:
 
-- `P116_GENERATED_SOURCE_SHA256=<P116_HEAD_GENERATED_SOURCE_SHA256>`
-- `P116_NATIVE_BINARY_SHA256=<P116_HEAD_NATIVE_BINARY_SHA256>`
+| Build | Canonical generator commit | include_p116 | Generated source SHA256 | Toolchain identity | Binary SHA256 | Build gates |
+|---|---|---:|---|---|---|---|
+| Packaged historical pin | `6fe4413861e7f597bb2f05f445eeb6513d7e8406` | `0` | `0c15927dbc40bdb1f7c522f063a8a2f38c557f9eb735cdd981cdd49449595c79` | Alpine `3.24.1`, GCC `(Alpine 15.2.0) 15.2.0`, musl interpreter `/lib/ld-musl-x86_64.so.1`, C flags `-O2 -g -Wall -Wextra -Wl,--as-needed`, NEEDED `libc.musl-x86_64.so.1,libglib-2.0.so.0,libgobject-2.0.so.0,libnice.so.10` | `91335b4490bc58910c78cb58b9c2d3eccc13f40dcfff7651995ad428cd71ddc7` | Host full suite/static gates passed; source gate is historical default |
+| Rebuilt historical source evidence | `6fe4413861e7f597bb2f05f445eeb6513d7e8406` | `0` | `0c15927dbc40bdb1f7c522f063a8a2f38c557f9eb735cdd981cdd49449595c79` | Same runtime toolchain identity as packaged pin; BuildID/debug path metadata differ | `f17ad2d6efbe002335a658c075da84677ced44246d556afe80953a8f59129841` | Runtime equivalence PASS; hash mismatch class `NON_RUNTIME_BUILD_METADATA` |
+| P116 current evidence | `6fe4413861e7f597bb2f05f445eeb6513d7e8406` | `1` | `93756730fd088b9227f37c4e0e3edbd18ac30c110db03b75bcc63f1c93952e66` | Alpine `3.24.1`/GCC `(Alpine 15.2.0) 15.2.0` builder path | `35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622` | Candidate staged only; packaged pin unchanged |
+
+Pinned vs rebuilt-historical binary diagnosis: full-file SHA256 is not
+reproducible, but runtime semantics are equivalent. `.text`, `.rodata`,
+`.data`, `.bss`, PT_LOAD geometry, dynamic section, interpreter, NEEDED
+libraries, symbols, and relocations match. Differences are BuildID and
+non-loadable DWARF/debug metadata: the packaged build embeds `/repo/.p114-build`
+paths, while the rebuild embeds `/src` paths. The 32-byte file size delta is
+accounted for by shorter debug/path metadata and the resulting section-header
+offset shift, not by runtime code or data.
 
 ## Readiness
 

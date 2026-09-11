@@ -158,6 +158,38 @@ class P116BuildProvenanceGateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "custom/transform.py")
 
+    def test_include_p116_builder_switch_is_explicit_and_historical_by_default(self) -> None:
+        self.assertIn("P80_BUILD_INCLUDE_P116=${P80_BUILD_INCLUDE_P116:-0}", self.script)
+        self.assertIn("0) P80_GENERATOR_P116_ARG=--no-include-p116 ;;", self.script)
+        self.assertIn("1) P80_GENERATOR_P116_ARG=--include-p116 ;;", self.script)
+        self.assertIn("P80_BUILD_INCLUDE_P116=INVALID", self.script)
+        self.assertIn('"$P80_GENERATOR_P116_ARG"', self.script)
+        self.assertIn('echo "P80_BUILD_INCLUDE_P116=$P80_BUILD_INCLUDE_P116"', self.script)
+        self.assertIn('echo "include_p116=\'"$P80_BUILD_INCLUDE_P116"\'"', self.script)
+
+        result = subprocess.run(
+            [
+                "bash",
+                "-eu",
+                "-c",
+                (
+                    "P80_BUILD_INCLUDE_P116=${P80_BUILD_INCLUDE_P116:-0}; "
+                    "case \"$P80_BUILD_INCLUDE_P116\" in "
+                    "0) P80_GENERATOR_P116_ARG=--no-include-p116 ;; "
+                    "1) P80_GENERATOR_P116_ARG=--include-p116 ;; "
+                    "*) exit 2 ;; "
+                    "esac; printf '%s' \"$P80_GENERATOR_P116_ARG\""
+                ),
+            ],
+            check=False,
+            env={**os.environ, "P80_BUILD_INCLUDE_P116": "1"},
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "--include-p116")
+
     def test_expected_source_sha_gate_is_env_driven_and_fail_closed(self) -> None:
         self.assertIn("P80_BUILD_EXPECTED_SOURCE_SHA=${P80_BUILD_EXPECTED_SOURCE_SHA:-}", self.script)
         self.assertIn("GENERATED_SOURCE_SHA256=\"$(sha256sum \"$GENERATED\" | awk '{print $1}')\"", self.script)
@@ -202,6 +234,7 @@ class P116BuildProvenanceGateTests(unittest.TestCase):
         self.assertLess(meta_append, meta_print)
         for field in (
             "P80_BUILD_TRANSFORM=$P80_BUILD_TRANSFORM",
+            "P80_BUILD_INCLUDE_P116=$P80_BUILD_INCLUDE_P116",
             "P80_BUILD_EXPECTED_SOURCE_SHA=$P80_BUILD_EXPECTED_SOURCE_SHA",
             "GENERATED_SOURCE_SHA256=$GENERATED_SOURCE_SHA256",
             "NATIVE_BINARY_SHA256=$CANDIDATE_SHA",
