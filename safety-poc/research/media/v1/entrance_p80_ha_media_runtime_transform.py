@@ -99,6 +99,7 @@ P80_RTP_RUNTIME = rf'''
 /* === P80_HA_MEDIA_RTP_FORWARDING_BEGIN === */
 #define P80_VIDEO_RTP_PORT {VIDEO_RTP_PORT}
 #define P80_AUDIO_RTP_PORT {AUDIO_RTP_PORT}
+#define P80_RTP_PROGRESS_CADENCE 50u
 
 static gboolean p80_media_forwarding_enabled = FALSE;
 static int p80_video_rtp_fd = -1;
@@ -272,10 +273,26 @@ p80_try_forward_wrapped_rtp(const guint8 *packet, guint len)
             printf("P80_VIDEO_RTP_FORWARDING=PASS\n");
             fflush(stdout);
         }}
+        if (p80_video_rtp_packets == 1u ||
+            p80_video_rtp_packets % P80_RTP_PROGRESS_CADENCE == 0u) {{
+            printf(
+                "P80_VIDEO_RTP_PACKETS=%llu\n",
+                (unsigned long long)p80_video_rtp_packets
+            );
+            fflush(stdout);
+        }}
     }} else {{
         p80_audio_rtp_packets++;
         if (p80_audio_rtp_packets == 1u) {{
             printf("P80_AUDIO_RTP_FORWARDING=PASS\n");
+            fflush(stdout);
+        }}
+        if (p80_audio_rtp_packets == 1u ||
+            p80_audio_rtp_packets % P80_RTP_PROGRESS_CADENCE == 0u) {{
+            printf(
+                "P80_AUDIO_RTP_PACKETS=%llu\n",
+                (unsigned long long)p80_audio_rtp_packets
+            );
             fflush(stdout);
         }}
     }}
@@ -418,6 +435,7 @@ def report() -> str:
             "P80_RTP_OUTPUT_SCOPE=LOOPBACK_ONLY",
             "P80_VIDEO_PAYLOAD_TYPE=99",
             "P80_AUDIO_PAYLOAD_TYPE=8",
+            "P80_RTP_PROGRESS_CADENCE=50",
             "SECOND_CTPP_OPEN=false",
             "DOOR_ACTION_SENT=false",
             "NETWORK_IO_PERFORMED=false",

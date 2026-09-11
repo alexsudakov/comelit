@@ -9,7 +9,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 TRANSPORT = ROOT / "custom_components" / "comelit" / "media_transport.py"
 BINARY = ROOT / "custom_components" / "comelit" / "native" / "comelit-media"
-EXPECTED_SHA256 = "ebc731381022be89576a680c39f7402225048e48adab88376434f660ad1a5ade"
+EXPECTED_SHA256 = "91335b4490bc58910c78cb58b9c2d3eccc13f40dcfff7651995ad428cd71ddc7"
 
 
 class P80MediaTransportStaticContractTests(unittest.TestCase):
@@ -109,6 +109,22 @@ class P80MediaTransportStaticContractTests(unittest.TestCase):
         self.assertIn('line == "P80_AUDIO_RTP_FORWARDING=PASS"', self.source)
         self.assertIn('"P80_WRAPPER_PROFILE_MISMATCH=true"', self.source)
         self.assertNotIn("print(raw", self.source)
+
+    def test_progress_diagnostics_are_monotonic_bounded_and_entity_notified(self) -> None:
+        self.assertIn("MediaProgressDiagnostics", self.source)
+        self.assertIn("_MEDIA_STATUS_NOTIFY_MIN_INTERVAL_SECONDS = 1.0", self.source)
+        self.assertIn("video_packet_count", self.source)
+        self.assertIn("audio_packet_count", self.source)
+        self.assertIn("video_last_packet_age_seconds", self.source)
+        self.assertIn("audio_last_packet_age_seconds", self.source)
+        self.assertIn('"P80_VIDEO_RTP_PACKETS="', self.source)
+        self.assertIn('"P80_AUDIO_RTP_PACKETS="', self.source)
+        self.assertIn("self._progress.update_marker(line)", self.source)
+        self.assertIn("loop.call_later(delay, self._notify_status_now)", self.source)
+        self.assertIn("if self.active and self._status_listeners:", self.source)
+        self.assertIn("_MEDIA_STATUS_NOTIFY_MIN_INTERVAL_SECONDS,", self.source)
+        self.assertIn("self._progress.reset()", self.source)
+        self.assertIn("self._cancel_status_notify()", self.source)
 
     def test_native_failure_diagnostics_are_allowlisted_redacted_and_bounded(self) -> None:
         self.assertIn("_MEDIA_NATIVE_MARKER_SAFE_VALUE_RE", self.source)

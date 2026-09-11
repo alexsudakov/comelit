@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 import hashlib
 import logging
 import os
@@ -12,6 +13,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .cloud import ComelitCloudError, async_negotiate_p2p
+from .media_diagnostics import MediaProgressDiagnostics
 from .oauth import ComelitOAuthError, ComelitOAuthManager
 from .sdp import ComelitSdpError, transform_offer
 
@@ -28,7 +30,7 @@ _MEDIA_STOP_FILE = _MEDIA_RUN_DIR / "stop"
 _MEDIA_LOCAL_SDP_FILE = _MEDIA_RUN_DIR / "local-rtp.sdp"
 
 MEDIA_NATIVE_BINARY_SHA256 = (
-    "ebc731381022be89576a680c39f7402225048e48adab88376434f660ad1a5ade"
+    "91335b4490bc58910c78cb58b9c2d3eccc13f40dcfff7651995ad428cd71ddc7"
 )
 MEDIA_VIDEO_RTP_PORT = 17899
 MEDIA_AUDIO_RTP_PORT = 17808
@@ -56,6 +58,7 @@ _MEDIA_NATIVE_MARKER_PREFIXES = (
     "P80_",
 )
 _MEDIA_NATIVE_MARKER_TAIL_LIMIT = 40
+_MEDIA_STATUS_NOTIFY_MIN_INTERVAL_SECONDS = 1.0
 
 _LOCAL_RTP_SDP = f"""v=0\r
 o=- 0 0 IN IP4 127.0.0.1\r
@@ -216,6 +219,10 @@ class ComelitEntranceMediaTransport:
         self._native_marker_tail: list[str] = []
         self._last_native_exit_code: int | None = None
         self._last_native_failure_markers: list[str] = []
+        self._progress = MediaProgressDiagnostics()
+        self._status_listeners: set[Callable[[], None]] = set()
+        self._status_notify_handle: asyncio.TimerHandle | None = None
+        self._last_status_notify_monotonic: float | None = None
 
     @property
     def active(self) -> bool:
@@ -239,6 +246,30 @@ class ComelitEntranceMediaTransport:
         return self._audio_forwarding.is_set()
 
     @property
+    def video_packet_count(self) -> int:
+        return self._progress.video_packet_count
+
+    @property
+    def audio_packet_count(self) -> int:
+        return self._progress.audio_packet_count
+
+    @property
+    def last_video_progress_monotonic(self) -> float | None:
+        return self._progress.last_video_progress_monotonic
+
+    @property
+    def last_audio_progress_monotonic(self) -> float | None:
+        return self._progress.last_audio_progress_monotonic
+
+    @property
+    def video_last_packet_age_seconds(self) -> float | None:
+        return self._progress.video_last_packet_age_seconds
+
+    @property
+    def audio_last_packet_age_seconds(self) -> float | None:
+        return self._progress.audio_last_packet_age_seconds
+
+    @property
     def last_error(self) -> str | None:
         return self._last_error
 
@@ -249,6 +280,45 @@ class ComelitEntranceMediaTransport:
     @property
     def last_native_failure_markers(self) -> list[str]:
         return list(self._last_native_failure_markers)
+
+    def async_add_status_listener(self, callback: Callable[[], None]) -> Callable[[], None]:
+        """Register a bounded diagnostics status listener and return its remover."""
+        self._status_listeners.add(callback)
+
+        def remove() -> None:
+            self._status_listeners.discard(callback)
+
+        return remove
+
+    def _cancel_status_notify(self) -> None:
+        handle = self._status_notify_handle
+        if handle is not None:
+            handle.cancel()
+        self._status_notify_handle = None
+
+    def _notify_status_now(self) -> None:
+        self._status_notify_handle = None
+        loop = asyncio.get_running_loop()
+        self._last_status_notify_monotonic = loop.time()
+        for callback in tuple(self._status_listeners):
+            callback()
+        if self.active and self._status_listeners:
+            self._status_notify_handle = loop.call_later(
+                _MEDIA_STATUS_NOTIFY_MIN_INTERVAL_SECONDS,
+                self._notify_status_now,
+            )
+
+    def _notify_status_bounded(self) -> None:
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        last = self._last_status_notify_monotonic
+        if last is None or now - last >= _MEDIA_STATUS_NOTIFY_MIN_INTERVAL_SECONDS:
+            self._cancel_status_notify()
+            self._notify_status_now()
+            return
+        if self._status_notify_handle is None:
+            delay = _MEDIA_STATUS_NOTIFY_MIN_INTERVAL_SECONDS - (now - last)
+            self._status_notify_handle = loop.call_later(delay, self._notify_status_now)
 
     def _remember_native_marker(self, line: str) -> None:
         if "=" not in line:
@@ -284,6 +354,9 @@ class ComelitEntranceMediaTransport:
         self._native_marker_tail.clear()
         self._last_native_exit_code = None
         self._last_native_failure_markers = []
+        self._cancel_status_notify()
+        self._progress.reset()
+        self._last_status_notify_monotonic = None
         self._offer_ready.clear()
         self._media_active.clear()
         self._video_forwarding.clear()
@@ -353,6 +426,7 @@ class ComelitEntranceMediaTransport:
         self._offer_ready.clear()
         self._video_forwarding.clear()
         self._audio_forwarding.clear()
+        self._cancel_status_notify()
         await self._hass.async_add_executor_job(_remove_helper_secret)
 
     async def _async_run_once(self) -> None:
@@ -518,6 +592,12 @@ class ComelitEntranceMediaTransport:
                 self._video_forwarding.set()
             elif line == "P80_AUDIO_RTP_FORWARDING=PASS":
                 self._audio_forwarding.set()
+            elif line.startswith((
+                "P80_VIDEO_RTP_PACKETS=",
+                "P80_AUDIO_RTP_PACKETS=",
+            )):
+                if self._progress.update_marker(line):
+                    self._notify_status_bounded()
             elif line in {
                 "P80_WRAPPER_PROFILE_MISMATCH=true",
                 "P80_RTP_FORWARD_SOCKET=FAIL",

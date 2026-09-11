@@ -57,6 +57,15 @@ class P80HaMediaRuntimeTransformTests(unittest.TestCase):
         self.assertIn("P80_VIDEO_RTP_FORWARDING=PASS", self.candidate)
         self.assertIn("P80_AUDIO_RTP_FORWARDING=PASS", self.candidate)
 
+    def test_rtp_progress_markers_are_numeric_and_bounded(self) -> None:
+        self.assertIn("#define P80_RTP_PROGRESS_CADENCE 50u", self.candidate)
+        self.assertIn("P80_VIDEO_RTP_PACKETS=%", self.candidate)
+        self.assertIn("P80_AUDIO_RTP_PACKETS=%", self.candidate)
+        self.assertIn("p80_video_rtp_packets % P80_RTP_PROGRESS_CADENCE == 0u", self.candidate)
+        self.assertIn("p80_audio_rtp_packets % P80_RTP_PROGRESS_CADENCE == 0u", self.candidate)
+        self.assertNotIn("P80_VIDEO_RTP_PACKETS=%s", self.candidate)
+        self.assertNotIn("P80_AUDIO_RTP_PACKETS=%s", self.candidate)
+
     def test_wrapper_profile_is_frozen_per_media_payload_type(self) -> None:
         self.assertIn("p80_video_profile_seen", self.candidate)
         self.assertIn("p80_audio_profile_seen", self.candidate)

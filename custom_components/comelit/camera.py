@@ -87,6 +87,8 @@ class ComelitEntranceCamera(Camera):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         status = self._manager.status()
+        video_age = self._transport.video_last_packet_age_seconds
+        audio_age = self._transport.audio_last_packet_age_seconds
         return {
             "media_active": status["active"],
             "media_phase": status["phase"],
@@ -95,6 +97,14 @@ class ComelitEntranceCamera(Camera):
             "listener_paused": status["listener_paused"],
             "video_forwarding": self._transport.video_forwarding,
             "audio_forwarding": self._transport.audio_forwarding,
+            "video_packet_count": self._transport.video_packet_count,
+            "audio_packet_count": self._transport.audio_packet_count,
+            "video_last_packet_age_seconds": (
+                round(video_age, 1) if video_age is not None else None
+            ),
+            "audio_last_packet_age_seconds": (
+                round(audio_age, 1) if audio_age is not None else None
+            ),
             "automatic_session_start": False,
             "hard_limit_seconds": 180,
         }
@@ -161,6 +171,9 @@ class ComelitEntranceCamera(Camera):
         await super().async_added_to_hass()
         self.async_on_remove(
             self._manager.async_add_status_listener(self._handle_status_update)
+        )
+        self.async_on_remove(
+            self._transport.async_add_status_listener(self._handle_status_update)
         )
 
     async def async_will_remove_from_hass(self) -> None:
