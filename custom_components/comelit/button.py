@@ -18,6 +18,7 @@ from .const import (
     MAIN_ENTRANCE_UNIQUE_ID,
     MAIN_GATE_ENTITY_ID,
     MAIN_GATE_UNIQUE_ID,
+    resolve_door_capability,
 )
 from .runtime import ComelitRingRuntime
 from .supervisor import ComelitRuntimeSupervisor
@@ -38,7 +39,7 @@ async def async_setup_entry(
         async_add_entities(
             [
                 ComelitEntranceDoorButton(runtime, supervisor),
-                ComelitGateDoorButton(runtime),
+                ComelitGateDoorButton(runtime, supervisor),
             ]
         )
 
@@ -66,19 +67,27 @@ class ComelitEntranceDoorButton(ButtonEntity):
         # Media owns the only allowed Comelit session while the listener is
         # intentionally paused. Door must fail closed rather than restarting
         # the Ring/Door runtime behind the media manager's back.
-        return not self._supervisor.media_paused
+        # Legacy static contract equivalent: return not self._supervisor.media_paused
+        return resolve_door_capability(
+            DOOR_ENTRANCE,
+            media_paused=self._supervisor.media_paused,
+        ).available
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         result = self._last_result or self._runtime.last_door_result or {}
+        capability = resolve_door_capability(
+            DOOR_ENTRANCE,
+            media_paused=self._supervisor.media_paused,
+        )
         return {
-            "standard_press_allowed": not self._supervisor.media_paused,
+            "standard_press_allowed": capability.press_allowed,
             "blocked_by_media_session": self._supervisor.media_paused,
             "one_shot_operation_required": True,
             "automatic_retry_allowed": False,
             "physical_effect_asserted": False,
             "physical_door_state": "UNKNOWN",
-            "actuation_profile_validated": True,
+            "actuation_profile_validated": capability.actuation_profile_validated,
             "last_operation_id": result.get("operation_id"),
             "last_protocol_state": result.get("state"),
             "last_protocol_acked": result.get("protocol_acked"),
@@ -131,25 +140,41 @@ class ComelitGateDoorButton(ButtonEntity):
     _attr_unique_id = MAIN_GATE_UNIQUE_ID
     _attr_icon = "mdi:gate"
     _attr_should_poll = False
-    _attr_available = False
 
-    def __init__(self, runtime: ComelitRingRuntime) -> None:
+    def __init__(
+        self,
+        runtime: ComelitRingRuntime,
+        supervisor: ComelitRuntimeSupervisor,
+    ) -> None:
         self._runtime = runtime
+        self._supervisor = supervisor
         self.entity_id = MAIN_GATE_ENTITY_ID
 
     @property
+    def available(self) -> bool:
+        return resolve_door_capability(
+            DOOR_GATE,
+            media_paused=self._supervisor.media_paused,
+        ).available
+
+    @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        capability = resolve_door_capability(
+            DOOR_GATE,
+            media_paused=self._supervisor.media_paused,
+        )
         return {
             "door": DOOR_GATE,
-            "standard_press_allowed": False,
+            "standard_press_allowed": capability.press_allowed,
             "one_shot_operation_required": True,
             "automatic_retry_allowed": False,
             "physical_effect_asserted": False,
             "physical_door_state": "UNKNOWN",
-            "actuation_profile_validated": False,
-            "ring_source_validated": True,
-            "ring_source": "00000610",
-            "blocked_reason": "gate_actuation_profile_not_validated",
+            "configured": capability.configured,
+            "actuation_profile_validated": capability.actuation_profile_validated,
+            "ring_source_validated": capability.ring_source_validated,
+            "ring_source": capability.ring_source,
+            "blocked_reason": capability.blocked_reason,
         }
 
     async def async_press(self) -> None:

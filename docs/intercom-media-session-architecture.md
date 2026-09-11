@@ -14,7 +14,7 @@ The previous pre-live assumption that media `must not stop or recreate the persi
 
 1. Intercom media is on-demand only.
 2. Home Assistant startup must not open a camera session just to keep `camera.*` live.
-3. One media session has a hard limit of **180 seconds** from successful upstream start.
+3. One media session has a hard limit of **600 seconds** from successful upstream start.
 4. The **deadline is absolute**. New viewers, snapshots, recordings or leases never extend it.
 5. The integration permits **at most one active intercom media session across the whole Comelit integration** until a different concurrency model is independently proven.
 6. Persistent listener and on-demand media must never own concurrent upstream Comelit sessions.
@@ -80,7 +80,7 @@ acquire manager lock
 -> confirm listener stopped/not-ready
 -> bootstrap entrance media
 -> confirm media active
--> set T0 and T0+180 deadline
+-> set T0 and T0+600 deadline
 -> publish active state
 ```
 
@@ -147,16 +147,16 @@ The camera entity never owns a permanent upstream session. Live view, snapshot a
 
 ## 6. Absolute timeout
 
-The 180-second timer starts when the upstream media session is actually established:
+The 600-second timer starts when the upstream media session is actually established:
 
 ```text
 T0       media active
 T0+60    recording lease may finish
 T0+170   a new viewer may reuse the session
-T0+180   forced teardown regardless of remaining leases
+T0+600   forced teardown regardless of remaining leases
 ```
 
-A request at `T0+170` gets only the remaining 10 seconds. It cannot move expiry to `T0+350`.
+A request at `T0+590` gets only the remaining 10 seconds. It cannot move expiry to `T0+1190`.
 
 ## 7. Snapshot
 
@@ -171,7 +171,7 @@ snapshot request
 -> restore listener
 ```
 
-A snapshot must not leave the session open for the remainder of the 180-second window unless another lease requires it.
+A snapshot must not leave the session open for the remainder of the 600-second window unless another lease requires it.
 
 ## 8. Recording after ring
 
@@ -187,7 +187,7 @@ ring received by persistent listener
 -> restore listener
 ```
 
-The 60-second recording remains subject to the same absolute 180-second limit.
+The 60-second recording remains subject to the same absolute 600-second limit.
 
 ## 9. Door behavior during media
 
@@ -215,7 +215,7 @@ answer
 -> restore listener
 ```
 
-No second conversation-specific upstream session manager is allowed. The 180-second limit remains until explicitly changed.
+No second conversation-specific upstream session manager is allowed. The 600-second limit remains until explicitly changed.
 
 ## 11. Acceptance gates
 
@@ -237,7 +237,7 @@ Before exposing media entities in production HA, implementation must prove:
 
 1. Listener diagnostic entity — implemented.
 2. Entrance signaling/media receive chain — P46-P78 evidence available.
-3. Production `ComelitMediaSessionManager` with absolute 180-second deadline.
+3. Production `ComelitMediaSessionManager` with absolute 600-second deadline.
 4. Exclusive listener pause/resume + Door fail-closed boundary.
 5. Package the entrance media native/runtime path for Home Assistant and prove one listener-isolated media cycle.
 6. `switch.comelit_entrance_camera` + active/remaining diagnostics.

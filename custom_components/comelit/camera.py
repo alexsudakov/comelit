@@ -51,12 +51,12 @@ class ComelitEntranceCamera(Camera):
 
     The camera entity never starts a Comelit session itself. The explicit
     switch owns start/stop, so merely opening a dashboard card cannot create a
-    hidden cloud session or extend the absolute 180-second lifetime.
+    hidden cloud session or extend the absolute media lifetime.
     """
 
-    _attr_name = "Comelit — Подъезд"
+    _attr_name = "Comelit — Камера подъезда"
     _attr_unique_id = ENTRANCE_CAMERA_UNIQUE_ID
-    _attr_icon = "mdi:doorbell-video"
+    _attr_icon = "mdi:video"
     _attr_supported_features = CameraEntityFeature.STREAM
     _attr_should_poll = False
 
@@ -106,7 +106,7 @@ class ComelitEntranceCamera(Camera):
                 round(audio_age, 1) if audio_age is not None else None
             ),
             "automatic_session_start": False,
-            "hard_limit_seconds": 180,
+            "hard_limit_seconds": self._manager.hard_limit_seconds,
         }
 
     async def stream_source(self) -> str | None:

@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 import math
 from typing import Any, Protocol
 
-MEDIA_SESSION_HARD_LIMIT_SECONDS = 180
+MEDIA_SESSION_HARD_LIMIT_SECONDS = 600
 MEDIA_TRANSPORT_WATCH_INTERVAL_SECONDS = 0.5
 MEDIA_PHASE_INACTIVE = "inactive"
 MEDIA_PHASE_STARTING = "starting"
@@ -119,6 +119,10 @@ class ComelitMediaSessionManager:
     @property
     def last_error(self) -> str | None:
         return self._last_error
+
+    @property
+    def hard_limit_seconds(self) -> float:
+        return self._hard_limit_seconds
 
     @property
     def remaining_seconds(self) -> int:
@@ -279,7 +283,7 @@ class ComelitMediaSessionManager:
                     # active=False is defined by the concrete transport only
                     # after the media process is no longer alive, so local
                     # socket ownership has been released. Restore normal
-                    # listener ownership instead of waiting until T0+180.
+                    # listener ownership instead of waiting for the hard limit.
                     self._leases.clear()
                     self._last_error = "transport_ended"
                     await self._async_stop_locked("transport_ended")

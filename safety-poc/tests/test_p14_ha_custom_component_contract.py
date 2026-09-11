@@ -168,7 +168,7 @@ class P14HomeAssistantContractTests(unittest.TestCase):
             ROOT / "docs/intercom-media-session-architecture.md"
         ).read_text()
         self.assertIn("on-demand only", doc)
-        self.assertIn("180 seconds", doc)
+        self.assertIn("600 seconds", doc)
         self.assertIn("deadline is absolute", doc)
         self.assertIn(
             "at most one active intercom media session across the whole Comelit integration",
@@ -190,11 +190,15 @@ class P14HomeAssistantContractTests(unittest.TestCase):
             'MAIN_GATE_ENTITY_ID = "button.comelit_main_gate_open_door"', const
         )
         self.assertIn("SUPPORTED_DOORS = (DOOR_ENTRANCE,)", const)
+        self.assertIn("def resolve_door_capability(", const)
         self.assertIn("ComelitGateDoorButton", button)
         self.assertIn('_attr_name = "Comelit — Калитка"', button)
-        self.assertIn("_attr_available = False", button)
-        self.assertIn('"actuation_profile_validated": False', button)
-        self.assertIn('"ring_source": "00000610"', button)
+        self.assertNotIn("_attr_available =", button)
+        self.assertIn("def available(self) -> bool:", button)
+        self.assertIn("resolve_door_capability(", button)
+        self.assertIn('"actuation_profile_validated": False', const)
+        self.assertIn('"ring_source": "00000610"', const)
+        self.assertIn('"ring_source": capability.ring_source', button)
         self.assertNotIn(
             "await self._runtime.async_open_door(DOOR_GATE)", button
         )

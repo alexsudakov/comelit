@@ -134,10 +134,16 @@ class P80HaMediaEntityWiringTests(unittest.TestCase):
         self.assertIn("stream", self.manifest["dependencies"])
 
     def test_hard_limit_and_no_hidden_retry_remain_explicit(self) -> None:
-        self.assertIn("MEDIA_SESSION_HARD_LIMIT_SECONDS = 180", self.session)
-        self.assertIn('"hard_limit_seconds": 180', self.switch)
+        self.assertIn("MEDIA_SESSION_HARD_LIMIT_SECONDS = 600", self.session)
+        self.assertIn(
+            '"hard_limit_seconds": self._manager.hard_limit_seconds',
+            self.switch,
+        )
         self.assertIn('"automatic_retry_allowed": False', self.switch)
-        self.assertIn('"hard_limit_seconds": 180', self.camera)
+        self.assertIn(
+            '"hard_limit_seconds": self._manager.hard_limit_seconds',
+            self.camera,
+        )
 
 
 if __name__ == "__main__":
