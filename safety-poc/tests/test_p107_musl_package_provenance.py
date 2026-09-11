@@ -17,9 +17,9 @@ TRANSPORT = ROOT / "custom_components" / "comelit" / "media_transport.py"
 BINARY = ROOT / "custom_components" / "comelit" / "native" / "comelit-media"
 NATIVE_LIB = ROOT / "custom_components" / "comelit" / "native" / "lib"
 SOURCE = SAFETY_ROOT / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-ctpp-door.c"
-EXPECTED_MUSL_SHA256 = "ebc731381022be89576a680c39f7402225048e48adab88376434f660ad1a5ade"
+EXPECTED_MUSL_SHA256 = "91335b4490bc58910c78cb58b9c2d3eccc13f40dcfff7651995ad428cd71ddc7"
 EXPECTED_RUN3_GLIBC_SHA256 = "94063498a35a886dc4cb735c3e629a5097b965224cb3354192723d30e70c16ac"
-EXPECTED_SOURCE_SHA256 = "262858014942a652524675bf94cb7327f883fa82516a2b28c577bcd13d15a99d"
+EXPECTED_SOURCE_SHA256 = "0c15927dbc40bdb1f7c522f063a8a2f38c557f9eb735cdd981cdd49449595c79"
 EXPECTED_INTERPRETER = "/lib/ld-musl-x86_64.so.1"
 EXPECTED_NEEDED = (
     "libc.musl-x86_64.so.1",

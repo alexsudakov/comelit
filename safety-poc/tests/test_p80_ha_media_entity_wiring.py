@@ -121,6 +121,14 @@ class P80HaMediaEntityWiringTests(unittest.TestCase):
         self.assertIn("await stream.stop()", self.camera)
         self.assertIn("self.stream = None", self.camera)
 
+    def test_camera_exposes_bounded_runtime_progress_diagnostics(self) -> None:
+        self.assertIn('"video_packet_count": self._transport.video_packet_count', self.camera)
+        self.assertIn('"audio_packet_count": self._transport.audio_packet_count', self.camera)
+        self.assertIn('"video_last_packet_age_seconds":', self.camera)
+        self.assertIn('"audio_last_packet_age_seconds":', self.camera)
+        self.assertIn("self._transport.async_add_status_listener", self.camera)
+        self.assertNotIn("should_poll = True", self.camera)
+
     def test_stream_dependency_is_explicit(self) -> None:
         self.assertIn("webhook", self.manifest["dependencies"])
         self.assertIn("stream", self.manifest["dependencies"])
