@@ -11,6 +11,8 @@ umask 077
 
 REPO=${REPO:-/root/comelit-door-diag-repo}
 BRANCH=${BRANCH:-fix/p116-ha-stream-rtp-bridge}
+P80_BUILD_EXPECTED_SHA=${P80_BUILD_EXPECTED_SHA:-}
+P80_BUILD_ALLOW_DETACHED=${P80_BUILD_ALLOW_DETACHED:-0}
 SOURCE_REL=safety-poc/research/door/v1_5_7/comelit-v4-persistent-ctpp-door.c
 TRANSFORM_REL=safety-poc/research/media/v1/entrance_p80_ha_media_runtime_transform.py
 OUTPUT=${OUTPUT:-/root/comelit-media-p80}
@@ -39,6 +41,25 @@ ROOTFS_MODE=UNSELECTED
 fail() {
     echo "$1" >&2
     FAIL=1
+}
+
+p80_rootfs_library_realpath() {
+    rootfs="$1"
+    needed="$2"
+    rootfs_real="$(readlink -f "$rootfs" 2>/dev/null || true)"
+    [ -n "$rootfs_real" ] && [ -d "$rootfs_real" ] || return 1
+
+    rootfs_lib="$(
+        find "$rootfs/lib" "$rootfs/usr/lib" -name "$needed" \( -type f -o -type l \) -print -quit 2>/dev/null || true
+    )"
+    [ -n "$rootfs_lib" ] || return 1
+
+    lib_real="$(readlink -f "$rootfs_lib" 2>/dev/null || true)"
+    [ -n "$lib_real" ] && [ -f "$lib_real" ] || return 1
+    case "$lib_real" in
+        "$rootfs_real"/*) printf '%s\n' "$lib_real" ;;
+        *) return 1 ;;
+    esac
 }
 
 summary() {
@@ -76,7 +97,7 @@ if [ "${EUID}" -ne 0 ]; then
     exit 1
 fi
 
-for command in git python3 sha256sum awk grep strings file tar chroot uname stat cp readelf sort paste find cmp sed install; do
+for command in git python3 sha256sum awk grep strings file tar chroot uname stat cp readelf sort paste find cmp sed install readlink; do
     command -v "$command" >/dev/null 2>&1 || fail "P80_BUILD_MISSING_COMMAND=$command"
 done
 [ "$FAIL" -eq 0 ] || exit 1
@@ -87,14 +108,28 @@ done
 
 REPO_HEAD="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
 CURRENT_BRANCH="$(git -C "$REPO" branch --show-current 2>/dev/null || true)"
-[ "$CURRENT_BRANCH" = "$BRANCH" ] || fail "P80_BUILD_BRANCH_GATE=FAIL expected=$BRANCH actual=$CURRENT_BRANCH"
+if [ -n "$P80_BUILD_EXPECTED_SHA" ]; then
+    [ "$REPO_HEAD" = "$P80_BUILD_EXPECTED_SHA" ] || fail "P80_BUILD_EXPECTED_SHA_GATE=FAIL expected=$P80_BUILD_EXPECTED_SHA actual=$REPO_HEAD"
+fi
+if [ "$P80_BUILD_ALLOW_DETACHED" = "1" ]; then
+    [ -n "$P80_BUILD_EXPECTED_SHA" ] || fail 'P80_BUILD_EXPECTED_SHA_REQUIRED_FOR_DETACHED=FAIL'
+else
+    [ "$CURRENT_BRANCH" = "$BRANCH" ] || fail "P80_BUILD_BRANCH_GATE=FAIL expected=$BRANCH actual=$CURRENT_BRANCH"
+fi
 [ -z "$(git -C "$REPO" status --porcelain)" ] || fail 'P80_BUILD_WORKTREE_CLEAN=FAIL'
 [ -f "$REPO/$SOURCE_REL" ] || fail 'P80_BUILD_SOURCE=ABSENT'
 [ -f "$REPO/$TRANSFORM_REL" ] || fail 'P80_BUILD_TRANSFORM=ABSENT'
 [ "$FAIL" -eq 0 ] || exit 1
 
 echo "P80_BUILD_REPO_HEAD=$REPO_HEAD"
-echo "P80_BUILD_BRANCH_GATE=PASS"
+if [ -n "$P80_BUILD_EXPECTED_SHA" ]; then
+    echo "P80_BUILD_EXPECTED_SHA_GATE=PASS $REPO_HEAD"
+fi
+if [ "$P80_BUILD_ALLOW_DETACHED" = "1" ]; then
+    echo "P80_BUILD_BRANCH_GATE=SKIPPED_DETACHED"
+else
+    echo "P80_BUILD_BRANCH_GATE=PASS"
+fi
 echo "P80_BUILD_WORKTREE_CLEAN=PASS"
 
 mkdir -p "$RUN_ROOT" "$BUILD"
@@ -271,10 +306,16 @@ fi
 LIB_IDENTICAL=PASS
 for needed in libglib-2.0.so.0 libgobject-2.0.so.0 libnice.so.10; do
     packaged="$REPO/custom_components/comelit/native/lib/$needed"
-    rootfs_lib="$(find "$ROOTFS/lib" "$ROOTFS/usr/lib" -name "$needed" -type f -print -quit 2>/dev/null || true)"
-    if [ ! -f "$packaged" ] || [ ! -f "$rootfs_lib" ] || ! cmp -s "$packaged" "$rootfs_lib"; then
+    rootfs_lib="$(p80_rootfs_library_realpath "$ROOTFS" "$needed" || true)"
+    if [ ! -f "$packaged" ]; then
         LIB_IDENTICAL=FAIL
-        fail "P80_LIB_IDENTICAL=FAIL lib=$needed"
+        fail "P80_LIB_IDENTICAL=FAIL lib=$needed reason=packaged_absent"
+    elif [ -z "$rootfs_lib" ]; then
+        LIB_IDENTICAL=FAIL
+        fail "P80_LIB_IDENTICAL=FAIL lib=$needed reason=rootfs_lib_unresolved"
+    elif ! cmp -s "$packaged" "$rootfs_lib"; then
+        LIB_IDENTICAL=FAIL
+        fail "P80_LIB_IDENTICAL=FAIL lib=$needed reason=content_mismatch"
     fi
 done
 
