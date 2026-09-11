@@ -40,7 +40,7 @@ jobs:
               apk add --no-cache build-base pkgconf glib-dev libnice-dev python3 binutils >/dev/null
               PYTHONDONTWRITEBYTECODE=1 \
               PYTHONPATH=/repo/safety-poc/research/media/v1 \
-              python3 /repo/safety-poc/research/media/v1/entrance_p80_ha_media_runtime_transform.py \
+              python3 /repo/safety-poc/research/media/v1/entrance_p106_teardown_state_classification_transform.py \
                 --source /repo/safety-poc/research/door/v1_5_7/comelit-v4-persistent-ctpp-door.c \
                 --output /repo/.p114-build/comelit-media.c >/repo/.p114-build/transform.log
               cc -O2 -g -Wall -Wextra -Wl,--as-needed \
@@ -60,6 +60,8 @@ jobs:
           grep -Fq '/lib/ld-musl-x86_64.so.1' .p114-build/readelf-program.txt
           grep -Fq 'P80_VIDEO_RTP_PACKETS=' .p114-build/comelit-media.c
           grep -Fq 'P80_AUDIO_RTP_PACKETS=' .p114-build/comelit-media.c
+          grep -Fq 'P80_DEVICE_ACK_000A_OBSERVED=PASS' .p114-build/comelit-media.c
+          grep -Fq 'PSEUDOTCP_NOTIFY_PACKET_CLASS=%s' .p114-build/comelit-media.c
           grep -Fq '#define P80_RTP_PROGRESS_CADENCE 50u' .p114-build/comelit-media.c
           ! grep -Fq 'signal(SIGUSR1, v4_door_signal_handler);' .p114-build/comelit-media.c
           install -m 755 .p114-build/comelit-media custom_components/comelit/native/comelit-media
@@ -69,12 +71,13 @@ jobs:
           set -euo pipefail
           CANDIDATE_SHA="$(sha256sum custom_components/comelit/native/comelit-media | awk '{print $1}')"
           SOURCE_SHA="$(sha256sum .p114-build/comelit-media.c | awk '{print $1}')"
-          python3 - "$CANDIDATE_SHA" <<'PY'
+          python3 - "$CANDIDATE_SHA" "$SOURCE_SHA" <<'PY'
           from pathlib import Path
           import re
           import sys
 
           sha = sys.argv[1]
+          source_sha = sys.argv[2]
           transport = Path("custom_components/comelit/media_transport.py")
           text = transport.read_text(encoding="utf-8")
           text, count = re.subn(
@@ -98,6 +101,24 @@ jobs:
           if count != 1:
               raise SystemExit("test SHA pin gate failed")
           test.write_text(text, encoding="utf-8")
+
+          provenance = Path("safety-poc/tests/test_p107_musl_package_provenance.py")
+          text = provenance.read_text(encoding="utf-8")
+          text, musl_count = re.subn(
+              r'EXPECTED_MUSL_SHA256 = "[0-9a-f]{64}"',
+              f'EXPECTED_MUSL_SHA256 = "{sha}"',
+              text,
+              count=1,
+          )
+          text, source_count = re.subn(
+              r'EXPECTED_SOURCE_SHA256 = "[0-9a-f]{64}"',
+              f'EXPECTED_SOURCE_SHA256 = "{source_sha}"',
+              text,
+              count=1,
+          )
+          if musl_count != 1 or source_count != 1:
+              raise SystemExit("P107/P114 provenance SHA pin gate failed")
+          provenance.write_text(text, encoding="utf-8")
           PY
           {
             echo 'P114_MEDIA_DIAGNOSTICS_BUILD=PROVEN_OFFLINE'
@@ -148,6 +169,7 @@ jobs:
             safety-poc/tests/test_p80_ha_media_runtime_transform.py \
             safety-poc/tests/test_p80_media_transport_static_contract.py \
             safety-poc/tests/test_p80_ha_media_entity_wiring.py \
+            safety-poc/tests/test_p107_musl_package_provenance.py \
             safety-poc/tests/test_p114_media_progress_diagnostics.py
           git commit -m 'research(media): add bounded P114 runtime diagnostics'
           git push origin HEAD:${{ github.event.pull_request.head.ref }}
