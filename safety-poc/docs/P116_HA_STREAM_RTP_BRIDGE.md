@@ -102,6 +102,29 @@ session-derived `sprop-parameter-sets` в этой фазе НЕ реализу�
 менялся: `comelit-media` и `MEDIA_NATIVE_BINARY_SHA256`
 (`91335b4490bc58910c78cb58b9c2d3eccc13f40dcfff7651995ad428cd71ddc7`) неизменны.
 
+## Native build provenance
+
+Packaged native pin:
+
+- `MEDIA_NATIVE_BINARY_SHA256=91335b4490bc58910c78cb58b9c2d3eccc13f40dcfff7651995ad428cd71ddc7`
+- `GENERATED_SOURCE_SHA256=0c15927dbc40bdb1f7c522f063a8a2f38c557f9eb735cdd981cdd49449595c79`
+- Generator: `safety-poc/research/media/v1/entrance_p106_teardown_state_classification_transform.py`
+  (P106 teardown-state classification composition), not the standalone P80 transform.
+
+Reproducibility is now an explicit CT120 builder gate: set
+`P80_BUILD_EXPECTED_SOURCE_SHA=<sha256>` and the build fails closed with
+`P80_BUILD_EXPECTED_SOURCE_SHA_GATE=FAIL expected=<expected> actual=<actual>` if
+the selected generator emits different C. Every builder run records
+`P80_BUILD_TRANSFORM=`, `P80_BUILD_EXPECTED_SOURCE_SHA=`,
+`GENERATED_SOURCE_SHA256=`, and `NATIVE_BINARY_SHA256=` in `build-meta.txt`.
+
+For the current P116 instrumented build, the generated C and native binary are
+expected to have new hashes because P116 RTP telemetry changes the generated
+source. Оркестратор/следующий раунд должен заполнить фактические значения:
+
+- `P116_GENERATED_SOURCE_SHA256=<P116_HEAD_GENERATED_SOURCE_SHA256>`
+- `P116_NATIVE_BINARY_SHA256=<P116_HEAD_NATIVE_BINARY_SHA256>`
+
 ## Readiness
 
 The local SDP file is atomically written only after the native process reports

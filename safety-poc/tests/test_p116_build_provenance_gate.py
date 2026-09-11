@@ -123,6 +123,91 @@ class P116BuildProvenanceGateTests(unittest.TestCase):
         self.assertIn("P80_BUILD_BRANCH_GATE=SKIPPED_DETACHED", self.script)
         self.assertIn("P80_BUILD_EXPECTED_SHA_REQUIRED_FOR_DETACHED=FAIL", self.script)
 
+    def test_default_build_transform_is_p106_composition_and_env_overrideable(self) -> None:
+        default = (
+            "safety-poc/research/media/v1/"
+            "entrance_p106_teardown_state_classification_transform.py"
+        )
+        old_p80 = (
+            "TRANSFORM_REL=safety-poc/research/media/v1/"
+            "entrance_p80_ha_media_runtime_transform.py"
+        )
+        self.assertIn(f"P80_BUILD_TRANSFORM=${{P80_BUILD_TRANSFORM:-{default}}}", self.script)
+        self.assertNotIn(old_p80, self.script)
+        self.assertIn('python3 "$REPO/$P80_BUILD_TRANSFORM"', self.script)
+        self.assertIn('[ -f "$REPO/$P80_BUILD_TRANSFORM" ]', self.script)
+        self.assertIn("P80_BUILD_TRANSFORM=$P80_BUILD_TRANSFORM", self.script)
+
+        result = subprocess.run(
+            [
+                "bash",
+                "-eu",
+                "-c",
+                (
+                    "P80_BUILD_TRANSFORM=${P80_BUILD_TRANSFORM:-"
+                    + default
+                    + "}; printf '%s' \"$P80_BUILD_TRANSFORM\""
+                ),
+            ],
+            check=False,
+            env={**os.environ, "P80_BUILD_TRANSFORM": "custom/transform.py"},
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "custom/transform.py")
+
+    def test_expected_source_sha_gate_is_env_driven_and_fail_closed(self) -> None:
+        self.assertIn("P80_BUILD_EXPECTED_SOURCE_SHA=${P80_BUILD_EXPECTED_SOURCE_SHA:-}", self.script)
+        self.assertIn("GENERATED_SOURCE_SHA256=\"$(sha256sum \"$GENERATED\" | awk '{print $1}')\"", self.script)
+        self.assertIn('echo "GENERATED_SOURCE_SHA256=$GENERATED_SOURCE_SHA256"', self.script)
+        self.assertIn('if [ -n "$P80_BUILD_EXPECTED_SOURCE_SHA" ]; then', self.script)
+        self.assertIn(
+            '[ "$GENERATED_SOURCE_SHA256" = "$P80_BUILD_EXPECTED_SOURCE_SHA" ]',
+            self.script,
+        )
+        self.assertIn("P80_BUILD_EXPECTED_SOURCE_SHA_GATE=PASS", self.script)
+        self.assertIn(
+            "P80_BUILD_EXPECTED_SOURCE_SHA_GATE=FAIL expected=$P80_BUILD_EXPECTED_SOURCE_SHA "
+            "actual=$GENERATED_SOURCE_SHA256",
+            self.script,
+        )
+        self.assertLess(
+            self.script.index("P80_BUILD_EXPECTED_SOURCE_SHA_GATE=FAIL"),
+            self.script.index("=== ALPINE CHROOT BUILD ==="),
+        )
+
+    def test_source_gate_and_build_meta_use_selected_generator_provenance(self) -> None:
+        transform_call = self.script.index('python3 "$REPO/$P80_BUILD_TRANSFORM"')
+        source_sha = self.script.index("GENERATED_SOURCE_SHA256=\"$(sha256sum")
+        source_gate = self.script.index("P80_GENERATED_SOURCE_GATE=PASS")
+        chroot_build = self.script.index("=== ALPINE CHROOT BUILD ===")
+        self.assertLess(transform_call, source_sha)
+        self.assertLess(source_sha, source_gate)
+        self.assertLess(source_gate, chroot_build)
+
+        for marker in (
+            '#define RUN_DIR     "/run/comelit-media"',
+            "signal(SIGUSR1, v4_door_signal_handler);",
+            "P80_MEDIA_ACTIVE=true",
+            "P80_VIDEO_RTP_FORWARDING=PASS",
+            "P80_AUDIO_RTP_FORWARDING=PASS",
+            "P78_SECOND_CTPP_OPEN=false",
+        ):
+            self.assertIn(marker, self.script)
+
+        meta_append = self.script.index('echo "NATIVE_BINARY_SHA256=$CANDIDATE_SHA"')
+        meta_print = self.script.index('cat "$META"')
+        self.assertLess(meta_append, meta_print)
+        for field in (
+            "P80_BUILD_TRANSFORM=$P80_BUILD_TRANSFORM",
+            "P80_BUILD_EXPECTED_SOURCE_SHA=$P80_BUILD_EXPECTED_SOURCE_SHA",
+            "GENERATED_SOURCE_SHA256=$GENERATED_SOURCE_SHA256",
+            "NATIVE_BINARY_SHA256=$CANDIDATE_SHA",
+        ):
+            self.assertIn(f'echo "{field}"', self.script)
+
 
 if __name__ == "__main__":
     unittest.main()

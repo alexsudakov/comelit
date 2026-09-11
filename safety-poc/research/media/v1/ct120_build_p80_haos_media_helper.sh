@@ -12,9 +12,12 @@ umask 077
 REPO=${REPO:-/root/comelit-door-diag-repo}
 BRANCH=${BRANCH:-fix/p116-ha-stream-rtp-bridge}
 P80_BUILD_EXPECTED_SHA=${P80_BUILD_EXPECTED_SHA:-}
+P80_BUILD_EXPECTED_SOURCE_SHA=${P80_BUILD_EXPECTED_SOURCE_SHA:-}
 P80_BUILD_ALLOW_DETACHED=${P80_BUILD_ALLOW_DETACHED:-0}
 SOURCE_REL=safety-poc/research/door/v1_5_7/comelit-v4-persistent-ctpp-door.c
-TRANSFORM_REL=safety-poc/research/media/v1/entrance_p80_ha_media_runtime_transform.py
+# Canonical P80/P106 native media source generator. Override only for explicit
+# provenance experiments; gates below validate the source emitted by this path.
+P80_BUILD_TRANSFORM=${P80_BUILD_TRANSFORM:-safety-poc/research/media/v1/entrance_p106_teardown_state_classification_transform.py}
 OUTPUT=${OUTPUT:-/root/comelit-media-p80}
 EXPECTED_ARCH=x86_64
 EXPECTED_INTERPRETER=/lib/ld-musl-x86_64.so.1
@@ -68,7 +71,10 @@ summary() {
     echo "P80_BUILD_RUN_ROOT=$RUN_ROOT"
     echo "P80_BUILD_REPO_HEAD=${REPO_HEAD:-UNKNOWN}"
     echo "P80_BUILD_BRANCH=${CURRENT_BRANCH:-UNKNOWN}"
+    echo "P80_BUILD_TRANSFORM=$P80_BUILD_TRANSFORM"
+    echo "P80_BUILD_EXPECTED_SOURCE_SHA=$P80_BUILD_EXPECTED_SOURCE_SHA"
     echo "P80_TRANSFORM_RC=${TRANSFORM_RC:-NOT_REACHED}"
+    echo "P80_GENERATED_SOURCE_SHA256=${GENERATED_SOURCE_SHA256:-NOT_REACHED}"
     echo "P80_CHROOT_BUILD_RC=${BUILD_RC:-NOT_REACHED}"
     echo "P80_BINARY_SHA256=${CANDIDATE_SHA:-NOT_REACHED}"
     echo "P80_BINARY_OUTPUT=${FINAL_OUTPUT:-NOT_CREATED}"
@@ -118,10 +124,11 @@ else
 fi
 [ -z "$(git -C "$REPO" status --porcelain)" ] || fail 'P80_BUILD_WORKTREE_CLEAN=FAIL'
 [ -f "$REPO/$SOURCE_REL" ] || fail 'P80_BUILD_SOURCE=ABSENT'
-[ -f "$REPO/$TRANSFORM_REL" ] || fail 'P80_BUILD_TRANSFORM=ABSENT'
+[ -f "$REPO/$P80_BUILD_TRANSFORM" ] || fail 'P80_BUILD_TRANSFORM=ABSENT'
 [ "$FAIL" -eq 0 ] || exit 1
 
 echo "P80_BUILD_REPO_HEAD=$REPO_HEAD"
+echo "P80_BUILD_TRANSFORM=$P80_BUILD_TRANSFORM"
 if [ -n "$P80_BUILD_EXPECTED_SHA" ]; then
     echo "P80_BUILD_EXPECTED_SHA_GATE=PASS $REPO_HEAD"
 fi
@@ -137,7 +144,7 @@ chmod 700 "$RUN_ROOT" "$BUILD"
 
 PYTHONDONTWRITEBYTECODE=1 \
 PYTHONPATH="$REPO/safety-poc/research/media/v1" \
-python3 "$REPO/$TRANSFORM_REL" \
+python3 "$REPO/$P80_BUILD_TRANSFORM" \
   --source "$REPO/$SOURCE_REL" \
   --output "$GENERATED"
 TRANSFORM_RC=$?
@@ -146,6 +153,15 @@ echo "P80_TRANSFORM_RC=$TRANSFORM_RC"
 [ -s "$GENERATED" ] || fail 'P80_GENERATED_SOURCE=EMPTY'
 
 if [ "$FAIL" -eq 0 ]; then
+    GENERATED_SOURCE_SHA256="$(sha256sum "$GENERATED" | awk '{print $1}')"
+    echo "GENERATED_SOURCE_SHA256=$GENERATED_SOURCE_SHA256"
+    if [ -n "$P80_BUILD_EXPECTED_SOURCE_SHA" ]; then
+        if [ "$GENERATED_SOURCE_SHA256" = "$P80_BUILD_EXPECTED_SOURCE_SHA" ]; then
+            echo "P80_BUILD_EXPECTED_SOURCE_SHA_GATE=PASS $GENERATED_SOURCE_SHA256"
+        else
+            fail "P80_BUILD_EXPECTED_SOURCE_SHA_GATE=FAIL expected=$P80_BUILD_EXPECTED_SOURCE_SHA actual=$GENERATED_SOURCE_SHA256"
+        fi
+    fi
     grep -Fq '#define RUN_DIR     "/run/comelit-media"' "$GENERATED" || fail 'P80_RUN_DIR_GATE=FAIL'
     ! grep -Fq 'signal(SIGUSR1, v4_door_signal_handler);' "$GENERATED" || fail 'P80_DOOR_SIGNAL_GATE=FAIL'
     grep -Fq 'P80_MEDIA_ACTIVE=true' "$GENERATED" || fail 'P80_MEDIA_ACTIVE_MARKER_SOURCE=FAIL'
@@ -265,6 +281,13 @@ echo "P80_CHROOT_BUILD_RC=$BUILD_RC"
 cp "$ROOTFS/out/comelit-media" "$CANDIDATE"
 cp "$ROOTFS/out/build-meta.txt" "$META"
 chmod 755 "$CANDIDATE"
+CANDIDATE_SHA="$(sha256sum "$CANDIDATE" | awk '{print $1}')"
+{
+    echo "P80_BUILD_TRANSFORM=$P80_BUILD_TRANSFORM"
+    echo "P80_BUILD_EXPECTED_SOURCE_SHA=$P80_BUILD_EXPECTED_SOURCE_SHA"
+    echo "GENERATED_SOURCE_SHA256=$GENERATED_SOURCE_SHA256"
+    echo "NATIVE_BINARY_SHA256=$CANDIDATE_SHA"
+} >> "$META"
 cat "$META"
 
 INTERPRETER="$(sed -n 's/^interpreter=//p' "$META")"
@@ -328,7 +351,6 @@ echo "NO_NEW_RUNTIME_DEPENDENCY=$NO_NEW_RUNTIME_DEPENDENCY"
 echo "MUSL_INTERPRETER_GATE=$MUSL_INTERPRETER_GATE"
 echo "LIB_IDENTICAL=$LIB_IDENTICAL"
 
-CANDIDATE_SHA="$(sha256sum "$CANDIDATE" | awk '{print $1}')"
 install -m 755 "$CANDIDATE" "$OUTPUT"
 FINAL_OUTPUT="$OUTPUT"
 

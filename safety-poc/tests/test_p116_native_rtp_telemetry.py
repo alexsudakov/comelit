@@ -180,6 +180,10 @@ class P116NativeRtpTelemetryTests(unittest.TestCase):
         for marker in (
             "OFFLINE_BUILD=${OFFLINE_BUILD:-1}",
             "OFFLINE_ROOTFS=${OFFLINE_ROOTFS:-}",
+            "P80_BUILD_TRANSFORM=${P80_BUILD_TRANSFORM:-safety-poc/research/media/v1/entrance_p106_teardown_state_classification_transform.py}",
+            "P80_BUILD_EXPECTED_SOURCE_SHA=${P80_BUILD_EXPECTED_SOURCE_SHA:-}",
+            "GENERATED_SOURCE_SHA256=",
+            "NATIVE_BINARY_SHA256=",
             "P80_ALPINE_DOWNLOAD=SKIPPED_OFFLINE",
             "candidate_executed=false",
             "elf_build_id=",
