@@ -55,16 +55,6 @@ _HLS_DIAGNOSTIC_FIELDS = (
     "hls_first_segment_complete",
     "hls_second_segment_created",
 )
-_HLS_WORKER_ERROR_COUNT_KEYS = (
-    "stream_worker_error_count",
-    "worker_error_count",
-    "error_count",
-)
-_HLS_START_WORKER_COUNT_KEYS = (
-    "start_worker_count",
-    "stream_start_worker_count",
-    "worker_start_count",
-)
 
 
 def _safe_diagnostic_string(value: Any) -> str | None:
@@ -178,74 +168,52 @@ class ComelitEntranceCamera(Camera):
 
         diagnostics["ha_stream_created"] = stream is not None
         diagnostics["hls_provider_present"] = False
-        if stream is not None:
-            try:
-                available = getattr(stream, "available", None)
-                if isinstance(available, bool):
-                    diagnostics["ha_stream_available"] = available
-            except Exception:
-                pass
+        if stream is None:
+            return diagnostics
 
-            try:
-                stream_diagnostics = stream.get_diagnostics()
-            except Exception:
-                stream_diagnostics = None
-            if isinstance(stream_diagnostics, dict):
-                diagnostics["ha_stream_container_format"] = _safe_diagnostic_string(
-                    stream_diagnostics.get("container_format")
-                )
-                diagnostics["ha_stream_video_codec"] = _safe_diagnostic_string(
-                    stream_diagnostics.get("video_codec")
-                )
-
-            output_diagnostics_available = False
-            worker_error_count = 0
-            start_worker_count = 0
-            try:
-                outputs = stream.outputs()
-            except Exception:
-                outputs = ()
-            try:
-                for index, output in enumerate(outputs):
-                    if index >= 16:
-                        break
-                    try:
-                        output_diagnostics = output.get_diagnostics()
-                    except Exception:
-                        continue
-                    if not isinstance(output_diagnostics, dict):
-                        continue
-                    output_diagnostics_available = True
-                    for candidate in _HLS_WORKER_ERROR_COUNT_KEYS:
-                        value = output_diagnostics.get(candidate)
-                        if (
-                            isinstance(value, int)
-                            and not isinstance(value, bool)
-                            and value >= 0
-                        ):
-                            worker_error_count += value
-                            break
-                    for candidate in _HLS_START_WORKER_COUNT_KEYS:
-                        value = output_diagnostics.get(candidate)
-                        if (
-                            isinstance(value, int)
-                            and not isinstance(value, bool)
-                            and value >= 0
-                        ):
-                            start_worker_count += value
-                            break
-            except Exception:
-                output_diagnostics_available = False
-            if output_diagnostics_available:
-                diagnostics["ha_stream_worker_error_count"] = worker_error_count
-                diagnostics["ha_stream_start_worker_count"] = start_worker_count
-
-        provider = None
         try:
-            stream_data = self.hass.data[STREAM_DOMAIN]
-            provider = stream_data.get(HLS_PROVIDER)
+            available = getattr(stream, "available", None)
+            if isinstance(available, bool):
+                diagnostics["ha_stream_available"] = available
         except Exception:
-            provider = None
+            pass
+
+        try:
+            stream_diagnostics = stream.get_diagnostics()
+        except Exception:
+            stream_diagnostics = None
+        if isinstance(stream_diagnostics, dict):
+            diagnostics["ha_stream_container_format"] = _safe_diagnostic_string(
+                stream_diagnostics.get("container_format")
+            )
+            diagnostics["ha_stream_video_codec"] = _safe_diagnostic_string(
+                stream_diagnostics.get("video_codec")
+            )
+            worker_error = stream_diagnostics.get("worker_error")
+            if (
+                isinstance(worker_error, int)
+                and not isinstance(worker_error, bool)
+                and worker_error >= 0
+            ):
+                diagnostics["ha_stream_worker_error_count"] = worker_error
+            start_worker = stream_diagnostics.get("start_worker")
+            if (
+                isinstance(start_worker, int)
+                and not isinstance(start_worker, bool)
+                and start_worker >= 0
+            ):
+                diagnostics["ha_stream_start_worker_count"] = start_worker
+
+        try:
+            outputs = stream.outputs()
+        except Exception:
+            outputs = None
+        provider = None
+        if outputs is not None:
+            try:
+                provider = outputs.get(HLS_PROVIDER)
+            except Exception:
+                provider = None
         diagnostics["hls_provider_present"] = provider is not None
 
         segments = None
