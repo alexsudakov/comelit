@@ -369,6 +369,145 @@ Marker-specific allowlist proposal:
 `REDACTION_NUMERIC_POLICY=unknown_numeric_redacted_marker_specific_allowlist`
 and `MARKER_SPECIFIC_ALLOWLIST_PROPOSAL=true`.
 
+## P116 R13D official-app trace capture tooling (2026-09-12)
+
+R13D остается `OFFLINE_ONLY`: tooling authored, capture not executed.
+Production SHA `0970b9c88fd47ddf83a397b0228c5d4bbef92423` не трогается; deploy,
+restart, OAuth refresh, door/gate actions, helper media session и keepalive/IDR
+fixes запрещены. `custom_components/**` не меняется.
+
+Top-level runner:
+`safety-poc/research/media/v1/p116_official_app_trace_runner.sh`.
+Extractor:
+`safety-poc/research/media/v1/p116_official_app_trace_extractor.py`.
+Runner по умолчанию выполняет только dry-run preflight. Единственный путь к
+реальному passive capture требует явный operator flag
+`--authorize-passive-capture`; в этом раунде этот режим не запускался.
+
+### Feasibility table
+
+| Capture point | OBSERVABLE_AT | VISIBLE_LAYERS | CAN_SEE_P2P/UDP_MEDIA | CAN_SEE_PROTOCOL_FAMILY | CAN_SEE_MESSAGE_TYPE | VERDICT | Reason |
+|---|---|---|---|---|---|---|---|
+| `(a) LAN capture at HA/CT122/CT120 host` | Только если official app / panel flow реально проходит через этот host или mirror interface уже доставляет эти frames | L2/L3/L4 metadata; plaintext application only if protocol is not encrypted and visible on the interface; TLS gives TLS_RECORD_METADATA only | `true` only for transiting/mirrored UDP; `false` for direct Wi-Fi/AP path outside host | `true` for RTP/RTCP/STUN/TURN/TCP/UDP/TLS family by ports/dissector | `METADATA_ONLY` for TLS; `true` only for plaintext safe opcode classes | `METADATA_ONLY` or `INFEASIBLE` | Обычный HA host не является L2 transit point for phone-to-device traffic. Он годится только если оператор заранее подтверждает mirror/tap or routing through this host. |
+| `(b) mirrored/SPAN port on switch or AP` | Switch/AP mirror that receives phone and entrance-device traffic | L2/L3/L4 metadata, RTP/RTCP structural fields, TLS record metadata; plaintext only if protocol itself plaintext | `true` if mirror covers phone radio/VLAN and device port/VLAN | `true` for transport/protocol family and cadence | `METADATA_ONLY` for TLS; `true` for RTCP packet types and plaintext safe classes | `FEASIBLE` | Best passive point: no traffic modification, sees both directions, can prove continuation past 36 s and cadence below 36 s. |
+| `(c) router-side capture` | Router/firewall packet capture for the relevant LAN/VLAN | L3/L4 metadata, TLS record metadata; sometimes no same-LAN switched traffic | `true` only if traffic routes through router; `false` for same-subnet switched P2P | `true` for routed flows | `METADATA_ONLY` for encrypted control; RTCP types only if media is routed and decoded | `METADATA_ONLY` | Useful if official app uses cloud/TURN/routed paths. Often misses direct same-LAN phone-to-device frames. |
+| `(d) phone-side capture` | Operator device OS-level capture app or OS packet trace | Device-local L3/L4 metadata, possible TLS record metadata, possible VPN capture constraints | `true` for flows visible to OS capture; platform-dependent for local Wi-Fi and media sockets | `true` for endpoint/cadence/family if OS exposes packets | `METADATA_ONLY` for TLS; plaintext only if app traffic is not encrypted | `FEASIBLE` but operator-dependent | Passive from network perspective, but requires operator device setup and privacy review. Documented as an option, not required by repo tooling. |
+| `(e) TLS-terminating observation` | Proxy/MITM/decryption endpoint | Would expose plaintext only by changing trust/flow or using secrets | N/A | N/A | N/A | `INFEASIBLE` / `NOT_ALLOWED` | Not allowed: it modifies traffic and/or requires secrets. R13D permits passive observation only. |
+
+Если official-app control channel зашифрован TLS, extractor still can prove
+only timing/length/cadence/endpoint-role evidence:
+`TLS_RECORD_METADATA`, relative times, direction, frame length, repeat count,
+cadence, whether client-to-device traffic continues after 36 s, and whether a
+periodic class repeats with cadence `<36s`. Это достаточно, чтобы доказать
+`traffic continuing past 36 s` или `periodicity <36 s`. Это не доказывает
+message type/opcode, session renewal semantics, IDR request semantics, or
+application payload meaning.
+
+### Operator protocol
+
+1. Operator selects a passive observation point and verifies it can see both
+   phone/client and entrance-device endpoints.
+2. start capture first: runner preflight must pass and capture begins before
+   the operator opens camera in the official app.
+3. Operator opens the entrance camera in the official app and holds rendering;
+   hold it >=60-90 s after media-active if the app keeps rendering.
+4. Operator writes marker file on the capture host with first field
+   `media_active_epoch` seconds. This is a bounded file marker, not chat and not
+   a network trigger.
+5. Runner captures a bounded window: default `PRE_SECONDS=5`,
+   `POST_SECONDS=90`, `HARD_CAP_SECONDS=125`, `MAX_FILE_MB=256`,
+   `MAX_MESSAGE_ROWS=200`.
+6. Runner stops capture, writes raw artifact outside Git with mode `600`,
+   records SHA256/size/provenance, runs offline sanitisation/extraction on the
+   capture host, and prints only scalar summary.
+7. Raw PCAP is deleted unless `--retain-raw` is explicitly supplied by the
+   operator. Retained raw artifacts remain outside Git, mode `600`, with SHA256
+   recorded.
+
+The runner is passive only: no injection, spoofing, traffic modification,
+replay, MITM, door/gate action, helper media session, HA deploy, HA restart, or
+OAuth refresh. If capture point/tooling/path is missing, it fails closed with
+`CAPTURE_POINT_MISSING=FAILED_SAFE` or equivalent `FAILED_SAFE` status.
+
+### Extraction fields
+
+Per post-active message/family the extractor implements:
+
+| Field | Meaning |
+|---|---|
+| `RELATIVE_TIME` | Seconds relative to operator `media_active_epoch`. |
+| `DIRECTION` | `CLIENT_TO_DEVICE`, `DEVICE_TO_CLIENT`, or `UNKNOWN_DIRECTION` from configured endpoints. |
+| `TRANSPORT_CLASS` | `UDP`, `TCP`, or `OTHER`. |
+| `PROTOCOL_FAMILY` | `RTP`, `RTCP`, `STUN_TURN`, `TLS_RECORD_METADATA`, `TCP_METADATA`, `UDP_METADATA`, `CTPP`, `RTPC`, `PSEUDOTCP`, or safe dissector family. |
+| `SAFE_MESSAGE_TYPE` | Structural class only, e.g. `RTP_PT_99`, `RTCP_PT_206`, `TLS_RECORD_METADATA`; no payload-derived secret. |
+| `MESSAGE_LENGTH` | Frame or transport length scalar. |
+| `REPEAT_COUNT` | Count in same safe class bucket. |
+| `FIRST_AT` | First relative time in bucket. |
+| `LAST_AT` | Last relative time in bucket. |
+| `CADENCE` | Median inter-arrival for repeated bucket, or `NONE`. |
+
+Candidate classes to inspect: `CTPP`, `RTPC`, `PSEUDOTCP_APPLICATION_TRAFFIC`,
+`ACK_CONTROL`, `HEARTBEAT_PING`, `SESSION_RENEWAL`, `RECEIVER_FEEDBACK`,
+`RTCP_FEEDBACK`, `KEYFRAME_IDR_REQUEST`, `STUN_TURN_KEEPALIVE`,
+`REPEATING_EVENT_LT36S`, and `CLIENT_TO_DEVICE_AFTER_36S`.
+
+RTP/H264 scalars implemented:
+`VIDEO_PACKET_COUNT`, `VIDEO_PT_SET`, `VIDEO_SSRC_CHANGE_COUNT`,
+`VIDEO_FIRST_TS`, `VIDEO_LAST_TS`, `SPS_COUNT`, `PPS_COUNT`, `IDR_COUNT`,
+`IDR_TIMES`.
+
+RTCP scalars implemented:
+`RTCP_PRESENT`, `RTCP_DIRECTION_SET`, `RTCP_PACKET_TYPES`, `RTCP_FIRST_AT`,
+`RTCP_LAST_AT`, `RTCP_REPEAT_COUNT`.
+
+### Privacy gate
+
+Repository evidence may contain only sanitized scalars: counts, lengths,
+relative timings, cadence, direction, protocol family, safe structural message
+classes, SHA256, file sizes, and provenance. It must not contain raw RTP/H264,
+raw application payloads, plaintext secrets, OAuth/access/refresh material, ICE
+username/password, device/account identifiers, session identifiers, endpoint
+material beyond proof need, or packet dumps. Summary template intentionally
+uses `PRIVACY_GATE=SCALAR_ONLY_NO_PAYLOAD_NO_IDENTIFIERS`.
+
+Raw artifacts policy: outside Git, mode `600`, SHA256 recorded, size recorded,
+deleted by default or retained only by explicit operator flag.
+
+Per-artifact provenance recorded:
+capture tool/version, extraction tool/version, interface/point, start/end UTC,
+start/end monotonic, filter expression, artifact SHA256, artifact size.
+
+### Comparison template
+
+Future comparison against our helper uses this scalar-only template:
+
+| EVENT | OFFICIAL_APP_SENDS | OUR_HELPER_SENDS | CADENCE | CONTINUES_AFTER_36S | MEDIA_LIFETIME_CANDIDATE | IDR_FEEDBACK_CANDIDATE |
+|---|---|---|---|---|---|---|
+| `CTPP` | `UNRESOLVED` | `UNRESOLVED` | `UNRESOLVED` | `UNRESOLVED` | `NOT_PROVEN` | `NOT_PROVEN` |
+| `RTPC` | `UNRESOLVED` | `UNRESOLVED` | `UNRESOLVED` | `UNRESOLVED` | `NOT_PROVEN` | `NOT_PROVEN` |
+| `PSEUDOTCP_APPLICATION_TRAFFIC` | `UNRESOLVED` | `UNRESOLVED` | `UNRESOLVED` | `UNRESOLVED` | `NOT_PROVEN` | `NOT_PROVEN` |
+| `ACK_CONTROL` | `UNRESOLVED` | `UNRESOLVED` | `UNRESOLVED` | `UNRESOLVED` | `NOT_PROVEN` | `NOT_PROVEN` |
+| `HEARTBEAT_PING` | `UNRESOLVED` | `UNRESOLVED` | `UNRESOLVED` | `UNRESOLVED` | `NOT_PROVEN` | `NOT_PROVEN` |
+| `SESSION_RENEWAL` | `UNRESOLVED` | `UNRESOLVED` | `UNRESOLVED` | `UNRESOLVED` | `NOT_PROVEN` | `NOT_PROVEN` |
+| `RECEIVER_FEEDBACK` | `UNRESOLVED` | `UNRESOLVED` | `UNRESOLVED` | `UNRESOLVED` | `NOT_PROVEN` | `NOT_PROVEN` |
+| `RTCP_FEEDBACK` | `UNRESOLVED` | `UNRESOLVED` | `UNRESOLVED` | `UNRESOLVED` | `NOT_PROVEN` | `NOT_PROVEN` |
+| `KEYFRAME_IDR_REQUEST` | `UNRESOLVED` | `UNRESOLVED` | `UNRESOLVED` | `UNRESOLVED` | `NOT_PROVEN` | `NOT_PROVEN` |
+| `STUN_TURN_KEEPALIVE` | `UNRESOLVED` | `UNRESOLVED` | `UNRESOLVED` | `UNRESOLVED` | `NOT_PROVEN` | `NOT_PROVEN` |
+| `REPEATING_EVENT_LT36S` | `UNRESOLVED` | `UNRESOLVED` | `<36s` if proven | `UNRESOLVED` | `PLAUSIBLE` when official-only | `NOT_PROVEN` |
+| `CLIENT_TO_DEVICE_AFTER_36S` | `UNRESOLVED` | `UNRESOLVED` | `UNRESOLVED` | `true` if proven | `PLAUSIBLE` when official-only | `NOT_PROVEN` |
+
+Closing verdict fields:
+
+| Verdict | Values |
+|---|---|
+| `MISSING_CLIENT_FEEDBACK_COULD_EXPLAIN_D1` | `PROVEN`, `PLAUSIBLE`, `REJECTED`, `UNRESOLVED` |
+| `MISSING_CLIENT_FEEDBACK_COULD_EXPLAIN_D2` | `PROVEN`, `PLAUSIBLE`, `REJECTED`, `UNRESOLVED` |
+| `COMMON_D1_D2_CAUSE` | `PROVEN`, `PLAUSIBLE`, `REJECTED`, `UNRESOLVED` |
+
+Current R13D state: `COMELIT_OFFICIAL_APP_LIVE=NOT_RUN`,
+`OUR_HELPER_MEDIA_SESSION=NOT_RUN`, `RTCP_ANALYSIS_READY=true`,
+`H264_IDR_TIMING_ANALYSIS_READY=true`, `COMPARISON_TEMPLATE_READY=true`.
+
 ## Host-verified offline results (2026-09-11)
 
 Все значения — фактический вывод host-прогонов, не предположения.
