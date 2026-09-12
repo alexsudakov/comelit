@@ -180,6 +180,195 @@ Open questions: did HA/FFmpeg bind both local UDP ports before first RTP; did
 it receive any datagrams; if yes, whether failure is SDP/extradata, RTP/H264
 format, audio leg behavior, timestamp handling, or upstream stop after ~36 s.
 
+## P116 R13C single-IDR closure (2026-09-12)
+
+R13C выполнен только offline, без socket/network/live/HA deploy. Исходный
+артефакт: `.p116-evidence/private/p115-run5/video.rtpdatagrams`,
+`sha256=76c8e173fa38e4f8b9fbba50b66899c292b802065240b17740d0db2a6b43373b`,
+framing `uint16_be_length_prefixed_rtp_payloads`, mode `600`.
+
+Конструкция варианта детерминированная: parser читает RTP PT99, группирует
+H264 NAL в access units по RTP timestamp/marker, находит второй AU с IDR и
+удаляет только RTP datagrams этого AU. Payload bytes вне этого AU не меняются;
+слепого byte patching нет. Derived stream записан вне Git:
+`.p116-evidence/private/p115-run5/video.single-idr.r13c.rtpdatagrams`,
+mode `600`, `sha256=f2aa0b671baaf55005b6a242419f48a9358bb448aaa2c4c4cec2c16462e490c6`.
+
+Идентификация удаленного IDR:
+
+| Scalar | Value |
+|---|---|
+| `SOURCE_RTP_DATAGRAMS` | `1538` |
+| `SOURCE_ACCESS_UNITS` | `745` |
+| `SOURCE_IDR_AU_COUNT` | `2` |
+| `SECOND_IDR_AU_INDEX` | `8` |
+| `SECOND_IDR_RTP_SEQ_RANGE` | `4916-4921` |
+| `SECOND_IDR_RTP_TS_RANGE` | `3606231252-3606231252` |
+| `SECOND_IDR_NAL_TYPES` | `5` |
+| `SECOND_IDR_PACKET_COUNT` | `6` |
+
+Валидация single-IDR variant под `/tmp/comelit-r13-pyav/bin/python`
+(`PyAV 17.0.1`, `libavformat 62.3.100`):
+
+| Marker | Value |
+|---|---|
+| `SINGLE_IDR_VARIANT_VALID` | `true` |
+| `IDR_AU_COUNT` | `1` |
+| `SPS_COUNT` | `9` |
+| `PPS_COUNT` | `9` |
+| `PYAV_OPEN` | `true` |
+| `VIDEO_STREAM_FOUND` | `true` |
+| `CODEC_EXTRADATA_SIZE` | `28` |
+| `VIDEO_TIME_BASE` | `1/1200000` |
+| `DECODED_FRAME_COUNT_SAMPLE` | `3` |
+| `FIRST_KEYFRAME_FOUND` | `true` |
+| `FIRST_KEYFRAME_DTS` | `0` |
+| `FIRST_KEYFRAME_PTS` | `0` |
+| `MUX_FIRST_KEYFRAME` | `PASS` |
+| `MP4_INIT_WRITTEN` | `true` |
+| `FIRST_MOOF_WRITTEN` | `true` |
+| `FIRST_MDAT_WRITTEN` | `true` |
+| `FIRST_SEGMENT_OBJECT_CREATED` | `true` |
+| `FIRST_LL_HLS_PART_CREATED` | `true` |
+| `FIRST_PART_HAS_KEYFRAME` | `true` |
+| `HLS_PLAYLIST_CAN_EXPOSE_OPEN_SEGMENT` | `true` |
+| `TIMESTAMP_VALIDATOR_DROPS` | `15` |
+
+Решения:
+
+| Decision | Value | Rationale |
+|---|---|---|
+| `SECOND_IDR_REQUIRED_FOR_FIRST_PART` | `false` | Single-IDR stream still creates the first LL-HLS Part with init/moof/mdat and first-part keyframe. |
+| `SECOND_IDR_REQUIRED_FOR_SEGMENT_CLOSE` | `true` | HA 2026.9.1 `StreamMuxer.mux_packet` closes a normal segment only on a later video keyframe after `min_segment_duration`; without a second keyframe this static close condition is not met. |
+| `D2_SINGLE_IDR_HYPOTHESIS_STATUS` | `closed` | The "no image because no second IDR is available for the first part" hypothesis is rejected for first-part creation. It remains separate from full segment closure. |
+
+## P116 R13C official-app capture plan
+
+Цель будущего owner-approved capture: сравнить
+`OFFICIAL_APP_POST_ACTIVE_EVENTS` и `OUR_HELPER_POST_ACTIVE_EVENTS` вокруг
+media-active и проверить, есть ли client feedback или post-active scheduler,
+которого нет у helper. Capture не выполняется в R13C; требуется отдельное
+решение владельца.
+
+Required window: `>=5 s before media-active and >=60 s after`, in both
+directions. `TRACE_REQUIRED_DIRECTIONS=client_to_device,device_to_client`.
+Начальная точка `media-active` фиксируется монотонным временем из локального
+capture runner; wall-clock используется только для внешней корреляции и не
+попадает в доказательства как identifier.
+
+Privacy gate:
+
+| Rule | Requirement |
+|---|---|
+| Secrets | Never carry OAuth/refresh/access/VIP tokens, ICE username/password, session IDs, device UUIDs, IP/address material beyond the proof need, raw application payload, raw RTP media, or raw H264 into repo evidence/docs. |
+| Raw PCAP | If needed, raw PCAP stays outside Git only, mode `600`, SHA256 recorded, analyzed locally, then deleted or retained only by owner policy. |
+| Repository evidence | Commit only sanitized scalar extracts: relative monotonic timestamp, direction, transport/channel class, protocol family, safe opcode/message type, length, repeat count, cadence, and RTP/RTCP/H264 structural counts. |
+| Redaction | Numeric-only unknowns resolve to `<redacted>` unless marker-specific policy below allows them. |
+
+Minimum extractable data per packet/message:
+
+| Family | Scalars |
+|---|---|
+| Common | relative monotonic timestamp, direction, transport/channel class, protocol family, safe opcode/message type, packet/message length, repeat count, cadence |
+| RTP | PT, packet counts, seq progression, timestamp progression, SSRC changes as count/change indicator only |
+| RTCP | presence, packet type, direction, cadence |
+| H264 | SPS count/times, PPS count/times, IDR count/times |
+
+Post-active candidate classes to check:
+
+| `EVENT` | `DIRECTION` | `FIRST_AT` | `LAST_AT` | `REPEAT_COUNT` | `CADENCE` | `MESSAGE_LENGTH` | `OUR_HELPER_EQUIVALENT` | `MEDIA_LIFETIME_CANDIDATE` | `IDR_FEEDBACK_CANDIDATE` | `SOURCE_EVIDENCE` |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `REPEATING_CTPP` | both | scalar | scalar | scalar | scalar | scalar | compare | PLAUSIBLE until official trace proves | NOT_PROVEN | sanitized CTPP frame class only |
+| `REPEATING_RTPC` | both | scalar | scalar | scalar | scalar | scalar | compare | PLAUSIBLE | PLAUSIBLE if opcode/timing matches feedback | sanitized RTPC envelope/opcode class |
+| `PSEUDOTCP_APPLICATION_TRAFFIC` | both | scalar | scalar | scalar | scalar | scalar | compare | PLAUSIBLE | PLAUSIBLE if post-IDR cadence aligns | length + safe flags only |
+| `ACK_CONTROL` | both | scalar | scalar | scalar | scalar | scalar | compare | PLAUSIBLE | PLAUSIBLE | ACK/control type, no payload |
+| `HEARTBEAT_PING` | both | scalar | scalar | scalar | scalar | scalar | compare | PLAUSIBLE | NOT_PROVEN | type + cadence |
+| `SESSION_RENEWAL` | client_to_device | scalar | scalar | scalar | scalar | scalar | compare | PLAUSIBLE | NOT_PROVEN | safe renewal marker only |
+| `RECEIVER_FEEDBACK` | client_to_device | scalar | scalar | scalar | scalar | scalar | compare | PLAUSIBLE | PLAUSIBLE | feedback class only |
+| `RTCP_FEEDBACK` | both | scalar | scalar | scalar | scalar | scalar | compare | PLAUSIBLE | PROVEN only if RTCP feedback type is present | RTCP packet type/count/cadence |
+| `KEYFRAME_IDR_REQUEST` | client_to_device | scalar | scalar | scalar | scalar | scalar | compare | PLAUSIBLE | PROVEN only with known safe IDR-request type | opcode/type class, no payload |
+| `TIMER_SCHEDULER_LT_36S` | both | scalar | scalar | scalar | `<36s` | scalar | compare | PLAUSIBLE | NOT_PROVEN | repeated event cadence |
+| `TRAFFIC_PAST_36S` | both | `>36s` | scalar | scalar | scalar | scalar | compare | PROVEN if official continues and helper stops | NOT_PROVEN | post-36s continuation class |
+
+Decision rule:
+
+| Question | Current R13C answer |
+|---|---|
+| `MISSING_CLIENT_FEEDBACK_COULD_EXPLAIN_D1_AND_D2` | `PLAUSIBLE` |
+
+Rationale: two helper attempts showed clean RTP then stop near 35-36 s, while
+the offline single-IDR result closes the first-part-specific second-IDR
+hypothesis. Missing post-active client feedback, RTCP feedback, heartbeat,
+renewal, or IDR request can plausibly explain both media lifetime and keyframe
+refresh behavior, but remains unproven until an official-app comparison exists.
+
+## P116 R13C numeric redaction policy proposal
+
+No production change is made in R13C. Existing regex `[0-9]{1,20}` is too
+wide because a numeric-only value can be a session, target, account, or device
+identifier. Proposed policy: unknown numerics resolve to `<redacted>`; numeric
+values are exposed only for an explicit safe marker or explicit safe family.
+Allowed families: packet counts, byte counts, durations, ages, seq-gap counts,
+duplicate/out-of-order/timestamp-regression counts, RTP structural timestamps
+when not a session identifier, PT, codec structural numbers, bounded sizes,
+SPS/PPS/IDR counts, and safe timing diagnostics. A catch-all numeric allowlist
+is forbidden.
+
+Marker-specific allowlist proposal:
+
+| `MARKER` | `VALUE_DOMAIN` | `SAFE_TO_EXPOSE` | `RATIONALE` |
+|---|---|---|---|
+| `REMOTE_SDP_BYTES` | byte count | `true` | Size only; no SDP text, token, ICE credential, address, or media payload. |
+| `PSEUDOTCP_APP_RX_EVENT` | bounded length + `OPEN`/`ACK` booleans | `true` | Length and safe flags support cadence analysis without payload. |
+| `P80_VIDEO_RTP_PORT` | fixed local loopback port | `true` | Static loopback handoff contract marker, not remote address material. |
+| `P80_AUDIO_RTP_PORT` | fixed local loopback port | `true` | Static loopback handoff contract marker, not remote address material. |
+| `P80_VIDEO_RTP_PACKETS` | packet count | `true` | Bounded progress counter. |
+| `P80_AUDIO_RTP_PACKETS` | packet count | `true` | Bounded progress counter. |
+| `P116_VIDEO_COUNT` | packet count | `true` | RTP structural count. |
+| `P116_VIDEO_FIRST_SEQ` | RTP sequence number | `true` | Structural sequence progression; not a session/device ID. |
+| `P116_VIDEO_LAST_SEQ` | RTP sequence number | `true` | Structural sequence progression; not a session/device ID. |
+| `P116_VIDEO_SEQ_GAPS` | count | `true` | Loss diagnostic count. |
+| `P116_VIDEO_DUPLICATES` | count | `true` | Duplicate packet diagnostic count. |
+| `P116_VIDEO_OUT_OF_ORDER` | count | `true` | Packet ordering diagnostic count. |
+| `P116_VIDEO_FIRST_TS` | RTP timestamp | `true` | RTP structural timestamp for progression only. |
+| `P116_VIDEO_LAST_TS` | RTP timestamp | `true` | RTP structural timestamp for progression only. |
+| `P116_VIDEO_TIMESTAMP_REGRESSIONS` | count | `true` | Timestamp diagnostic count. |
+| `P116_VIDEO_SSRC_COUNT` | count | `true` | Exposes only number of SSRCs, never SSRC value. |
+| `P116_VIDEO_SSRC_CHANGES` | count | `true` | Exposes only change count, never SSRC value. |
+| `P116_VIDEO_PT_SET` | RTP payload types | `true` | Codec/transport structural numbers. |
+| `P116_VIDEO_MARKER_COUNT` | count | `true` | RTP marker-bit count. |
+| `P116_VIDEO_FIRST_MONOTONIC_MS` | relative monotonic timing | `true` | Local timing diagnostic, not wall-clock or identifier. |
+| `P116_VIDEO_LAST_MONOTONIC_MS` | relative monotonic timing | `true` | Local timing diagnostic, not wall-clock or identifier. |
+| `P116_VIDEO_FIRST_KEYFRAME_MONOTONIC_MS` | relative monotonic timing | `true` | Local keyframe timing diagnostic. |
+| `P116_VIDEO_SPS_COUNT` | count | `true` | H264 structural count. |
+| `P116_VIDEO_PPS_COUNT` | count | `true` | H264 structural count. |
+| `P116_VIDEO_FUA_COUNT` | count | `true` | RTP/H264 packetization structural count. |
+| `P116_VIDEO_SINGLE_NAL_COUNT` | count | `true` | RTP/H264 packetization structural count. |
+| `P116_AUDIO_COUNT` | packet count | `true` | RTP structural count. |
+| `P116_AUDIO_FIRST_SEQ` | RTP sequence number | `true` | Structural sequence progression; not a session/device ID. |
+| `P116_AUDIO_LAST_SEQ` | RTP sequence number | `true` | Structural sequence progression; not a session/device ID. |
+| `P116_AUDIO_SEQ_GAPS` | count | `true` | Loss diagnostic count. |
+| `P116_AUDIO_DUPLICATES` | count | `true` | Duplicate packet diagnostic count. |
+| `P116_AUDIO_OUT_OF_ORDER` | count | `true` | Packet ordering diagnostic count. |
+| `P116_AUDIO_FIRST_TS` | RTP timestamp | `true` | RTP structural timestamp for progression only. |
+| `P116_AUDIO_LAST_TS` | RTP timestamp | `true` | RTP structural timestamp for progression only. |
+| `P116_AUDIO_TIMESTAMP_REGRESSIONS` | count | `true` | Timestamp diagnostic count. |
+| `P116_AUDIO_SSRC_COUNT` | count | `true` | Exposes only number of SSRCs, never SSRC value. |
+| `P116_AUDIO_SSRC_CHANGES` | count | `true` | Exposes only change count, never SSRC value. |
+| `P116_AUDIO_PT_SET` | RTP payload types | `true` | Codec/transport structural numbers. |
+| `P116_AUDIO_FIRST_MONOTONIC_MS` | relative monotonic timing | `true` | Local timing diagnostic, not wall-clock or identifier. |
+| `P116_AUDIO_LAST_MONOTONIC_MS` | relative monotonic timing | `true` | Local timing diagnostic, not wall-clock or identifier. |
+| `ENTRANCE_MEDIA_OBSERVATION_RX_EVENT` | packet/message length | `true` | Bounded receive length only; payload is not emitted. |
+| `CTPP_*` unknown numeric-only value | unknown numeric | `false` | Could be session, target, account, or device identifier unless explicitly typed. |
+| `RTPC_*` unknown numeric-only value | unknown numeric | `false` | Could be session, target, account, or device identifier unless explicitly typed. |
+| `P80_DEVICE_*` numeric suffix/value | device/opcode marker | `false` for generic numeric value, `true` only for explicit safe opcode labels | Device/target IDs must not be exposed as generic numerics. |
+| `V4_CTPP_*` unknown numeric-only value | unknown numeric | `false` | Legacy CTPP numeric values can be identifiers. |
+| `SELECTED_PAIR_*` numeric-only value | ICE/network candidate detail | `false` | Can encode network or session material. |
+| `ICE_*` numeric-only value | ICE/session/network diagnostic | `false` by default | Safe only if explicitly reduced to count/cadence/state. |
+
+`REDACTION_NUMERIC_POLICY=unknown_numeric_redacted_marker_specific_allowlist`
+and `MARKER_SPECIFIC_ALLOWLIST_PROPOSAL=true`.
+
 ## Host-verified offline results (2026-09-11)
 
 Все значения — фактический вывод host-прогонов, не предположения.
