@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import inspect
 import logging
 import re
 from typing import Any
+from urllib.parse import urljoin
 
 from homeassistant.components.camera import (
     Camera,
@@ -36,9 +38,42 @@ try:  # pragma: no cover - import-shape guard around HA internals
 except Exception:  # pragma: no cover - keeps the integration importable
     HLS_PROVIDER = "hls_provider"
 
+try:  # pragma: no cover - optional HA runtime helper
+    from homeassistant.components.camera.const import StreamType
+except Exception:  # pragma: no cover - import-shape guard around HA internals
+    try:
+        from homeassistant.components.camera import StreamType
+    except Exception:  # pragma: no cover - keeps static tooling importable
+        StreamType = None
+
+try:  # pragma: no cover - optional HA runtime helper
+    from homeassistant.helpers.aiohttp_client import async_get_clientsession
+except Exception:  # pragma: no cover - self-HTTP unavailable
+    async_get_clientsession = None
+
+try:  # pragma: no cover - optional HA runtime helper
+    from homeassistant.helpers.network import NoURLAvailableError, get_url
+except Exception:  # pragma: no cover - self-HTTP unavailable
+    NoURLAvailableError = Exception
+    get_url = None
+
+try:  # pragma: no cover - optional HA runtime helper
+    from aiohttp import ClientTimeout
+except Exception:  # pragma: no cover - self-HTTP unavailable
+    ClientTimeout = None
+
+try:  # pragma: no cover - HA private implementation guard
+    from homeassistant.components.stream.hls import HlsMasterPlaylistView, HlsPlaylistView
+except Exception:  # pragma: no cover - direct render unavailable
+    HlsMasterPlaylistView = None
+    HlsPlaylistView = None
+
 
 _LOGGER = logging.getLogger(__name__)
 _DIAGNOSTIC_SAFE_STRING = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
+_HLS_CODEC_STRING = re.compile(
+    r"^(avc1|avc3|hvc1|hev1|mp4a|opus|mp4v)\.[0-9A-Fa-f.]+$"
+)
 _HLS_DIAGNOSTIC_FIELDS = (
     "ha_stream_created",
     "ha_stream_available",
@@ -54,6 +89,51 @@ _HLS_DIAGNOSTIC_FIELDS = (
     "hls_first_part_has_keyframe",
     "hls_first_segment_complete",
     "hls_second_segment_created",
+)
+_HLS_HTTP_DIAGNOSTIC_FIELDS = (
+    "hls_endpoint_generated",
+    "hls_probe_mode",
+    "hls_probe_completed",
+    "hls_http_routing_proven",
+    "hls_master_probe_attempted",
+    "hls_master_http_status",
+    "hls_master_content_type_ok",
+    "hls_master_bytes",
+    "hls_master_has_extm3u",
+    "hls_master_has_stream_inf",
+    "hls_master_has_playlist_reference",
+    "hls_master_codec_string",
+    "hls_media_probe_attempted",
+    "hls_media_http_status",
+    "hls_media_content_type_ok",
+    "hls_media_bytes",
+    "hls_media_has_extm3u",
+    "hls_media_has_map",
+    "hls_media_has_part",
+    "hls_media_has_extinf",
+    "hls_media_part_reference_count",
+    "hls_media_segment_reference_count",
+    "hls_init_probe_attempted",
+    "hls_init_http_status",
+    "hls_init_content_type_ok",
+    "hls_init_bytes_http",
+    "hls_part_probe_attempted",
+    "hls_part_http_status",
+    "hls_part_content_type_ok",
+    "hls_part_bytes_http",
+    "camera_frontend_hls_supported",
+    "camera_frontend_webrtc_supported",
+    "camera_webrtc_provider_present",
+)
+_HLS_PLAYLIST_CONTENT_TYPES = (
+    "application/vnd.apple.mpegurl",
+    "application/x-mpegurl",
+    "audio/mpegurl",
+)
+_HLS_MEDIA_CONTENT_TYPES = (
+    "video/mp4",
+    "application/mp4",
+    "application/octet-stream",
 )
 
 
@@ -74,6 +154,48 @@ def _format_diagnostic_value(value: Any) -> str:
     if safe is not None:
         return safe
     return "unknown"
+
+
+def _bounded_non_bool_int(value: Any, *, maximum: int | None = None) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        if maximum is not None:
+            return min(value, maximum)
+        return value
+    return None
+
+
+def _content_type_matches(value: str | None, prefixes: tuple[str, ...]) -> bool:
+    if value is None:
+        return False
+    normalized = value.split(";", 1)[0].strip().lower()
+    return any(normalized.startswith(prefix) for prefix in prefixes)
+
+
+def _extract_hls_codec_string(playlist: str) -> str:
+    match = re.search(r'CODECS="([^"]{1,128})"', playlist)
+    if match is None:
+        return "unknown"
+    tokens = [token.strip() for token in match.group(1).split(",")]
+    joined = ",".join(tokens)
+    if not tokens or len(joined) > 64:
+        return "unknown"
+    if all(_HLS_CODEC_STRING.fullmatch(token) for token in tokens):
+        return joined
+    return "unknown"
+
+
+def _count_bounded(pattern: str, text: str) -> int:
+    return min(len(re.findall(pattern, text)), 64)
+
+
+def _first_relative_part_name(playlist: str) -> str | None:
+    match = re.search(r'#EXT-X-PART:[^\n]*URI="([^"]+)"', playlist)
+    if match is None:
+        return None
+    name = match.group(1)
+    if "://" in name or name.startswith("//") or "/" in name or not name.endswith(".m4s"):
+        return None
+    return name
 
 
 async def async_setup_entry(
@@ -116,6 +238,9 @@ class ComelitEntranceCamera(Camera):
         self._transport = transport
         self._stream_reset_task: asyncio.Task[None] | None = None
         self._last_hls_diagnostics_signature: tuple[Any, ...] | None = None
+        self._hls_http_probe_task: asyncio.Task[None] | None = None
+        self._hls_http_probe_done = False
+        self._hls_http_probe_result: dict[str, Any] | None = None
         self.entity_id = ENTRANCE_CAMERA_ENTITY_ID
 
     @property
@@ -156,7 +281,71 @@ class ComelitEntranceCamera(Camera):
             "hard_limit_seconds": self._manager.hard_limit_seconds,
         }
         attrs.update(self._hls_runtime_diagnostics())
+        attrs.update(self._hls_http_boundary_diagnostics())
         return attrs
+
+    def _new_hls_http_probe_result(self) -> dict[str, Any]:
+        result: dict[str, Any] = dict.fromkeys(_HLS_HTTP_DIAGNOSTIC_FIELDS)
+        result.update(
+            {
+                "hls_endpoint_generated": False,
+                "hls_probe_mode": "none",
+                "hls_probe_completed": False,
+                "hls_http_routing_proven": False,
+                "hls_master_probe_attempted": False,
+                "hls_master_codec_string": "unknown",
+                "hls_media_probe_attempted": False,
+                "hls_init_probe_attempted": False,
+                "hls_part_probe_attempted": False,
+            }
+        )
+        result.update(self._camera_frontend_capability_diagnostics())
+        return result
+
+    def _hls_http_boundary_diagnostics(self) -> dict[str, Any]:
+        result = self._new_hls_http_probe_result()
+        if self._hls_http_probe_result is not None:
+            result.update(self._hls_http_probe_result)
+        return result
+
+    def _reset_hls_http_probe_state(self) -> None:
+        if self._hls_http_probe_task is not None and not self._hls_http_probe_task.done():
+            self._hls_http_probe_task.cancel()
+        self._hls_http_probe_task = None
+        self._hls_http_probe_done = False
+        self._hls_http_probe_result = None
+
+    def _camera_frontend_capability_diagnostics(self) -> dict[str, bool | None]:
+        hls_supported: bool | None = None
+        webrtc_supported: bool | None = None
+        provider_present: bool | None = None
+        try:
+            capabilities = self.camera_capabilities
+        except Exception:
+            capabilities = None
+        try:
+            stream_types = capabilities.frontend_stream_types
+        except Exception:
+            stream_types = None
+        if (
+            StreamType is not None
+            and isinstance(stream_types, (set, frozenset, list, tuple))
+        ):
+            try:
+                hls_supported = StreamType.HLS in stream_types
+                webrtc_supported = StreamType.WEB_RTC in stream_types
+            except Exception:
+                hls_supported = None
+                webrtc_supported = None
+        try:
+            provider_present = getattr(self, "webrtc_provider", None) is not None
+        except Exception:
+            provider_present = None
+        return {
+            "camera_frontend_hls_supported": hls_supported,
+            "camera_frontend_webrtc_supported": webrtc_supported,
+            "camera_webrtc_provider_present": provider_present,
+        }
 
     def _hls_runtime_diagnostics(self) -> dict[str, Any]:
         diagnostics: dict[str, Any] = dict.fromkeys(_HLS_DIAGNOSTIC_FIELDS)
@@ -362,6 +551,7 @@ class ComelitEntranceCamera(Camera):
                 self.hass.data[STREAM_DOMAIN][ATTR_STREAMS].append(stream)
                 stream.set_update_callback(self.async_write_ha_state)
                 self.stream = stream
+                self._reset_hls_http_probe_state()
                 self._last_hls_diagnostics_signature = None
             return self.stream
 
@@ -398,10 +588,27 @@ class ComelitEntranceCamera(Camera):
                     self._async_reset_stream(),
                     "reset Comelit entrance camera stream",
                 )
+        hls_diagnostics = self._hls_runtime_diagnostics()
+        if (
+            hls_diagnostics["ha_stream_created"]
+            and hls_diagnostics["hls_provider_present"]
+            and isinstance(hls_diagnostics["hls_segment_count"], int)
+            and hls_diagnostics["hls_segment_count"] >= 2
+            and not self._hls_http_probe_done
+            and (
+                self._hls_http_probe_task is None
+                or self._hls_http_probe_task.done()
+            )
+        ):
+            self._hls_http_probe_task = self.hass.async_create_task(
+                self._async_probe_hls_http_boundary(),
+                "probe Comelit HLS HTTP boundary",
+            )
         self._log_hls_runtime_diagnostics_if_changed()
         self.async_write_ha_state()
 
     async def _async_reset_stream(self) -> None:
+        self._reset_hls_http_probe_state()
         self._last_hls_diagnostics_signature = None
         stream = self.stream
         if stream is None:
@@ -409,3 +616,314 @@ class ComelitEntranceCamera(Camera):
         await stream.stop()
         if self.stream is stream:
             self.stream = None
+
+    async def _async_probe_hls_http_boundary(self) -> None:
+        result = self._new_hls_http_probe_result()
+        cancelled = False
+        try:
+            result.update(await self._async_build_hls_http_boundary_result())
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            result["hls_probe_mode"] = "unavailable"
+        finally:
+            if cancelled:
+                return
+            result["hls_probe_completed"] = True
+            result.update(self._camera_frontend_capability_diagnostics())
+            self._hls_http_probe_result = result
+            self._hls_http_probe_done = True
+            _LOGGER.info(
+                "Comelit HLS HTTP diagnostics: %s",
+                " ".join(
+                    f"{key}={_format_diagnostic_value(result.get(key))}"
+                    for key in _HLS_HTTP_DIAGNOSTIC_FIELDS
+                ),
+            )
+            self.async_write_ha_state()
+
+    async def _async_build_hls_http_boundary_result(self) -> dict[str, Any]:
+        stream = self.stream
+        if stream is None:
+            result = self._new_hls_http_probe_result()
+            result["hls_probe_mode"] = "unavailable"
+            return result
+
+        endpoint = self._hls_endpoint_fragment(stream)
+        if endpoint is None:
+            return await self._async_direct_render_hls_probe(
+                stream,
+                hls_endpoint_generated=False,
+            )
+
+        if get_url is None or async_get_clientsession is None or ClientTimeout is None:
+            return await self._async_direct_render_hls_probe(
+                stream,
+                hls_endpoint_generated=True,
+            )
+
+        try:
+            base = get_url(
+                self.hass,
+                allow_internal=True,
+                prefer_external=False,
+            )
+        except NoURLAvailableError:
+            return await self._async_direct_render_hls_probe(
+                stream,
+                hls_endpoint_generated=True,
+            )
+        except Exception:
+            return await self._async_direct_render_hls_probe(
+                stream,
+                hls_endpoint_generated=True,
+            )
+
+        return await self._async_self_http_hls_probe(base, endpoint)
+
+    def _hls_endpoint_fragment(self, stream: Stream) -> str | None:
+        try:
+            endpoint = stream.endpoint_url(HLS_PROVIDER)
+        except Exception:
+            return None
+        if not isinstance(endpoint, str) or not endpoint:
+            return None
+        return endpoint
+
+    async def _async_self_http_hls_probe(
+        self,
+        base: str,
+        endpoint: str,
+    ) -> dict[str, Any]:
+        result = self._new_hls_http_probe_result()
+        result["hls_endpoint_generated"] = True
+        result["hls_probe_mode"] = "self_http"
+        session = async_get_clientsession(self.hass)
+        timeout = ClientTimeout(total=10)
+        master_address = urljoin(base.rstrip("/") + "/", endpoint.lstrip("/"))
+        master = await self._async_fetch_hls_scalar(
+            session,
+            master_address,
+            timeout,
+            _HLS_PLAYLIST_CONTENT_TYPES,
+            read_text=True,
+        )
+        result.update(
+            {
+                "hls_master_probe_attempted": True,
+                "hls_master_http_status": master["status"],
+                "hls_master_content_type_ok": master["content_type_ok"],
+                "hls_master_bytes": master["bytes"],
+            }
+        )
+        master_text = master["text"]
+        if isinstance(master_text, str):
+            result.update(
+                {
+                    "hls_master_has_extm3u": "#EXTM3U" in master_text,
+                    "hls_master_has_stream_inf": "#EXT-X-STREAM-INF" in master_text,
+                    "hls_master_has_playlist_reference": (
+                        _count_bounded(r"\.m3u8(?:\?|$)", master_text) == 1
+                    ),
+                    "hls_master_codec_string": _extract_hls_codec_string(master_text),
+                }
+            )
+
+        media_address = master_address.replace("master_playlist.m3u8", "playlist.m3u8")
+        media = await self._async_fetch_hls_scalar(
+            session,
+            media_address,
+            timeout,
+            _HLS_PLAYLIST_CONTENT_TYPES,
+            read_text=True,
+        )
+        result.update(
+            {
+                "hls_media_probe_attempted": True,
+                "hls_media_http_status": media["status"],
+                "hls_media_content_type_ok": media["content_type_ok"],
+                "hls_media_bytes": media["bytes"],
+            }
+        )
+        media_text = media["text"]
+        part_name = None
+        if isinstance(media_text, str):
+            part_name = _first_relative_part_name(media_text)
+            result.update(
+                {
+                    "hls_media_has_extm3u": "#EXTM3U" in media_text,
+                    "hls_media_has_map": "#EXT-X-MAP" in media_text,
+                    "hls_media_has_part": "#EXT-X-PART" in media_text,
+                    "hls_media_has_extinf": "#EXTINF" in media_text,
+                    "hls_media_part_reference_count": _count_bounded(
+                        r'#EXT-X-PART:[^\n]*URI="[^"]+\.m4s"', media_text
+                    ),
+                    "hls_media_segment_reference_count": min(
+                        _count_bounded(r"#EXTINF", media_text),
+                        _count_bounded(r"(?m)^[^#\n][^\n]*\.m4s(?:\?|$)", media_text),
+                    ),
+                }
+            )
+
+        init_address = media_address.replace("playlist.m3u8", "init.mp4")
+        init = await self._async_fetch_hls_scalar(
+            session,
+            init_address,
+            timeout,
+            _HLS_MEDIA_CONTENT_TYPES,
+            read_text=False,
+        )
+        result.update(
+            {
+                "hls_init_probe_attempted": True,
+                "hls_init_http_status": init["status"],
+                "hls_init_content_type_ok": init["content_type_ok"],
+                "hls_init_bytes_http": init["bytes"],
+            }
+        )
+
+        if part_name is not None:
+            part_address = media_address.rsplit("/", 1)[0] + "/" + part_name
+            part = await self._async_fetch_hls_scalar(
+                session,
+                part_address,
+                timeout,
+                _HLS_MEDIA_CONTENT_TYPES,
+                read_text=False,
+            )
+            result.update(
+                {
+                    "hls_part_probe_attempted": True,
+                    "hls_part_http_status": part["status"],
+                    "hls_part_content_type_ok": part["content_type_ok"],
+                    "hls_part_bytes_http": part["bytes"],
+                }
+            )
+
+        result["hls_http_routing_proven"] = all(
+            _bounded_non_bool_int(result.get(field)) is not None
+            and 200 <= result[field] < 300
+            for field in (
+                "hls_master_http_status",
+                "hls_media_http_status",
+                "hls_init_http_status",
+            )
+        )
+        return result
+
+    async def _async_fetch_hls_scalar(
+        self,
+        session: Any,
+        address: str,
+        timeout: Any,
+        content_types: tuple[str, ...],
+        *,
+        read_text: bool,
+    ) -> dict[str, Any]:
+        scalar = {
+            "status": None,
+            "content_type_ok": None,
+            "bytes": None,
+            "text": None,
+        }
+        try:
+            async with session.get(
+                address,
+                allow_redirects=False,
+                timeout=timeout,
+            ) as response:
+                scalar["status"] = _bounded_non_bool_int(response.status)
+                content_type_ok = _content_type_matches(
+                    response.headers.get("Content-Type"),
+                    content_types,
+                )
+                if 300 <= response.status < 400:
+                    content_type_ok = False
+                scalar["content_type_ok"] = content_type_ok
+                body = await response.read()
+                scalar["bytes"] = len(body)
+                if read_text:
+                    scalar["text"] = body[:65536].decode("utf-8", "replace")
+        except Exception:
+            pass
+        return scalar
+
+    async def _async_direct_render_hls_probe(
+        self,
+        stream: Stream,
+        *,
+        hls_endpoint_generated: bool,
+    ) -> dict[str, Any]:
+        result = self._new_hls_http_probe_result()
+        result["hls_http_routing_proven"] = False
+        if HlsMasterPlaylistView is None or HlsPlaylistView is None:
+            result["hls_probe_mode"] = "unavailable"
+            return result
+        try:
+            outputs = stream.outputs()
+            track = outputs.get(HLS_PROVIDER)
+        except Exception:
+            track = None
+        if track is None:
+            result["hls_probe_mode"] = "unavailable"
+            return result
+        result["hls_probe_mode"] = "direct_render"
+        result["hls_master_probe_attempted"] = True
+        result["hls_media_probe_attempted"] = True
+        result["hls_master_http_status"] = None
+        result["hls_media_http_status"] = None
+        result["hls_init_http_status"] = None
+        result["hls_part_http_status"] = None
+        try:
+            master_text = HlsMasterPlaylistView.render(track)
+            if inspect.isawaitable(master_text):
+                master_text = await master_text
+            media_text = HlsPlaylistView.render(track)
+            if inspect.isawaitable(media_text):
+                media_text = await media_text
+            if not isinstance(master_text, str) or not isinstance(media_text, str):
+                result["hls_probe_mode"] = "unavailable"
+                return result
+            result["hls_endpoint_generated"] = hls_endpoint_generated
+            result["hls_master_bytes"] = len(master_text.encode("utf-8"))
+            result["hls_media_bytes"] = len(media_text.encode("utf-8"))
+            if master_text:
+                result.update(
+                    {
+                        "hls_master_has_extm3u": "#EXTM3U" in master_text,
+                        "hls_master_has_stream_inf": "#EXT-X-STREAM-INF" in master_text,
+                        "hls_master_has_playlist_reference": (
+                            _count_bounded(r"\.m3u8(?:\?|$)", master_text) == 1
+                        ),
+                        "hls_master_codec_string": _extract_hls_codec_string(
+                            master_text
+                        ),
+                    }
+                )
+            if media_text:
+                result.update(
+                    {
+                        "hls_media_has_extm3u": "#EXTM3U" in media_text,
+                        "hls_media_has_map": "#EXT-X-MAP" in media_text,
+                        "hls_media_has_part": "#EXT-X-PART" in media_text,
+                        "hls_media_has_extinf": "#EXTINF" in media_text,
+                        "hls_media_part_reference_count": _count_bounded(
+                            r'#EXT-X-PART:[^\n]*URI="[^"]+\.m4s"', media_text
+                        ),
+                        "hls_media_segment_reference_count": min(
+                            _count_bounded(r"#EXTINF", media_text),
+                            _count_bounded(
+                                r"(?m)^[^#\n][^\n]*\.m4s(?:\?|$)",
+                                media_text,
+                            ),
+                        ),
+                    }
+                )
+        except Exception:
+            result["hls_probe_mode"] = "unavailable"
+        result["hls_http_routing_proven"] = False
+        result["hls_master_http_status"] = None
+        result["hls_media_http_status"] = None
+        result["hls_init_http_status"] = None
+        result["hls_part_http_status"] = None
+        return result
