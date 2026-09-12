@@ -462,3 +462,167 @@ Decision classes from the owner:
   после первого keyframe, а также фактическая пригодность аудио-потока.
 - Требуется один bounded live-замер semantic RTP telemetry (только скаляры, без payload) на
   immutable SHA этой ветки.
+
+## R13 HA render path + media lifetime forensics
+
+`BASE_SHA=139c2b78c8a0dfd9bc5ed521a66c9c522e3a5da8`. Эта итерация была
+строго offline: live Comelit/HA restart/deploy/OAuth/Door/Gate не выполнялись,
+`custom_components/**` и `.p116-evidence/**` не изменялись, native binary не
+запускался.
+
+### D2 chain
+
+`RTP PT99 -> FFmpeg RTP demux = PROVEN_STATIC`: staged SDP/bridge contract
+использует PT99 H264/90000 на `127.0.0.1:17899`, а FFmpeg 6.1.1/7.1.1
+`rtpdec_h264.c` парсит `packetization-mode` и обрабатывает FU-A (`case 28`)
+без проверки этого поля. `sprop-parameter-sets` является статическим SDP-путем
+к `codecpar->extradata`; in-band SPS/PPS пригодность для HA PyAV в этой среде
+не закрыта, потому что `import av` отсутствует.
+
+`FFmpeg RTP demux -> av.Packet = UNRESOLVED_INPUT_UNAVAILABLE`: локально нет
+PyAV и нет raw RTP capture. Можно доказать только C-код RTP depacketizer и
+старый host-harness результат; нельзя измерить `packet.dts`, `packet.pts`,
+`packet.time_base`, `packet.is_keyframe` для текущего production потока.
+
+`av.Packet -> TimestampValidator = PROVEN_STATIC`: `TimestampValidator` в
+`.p116-evidence/stream/worker.py` отбрасывает пакеты без DTS до
+`MAX_MISSING_DTS + 1`, отбрасывает non-monotonic DTS, и бросает
+`StreamWorkerError` только при большом разрыве DTS. Наблюдаемая ошибка
+`Error demuxing stream (...)` находится после успешного поиска первого
+keyframe и после `muxer.mux_packet(first_keyframe)`.
+
+`TimestampValidator -> first_keyframe = OBSERVED`: HA лог R11/R12 указывает на
+поздний `Error demuxing stream (...)`, а staged worker достигает этого текста
+только после `first_keyframe = next(...)` и успешного mux первого keyframe.
+
+`first_keyframe -> StreamMuxer.reset() -> mux_packet(first_keyframe) =
+OBSERVED`: тот же observed branch доказывает прохождение этих переходов до
+ошибки чтения следующего пакета.
+
+`subsequent mux_packet() = UNRESOLVED_INPUT_UNAVAILABLE`: ошибка возникает на
+`next(container_packets)`, поэтому локально не доказано, был ли следующий
+валидный video packet отдан muxer, был ли он отфильтрован validator, или PyAV
+заблокировался до выдачи пакета.
+
+`MP4 fragment bytes -> StreamMuxer.create_segment() -> Segment.async_add_part()
+= NOT_PROVEN`: staged muxer создает `Segment` только когда `delay_moov`/FFmpeg
+передвинул `BytesIO` и затем вызывает `async_add_part(Part(...))`. Но без PyAV
+и capture нельзя доказать, что первый `moof/mdat` реально был записан на
+production packet sequence.
+
+`HLS playlist/part availability = UNRESOLVED_INPUT_UNAVAILABLE`: staged
+`core.py` содержит `Segment.render_hls()`, но provider layer
+`.p116-evidence/stream/hls.py` отсутствует. Для закрытия нужны `HlsStreamOutput`
+и view/segment/part handlers из `stream/hls.py`.
+
+Скалярный вывод: `D2_FIRST_LL_HLS_PART_CREATED=UNRESOLVED`,
+`VIDEO_CODEC_EXTRADATA_AVAILABLE_BEFORE_MUX=UNRESOLVED_INPUT_UNAVAILABLE`,
+`VIDEO_TIME_BASE=UNRESOLVED_INPUT_UNAVAILABLE`,
+`FIRST_KEYFRAME_DTS_PTS_VALID=OBSERVED`, `NEXT_VIDEO_PACKET_DTS_PTS_VALID=UNRESOLVED`,
+`TIMESTAMP_VALIDATOR_DROPS=NOT_PROVEN`, `MUX_FIRST_KEYFRAME=PASS`,
+`MP4_INIT_WRITTEN=NOT_PROVEN`, `FIRST_MOOF_WRITTEN=NOT_PROVEN`,
+`FIRST_SEGMENT_OBJECT_CREATED=NOT_PROVEN`, `FIRST_PART_CREATED=NOT_PROVEN`,
+`FIRST_PART_HAS_KEYFRAME=NOT_PROVEN`,
+`HLS_PLAYLIST_CAN_EXPOSE_OPEN_SEGMENT=UNRESOLVED_INPUT_UNAVAILABLE`.
+
+`PCMA_BLOCKS_VIDEO_MUX=false`: staged HA `stream/const.py` supports only
+`{"aac", "mp3"}` audio. `worker.py` sets `audio_stream = None` when the codec
+name is outside that set, so PT8/PCMA cannot be a required output mux dependency
+for video in this HA path.
+
+LL-HLS default path: `ll_hls=True`, segment duration default `6`, part duration
+default `1`, `min_segment_duration=5.9`, `frag_duration=900000` microseconds
+for 1s parts, `delay_moov` enabled. A second keyframe after `min_segment_duration`
+is statically required to close the first full `Segment`. A second IDR is
+`NOT_PROVEN` as required for the first playable `Part`; that depends on actual
+first `moof/mdat` emission and `stream/hls.py` open-part exposure.
+
+Offline reproduction: `python3 safety-poc/research/media/v1/entrance_p116_sdp_rtp_bridge_harness.py --run`
+generated synthetic input (`access_units=12`, `idr_count=12`, SPS/PPS present)
+but stopped at `HARNESS_STATUS=NOT_RUN reason=socket_create:PermissionError`.
+Therefore V1/V2/V3/V4 decisive `NO_PART -> PART_CREATED` or
+`NO_PLAYABLE_OUTPUT -> PLAYABLE_OUTPUT` transitions were not run in this
+sandbox.
+
+### D1 outbound inventory
+
+Required conclusion: `OUR_RTP_STOP_AROUND_36S=PROVEN_FOR_3_P116_SESSIONS`,
+`PERIODIC_CLIENT_TRAFFIC_REQUIRED=NOT_PROVEN`,
+`KEEPALIVE_MESSAGE_TYPE=NOT_PROVEN`.
+
+Generated helper inventory after `P80_MEDIA_ACTIVE=true`:
+
+`EVENT=P80 media active markers`, `DIRECTION=stdout only`,
+`FIRST_OBSERVED=immediate`, `CADENCE=once`, `SOURCE_EVIDENCE=entrance_p80...:600-607`,
+`OUR_HELPER_SENDS_IT=false`, `LIFETIME_CAUSALITY=NOT_PROVEN`,
+`IDR_CAUSALITY=NOT_PROVEN`.
+
+`EVENT=PT99/PT8 RTP loopback forwarding`, `DIRECTION=helper -> HA localhost UDP`,
+`FIRST_OBSERVED=first accepted RTP`, `CADENCE=inbound-RTP-driven`,
+`SOURCE_EVIDENCE=entrance_p80...:529-575`, `OUR_HELPER_SENDS_IT=true`,
+`LIFETIME_CAUSALITY=NOT_PROVEN`, `IDR_CAUSALITY=NOT_PROVEN`.
+
+`EVENT=P80 RTP packet progress markers`, `DIRECTION=stdout only`,
+`FIRST_OBSERVED=packet 1`, `CADENCE=1 then every 50 per stream`,
+`SOURCE_EVIDENCE=entrance_p80...:547-575`, `OUR_HELPER_SENDS_IT=false`,
+`LIFETIME_CAUSALITY=NOT_PROVEN`, `IDR_CAUSALITY=NOT_PROVEN`.
+
+`EVENT=non-media PseudoTCP receive path`, `DIRECTION=device -> helper/libnice`,
+`FIRST_OBSERVED=whenever non-media datagram arrives`, `CADENCE=input-driven`,
+`SOURCE_EVIDENCE=entrance_p80...:612-622 plus inherited PseudoTCP code`,
+`OUR_HELPER_SENDS_IT=false`, `LIFETIME_CAUSALITY=PLAUSIBLE`,
+`IDR_CAUSALITY=PLAUSIBLE`.
+
+`EVENT=P97/P92 missing ACK timers`, `DIRECTION=internal fail-closed timer`,
+`FIRST_OBSERVED=before media-active only`, `CADENCE=one-shot 3s gates`,
+`SOURCE_EVIDENCE=entrance_p97...:204-227; entrance_p92...:121-133`,
+`OUR_HELPER_SENDS_IT=false`, `LIFETIME_CAUSALITY=NOT_PROVEN`,
+`IDR_CAUSALITY=NOT_PROVEN`.
+
+Repo capture artifacts contain an official-app teardown signature at about
+35.098s in `self_activation.pcap` and 47.284s in `p2p_rtsp.pcap`, plus
+media-bearing non-PseudoTCP RTP and residual PseudoTCP app traffic. They do not
+contain a local frozen P77 raw RTP artifact, and they do not prove a repeating
+CTPP/RTPC heartbeat, RTCP feedback, PLI/FIR, keyframe request, or session-renewal
+message. `MISSING_CLIENT_FEEDBACK_COULD_EXPLAIN_D1_AND_D2=PLAUSIBLE`, because a
+post-active official-client feedback loop could both extend media lifetime and
+request/trigger decodable/keyframe cadence, but no local artifact proves it.
+
+### Redaction audit
+
+Текущий value regex разрешает booleans, PASS/FAIL-style enums, `FATAL`, `NONE`,
+decimal scalars and comma-separated small integer sets. Поэтому часть safe
+enum/scalar markers is redacted today.
+
+`SAFE_REDACTION_EXPANSION=` exact proposal:
+`^(?:PASS|FAIL|true|false|READY|OPEN|CLOSED|UNKNOWN_OUTCOME|REJECTED|REJECTED_NOT_READY|FAILED_SAFE|EXPECTED_TERMINAL_SHUTDOWN|FATAL|NONE|HOME_ASSISTANT|STATE_SCOPED_STRUCTURAL|NOT_MATCHED|ACTIVE|PREACTIVE|DISCONNECTED|GATHERING|CONNECTING|CONNECTED|READY|FAILED|[0-9]{1,20}|[0-9]{1,3}(?:,[0-9]{1,3}){0,127})$`
+
+Rationale: `P80_MEDIA_LIFETIME_OWNER=HOME_ASSISTANT`,
+`P80_DEVICE_ACK_000A_BINDING=STATE_SCOPED_STRUCTURAL`,
+`P80_DEVICE_ACK_000A_TAIL_RELATION=PASS|NOT_MATCHED`,
+`P80_DEVICE_ACK_001A_*` same domain,
+`P80_WRAPPER_PROFILE_MISMATCH_STATE=ACTIVE|PREACTIVE`,
+`PSEUDOTCP_NOTIFY_PACKET_SOCKET_CLOSED=true|false`,
+`PSEUDOTCP_NOTIFY_PACKET_GRACEFUL_STARTED=true|false`,
+`PSEUDOTCP_NOTIFY_PACKET_CLASS=EXPECTED_TERMINAL_SHUTDOWN|FATAL`,
+`ICE_COMPONENT_STATE=DISCONNECTED|GATHERING|CONNECTING|CONNECTED|READY|FAILED`,
+`PSEUDOTCP_CLOSED_CALLBACK=true` are bounded enums/scalars. Values that could
+carry SDP, ICE credentials, selected pair addresses, tokens, channel ids beyond
+numeric scalars, raw payload, or free text remain redacted. No catch-all pattern
+is proposed; tests keep secret-shaped sentinels rejected.
+
+### Missing gates
+
+`MINIMAL_MISSING_INPUTS`: exact HA 2026.9.1 `stream/hls.py` and PyAV/FFmpeg
+environment; V1-V5 raw RTP replay capture such as CT120
+`media/video.rtpdatagrams`; one official-app trace from 5s before media-active
+to at least 60s after, both directions, containing packet timing, direction,
+protocol class (CTPP/RTPC/PseudoTCP/STUN/TURN/RTP/RTCP), safe message type/opcode
+and length, and H264 semantic scalars (SPS/PPS/IDR counts), without OAuth tokens,
+ICE credentials, raw media payloads, addresses beyond anonymized endpoint roles,
+or session secrets.
+
+`UNRESOLVED_INPUT_GATES`: first HA LL-HLS part creation, first `moof/mdat`
+creation under PyAV, first part keyframe flag, open-segment playlist exposure,
+next video packet DTS/PTS validity, timestamp-validator drop count, V1/V2/V3/V4
+offline variant outcome, and any causal keepalive/IDR-request message.
