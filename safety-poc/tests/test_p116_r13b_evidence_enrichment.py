@@ -9,6 +9,18 @@ ROOT = Path(__file__).resolve().parents[2]
 EVIDENCE = ROOT / ".p116-evidence"
 HA = EVIDENCE / "ha-2026.9.1"
 MEDIA = ROOT / "safety-poc" / "research" / "media" / "v1"
+PRIVATE_HA_EVIDENCE_READY = all(
+    (HA / name).is_file()
+    for name in (
+        "RETRIEVAL_MANIFEST.tsv",
+        "hls.py",
+        "fmp4utils.py",
+        "worker.py",
+        "core.py",
+        "const.py",
+        "__init__.py",
+    )
+)
 
 
 SAFE_REDACTION_R13B = re.compile(
@@ -23,6 +35,10 @@ SAFE_REDACTION_R13B = re.compile(
 
 
 class P116R13BEvidenceEnrichmentTests(unittest.TestCase):
+    @unittest.skipUnless(
+        PRIVATE_HA_EVIDENCE_READY,
+        "private HA 2026.9.1 evidence unavailable",
+    )
     def test_ha_2026_9_1_evidence_closes_hls_import_closure(self) -> None:
         manifest = (HA / "RETRIEVAL_MANIFEST.tsv").read_text(encoding="utf-8")
         for name in ("hls.py", "fmp4utils.py", "worker.py", "core.py", "const.py", "__init__.py"):
