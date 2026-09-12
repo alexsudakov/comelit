@@ -667,6 +667,7 @@ class ComelitEntranceCamera(Camera):
                 self.hass,
                 allow_internal=True,
                 prefer_external=False,
+                allow_cloud=False,
             )
         except NoURLAvailableError:
             return await self._async_direct_render_hls_probe(

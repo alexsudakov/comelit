@@ -306,11 +306,59 @@ class P116R20HlsHttpBoundaryDiagnosticsTests(unittest.TestCase):
             self.camera,
             "_async_build_hls_http_boundary_result",
         )
-        self.assertIn("base = get_url(", build_source)
-        self.assertIn("allow_internal=True", build_source)
-        self.assertIn("prefer_external=False", build_source)
-        for forbidden in ("127.0.0.1", "localhost", ":8123"):
-            self.assertNotIn(forbidden, self.camera)
+        expected_call = """get_url(
+                self.hass,
+                allow_internal=True,
+                prefer_external=False,
+                allow_cloud=False,
+            )"""
+        self.assertIn(expected_call, build_source)
+
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                lower_value = node.value.lower()
+                for forbidden in ("127.0.0.1", "localhost", ":8123"):
+                    self.assertNotIn(forbidden, lower_value)
+                if "://" in lower_value:
+                    self.assertNotIn("nabu", lower_value)
+                    self.assertNotIn("cloud", lower_value)
+
+    def test_self_http_supported_failure_paths_use_direct_render_without_retry(self) -> None:
+        build_source = _function_source(
+            self.tree,
+            self.camera,
+            "_async_build_hls_http_boundary_result",
+        )
+        self.assertEqual(self.camera.count("get_url("), 1)
+
+        build_dedented = textwrap.dedent(build_source)
+        build_tree = ast.parse(build_dedented)
+        handlers = [
+            node
+            for node in ast.walk(build_tree)
+            if isinstance(node, ast.ExceptHandler)
+        ]
+        handler_types = [
+            handler.type.id
+            for handler in handlers
+            if isinstance(handler.type, ast.Name)
+        ]
+        self.assertIn("NoURLAvailableError", handler_types)
+        self.assertIn("Exception", handler_types)
+
+        for handler in handlers:
+            if not isinstance(handler.type, ast.Name):
+                continue
+            if handler.type.id not in {"NoURLAvailableError", "Exception"}:
+                continue
+            self.assertEqual(len(handler.body), 1)
+            statement = handler.body[0]
+            self.assertIsInstance(statement, ast.Return)
+            statement_source = ast.get_source_segment(build_dedented, statement) or ""
+            self.assertIn(
+                "return await self._async_direct_render_hls_probe(",
+                statement_source,
+            )
 
 
 if __name__ == "__main__":

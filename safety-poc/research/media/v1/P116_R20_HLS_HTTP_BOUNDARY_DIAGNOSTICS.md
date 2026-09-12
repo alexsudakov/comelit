@@ -8,11 +8,11 @@ The probe runs once per HA `Stream` generation, only after the stream exists,
 the HLS provider exists, and at least two HLS segments are visible. The primary
 mode is `self_http`: it asks Home Assistant for its supported internal base URL
 with the supported `get_url` helper using `allow_internal=True` and
-`prefer_external=False`, leaving `allow_cloud` at the helper default because the
-probe prefers the non-external local route. It combines that base with the
-endpoint path from `stream.endpoint_url(HLS_PROVIDER)` and fetches only the
-master playlist, media playlist, init object, and first relative part reference
-through the HA aiohttp client.
+`prefer_external=False`, and passes `allow_cloud=False` explicitly so a cloud URL
+can never be used. It combines that base with the endpoint path from
+`stream.endpoint_url(HLS_PROVIDER)` and fetches only the master playlist, media
+playlist, init object, and first relative part reference through the HA aiohttp
+client.
 
 The endpoint token is never stored, logged, or exposed as an entity attribute.
 Playlist bodies are reduced to booleans, byte counts, bounded reference counts,
