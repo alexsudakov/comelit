@@ -46,6 +46,7 @@ _MEDIA_NATIVE_MARKER_PREFIXES = (
     "ICE_",
     "REMOTE_SDP_",
     "PSEUDOTCP_",
+    "CONVERSATION_",
     "SELECTED_PAIR_",
     "V4_",
     "P12_",
@@ -59,6 +60,23 @@ _MEDIA_NATIVE_MARKER_PREFIXES = (
     "P116_",
 )
 _MEDIA_NATIVE_MARKER_TAIL_LIMIT = 40
+_MEDIA_NATIVE_PROTOCOL_MARKER_LIMIT = 80
+_MEDIA_NATIVE_PROTOCOL_MARKER_PREFIXES = (
+    "ICE_",
+    "REMOTE_SDP_",
+    "PSEUDOTCP_",
+    "CONVERSATION_",
+    "CTPP_",
+    "V4_CTPP_",
+    "P78_RTPC_",
+    "P80_PREACTIVE_",
+    "P80_DEVICE_",
+    "P80_MEDIA_",
+    "P80_VIDEO_RTP_PORT",
+    "P80_AUDIO_RTP_PORT",
+    "P80_VIDEO_RTP_FORWARDING",
+    "P80_AUDIO_RTP_FORWARDING",
+)
 _MEDIA_STATUS_NOTIFY_MIN_INTERVAL_SECONDS = 1.0
 
 _LOCAL_RTP_SDP = f"""v=0\r
@@ -226,6 +244,7 @@ class ComelitEntranceMediaTransport:
         self._stopping = False
         self._last_error: str | None = None
         self._native_marker_tail: list[str] = []
+        self._native_protocol_markers: list[str] = []
         self._last_native_exit_code: int | None = None
         self._last_native_failure_markers: list[str] = []
         self._progress = MediaProgressDiagnostics()
@@ -333,35 +352,53 @@ class ComelitEntranceMediaTransport:
             delay = _MEDIA_STATUS_NOTIFY_MIN_INTERVAL_SECONDS - (now - last)
             self._status_notify_handle = loop.call_later(delay, self._notify_status_now)
 
-    def _remember_native_marker(self, line: str) -> None:
+    def _safe_native_marker(self, line: str) -> tuple[str, str] | None:
         if "=" not in line:
-            return
+            return None
         key, value = line.split("=", 1)
         if not _MEDIA_NATIVE_MARKER_KEY_RE.fullmatch(key):
-            return
+            return None
         if not key.startswith(_MEDIA_NATIVE_MARKER_PREFIXES):
-            return
+            return None
         safe_value = (
             value
             if _MEDIA_NATIVE_MARKER_SAFE_VALUE_RE.fullmatch(value)
             else "<redacted>"
         )
-        self._native_marker_tail.append(f"{key}={safe_value}")
+        return key, f"{key}={safe_value}"
+
+    def _remember_native_marker(self, line: str) -> None:
+        safe_marker = self._safe_native_marker(line)
+        if safe_marker is None:
+            return
+        key, marker = safe_marker
+        self._native_marker_tail.append(marker)
         if len(self._native_marker_tail) > _MEDIA_NATIVE_MARKER_TAIL_LIMIT:
             del self._native_marker_tail[:-_MEDIA_NATIVE_MARKER_TAIL_LIMIT]
+        if key.startswith(_MEDIA_NATIVE_PROTOCOL_MARKER_PREFIXES):
+            self._native_protocol_markers.append(marker)
+            if len(self._native_protocol_markers) > _MEDIA_NATIVE_PROTOCOL_MARKER_LIMIT:
+                del self._native_protocol_markers[
+                    :-_MEDIA_NATIVE_PROTOCOL_MARKER_LIMIT
+                ]
 
     def _capture_native_failure(self, returncode: int) -> None:
         self._last_native_exit_code = returncode
         self._last_native_failure_markers = list(self._native_marker_tail)
 
     def _emit_native_success_summary(self) -> None:
-        p116_markers = [
-            marker
-            for marker in self._native_marker_tail
-            if marker.startswith("P116_")
-        ]
+        protocol_markers = list(dict.fromkeys(self._native_protocol_markers))
+        p116_markers = list(
+            dict.fromkeys(
+                marker
+                for marker in self._native_marker_tail
+                if marker.startswith("P116_")
+            )
+        )
         _LOGGER.info(
-            "Comelit entrance media transport completed: p116_native_markers=%s",
+            "Comelit entrance media transport completed: "
+            "protocol_native_markers=%s p116_native_markers=%s",
+            protocol_markers,
             p116_markers,
         )
 
@@ -376,6 +413,7 @@ class ComelitEntranceMediaTransport:
         self._stopping = False
         self._last_error = None
         self._native_marker_tail.clear()
+        self._native_protocol_markers.clear()
         self._last_native_exit_code = None
         self._last_native_failure_markers = []
         self._cancel_status_notify()

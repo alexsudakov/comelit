@@ -131,12 +131,15 @@ class P80MediaTransportStaticContractTests(unittest.TestCase):
 
     def test_native_failure_diagnostics_are_allowlisted_redacted_and_bounded(self) -> None:
         self.assertIn("_MEDIA_NATIVE_MARKER_SAFE_VALUE_RE", self.source)
+        self.assertIn("_MEDIA_NATIVE_PROTOCOL_MARKER_LIMIT = 80", self.source)
+        self.assertIn("_MEDIA_NATIVE_PROTOCOL_MARKER_PREFIXES = (", self.source)
         self.assertIn('"P78_",', self.source)
         self.assertIn('"P80_",', self.source)
         self.assertIn('"PSEUDOTCP_",', self.source)
         self.assertIn('else "<redacted>"', self.source)
         self.assertIn("_MEDIA_NATIVE_MARKER_TAIL_LIMIT = 40", self.source)
         self.assertIn("self._remember_native_marker(line)", self.source)
+        self.assertIn("protocol_native_markers=%s", self.source)
         self.assertIn("self._capture_native_failure(process.returncode)", self.source)
         self.assertIn("self._capture_native_failure(rc)", self.source)
         self.assertIn("safe_native_markers=%s", self.source)

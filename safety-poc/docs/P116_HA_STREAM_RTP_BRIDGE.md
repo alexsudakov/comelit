@@ -27,6 +27,159 @@ the next demuxed packet with `timeout=SOURCE_TIMEOUT` (30 seconds). Offline
 static evidence does not prove whether the next-packet timeout is caused by
 RTP loss, timestamp cadence, missing later media, or muxer/extradata behavior.
 
+## R11 offline handoff analysis (2026-09-12)
+
+Два production-прогона на `ccc872512590bd70e4a1510e3ae4071cada81f25`
+дали воспроизводимую подпись: RTP начинается, первый keyframe приходит почти
+сразу, последовательность байт-чистая, затем upstream/media path стабильно
+останавливает RTP около 35-36 секунд.
+
+Attempt 1, 10:13:12 -> 10:23:13 local, HA camera viewer не открывался:
+`P116_VIDEO_COUNT=1703`, seq `60113->61815`,
+`FIRST_MONOTONIC_MS=551901537 -> LAST_MONOTONIC_MS=551936678`
+(35.141 s), `FIRST_KEYFRAME_MONOTONIC_MS=551901538` (+1 ms),
+`SEQ_GAPS=0`, `DUPLICATES=0`, `OUT_OF_ORDER=0`,
+`TIMESTAMP_REGRESSIONS=0`, `SSRC_COUNT=1`, `SSRC_CHANGES=0`,
+`PT_SET=99`, `MARKER_COUNT=901`, `SPS_COUNT=10`, `PPS_COUNT=10`,
+`FUA_COUNT=1494`, `SINGLE_NAL_COUNT=209`; audio `COUNT=1764`.
+`ERROR_DEMUXING=0`, что ожидаемо без viewer и без stream worker.
+
+Attempt 2, 10:35:53.027 -> 10:36:52 local, пользователь открыл HA camera view:
+`P116_VIDEO_COUNT=1749`, seq `58495->60243`,
+`FIRST_TS=3663334452 -> LAST_TS=3666570852`
+(3 236 400 @90 kHz = 35.96 s),
+`FIRST_MONOTONIC_MS=553261571 -> LAST_MONOTONIC_MS=553297455`
+(35.884 s), `FIRST_KEYFRAME_MONOTONIC_MS=553261587` (+16 ms),
+`SEQ_GAPS=0`, `DUPLICATES=0`, `OUT_OF_ORDER=0`,
+`TIMESTAMP_REGRESSIONS=0`, `SSRC_COUNT=1`, `SSRC_CHANGES=0`,
+`PT_SET=99`, `MARKER_COUNT=920`, `FUA_COUNT=1571`,
+`SINGLE_NAL_COUNT=178`, `SPS_COUNT=10`, `PPS_COUNT=10`;
+audio `COUNT=1799`, `FIRST_TS=199508096 -> LAST_TS=199795776`
+(287 680 @8 kHz = 35.96 s), `PT_SET=8`.
+
+HA-side leg attempt 2:
+
+```text
+2026-09-12 10:35:53.027 INFO  (MainThread)   [custom_components.comelit.media_transport] Comelit entrance media session ACTIVE
+2026-09-12 10:36:47.342 INFO  (MainThread)   [custom_components.comelit.media_transport] Comelit entrance media transport completed: p116_native_markers=[...]
+2026-09-12 10:36:49.059 ERROR (stream_worker)[homeassistant.components.stream.stream.camera.comelit_entrance] Error from stream worker: Error demuxing stream (Operation timed out, /run/comelit-media/local-rtp.sdp)
+2026-09-12 10:36:52.712 INFO  (MainThread)   [custom_components.comelit.runtime] Comelit ring listener READY for persistent 3300s cycle
+```
+
+Последний video RTP пакет пришел в 10:36:28.911 local; HA demux error
+появился в 10:36:49.059, то есть через 20.15 s после остановки RTP.
+Пользователь сообщил `no image` за примерно 30 s открытого view, включая
+период, когда RTP еще шел. Deadline media path остается
+`hard_limit_seconds=600`; teardown закончился `media_phase=inactive`,
+`media_active=False`, forwarding False; listener probe после цикла:
+`listener_ready=true`, `last_error=null`, `supervisor_running=true`;
+`DOOR_ACTIONS_SENT=0`, `GATE_ACTIONS_SENT=0`.
+
+### `/run/comelit-media/local-rtp.sdp`
+
+`PROVEN_STATIC`: Python пишет SDP атомарно после `P80_MEDIA_ACTIVE=true`.
+Файл статический, ASCII, без runtime SSRC:
+
+```text
+v=0
+o=- 0 0 IN IP4 127.0.0.1
+s=Comelit entrance media
+c=IN IP4 127.0.0.1
+t=0 0
+m=video 17899 RTP/AVP 99
+a=rtpmap:99 H264/90000
+a=fmtp:99 packetization-mode=1
+a=recvonly
+m=audio 17808 RTP/AVP 8
+a=rtpmap:8 PCMA/8000/1
+a=recvonly
+```
+
+Evidence: `custom_components/comelit/media_transport.py:35` задает
+`MEDIA_VIDEO_RTP_PORT=17899`, `:36` задает `MEDIA_AUDIO_RTP_PORT=17808`,
+`:64-76` содержит `_LOCAL_RTP_SDP`, `:149-150` пишет
+`_MEDIA_LOCAL_SDP_FILE` как ASCII. `local_sdp_ready` зависит от active state и
+существования файла (`:246-251`), а фактическая запись выполняется после
+active wait (`:551-572`). Dynamic parts: нет dynamic ports и нет advertised
+SSRC; только факт наличия файла зависит от runtime media activation.
+
+### Helper local RTP sink
+
+`PROVEN_OFFLINE`: helper composition forwards accepted inner RTP to loopback
+UDP targets. Static generator evidence:
+`safety-poc/research/media/v1/entrance_p80_ha_media_runtime_transform.py:99-112`
+defines `P80_VIDEO_RTP_PORT=17899`, `P80_AUDIO_RTP_PORT=17808`, sockets and
+targets; `:471-481` creates an AF_INET/SOCK_DGRAM socket and sets
+`sin_port=htons(port)`, `sin_addr=INADDR_LOOPBACK`; `:484-499` accepts only
+RTP v2 PT99/PT8; `:509-536` selects video/audio target by payload type and
+calls `sendto()` with the inner RTP bytes; `:600-604` emits
+`P80_MEDIA_ACTIVE=true` and the two local port markers. Installed binary
+strings also contain `P80_VIDEO_RTP_PORT=%u`, `P80_AUDIO_RTP_PORT=%u`,
+`P80_VIDEO_RTP_FORWARDING=PASS`, `P80_AUDIO_RTP_FORWARDING=PASS`,
+`P80_MEDIA_ACTIVE=true`, `P116_%s_PT_SET=`.
+
+### HA stream consumption
+
+`NOT_PROVEN`: this repository does not vendor Home Assistant Core stream code.
+The local component evidence proves the advertised source path and readiness,
+but cannot statically substantiate which sockets HA stream binds/connects,
+which payload types its PyAV/FFmpeg build accepts for this SDP, or the precise
+internal branch behind `Operation timed out` for a local SDP source. Therefore
+claims about HA demux internals are intentionally left unproven in this round.
+
+### Evidence labels and hypotheses
+
+`HANDOFF_SDP_PORT_MATCH=PROVEN_STATIC`: SDP ports 17899/17808 match the helper
+composition and installed marker strings.
+
+`HANDOFF_PT_MATCH=PROVEN_OFFLINE`: live markers show video `PT_SET=99` and
+audio `PT_SET=8`; helper source accepts only PT99/PT8 and SDP advertises those
+payload types.
+
+`HANDOFF_SSRC_MATCH=NOT_PROVEN`: SDP has no `a=ssrc`, while live RTP had one
+stable SSRC per stream. No static HA evidence here proves whether HA needs or
+ignores SSRC for this SDP.
+
+`HANDOFF_DIRECTION_MATCH=PROVEN_STATIC`: SDP says `recvonly`; helper sends RTP
+with `sendto()` to loopback UDP ports. Expected direction is helper as sender,
+HA/FFmpeg as UDP receiver.
+
+`HANDOFF_EXPECTED_TO_DELIVER_PACKETS=UNDETERMINED`: static ports/PT/address and
+direction line up, and live native telemetry proves forwarding counters grew,
+but this repo cannot prove that HA actually bound those UDP ports in the same
+namespace or consumed packets before timeout.
+
+Current decision: `H1_SUPPORTED=false`, `H2_SUPPORTED=false`,
+`HYPOTHESIS_STATUS=UNDETERMINED`. H1 ("HA receives no packets") is weakened by
+the static handoff match but not falsified. H2 ("HA receives packets but cannot
+demux them") is consistent with the HA error text and user-visible no-image
+report, but not proven because this repo has no HA stream internals and no
+read-only packet-consumption evidence from HA. The single distinguishing check
+is not available statically in this repo: a future bounded live run must
+observe whether the HA/FFmpeg process has bound `127.0.0.1:17899/17808` and
+whether UDP packets reach that socket during the active window, without
+payload capture. If a native-side fix is required, it belongs in the helper
+composition around
+`safety-poc/research/media/v1/entrance_p80_ha_media_runtime_transform.py:471-536`;
+no native/helper change is implemented in R11.
+
+### Evidence channels and limits
+
+Native marker channel: one bounded HA log line now includes protocol markers
+(`CTPP`, `RTPC`, `ICE`, `P80` gates, `P80_MEDIA_ACTIVE`,
+`PSEUDOTCP`/`CONVERSATION`, `REMOTE_SDP_BYTES`) plus trailing P116 RTP
+counters. Limit: marker values are scalar/redacted and do not contain raw
+RTP/H264 or per-packet payload.
+
+Recorder/entity channel: recorder dumps can show integration-visible state
+(`media_phase`, active/forwarding flags, listener readiness, last error).
+Limit: entity attributes cannot prove HA stream-worker socket binding,
+received datagrams, decoder state, or PyAV/FFmpeg demux branch.
+
+Open questions: did HA/FFmpeg bind both local UDP ports before first RTP; did
+it receive any datagrams; if yes, whether failure is SDP/extradata, RTP/H264
+format, audio leg behavior, timestamp handling, or upstream stop after ~36 s.
+
 ## Host-verified offline results (2026-09-11)
 
 Все значения — фактический вывод host-прогонов, не предположения.
