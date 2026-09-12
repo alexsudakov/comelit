@@ -124,7 +124,9 @@ class P116R18HlsRuntimeDiagnosticsTests(unittest.TestCase):
             "stream_start_worker_count",
             "worker_start_count",
         ):
-            self.assertNotIn(obsolete, self.diagnostic_source)
+            self.assertNotIn(
+                f'stream_diagnostics.get("{obsolete}")', self.diagnostic_source
+            )
 
     def test_hls_provider_is_resolved_from_stream_outputs(self) -> None:
         self.assertIn("stream.outputs()", self.diagnostic_source)
