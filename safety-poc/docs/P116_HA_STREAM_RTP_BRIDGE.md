@@ -412,8 +412,10 @@ application payload meaning.
 3. Operator opens the entrance camera in the official app and holds rendering;
    hold it >=60-90 s after media-active if the app keeps rendering.
 4. Operator writes marker file on the capture host with first field
-   `media_active_epoch` seconds. This is a bounded file marker, not chat and not
-   a network trigger.
+   `media_active_epoch` seconds. This R13D marker meaning is **Superseded by R13E**:
+   R13E marker first field is `OPERATOR_VIEW_START_EPOCH`, and media-active is
+   derived from the first RTP packet after that view start. This is a bounded
+   file marker, not chat and not a network trigger.
 5. Runner captures a bounded window: default `PRE_SECONDS=5`,
    `POST_SECONDS=90`, `HARD_CAP_SECONDS=125`, `MAX_FILE_MB=256`,
    `MAX_MESSAGE_ROWS=200`.
@@ -435,8 +437,8 @@ Per post-active message/family the extractor implements:
 
 | Field | Meaning |
 |---|---|
-| `RELATIVE_TIME` | Seconds relative to operator `media_active_epoch`. |
-| `DIRECTION` | `CLIENT_TO_DEVICE`, `DEVICE_TO_CLIENT`, or `UNKNOWN_DIRECTION` from configured endpoints. |
+| `RELATIVE_TIME` | Seconds relative to operator `media_active_epoch`. **Superseded by R13E**: relative media timing is derived from `MEDIA_ACTIVE_REFERENCE`, not operator-supplied. |
+| `DIRECTION` | `CLIENT_TO_DEVICE`, `DEVICE_TO_CLIENT`, or `UNKNOWN_DIRECTION` from configured endpoints. **Superseded by R13E**: `--device-ip` is optional and directions are `CLIENT_TO_REMOTE` / `REMOTE_TO_CLIENT` / `UNKNOWN_DIRECTION`. |
 | `TRANSPORT_CLASS` | `UDP`, `TCP`, or `OTHER`. |
 | `PROTOCOL_FAMILY` | `RTP`, `RTCP`, `STUN_TURN`, `TLS_RECORD_METADATA`, `TCP_METADATA`, `UDP_METADATA`, `CTPP`, `RTPC`, `PSEUDOTCP`, or safe dissector family. |
 | `SAFE_MESSAGE_TYPE` | Structural class only, e.g. `RTP_PT_99`, `RTCP_PT_206`, `TLS_RECORD_METADATA`; no payload-derived secret. |
@@ -476,6 +478,9 @@ deleted by default or retained only by explicit operator flag.
 Per-artifact provenance recorded:
 capture tool/version, extraction tool/version, interface/point, start/end UTC,
 start/end monotonic, filter expression, artifact SHA256, artifact size.
+The R13D `MEDIA_ACTIVE_EPOCH` provenance field, where present in older notes, is
+**Superseded by R13E**: R13E records `OPERATOR_VIEW_START_EPOCH` and derived
+`MEDIA_ACTIVE_REFERENCE`.
 
 ### Comparison template
 
@@ -507,6 +512,183 @@ Closing verdict fields:
 Current R13D state: `COMELIT_OFFICIAL_APP_LIVE=NOT_RUN`,
 `OUR_HELPER_MEDIA_SESSION=NOT_RUN`, `RTCP_ANALYSIS_READY=true`,
 `H264_IDR_TIMING_ANALYSIS_READY=true`, `COMPARISON_TEMPLATE_READY=true`.
+
+## P116 R13E official-app trace hardening (2026-09-12)
+
+R13E remains `RESEARCH_OFFLINE`: no Comelit live access, no official-app
+capture, no helper live session, no HA deploy/restart, no OAuth access, and no
+door/gate action was executed. Production remains deployed at
+`0970b9c88fd47ddf83a397b0228c5d4bbef92423`; `custom_components/**` is out of
+scope.
+
+### Discovery filter and peer model
+
+`CLIENT_IP` stays required. `DEVICE_IP` is optional. Default discovery capture
+uses client-only BPF:
+`CAPTURE_FILTER_MODE=CLIENT_ONLY`, `DEVICE_IP_REQUIRED=false`,
+`FILTER_IP_TERM_COUNT=1`, with raw expression
+`host $CLIENT_IP` recorded only in capture-host provenance outside Git, mode
+`600`. Supplying `--device-ip` is an explicit operator narrowing:
+`CAPTURE_FILTER_MODE=CLIENT_DEVICE_NARROW`, `DEVICE_IP_REQUIRED=false`,
+`FILTER_IP_TERM_COUNT=2`, raw expression `host $CLIENT_IP and host $DEVICE_IP`.
+`--filter-extra` remains an additional parenthesised `and` term. Runner stdout
+never prints the literal filter because it contains endpoint addresses.
+
+Extractor direction is client-relative:
+
+| Rule | `DIRECTION` |
+|---|---|
+| `src == CLIENT_IP` | `CLIENT_TO_REMOTE` |
+| `dst == CLIENT_IP` | `REMOTE_TO_CLIENT` |
+| otherwise | `UNKNOWN_DIRECTION` |
+
+Each distinct remote endpoint address observed with the client receives a
+trace-local deterministic alias by first appearance: `REMOTE_PEER_1`,
+`REMOTE_PEER_2`, etc. The alias ordinal is not persistent; the same remote may
+be `REMOTE_PEER_1` in one trace and `REMOTE_PEER_3` in another. Rows where
+neither endpoint is the client use `PEER_ALIAS=NO_CLIENT_ENDPOINT`,
+`DIRECTION=UNKNOWN_DIRECTION`; they stay visible in `MESSAGE_FAMILY_ROWS` and
+`UNKNOWN_DIRECTION_RECORDS` but are excluded from `PEER_SUMMARY` and
+`REMOTE_PEER_COUNT`.
+
+`PEER_ALIAS` is present on every message family row and is part of the bucket
+key, so two peers with the same protocol family, message type, length, and
+direction cannot merge. `PEER_SUMMARY` contains one entry per client peer with
+`PEER_ALIAS`, `FIRST_AT`, `LAST_AT`, `CLIENT_TO_REMOTE_COUNT`,
+`REMOTE_TO_CLIENT_COUNT`, `POST36_CLIENT_TO_REMOTE_COUNT`,
+`PROTOCOL_FAMILY_SET`, `RTP_PRESENT`, `RTCP_PRESENT`, and
+`STUN_TURN_PRESENT`. Sanitised output is self-checked before write; only after
+that scan passes does the summary emit
+`RAW_CLIENT_IP_IN_SANITISED_SUMMARY=false` and
+`RAW_REMOTE_IP_IN_SANITISED_SUMMARY=false`.
+
+### Marker and media-active reference
+
+Operator marker semantics changed. The marker file first whitespace-separated
+field is `OPERATOR_VIEW_START_EPOCH`: the moment the operator initiates or opens
+the official-app view. It is not a media-active timestamp.
+
+Exact runner order:
+
+1. start `tcpdump`;
+2. record `CAPTURE_START_EPOCH` immediately after tcpdump launch returns;
+3. verify the tcpdump process is alive, then print `CAPTURE_ARMED=true`,
+   `OPERATOR_MAY_OPEN_VIEW_NOW=true`,
+   `OPERATOR_INSTRUCTION=WAIT_FOR_CAPTURE_ARMED_THEN_OPEN_VIEW`, and
+   `OPERATOR_INSTRUCTION=WRITE_MARKER_FILE_WITH_OPERATOR_VIEW_START_EPOCH_AT_VIEW_OPEN`;
+4. only then wait up to `MARKER_WAIT_SECONDS` for the marker file;
+5. the operator must not open the view before `CAPTURE_ARMED=true`;
+6. require `OPERATOR_VIEW_START_EPOCH - CAPTURE_START_EPOCH >= PRE_SECONDS`.
+
+If the marker is non-numeric, in the future, or arrives too soon for the
+pre-window, the runner kills and reaps tcpdump, prints
+`PRE_WINDOW_TOO_SHORT=FAILED_SAFE` for that gate failure, sets
+`CAPTURE_VALID=false`, does not run extraction, and keeps the raw file only
+under the raw-artifact policy.
+
+`MEDIA_ACTIVE_REFERENCE` is derived by the extractor. `FIRST_RTP_AFTER_VIEW`
+means the earliest packet with `PROTOCOL_FAMILY == "RTP"` and epoch
+`>= OPERATOR_VIEW_START_EPOCH`, across all peers. If no such RTP exists,
+`MEDIA_ACTIVE_REFERENCE=UNRESOLVED_NO_RTP`; the extractor does not substitute
+the first UDP, TLS, or post-view packet. `VIEW_TO_FIRST_RTP_SECONDS` is the
+derived RTP epoch minus `OPERATOR_VIEW_START_EPOCH`, or `UNRESOLVED`.
+`VIEW_RELATIVE_TIME`, `VIEW_FIRST_AT`, `VIEW_LAST_AT`, and `VIEW_CADENCE` are
+always view-relative numbers for post-view buckets. `RELATIVE_TIME`,
+`FIRST_AT`, `LAST_AT`, and `CADENCE` are media-relative and are `null` when the
+media-active reference is unresolved.
+
+### Gates and truncation
+
+The runner preserves defaults unless explicitly overridden:
+`PRE_SECONDS=5`, `POST_SECONDS=90`, `MARKER_WAIT_SECONDS=120`,
+`HARD_CAP_SECONDS=125`, `MAX_FILE_MB=256`, `MAX_MESSAGE_ROWS=200`. It adds the
+preflight invariant `PRE_SECONDS + POST_SECONDS <= HARD_CAP_SECONDS`, otherwise
+`POST_WINDOW_EXCEEDS_HARD_CAP=FAILED_SAFE`. The bounded sequence is capture
+start, operator view at least `PRE_SECONDS` later, first RTP when media actually
+starts, then remaining budget until `CAPTURE_START_EPOCH + HARD_CAP_SECONDS`.
+
+Post-media sufficiency is computed from actual timestamps, never configuration:
+`POST_MEDIA_ACTIVE_CAPTURE_SECONDS = CAPTURE_END_EPOCH - FIRST_RTP_AFTER_VIEW_EPOCH`.
+`POST_MEDIA_ACTIVE_90S_GATE=PASS` only when that value is at least 90 seconds;
+`POST_MEDIA_ACTIVE_60S_GATE=PASS` only when it is at least 60 seconds. If either
+the capture end or media-active reference is unknown, both gates are
+`UNRESOLVED`.
+
+Message family rows remain bounded, but truncation is explicit:
+`MESSAGE_FAMILY_BUCKET_COUNT`, `MESSAGE_FAMILY_ROWS_EMITTED`, and
+`MESSAGE_FAMILY_ROWS_TRUNCATED` are top-level fields. All scalar counts,
+timings, `POST36_*`, RTP/RTCP/H264 fields, peer summaries, and
+`REPEATING_LT36S_CLASSES` are derived from the full bucket/input set, not the
+emitted row subset.
+
+### Raw retention and privacy
+
+Default raw behavior is still delete raw after extraction unless `--retain-raw`
+is supplied. For the single future official-app session the recommended
+invocation includes `--retain-raw`, because it is one expensive live evidence
+artifact and may require another offline extraction pass. Live capture still
+requires `--authorize-passive-capture`. Raw PCAP, raw TSV, and provenance stay
+outside Git, mode `600`, with SHA256 and size recorded; payload is never
+printed.
+
+Sanitised summary JSON, runner scalar stdout, and repository evidence must not
+contain `CLIENT_IP`, remote IPs, IPv6 addresses, MAC addresses, OAuth/VIP
+tokens, ICE credentials, session IDs, device UUIDs, raw payload, or raw
+RTP/H264 bytes. Allowed evidence is limited to `REMOTE_PEER_N` aliases,
+direction, relative timing, packet/message length, protocol family, RTP payload
+type, SSRC change count without raw SSRC, RTCP type, and SPS/PPS/IDR counts or
+times. Raw endpoint addresses are allowed only in capture-host raw artifacts
+outside Git.
+
+### Capture point preflight verdict
+
+Recorded orchestrator read-only recon evidence, 2026-09-12:
+
+- CT122 `hermes-node`, 192.168.1.50: interfaces `lo`, `eth0@if34` (UP, 192.168.1.50/24),
+  `docker0` (DOWN), `br-f4dc66685875`, four `veth*@if2`; default route via 192.168.1.1 dev eth0.
+  Tools: `tcpdump=/usr/bin/tcpdump`, `tshark=MISSING`, `dumpcap=MISSING`, `scapy=MISSING`.
+- CT120, 192.168.1.85 (Ubuntu 24.04.4, x86_64): `lo`, `eth0@if58` (UP, 192.168.1.85/24),
+  default via 192.168.1.1 dev eth0. Tools: `tcpdump=/usr/bin/tcpdump`, `tshark=MISSING`,
+  `dumpcap=MISSING`.
+- Interpretation: both hosts are LXC containers with a single veth on a normal bridge
+  port; a normal switched/bridged port does not receive unicast frames between
+  two other hosts, and no mirror/SPAN or AP-side observation was configured or
+  verified. Therefore neither host may be assumed to see phone<->panel traffic.
+
+Preflight verdict:
+
+```text
+CAPTURE_HOST=UNRESOLVED
+CAPTURE_INTERFACE=UNRESOLVED
+CAPTURE_POINT_TYPE=UNRESOLVED
+SEES_PHONE_TRAFFIC=UNRESOLVED
+CAPTURE_POINT_READY=false
+```
+
+| Field | Value |
+|---|---|
+| `CAPTURE_HOST` | `UNRESOLVED` |
+| `CAPTURE_INTERFACE` | `UNRESOLVED` |
+| `CAPTURE_POINT_TYPE` | `UNRESOLVED` |
+| `SEES_PHONE_TRAFFIC` | `UNRESOLVED` |
+| `CAPTURE_POINT_READY` | `false` |
+
+Implemented toolchain option: explicit fail-closed dependency, not a pure-Python
+pcap fallback. `tshark` is absent on both candidate hosts, while the
+runner/extractor pipeline needs `tshark` for field export, so the future capture
+host must provide `tcpdump`, `tshark`, `python3`, `timeout`, and `sha256sum`.
+
+`NEXT_REQUIRED_USER_ACTION=Подтвердить точку наблюдения, видящую phone<->panel traffic (SPAN/mirror на коммутаторе или AP, либо phone-side capture), — CT122/CT120 как обычные bridge-порты не годятся.`
+
+### Mandatory tests
+
+R13E adds mandatory sandbox tests for client-only filter generation, optional
+device narrowing, multi-peer direction, stable per-trace peer aliases, raw-IP
+absence in summary and CLI stdout, peer-distinct bucket keys, pre-window pass
+and fail gates, first-RTP-derived media reference, no-RTP unresolved behavior,
+actual post-media window gates, explicit message-row truncation, rejection of
+the removed `--media-active-epoch` CLI option, raw retention recommendation,
+and documentation of capture-point preflight and gates.
 
 ## Host-verified offline results (2026-09-11)
 

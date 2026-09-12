@@ -31,6 +31,8 @@ class P116R13DOfficialAppCaptureToolingTests(unittest.TestCase):
         self.assertIn("PASSIVE_ONLY=true", source)
         self.assertIn("CAPTURE_POINT_MISSING=FAILED_SAFE", source)
         self.assertIn("OPERATOR_MARKER_TIMEOUT=FAILED_SAFE", source)
+        self.assertIn("OPERATOR_VIEW_START_EPOCH", source)
+        self.assertIn("CAPTURE_ARMED=true", source)
 
     def test_runner_has_bounded_duration_size_message_and_raw_artifact_policy(self) -> None:
         source = RUNNER.read_text(encoding="utf-8")
@@ -44,7 +46,7 @@ class P116R13DOfficialAppCaptureToolingTests(unittest.TestCase):
             "chmod 600 \"$RAW_PCAP\"",
             "sha256sum",
             "RAW_ARTIFACT_PATH_INSIDE_REPO=FAILED_SAFE",
-            "RAW_ARTIFACT_POLICY=outside_git_mode_600_sha256_retain_or_delete_by_flag",
+            "RAW_ARTIFACT_POLICY=outside_git_mode_600_sha256_retain_raw_for_one_shot",
         ):
             self.assertIn(required, source)
 
@@ -81,17 +83,22 @@ class P116R13DOfficialAppCaptureToolingTests(unittest.TestCase):
                 path,
                 client_ip="10.0.0.10",
                 device_ip="10.0.0.20",
-                media_active_epoch=100.0,
+                operator_view_start_epoch=100.0,
             )
-            summary = extractor.summarize(rows, input_path=path, max_message_rows=50)
+            summary = extractor.summarize(
+                rows,
+                input_path=path,
+                max_message_rows=50,
+                operator_view_start_epoch=100.0,
+            )
         for key in extractor.SUMMARY_KEYS:
             self.assertIn(key, summary)
         for row in summary["MESSAGE_FAMILY_ROWS"]:
             for key in extractor.REQUIRED_MESSAGE_FIELDS:
                 self.assertIn(key, row)
-        self.assertEqual(summary["CLIENT_TO_DEVICE_RECORDS"], 4)
-        self.assertEqual(summary["DEVICE_TO_CLIENT_RECORDS"], 1)
-        self.assertEqual(summary["POST36_CLIENT_TO_DEVICE_RECORDS"], 1)
+        self.assertEqual(summary["CLIENT_TO_REMOTE_RECORDS"], 4)
+        self.assertEqual(summary["REMOTE_TO_CLIENT_RECORDS"], 1)
+        self.assertEqual(summary["POST36_CLIENT_TO_REMOTE_RECORDS"], 1)
         self.assertEqual(summary["VIDEO_PACKET_COUNT"], 3)
         self.assertEqual(summary["VIDEO_PT_SET"], "99")
         self.assertEqual(summary["SPS_COUNT"], 1)
