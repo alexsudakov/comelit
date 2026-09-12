@@ -12,6 +12,10 @@ EVIDENCE = ROOT / ".p116-evidence"
 STREAM = EVIDENCE / "stream"
 MEDIA = ROOT / "safety-poc" / "research" / "media" / "v1"
 TRANSPORT = ROOT / "custom_components" / "comelit" / "media_transport.py"
+PRIVATE_STREAM_EVIDENCE_READY = all(
+    (STREAM / name).is_file()
+    for name in ("const.py", "worker.py", "__init__.py", "core.py")
+)
 
 
 SAFE_REDACTION_EXPANSION = (
@@ -48,6 +52,10 @@ class P116R13HaRenderAndMediaLifetimeForensicsTests(unittest.TestCase):
         ):
             self.assertFalse((EVIDENCE / rel).exists(), rel)
 
+    @unittest.skipUnless(
+        PRIVATE_STREAM_EVIDENCE_READY,
+        "private HA 2026.9.1 stream evidence unavailable",
+    )
     def test_ha_stream_drops_pcma_audio_as_unsupported_codec(self) -> None:
         const_source = (STREAM / "const.py").read_text(encoding="utf-8")
         worker_source = (STREAM / "worker.py").read_text(encoding="utf-8")
@@ -56,6 +64,10 @@ class P116R13HaRenderAndMediaLifetimeForensicsTests(unittest.TestCase):
         self.assertIn("audio_stream = None", worker_source)
         self.assertNotIn("pcma", const_source.lower())
 
+    @unittest.skipUnless(
+        PRIVATE_STREAM_EVIDENCE_READY,
+        "private HA 2026.9.1 stream evidence unavailable",
+    )
     def test_ll_hls_defaults_and_muxer_first_part_boundary_are_static(self) -> None:
         init_source = (STREAM / "__init__.py").read_text(encoding="utf-8")
         worker_source = (STREAM / "worker.py").read_text(encoding="utf-8")
@@ -71,6 +83,10 @@ class P116R13HaRenderAndMediaLifetimeForensicsTests(unittest.TestCase):
         self.assertIn("Part(", worker_source)
         self.assertIn("has_keyframe=self._part_has_keyframe", worker_source)
 
+    @unittest.skipUnless(
+        PRIVATE_STREAM_EVIDENCE_READY,
+        "private HA 2026.9.1 stream evidence unavailable",
+    )
     def test_timestamp_validator_drop_rules_are_static(self) -> None:
         worker_source = (STREAM / "worker.py").read_text(encoding="utf-8")
         self.assertIn("MAX_MISSING_DTS", worker_source)
