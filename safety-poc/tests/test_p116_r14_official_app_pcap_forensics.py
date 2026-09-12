@@ -20,6 +20,8 @@ import p116_r14_official_app_pcap_forensics as r14
 class P116R14OfficialAppPcapForensicsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        if not PCAP.is_file():
+            raise unittest.SkipTest("private R14 PCAP unavailable")
         cls.analysis = r14.analyze(PCAP)
         cls.report = r14.render_report(cls.analysis)
 
