@@ -1296,3 +1296,152 @@ the numeric scalar allowance `[0-9]{1,20}` plus up-to-128-element numeric lists
 is pre-existing in `custom_components/comelit/media_transport.py:41-45`, not
 introduced by R13/R13B; whether that should be narrowed is a separate exposure
 question and was not changed here.
+
+## R14 official-app PCAPdroid forensics
+
+`BASELINE_MODE=RESEARCH_OFFLINE`. Live Comelit/official-app recapture,
+HA deploy/restart, OAuth access, Door/Gate actions, raw PCAP commit, literal byte
+replay, keepalive implementation, IDR-request implementation and production
+functional fixes were not performed. Raw artifact stayed in
+`.p116-evidence/private/pcapdroid-r14/` and was read only by
+`p116_r14_official_app_pcap_forensics.py`.
+
+### Provenance and parser
+
+`PROVEN_OFFLINE`: PCAP SHA256 is
+`3e2241709ea518b277814a66c8166f52d24aae712646e9ce316e75b46363d62f`, size is
+`3773269`, classic little-endian PCAP, linktype `101` Raw IP, `6296` packets.
+The R14 parser uses only Python stdlib `struct`; it covers IPv4 UDP, minimal
+RTP/RTCP/STUN/PseudoTCP classification and the established offset-8 RTP shape.
+It emits only counts, lengths, relative seconds, cadences, protocol family
+labels and evidence labels.
+
+### Timeline
+
+`CAPTURE_START=0.000 OBSERVED`.
+`APP_CONTROL_START=3.799 OBSERVED`.
+`FIRST_MEDIA_CONTROL=5.154 PROVEN_OFFLINE`.
+`FIRST_AUDIO_RTP=12.380 OBSERVED`.
+`FIRST_VIDEO_RTP=12.970 OBSERVED`.
+`FIRST_IDR=12.970 OBSERVED`.
+`PERIODIC_CONTROL_EVENTS=5s_PSEUDOTCP_APPLICATION_TRAFFIC OBSERVED`.
+`PERIODIC_STUN_EVENTS=6.999s_client_originated_median OBSERVED`.
+`LAST_AUDIO_RTP=71.579 OBSERVED`.
+`LAST_VIDEO_RTP=71.689 OBSERVED`.
+`MEDIA_TEARDOWN_CONTROL=83.143 OBSERVED`.
+`CAPTURE_END=84.932 OBSERVED`.
+
+### Media scalars
+
+`VIDEO_PT=99`, `AUDIO_PT=8`.
+`VIDEO_PACKET_COUNT=2720`, `AUDIO_PACKET_COUNT=2959`.
+`VIDEO_FIRST_AT=12.970`, `VIDEO_LAST_AT=71.689`,
+`OFFICIAL_MEDIA_DURATION_VIDEO=58.719`.
+`AUDIO_FIRST_AT=12.380`, `AUDIO_LAST_AT=71.579`,
+`OFFICIAL_MEDIA_DURATION_AUDIO=59.199`.
+`SPS_COUNT=16`, `PPS_COUNT=16`, `IDR_COUNT=2`,
+`IDR_TIMES=12.970,13.071`, `LATER_IDR_AFTER_1S=false`.
+Operator fact remains authoritative: `AUDIO_USER_ENABLED=false`.
+Therefore `AUDIO_RTP_PRESENT=true`, but
+`AUDIO_RTP_DEFAULT_COMPONENT_STATUS=OBSERVED_FOR_THIS_CAPTURE`.
+
+### Periodic control
+
+`PROVEN_OFFLINE`: all non-RTP/non-RTCP/non-STUN client-originated families on the
+media endpoint pair were grouped by structural class and outer/inner length.
+The independently verified 5-second candidate is:
+
+```text
+PERIODIC_5S_CONTROL_PRESENT=true
+PERIODIC_5S_CONTROL_DIRECTION=CLIENT_TO_DEVICE
+PERIODIC_5S_CONTROL_OUTER_LENGTH=42
+PERIODIC_5S_CONTROL_INNER_LENGTH=18
+PERIODIC_5S_CONTROL_REPEAT_COUNT=18
+PERIODIC_5S_CONTROL_FIRST_AT=5.958
+PERIODIC_5S_CONTROL_LAST_AT=83.143
+PERIODIC_5S_CONTROL_CADENCE=5.010
+PERIODIC_5S_CONTROL_CONTINUES_AFTER_36S=true
+PERIODIC_5S_SERVER_RESPONSE=true
+PERIODIC_5S_SERVER_RESPONSE_LATENCY=0.098
+PERIODIC_5S_CONTROL_FAMILY=PSEUDOTCP_APPLICATION_TRAFFIC
+```
+
+Additional repeated client-originated families exist, including a 14-byte custom
+media-control-shaped family at about 5 seconds and PseudoTCP transport ACK/close
+traffic. They are not used as the primary 5-second finding because the 42-byte
+family has proven PseudoTCP application data length and response correlation.
+
+Family classification:
+`CONTROL_IS_PSEUDOTCP_APP=PROVEN_OFFLINE`;
+`CONTROL_IS_PSEUDOTCP_TRANSPORT=REJECTED` for the 42-byte candidate because it
+carries 18 bytes of PseudoTCP data with no transport-only flag;
+`CONTROL_IS_CTPP=UNRESOLVED`;
+`CONTROL_IS_RTPC=UNRESOLVED`;
+`CONTROL_IS_CUSTOM_MEDIA_HEARTBEAT=UNRESOLVED`;
+`CONTROL_IS_OTHER=REJECTED`.
+The unresolved CTPP/RTPC status is deliberate: R14 proves PseudoTCP application
+traffic but does not expose a safe inner CTPP/RTPC opcode/body without raw
+payload inspection or replay.
+
+### Comparison with our helper
+
+`PROVEN_STATIC`: the generated helper after `P80_MEDIA_ACTIVE=true` forwards
+PT99/PT8 RTP to HA loopback and allows inbound non-media data into the inherited
+PseudoTCP receive path, but R12/R13 static inventory found no periodic
+client-originated 5-second CTPP/RTPC/PseudoTCP application send loop.
+`OUR_HELPER_SENDS_EQUIVALENT_5S_CONTROL=false`.
+`OUR_HELPER_HAS_TIMER_FOR_EQUIVALENT=false`.
+`OUR_HELPER_HANDLES_SERVER_RESPONSE=false`.
+Therefore `MISSING_5S_CONTROL_CONFIRMED=true` and
+`MISSING_PERIODIC_CONTROL_DIFFERENCE=PROVEN`.
+The causal statement stays narrower:
+`MISSING_PERIODIC_CONTROL_CAN_EXPLAIN_36S_STOP=PLAUSIBLE`, not proven, because
+R14 shows an official-client difference and longer official media lifetime, but
+does not prove that generating this exact family would extend our helper stream.
+
+### STUN / ICE
+
+`STUN_PERIODICITY=6.999` for client-originated STUN on the media pair;
+direction-specific later STUN checks also continue after 36 seconds.
+`STUN_CONTINUES_AFTER_36S=true`.
+`OUR_HELPER_LIBNICE_EQUIVALENT=true` by static dependency/runtime model.
+`STUN_DIFFERENCE_PRESENT=false`.
+`STUN_AS_D1_ROOT_CAUSE=REJECTED`.
+STUN remains separate from the 5-second PseudoTCP application-control event.
+
+### Auto-close
+
+Operator fact: `OFFICIAL_APP_CAMERA_CLOSED_AUTOMATICALLY=true`.
+`PROVEN_OFFLINE`: media RTP from the device stops at `71.689`, while
+client-originated periodic control continues through `83.143`; the next expected
+5-second control after `78.133` is observed at `83.143`. PseudoTCP teardown then
+appears at `83.143-83.245`. This supports
+`MEDIA_END_INITIATOR=DEVICE` for RTP production and separates media stop from
+the later client close. `OFFICIAL_MEDIA_AUTO_CLOSE_DURATION=83.245`.
+`OFFICIAL_60S_LIMIT_CLASSIFICATION=SERVER_PROTOCOL_LIMIT`: evidence is the
+near-60-second device media stop while client-side periodic control is still
+present. No RTPC close, CTPP close, explicit IDR request, or safe application
+timeout opcode was proven before RTP stopped.
+
+### D1 and D2
+
+R14 satisfies the D1 difference rule: official app sends periodic post-active
+control, cadence is below 36 seconds, messages continue past 36 seconds, server
+responses are present, and our helper sends no equivalent. Therefore
+`MISSING_PERIODIC_CONTROL_DIFFERENCE=PROVEN`.
+`MISSING_PERIODIC_CONTROL_CAUSES_36S_STOP=PLAUSIBLE`.
+
+No direct proof connects this D1 protocol-lifetime difference to the HA rendering
+issue. `COMMON_D1_D2_CAUSE=UNRESOLVED`.
+
+### Next minimal fix, proposal only
+
+No implementation was made. If future evidence proves the exact generation rule,
+the corrective location is the generated helper P80/P78 media state machine:
+`FIRST_SEND_CONDITION=P80_MEDIA_ACTIVE`,
+`CADENCE_SOURCE=official_app_observed_5s`,
+`MESSAGE_GENERATION_RULE=derive_structural_PseudoTCP_app_frame_no_literal_replay`,
+`RESPONSE_HANDLING=consume_and_classify_server_response`,
+`STOP_CONDITION=media_session_teardown`,
+`SESSION_STATE_RULE=session_bound_runtime_generation`,
+`NO_LITERAL_REPLAY=true`.
