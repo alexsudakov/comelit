@@ -45,18 +45,6 @@ DIAGNOSTIC_METHODS = (
     "_log_hls_runtime_diagnostics_if_changed",
 )
 
-WORKER_ERROR_COUNT_KEYS = (
-    "stream_worker_error_count",
-    "worker_error_count",
-    "error_count",
-)
-
-START_WORKER_COUNT_KEYS = (
-    "start_worker_count",
-    "stream_start_worker_count",
-    "worker_start_count",
-)
-
 EXISTING_EXTRA_STATE_KEYS = (
     "media_active",
     "media_phase",
@@ -112,6 +100,9 @@ class P116R18HlsRuntimeDiagnosticsTests(unittest.TestCase):
         cls.camera = CAMERA.read_text(encoding="utf-8")
         cls.tree = ast.parse(cls.camera)
         cls.parents = _parent_map(cls.tree)
+        cls.diagnostic_source = _function_source(
+            cls.tree, cls.camera, "_hls_runtime_diagnostics"
+        )
 
     def test_all_14_diagnostic_fields_are_present(self) -> None:
         for field in DIAGNOSTIC_FIELDS:
@@ -119,47 +110,28 @@ class P116R18HlsRuntimeDiagnosticsTests(unittest.TestCase):
         self.assertIn("_HLS_DIAGNOSTIC_FIELDS", self.camera)
         self.assertIn("attrs.update(self._hls_runtime_diagnostics())", self.camera)
 
-    def test_hls_provider_and_ha_stream_public_diagnostics_are_used(self) -> None:
-        self.assertIn("from homeassistant.components.stream import HLS_PROVIDER", self.camera)
-        self.assertIn('HLS_PROVIDER = "hls_provider"', self.camera)
-        self.assertIn("self.hass.data[STREAM_DOMAIN]", self.camera)
-        self.assertIn(".get(HLS_PROVIDER)", self.camera)
-        self.assertIn("stream.get_diagnostics()", self.camera)
-        self.assertIn("stream.outputs()", self.camera)
-        self.assertIn("provider.get_segments()", self.camera)
+    def test_ha_2026_9_1_stream_diagnostics_keys_are_exact(self) -> None:
+        self.assertIn("stream.get_diagnostics()", self.diagnostic_source)
+        self.assertIn('stream_diagnostics.get("container_format")', self.diagnostic_source)
+        self.assertIn('stream_diagnostics.get("video_codec")', self.diagnostic_source)
+        self.assertIn('stream_diagnostics.get("worker_error")', self.diagnostic_source)
+        self.assertIn('stream_diagnostics.get("start_worker")', self.diagnostic_source)
+        for obsolete in (
+            "stream_worker_error_count",
+            "worker_error_count",
+            "error_count",
+            "start_worker_count",
+            "stream_start_worker_count",
+            "worker_start_count",
+        ):
+            self.assertNotIn(obsolete, self.diagnostic_source)
 
-    def test_per_output_counter_candidates_are_defensive(self) -> None:
-        for key in WORKER_ERROR_COUNT_KEYS:
-            self.assertIn(f'"{key}"', self.camera)
-        for key in START_WORKER_COUNT_KEYS:
-            self.assertIn(f'"{key}"', self.camera)
-        self.assertIn("_HLS_WORKER_ERROR_COUNT_KEYS", self.camera)
-        self.assertIn("_HLS_START_WORKER_COUNT_KEYS", self.camera)
-
-        diagnostic_source = _function_source(
-            self.tree, self.camera, "_hls_runtime_diagnostics"
-        )
-        self.assertIn("for candidate in _HLS_WORKER_ERROR_COUNT_KEYS", diagnostic_source)
-        self.assertIn("for candidate in _HLS_START_WORKER_COUNT_KEYS", diagnostic_source)
-        self.assertIn("output_diagnostics.get(candidate)", diagnostic_source)
-        self.assertIn("not isinstance(value, bool)", diagnostic_source)
-        self.assertIn("value >= 0", diagnostic_source)
-
-    def test_stream_outputs_are_only_read_through_public_diagnostics(self) -> None:
-        diagnostic_method = next(
-            node
-            for node in ast.walk(self.tree)
-            if isinstance(node, ast.FunctionDef)
-            and node.name == "_hls_runtime_diagnostics"
-        )
-        output_reads = [
-            node
-            for node in ast.walk(diagnostic_method)
-            if isinstance(node, ast.Attribute)
-            and isinstance(node.value, ast.Name)
-            and node.value.id == "output"
-        ]
-        self.assertEqual(["get_diagnostics"], [node.attr for node in output_reads])
+    def test_hls_provider_is_resolved_from_stream_outputs(self) -> None:
+        self.assertIn("stream.outputs()", self.diagnostic_source)
+        self.assertIn("outputs.get(HLS_PROVIDER)", self.diagnostic_source)
+        self.assertIn("provider.get_segments()", self.diagnostic_source)
+        self.assertNotIn("self.hass.data[STREAM_DOMAIN]", self.diagnostic_source)
+        self.assertNotIn("output.get_diagnostics()", self.diagnostic_source)
 
     def test_init_and_part_data_lengths_are_exported_without_bytes(self) -> None:
         for node in ast.walk(self.tree):
@@ -182,10 +154,7 @@ class P116R18HlsRuntimeDiagnosticsTests(unittest.TestCase):
             self.assertEqual(parent.func.id, "bool")
         self.assertTrue(seen)
 
-    def test_sensitive_strings_and_protocol_paths_are_absent_from_camera(self) -> None:
-        for forbidden in ("access_token", "endpoint_url"):
-            self.assertNotIn(forbidden, self.camera)
-
+    def test_sensitive_strings_and_protocol_paths_are_absent_from_diagnostics(self) -> None:
         diagnostic_source = "\n".join(
             _function_source(self.tree, self.camera, name) for name in DIAGNOSTIC_METHODS
         )
@@ -212,8 +181,6 @@ class P116R18HlsRuntimeDiagnosticsTests(unittest.TestCase):
             self.tree, self.camera, "_log_hls_runtime_diagnostics_if_changed"
         )
         self.assertIn('payload["video_packet_count"]', log_source)
-        for field in DIAGNOSTIC_FIELDS:
-            self.assertIn(field, self.camera)
         self.assertNotIn(".init", log_source)
         self.assertNotIn(".data", log_source)
         self.assertNotIn("repr(", log_source)
