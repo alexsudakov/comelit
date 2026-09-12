@@ -626,3 +626,163 @@ or session secrets.
 creation under PyAV, first part keyframe flag, open-segment playlist exposure,
 next video packet DTS/PTS validity, timestamp-validator drop count, V1/V2/V3/V4
 offline variant outcome, and any causal keepalive/IDR-request message.
+
+## R13B evidence enrichment
+
+`BASE_SHA=b9934dd83b17158bac213efcc18c5ec6b4b66e87`. This iteration stayed
+offline: no Comelit live session, HA deploy/restart, OAuth, Door/Gate action,
+keepalive implementation, IDR-request implementation, production component edit,
+native binary execution, or network I/O was performed.
+
+### HA 2026.9.1 stream evidence
+
+`HA_UPSTREAM_LOCAL_MATCHES=PASS`: the staged `ha-2026.9.1` files match the
+orchestrator manifest SHA256 values for `hls.py`, `fmp4utils.py`, `worker.py`,
+`core.py`, `const.py`, and `__init__.py`. The previous `stream/worker.py`,
+`stream/core.py`, `stream/const.py`, and `stream/__init__.py` staged copies are
+byte-identical to the new tag copies. `PROVEN_STATIC`: `hls.py` imports only the
+local stream closure needed here: `.const`, `.core`, and `.fmp4utils`.
+
+`PROVEN_STATIC`: default LL-HLS setup in `__init__.py:277-287` sets
+`ll_hls=True`, `min_segment_duration=segment_duration - 0.1`, part duration from
+`CONF_PART_DURATION`, advance-part-limit from `max(int(3 / part_duration), 3)`,
+and part timeout as `2 * part_duration`. `const.py:28-29` defines non-LL target
+segment duration `2.0` and adjuster `0.1`; the R13B LL-HLS runtime defaults
+remain the HA config defaults already captured in R13 (`segment_duration=6`,
+`part_duration=1`).
+
+`PROVEN_STATIC`: HA-style fMP4 muxing uses `movflags` containing `empty_moov`,
+`default_base_moof`, `frag_discont`, `negative_cts_offsets`, `skip_trailer`, and
+`delay_moov`; LL-HLS adds `frag_duration=int(part_target_duration * 9e5)`
+(`worker.py:183-243`). A second keyframe at/after `min_segment_duration` is
+required only to close the first full segment (`worker.py:290-299`). It is not a
+static precondition for the first part: `check_flush_part()` creates a `Segment`
+when `delay_moov` first moves the buffer, then flushes the moof (`worker.py:331-343`),
+and `flush()` calls `Segment.async_add_part(Part(...))` (`worker.py:345-423`).
+
+`PROVEN_STATIC`: open LL-HLS segments can be exposed in playlists. The playlist
+renderer includes the most recent segment even when incomplete (`hls.py:173-180`),
+renders parts for the last segment (`hls.py:235-240`), and `Segment.render_hls()`
+adds a preload hint for the next part of an incomplete segment (`core.py:198-220`).
+
+### Run5 RTP offline probe
+
+`DATAGRAM_FRAMING=PROVEN_STATIC`: the P105 runner writes each UDP payload as a
+2-byte big-endian length followed by the payload (`ct120_run_p105_entrance_media_live.sh:426-436`).
+The same runner's depacketizer reads that exact framing (`:470-480`). Therefore
+the staged `video.rtpdatagrams` file is length-prefixed RTP payloads, not raw
+concatenated UDP payloads and not pcap.
+
+`PROVEN_OFFLINE`: `/tmp/comelit-r13-pyav/bin/python
+safety-poc/research/media/v1/entrance_p116_r13b_offline_hls_probe.py --artifact
+.p116-evidence/private/p115-run5/video.rtpdatagrams` used PyAV `17.0.1` with
+libavformat `(62, 3, 100)`. It parsed `1538` PT99 RTP datagrams into `745` H264
+access units, with `SPS_COUNT=9`, `PPS_COUNT=9`, and `IDR_ACCESS_UNITS=2`.
+The first captured access unit is not an IDR, so the probe starts muxing at the
+first IDR, matching HA worker behavior that advances to the first video keyframe
+before muxing (`worker.py:690-710`, `:724-738`).
+
+`PROVEN_OFFLINE`: V1, the raw run5 keyframe cadence, produced an HA-style fMP4
+file: `MUX_STATUS=PASS`, `MP4_INIT=YES`, `FIRST_MOOF=YES`, `FIRST_MDAT=YES`,
+`FIRST_PART_CREATED=YES`, `FIRST_PART_HAS_KEYFRAME=YES`,
+`FFPROBE_CODEC=h264`, `FFPROBE_EXTRADATA_SIZE=44`, `FFPROBE_TIME_BASE=1/90000`,
+`FIRST_KEYFRAME_DTS_PTS_VALID=YES`, `NEXT_VIDEO_PACKET_DTS_PTS_VALID=YES`,
+`TIMESTAMP_VALIDATOR_DROPS=16`. The drop count is from the socket-free RTP
+timestamp validator equivalent in the probe; it reflects duplicate/non-advancing
+access-unit timestamps before muxing and did not prevent first part creation.
+
+`PROVEN_OFFLINE`: V2, the same stream with one injected second IDR, also produced
+the first part: `MUX_STATUS=PASS`, `MP4_INIT=YES`, `FIRST_MOOF=YES`,
+`FIRST_MDAT=YES`, `FIRST_PART_CREATED=YES`, `FIRST_PART_HAS_KEYFRAME=YES`,
+`FFPROBE_CODEC=h264`, `FFPROBE_EXTRADATA_SIZE=44`, `FFPROBE_TIME_BASE=1/90000`,
+`FIRST_KEYFRAME_DTS_PTS_VALID=YES`, `NEXT_VIDEO_PACKET_DTS_PTS_VALID=YES`,
+`TIMESTAMP_VALIDATOR_DROPS=41`. Because V1 already creates the first part, the
+injected second IDR is not the decisive variable for first-part creation.
+
+`PROVEN_STATIC`: V3 video-only and V4 production SDP with advertised silent PCMA
+do not change the HA output mux dependency for video. `const.py:19` supports
+only `{"aac", "mp3"}` audio, and `worker.py:650-657` sets unsupported or
+profile-less audio streams to `None`. Therefore PCMA does not block video muxing
+in this HA path. R13B does not prove whether an SDP-level silent PCMA m-line can
+affect FFmpeg's initial demux wait before video packets; the raw audio artifact
+was not staged and no socket replay was used.
+
+Scalar D2 closure:
+
+```text
+D2_FIRST_LL_HLS_PART_CREATED=YES
+FIRST_PART_HAS_KEYFRAME=YES
+SECOND_IDR_REQUIRED_FOR_FIRST_PART=NO
+SECOND_IDR_REQUIRED_FOR_SEGMENT_CLOSE=PROVEN_STATIC
+VIDEO_CODEC_EXTRADATA_AVAILABLE_BEFORE_MUX=YES
+VIDEO_TIME_BASE=1/90000
+FIRST_KEYFRAME_DTS_PTS_VALID=YES
+NEXT_VIDEO_PACKET_DTS_PTS_VALID=YES
+TIMESTAMP_VALIDATOR_DROPS=16
+MUX_FIRST_KEYFRAME=PASS
+MP4_INIT_WRITTEN=YES
+FIRST_MOOF_WRITTEN=YES
+FIRST_SEGMENT_OBJECT_CREATED=YES
+FIRST_PART_CREATED=YES
+HLS_PLAYLIST_CAN_EXPOSE_OPEN_SEGMENT=YES
+```
+
+`D2_ROOT_CAUSE=NOT_SECOND_IDR_FOR_FIRST_PART`: R13B proves that the staged run5
+RTP can create the first LL-HLS part under PyAV 17/FFmpeg 7.1-line fMP4 muxing
+without an injected second IDR. The remaining unresolved D2 causes are not input
+availability gates lifted by R13B; they concern live timing/lifecycle, possible
+pre-keyframe demux wait behavior, or official-client feedback that is not present
+in the staged offline media.
+
+### D1 static-only closure
+
+`OUR_RTP_STOP_AROUND_36S=PROVEN_FOR_3_P116_SESSIONS`,
+`PERIODIC_CLIENT_TRAFFIC_REQUIRED=NOT_PROVEN`, and
+`KEEPALIVE_MESSAGE_TYPE=NOT_PROVEN` remain unchanged. The static outbound
+inventory after `P80_MEDIA_ACTIVE=true` is complete for this repo:
+
+`PROVEN_STATIC`: media activation emits stdout markers and enables forwarding
+only (`entrance_p80_ha_media_runtime_transform.py:583-608`).
+
+`PROVEN_STATIC`: accepted PT99/PT8 RTP is sent helper -> HA loopback UDP via
+`sendto()` (`:484-545`), then bounded scalar telemetry/progress markers are
+printed (`:545-575`).
+
+`PROVEN_STATIC`: non-media data after media-active continues through the
+inherited readable branch/PseudoTCP path and prints only scalar receive-event
+size markers in this transform (`:612-620`). This is input-driven, not a proven
+client keepalive loop.
+
+`PROVEN_STATIC`: the only post-000A/001A timers found in the generated media
+gate are pre/media-start fail-closed 3-second ACK timers
+(`entrance_p97_complete_post_000a_ack_cycle_transform.py:204-227`;
+`entrance_p92_wait_device_000a_before_001a_transform.py:121-133`).
+
+Minimal official-app trace definition for the unresolved D1 question:
+capture from 5 seconds before media-active until at least 60 seconds after,
+both directions, with packet timing, direction, endpoint roles, protocol class
+(`CTPP`, `RTPC`, `PseudoTCP`, `STUN/TURN`, `RTP`, `RTCP`), safe message
+type/opcode, body length, and H264 scalar counts (`SPS`, `PPS`, `IDR`). Exclude
+OAuth tokens, ICE credentials, raw media payloads, raw SDP credentials, endpoint
+addresses beyond anonymized roles, channel/session identifiers beyond
+redacted/stable role labels, and any JPEG/video/audio publication.
+
+### Redaction audit follow-up
+
+`SAFE_REDACTION_PROPOSAL=PROVEN_STATIC_PROPOSAL_ONLY`: extend the safe marker
+value regex with bounded enums plus anchored shapes for structured multi-token
+values:
+
+```text
+^(?:PASS|FAIL|true|false|READY|OPEN|CLOSED|UNKNOWN_OUTCOME|REJECTED|REJECTED_NOT_READY|FAILED_SAFE|EXPECTED_TERMINAL_SHUTDOWN|FATAL|NONE|HOME_ASSISTANT|STATE_SCOPED_STRUCTURAL|NOT_MATCHED|ACTIVE|PREACTIVE|DISCONNECTED|GATHERING|CONNECTING|CONNECTED|FAILED|[0-9]{1,20}|[0-9]{1,3}(?:,[0-9]{1,3}){0,127}|[0-9]{1,5} OPEN=(?:true|false) ACK=(?:true|false)|FAIL LEN=[0-9]{1,5})$
+```
+
+The multi-token additions are deliberately anchored to the known shapes
+`PSEUDOTCP_APP_RX_EVENT="%d OPEN=%s ACK=%s"` and
+`PSEUDOTCP_NOTIFY_PACKET=FAIL LEN=24`; they are not catch-all text patterns.
+Identifier-like, token-like, address-like, session-like, SDP-like, and free-text
+values remain redacted. `NUMERIC_ALLOWANCE_RESIDUAL_RISK=OBSERVATION_ONLY`:
+the numeric scalar allowance `[0-9]{1,20}` plus up-to-128-element numeric lists
+is pre-existing in `custom_components/comelit/media_transport.py:41-45`, not
+introduced by R13/R13B; whether that should be narrowed is a separate exposure
+question and was not changed here.
