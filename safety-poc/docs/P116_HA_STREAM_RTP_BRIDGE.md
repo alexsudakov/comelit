@@ -388,6 +388,51 @@ the scalar-safe value allowlist. These markers are not media-state-driving:
 activation remains exclusively `P80_MEDIA_ACTIVE=true`, and progress entities
 continue to advance only from the legacy `P80_*_RTP_PACKETS` markers.
 
+## R12 protocol periodicity and 36 s stop forensics
+
+`PROVEN_STATIC`: the HA log success line now preserves the existing
+`protocol_native_markers=[...]` and `p116_native_markers=[...]` fields, and adds
+`protocol_native_marker_timing=[KEY#count@first_ms-last_ms, ...]`. The timing
+summary is keyed by safe marker family/key, uses the same redacted marker
+admission path, is capped to 80 families and a 2048-character compact list, and
+is emitted only once at normal media-cycle completion.
+
+`PROVEN_OFFLINE`: the generated P80 helper declares media active after the
+post-000A/001A structural ACK gate and then owns no periodic CTPP/RTPC renewal
+loop. Its media-active function emits `P80_MEDIA_LIFETIME_OWNER=HOME_ASSISTANT`
+and `P80_MEDIA_AUTO_CLOSE_3000MS=false`, enables forwarding, and leaves accepted
+PT99/PT8 RTP to `sendto()` loopback. Non-media datagrams continue to the existing
+PseudoTCP path. The only 3-second timers in the generated media path are the
+pre-active missing-device-ACK fail-closed gates; no generated 30-40 s forwarding
+timer was found.
+
+`NOT_PROVEN`: this repository does not contain enough official-app viewing trace
+after media start to prove a required periodic media renewal/keepalive cadence or
+to prove that adding such a periodic send would extend the stream. The candidate
+cause consistent with the new native-app fact is: after the one-shot ACK/media
+start exchange, our helper stops sending client-side RTPC/CTPP/media-lifetime
+traffic that the native app likely continues sending while viewing. The
+corrective location, if that hypothesis is validated, is the generated helper
+composition/state machine around
+`safety-poc/research/media/v1/entrance_p80_ha_media_runtime_transform.py` and its
+P97/P78 RTPC composition chain, not the HA Python wrapper alone.
+
+`IDR_CADENCE_ON_OUR_PATH=initial_only_observed`: live P116 telemetry recorded the
+first keyframe at +1 ms / +16 ms in two R11 runs while SPS/PPS repeated ten
+times over roughly 35-36 seconds. R12 live evidence again reports repeated
+SPS/PPS and no clean second-IDR proof. The generated helper only classifies IDR
+NAL type 5/FU-A type 5; no protocol request or decoder-feedback path for
+requesting a fresh IDR is proven in this repo.
+
+`HA_STREAM_SOURCE_CONTRACT=PROVEN_STATIC`: `camera.py` hands HA Stream the string
+path returned by `transport.local_sdp_path` only while the manager is active and
+`transport.local_sdp_ready` is true, and constructs `Stream(...,
+pyav_options={"protocol_whitelist": "file,udp,rtp"}, ...)`. The current SDP is
+loopback RTP/AVP PT99/PT8 with `a=recvonly` on both m-lines and no `a=ssrc`.
+Because HA Core is not vendored in this repo, whether missing `a=ssrc` matters
+for HA's demuxer remains `NOT_PROVEN`; direction is statically consistent with
+helper-as-sender and HA/FFmpeg-as-receiver.
+
 ### Live correlation plan
 
 Use one bounded production validation run and correlate scalar timestamps/events

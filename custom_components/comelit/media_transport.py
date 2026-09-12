@@ -7,6 +7,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import time
 
 from aiohttp import ClientSession
 from homeassistant.config_entries import ConfigEntry
@@ -61,6 +62,8 @@ _MEDIA_NATIVE_MARKER_PREFIXES = (
 )
 _MEDIA_NATIVE_MARKER_TAIL_LIMIT = 40
 _MEDIA_NATIVE_PROTOCOL_MARKER_LIMIT = 80
+_MEDIA_NATIVE_PROTOCOL_TIMING_LIMIT = 80
+_MEDIA_NATIVE_PROTOCOL_TIMING_LINE_LIMIT = 2048
 _MEDIA_NATIVE_PROTOCOL_MARKER_PREFIXES = (
     "ICE_",
     "REMOTE_SDP_",
@@ -245,6 +248,7 @@ class ComelitEntranceMediaTransport:
         self._last_error: str | None = None
         self._native_marker_tail: list[str] = []
         self._native_protocol_markers: list[str] = []
+        self._native_protocol_marker_timing: dict[str, tuple[int, int, int]] = {}
         self._last_native_exit_code: int | None = None
         self._last_native_failure_markers: list[str] = []
         self._progress = MediaProgressDiagnostics()
@@ -381,6 +385,34 @@ class ComelitEntranceMediaTransport:
                 del self._native_protocol_markers[
                     :-_MEDIA_NATIVE_PROTOCOL_MARKER_LIMIT
                 ]
+            now_ms = int(time.monotonic() * 1000)
+            previous = self._native_protocol_marker_timing.get(key)
+            if previous is None:
+                if (
+                    len(self._native_protocol_marker_timing)
+                    >= _MEDIA_NATIVE_PROTOCOL_TIMING_LIMIT
+                ):
+                    return
+                self._native_protocol_marker_timing[key] = (1, now_ms, now_ms)
+            else:
+                count, first_ms, last_ms = previous
+                self._native_protocol_marker_timing[key] = (
+                    count + 1,
+                    first_ms,
+                    max(last_ms, now_ms),
+                )
+
+    def _format_protocol_marker_timing(self) -> list[str]:
+        timing: list[str] = []
+        line_size = 0
+        for key, (count, first_ms, last_ms) in self._native_protocol_marker_timing.items():
+            item = f"{key}#{count}@{first_ms}-{last_ms}"
+            projected = line_size + len(item) + (2 if timing else 0)
+            if projected > _MEDIA_NATIVE_PROTOCOL_TIMING_LINE_LIMIT:
+                break
+            timing.append(item)
+            line_size = projected
+        return timing
 
     def _capture_native_failure(self, returncode: int) -> None:
         self._last_native_exit_code = returncode
@@ -388,6 +420,7 @@ class ComelitEntranceMediaTransport:
 
     def _emit_native_success_summary(self) -> None:
         protocol_markers = list(dict.fromkeys(self._native_protocol_markers))
+        protocol_marker_timing = self._format_protocol_marker_timing()
         p116_markers = list(
             dict.fromkeys(
                 marker
@@ -397,8 +430,10 @@ class ComelitEntranceMediaTransport:
         )
         _LOGGER.info(
             "Comelit entrance media transport completed: "
-            "protocol_native_markers=%s p116_native_markers=%s",
+            "protocol_native_markers=%s protocol_native_marker_timing=%s "
+            "p116_native_markers=%s",
             protocol_markers,
+            protocol_marker_timing,
             p116_markers,
         )
 
@@ -414,6 +449,7 @@ class ComelitEntranceMediaTransport:
         self._last_error = None
         self._native_marker_tail.clear()
         self._native_protocol_markers.clear()
+        self._native_protocol_marker_timing.clear()
         self._last_native_exit_code = None
         self._last_native_failure_markers = []
         self._cancel_status_notify()

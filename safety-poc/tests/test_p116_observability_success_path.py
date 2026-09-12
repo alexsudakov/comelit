@@ -131,12 +131,48 @@ class P116ObservabilitySuccessPathTests(unittest.TestCase):
         self.assertEqual(len(captured.records), 1)
         message = captured.records[0].getMessage()
         self.assertIn("protocol_native_markers=", message)
+        self.assertIn("protocol_native_marker_timing=", message)
         self.assertIn("p116_native_markers=", message)
         for marker in protocol_markers:
             self.assertIn(marker, message)
         self.assertIn("P116_VIDEO_PT_SET=8,99", message)
         self.assertIn("P116_UNKNOWN=<redacted>", message)
         self.assertNotIn("token secret", message)
+
+    def test_protocol_marker_timing_counts_repeated_keys(self) -> None:
+        with patch.object(media_transport.time, "monotonic", side_effect=[10.0, 10.5, 11.0]):
+            self.transport._remember_native_marker("ICE_READY_FINAL=true")
+            self.transport._remember_native_marker("ICE_READY_FINAL=true")
+            self.transport._remember_native_marker("P80_MEDIA_ACTIVE=true")
+
+        self.assertEqual(
+            self.transport._native_protocol_marker_timing["ICE_READY_FINAL"],
+            (2, 10000, 10500),
+        )
+        self.assertEqual(
+            self.transport._native_protocol_marker_timing["P80_MEDIA_ACTIVE"],
+            (1, 11000, 11000),
+        )
+
+        with self.assertLogs(
+            "custom_components.comelit.media_transport",
+            level="INFO",
+        ) as captured:
+            self.transport._emit_native_success_summary()
+
+        message = captured.records[0].getMessage()
+        self.assertIn("ICE_READY_FINAL#2@10000-10500", message)
+        self.assertIn("P80_MEDIA_ACTIVE#1@11000-11000", message)
+
+    def test_protocol_marker_timestamps_are_non_decreasing(self) -> None:
+        with patch.object(media_transport.time, "monotonic", side_effect=[20.0, 19.0]):
+            self.transport._remember_native_marker("PSEUDOTCP_OPEN_FINAL=true")
+            self.transport._remember_native_marker("PSEUDOTCP_OPEN_FINAL=true")
+
+        self.assertEqual(
+            self.transport._native_protocol_marker_timing["PSEUDOTCP_OPEN_FINAL"],
+            (2, 20000, 20000),
+        )
 
     def test_protocol_markers_survive_later_p116_progress_flood(self) -> None:
         self.transport._remember_native_marker("V4_CTPP_OPEN_SENT=PASS")
@@ -173,6 +209,14 @@ class P116ObservabilitySuccessPathTests(unittest.TestCase):
             self.transport._remember_native_marker(f"REMOTE_SDP_BYTES={index}")
 
         self.assertEqual(len(self.transport._native_protocol_markers), limit)
+        self.assertLessEqual(
+            len(self.transport._native_protocol_marker_timing),
+            media_transport._MEDIA_NATIVE_PROTOCOL_TIMING_LIMIT,
+        )
+        self.assertLessEqual(
+            sum(len(item) + 2 for item in self.transport._format_protocol_marker_timing()),
+            media_transport._MEDIA_NATIVE_PROTOCOL_TIMING_LINE_LIMIT + 2,
+        )
         with self.assertLogs(
             "custom_components.comelit.media_transport",
             level="INFO",
@@ -181,6 +225,27 @@ class P116ObservabilitySuccessPathTests(unittest.TestCase):
 
         self.assertEqual(len(captured.records), 1)
         self.assertLess(len(captured.records[0].getMessage()), 4096)
+
+    def test_protocol_marker_timing_family_cap_is_bounded(self) -> None:
+        keys = (
+            "ICE_READY_FINAL",
+            "ICE_CONNECTED_FINAL",
+            "PSEUDOTCP_OPEN_FINAL",
+            "PSEUDOTCP_STARTED_FINAL",
+            "P80_MEDIA_ACTIVE",
+            "P80_VIDEO_RTP_FORWARDING",
+            "P80_AUDIO_RTP_FORWARDING",
+            "P80_DEVICE_ACK_000A_OBSERVED",
+            "P80_DEVICE_ACK_001A_OBSERVED",
+        )
+        for index in range(media_transport._MEDIA_NATIVE_PROTOCOL_TIMING_LIMIT + 10):
+            key = keys[index % len(keys)]
+            self.transport._remember_native_marker(f"{key}_{index}=PASS")
+
+        self.assertEqual(
+            len(self.transport._native_protocol_marker_timing),
+            media_transport._MEDIA_NATIVE_PROTOCOL_TIMING_LIMIT,
+        )
 
     def test_native_markers_do_not_emit_per_packet_logs(self) -> None:
         with patch.object(media_transport._LOGGER, "info") as info:
