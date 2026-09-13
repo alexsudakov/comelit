@@ -74,6 +74,7 @@ _DIAGNOSTIC_SAFE_STRING = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
 _HLS_CODEC_STRING = re.compile(
     r"^(avc1|avc3|hvc1|hev1|mp4a|opus|mp4v)\.[0-9A-Fa-f.]+$"
 )
+_HLS_PART_URI = re.compile(r"^(?:\./)?segment/[0-9]+\.[0-9]+\.m4s$")
 _HLS_DIAGNOSTIC_FIELDS = (
     "ha_stream_created",
     "ha_stream_available",
@@ -135,6 +136,7 @@ _HLS_MEDIA_CONTENT_TYPES = (
     "application/mp4",
     "application/octet-stream",
 )
+_HLS_PART_CONTENT_TYPES = ("video/iso.segment",)
 
 
 def _safe_diagnostic_string(value: Any) -> str | None:
@@ -193,7 +195,7 @@ def _first_relative_part_name(playlist: str) -> str | None:
     if match is None:
         return None
     name = match.group(1)
-    if "://" in name or name.startswith("//") or "/" in name or not name.endswith(".m4s"):
+    if _HLS_PART_URI.fullmatch(name) is None:
         return None
     return name
 
@@ -666,6 +668,7 @@ class ComelitEntranceCamera(Camera):
             base = get_url(
                 self.hass,
                 allow_internal=True,
+                allow_external=False,
                 prefer_external=False,
                 allow_cloud=False,
             )
@@ -784,12 +787,12 @@ class ComelitEntranceCamera(Camera):
         )
 
         if part_name is not None:
-            part_address = media_address.rsplit("/", 1)[0] + "/" + part_name
+            part_address = urljoin(media_address, part_name)
             part = await self._async_fetch_hls_scalar(
                 session,
                 part_address,
                 timeout,
-                _HLS_MEDIA_CONTENT_TYPES,
+                _HLS_PART_CONTENT_TYPES,
                 read_text=False,
             )
             result.update(
@@ -801,14 +804,24 @@ class ComelitEntranceCamera(Camera):
                 }
             )
 
+        attempt_fields = (
+            "hls_master_probe_attempted",
+            "hls_media_probe_attempted",
+            "hls_init_probe_attempted",
+            "hls_part_probe_attempted",
+        )
+        status_fields = (
+            "hls_master_http_status",
+            "hls_media_http_status",
+            "hls_init_http_status",
+            "hls_part_http_status",
+        )
         result["hls_http_routing_proven"] = all(
+            result.get(field) is True for field in attempt_fields
+        ) and all(
             _bounded_non_bool_int(result.get(field)) is not None
             and 200 <= result[field] < 300
-            for field in (
-                "hls_master_http_status",
-                "hls_media_http_status",
-                "hls_init_http_status",
-            )
+            for field in status_fields
         )
         return result
 
