@@ -300,7 +300,7 @@ class P116R20HlsHttpBoundaryDiagnosticsTests(unittest.TestCase):
                 segment,
             )
 
-    def test_self_http_uses_supported_get_url_without_hardcoded_address(self) -> None:
+    def test_self_http_uses_internal_only_get_url_without_hardcoded_address(self) -> None:
         build_source = _function_source(
             self.tree,
             self.camera,
@@ -309,10 +309,12 @@ class P116R20HlsHttpBoundaryDiagnosticsTests(unittest.TestCase):
         expected_call = """get_url(
                 self.hass,
                 allow_internal=True,
+                allow_external=False,
                 prefer_external=False,
                 allow_cloud=False,
             )"""
         self.assertIn(expected_call, build_source)
+        self.assertEqual(self.camera.count("get_url("), 1)
 
         for node in ast.walk(self.tree):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -359,6 +361,47 @@ class P116R20HlsHttpBoundaryDiagnosticsTests(unittest.TestCase):
                 "return await self._async_direct_render_hls_probe(",
                 statement_source,
             )
+
+    def test_part_uri_matches_exact_ha_relative_shape_only(self) -> None:
+        helper = _function_source(self.tree, self.camera, "_first_relative_part_name")
+        self.assertIn("_HLS_PART_URI.fullmatch(name)", helper)
+        self.assertIn(
+            're.compile(r"^(?:\\./)?segment/[0-9]+\\.[0-9]+\\.m4s$")',
+            self.camera,
+        )
+        for accepted in ("./segment/0.0.m4s", "./segment/12.3.m4s"):
+            self.assertRegex(accepted, r"^(?:\./)?segment/[0-9]+\.[0-9]+\.m4s$")
+        for rejected in (
+            "https://example.com/segment/0.0.m4s",
+            "//example.com/segment/0.0.m4s",
+            "../segment/0.0.m4s",
+            "./other/0.0.m4s",
+            "./segment/abc.0.m4s",
+            "./segment/0.0.m4s?x=1",
+        ):
+            self.assertNotRegex(rejected, r"^(?:\./)?segment/[0-9]+\.[0-9]+\.m4s$")
+
+    def test_part_probe_uses_exact_ha_content_type_and_safe_url_join(self) -> None:
+        self_http = _function_source(self.tree, self.camera, "_async_self_http_hls_probe")
+        self.assertIn('_HLS_PART_CONTENT_TYPES = ("video/iso.segment",)', self.camera)
+        self.assertIn("part_address = urljoin(media_address, part_name)", self_http)
+        self.assertIn("_HLS_PART_CONTENT_TYPES", self_http)
+
+    def test_http_routing_proof_requires_master_media_init_and_part(self) -> None:
+        self_http = _function_source(self.tree, self.camera, "_async_self_http_hls_probe")
+        for field in (
+            "hls_master_probe_attempted",
+            "hls_media_probe_attempted",
+            "hls_init_probe_attempted",
+            "hls_part_probe_attempted",
+            "hls_master_http_status",
+            "hls_media_http_status",
+            "hls_init_http_status",
+            "hls_part_http_status",
+        ):
+            self.assertIn(f'"{field}"', self_http)
+        self.assertIn("result.get(field) is True for field in attempt_fields", self_http)
+        self.assertIn("for field in status_fields", self_http)
 
 
 if __name__ == "__main__":
