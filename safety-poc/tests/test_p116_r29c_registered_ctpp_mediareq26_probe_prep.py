@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import ast
+import re
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -13,6 +15,7 @@ MEDIA = ROOT / "research" / "media" / "v1"
 SOURCE = ROOT / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-ctpp-door.c"
 TRANSFORM = MEDIA / "entrance_p116_r29c_registered_ctpp_mediareq26_probe_transform.py"
 RUNNER = MEDIA / "ct120_run_p116_r29c_registered_ctpp_mediareq26_probe.sh"
+BUILDER = MEDIA / "ct120_build_p80_haos_media_helper.sh"
 
 sys.path.insert(0, str(MEDIA))
 import entrance_p116_r29c_registered_ctpp_mediareq26_probe_transform as r29c
@@ -22,6 +25,31 @@ def region(text: str, start: str, end: str) -> str:
     s = text.index(start)
     e = text.index(end, s)
     return text[s:e]
+
+
+def builder_p116_flags() -> set[str]:
+    text = BUILDER.read_text(encoding="utf-8")
+    case_region = region(
+        text,
+        'case "$P80_BUILD_INCLUDE_P116" in',
+        '[ "$FAIL" -eq 0 ] || exit 1',
+    )
+    return set(re.findall(r"P80_GENERATOR_P116_ARG=(--(?:no-)?include-p116)", case_region))
+
+
+def transform_cli_flags() -> set[str]:
+    tree = ast.parse(TRANSFORM.read_text(encoding="utf-8"))
+    flags: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Attribute) or node.func.attr != "add_argument":
+            continue
+        for arg in node.args:
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                if arg.value in {"--include-p116", "--no-include-p116"}:
+                    flags.add(arg.value)
+    return flags
 
 
 class P116R29CRegisteredCtppMediaReq26ProbePrep(unittest.TestCase):
@@ -186,6 +214,50 @@ class P116R29CRegisteredCtppMediaReq26ProbePrep(unittest.TestCase):
             "build_marker GENERATED_SOURCE_SHA256 fallback'"
         )
         self.assertEqual(out.strip(), "fallback")
+
+    def test_runner_materialisation_path_matches_builder_contract(self) -> None:
+        text = RUNNER.read_text(encoding="utf-8")
+        for path in (BUILDER, TRANSFORM, RUNNER):
+            self.assertTrue(path.exists(), path)
+        for marker in (
+            'P80_BUILD_TRANSFORM="$TRANSFORM_REL"',
+            "P80_BUILD_INCLUDE_P116=1",
+            'P80_BUILD_EXPECTED_SOURCE_SHA="$R29C_EXPECTED_GENERATED_SOURCE_SHA"',
+            'OUTPUT="$CANDIDATE_OUTPUT"',
+            'git -C "$REPO" show "$R29C_EXPECTED_COMMIT_SHA:$TRANSFORM_REL"',
+            'git -C "$REPO" show "$R29C_EXPECTED_COMMIT_SHA:$BUILDER_REL"',
+            'cmp "$RUN_ROOT/transform.py" "$REPO/$TRANSFORM_REL"',
+            'cmp "$RUN_ROOT/builder.sh" "$REPO/$BUILDER_REL"',
+            'chroot "$rootfs" "/r29c-selfcheck/$CANDIDATE_NAME" --r29-selfcheck',
+        ):
+            self.assertIn(marker, text)
+
+    def test_transform_accepts_builder_p116_generator_flags(self) -> None:
+        flags = builder_p116_flags()
+        self.assertEqual(flags, {"--include-p116", "--no-include-p116"})
+        self.assertEqual(transform_cli_flags(), flags)
+
+        with tempfile.TemporaryDirectory() as td:
+            for flag in sorted(flags):
+                output = Path(td) / f"{flag.removeprefix('--').replace('-', '_')}.c"
+                proc = subprocess.run(
+                    [
+                        sys.executable,
+                        str(TRANSFORM),
+                        "--source",
+                        str(SOURCE),
+                        "--output",
+                        str(output),
+                        flag,
+                    ],
+                    cwd=REPO,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertGreater(output.stat().st_size, 0)
 
     def test_transform_imports_are_standard_or_r29(self) -> None:
         tree = ast.parse(TRANSFORM.read_text(encoding="utf-8"))

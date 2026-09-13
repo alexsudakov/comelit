@@ -711,7 +711,8 @@ def _assert_r29c_gates(candidate: str) -> None:
             raise RuntimeError(f"R29C_SELFCHECK_NETWORK_GATE=FAIL marker={forbidden}")
 
 
-def transform(source: str) -> str:
+def transform(source: str, *, include_p116: bool = True) -> str:
+    _ = include_p116
     candidate = r29.transform(source)
     candidate = _replace_once(
         candidate,
@@ -820,6 +821,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--report", action="store_true")
+    parser.add_argument("--include-p116", action="store_true", default=True)
+    parser.add_argument("--no-include-p116", dest="include_p116", action="store_false")
     args = parser.parse_args(argv)
 
     if args.report:
@@ -832,7 +835,7 @@ def main(argv: list[str] | None = None) -> int:
     if not source_path.exists() and str(source_path).startswith("safety-poc/"):
         source_path = Path(str(source_path)[len("safety-poc/"):])
     args.output.write_text(
-        transform(source_path.read_text(encoding="utf-8")),
+        transform(source_path.read_text(encoding="utf-8"), include_p116=args.include_p116),
         encoding="utf-8",
     )
     return 0
