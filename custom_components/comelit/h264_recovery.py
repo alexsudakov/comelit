@@ -317,6 +317,7 @@ class H264RecoveryRewriter:
                 nal_payload_after_header
             )
             if malformed:
+                self._mark_malformed("malformed_sei")
                 self._mark_unprovable_recovery_signal(au)
             if is_recovery_point:
                 if not au.seen_recovery_point_sei:
@@ -425,7 +426,7 @@ class H264RecoveryRewriter:
                 can_inject_before_this_packet=False,
             )
         self._mark_unsupported()
-        if nal_type in {25, 26, 27, 29, 30, 31}:
+        if nal_type == 0 or nal_type in {25, 26, 27, 29, 30, 31}:
             self._mark_unprovable_recovery_signal(au)
         return False
 

@@ -42,7 +42,9 @@ Supported H.264 packetization forms are:
 
 Unsupported forms pass through unchanged and increment a bounded scalar counter.
 Malformed RTP/H.264 structures pass through and increment a bounded malformed counter.
-No exception is allowed to escape the datagram callback.
+Malformed type-6 SEI conditions also feed that bounded malformed counter and set the
+bounded `malformed_sei` last-error token while preserving packet pass-through. No
+exception is allowed to escape the datagram callback.
 
 ## Eligibility
 
@@ -68,13 +70,15 @@ parsed confidently, the shim passes through.
 For each per-SSRC RTP timestamp access unit, the shim treats unprovable recovery
 signalling before the first VCL as a fail-closed condition for that access unit. This
 includes unsupported H.264 aggregation or fragmentation packetization, fragmented SEI,
-malformed SEI, and malformed H.264 structures encountered before the first VCL.
+malformed SEI, NAL type 0 unspecified packets, and malformed H.264 structures
+encountered before the first VCL.
 
 This records the contract requirement to prefer pass-through/no-injection for that
 access unit when avoiding duplicate recovery signalling cannot be proven safely. The
-rule only narrows injection eligibility. It does not fabricate IDR, drop RTP, change
-original RTP payload bytes, or widen live activity. This phase remains offline-only with
-LIVE_AUTHORIZED=false and no live network activity.
+rule only narrows injection eligibility. NAL type 0 remains an unsupported-packet
+pass-through and is not classified as malformed. The rule does not fabricate IDR, drop
+RTP, change original RTP payload bytes, or widen live activity. This phase remains
+offline-only with LIVE_AUTHORIZED=false and no live network activity.
 
 The inserted SEI is generated semantically with:
 

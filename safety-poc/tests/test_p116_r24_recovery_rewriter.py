@@ -276,6 +276,50 @@ class P116R24RecoveryRewriterTests(unittest.TestCase):
         self.assertEqual(self.rewriter.malformed_count, 1)
         self.assertEqual(self.rewriter.injected_count, 0)
 
+    def test_malformed_single_nal_sei_counts_and_passes_through(self) -> None:
+        sps, pps = self.context()
+        malformed_sei = nal(6, b"\x06\x02\x80")
+        packets = [sps, pps, rtp(12, malformed_sei), rtp(13, slice_nal(2))]
+        out = self.rewrite(*packets)
+        self.assertEqual(out, packets)
+        self.assertEqual(self.rewriter.malformed_count, 1)
+        self.assertEqual(self.rewriter.last_error, "malformed_sei")
+        self.assertEqual(self.rewriter.injected_count, 0)
+
+    def test_malformed_stap_a_sei_counts_once_and_passes_through(self) -> None:
+        sps, pps = self.context()
+        malformed_stap = stap_a(nal(6, b"\x06\x02\x80"), slice_nal(2))
+        packets = [sps, pps, rtp(12, malformed_stap)]
+        out = self.rewrite(*packets)
+        self.assertEqual(out, packets)
+        self.assertEqual(self.rewriter.malformed_count, 1)
+        self.assertEqual(self.rewriter.injected_count, 0)
+
+    def test_malformed_sei_fail_closed_scope_is_timestamp_and_ssrc(self) -> None:
+        ts1_sps, ts1_pps = self.context(timestamp=1, ssrc=1)
+        ts2_sps, ts2_pps = self.context(timestamp=2, ssrc=1)
+        other_sps, other_pps = self.context(timestamp=1, ssrc=2)
+        packets = [
+            ts1_sps,
+            ts1_pps,
+            rtp(12, nal(6, b"\x06\x02\x80"), timestamp=1, ssrc=1),
+            rtp(13, slice_nal(2), timestamp=1, ssrc=1),
+            ts2_sps,
+            ts2_pps,
+            rtp(22, slice_nal(2), timestamp=2, ssrc=1),
+            other_sps,
+            other_pps,
+            rtp(12, slice_nal(2), timestamp=1, ssrc=2),
+        ]
+        out = self.rewrite(*packets)
+        self.assertEqual(self.rewriter.malformed_count, 1)
+        self.assertEqual(self.rewriter.last_error, "malformed_sei")
+        self.assertEqual(self.rewriter.injected_count, 2)
+        self.assertEqual(
+            [seq(packet) for packet in out],
+            [10, 11, 12, 13, 10, 11, 22, 23, 10, 11, 12, 13],
+        )
+
     def test_unprovable_recovery_signal_scope_is_timestamp_and_ssrc(self) -> None:
         ts1_sps, ts1_pps = self.context(timestamp=1, ssrc=1)
         ts2_sps, ts2_pps = self.context(timestamp=2, ssrc=1)
@@ -312,6 +356,41 @@ class P116R24RecoveryRewriterTests(unittest.TestCase):
         out = self.rewrite(rtp(1, unsupported))
         self.assertEqual(payload(out[0]), unsupported)
         self.assertEqual(self.rewriter.unsupported_packet_count, 1)
+
+    def test_nal_type_zero_before_vcl_is_unsupported_and_fail_closed(self) -> None:
+        sps, pps = self.context()
+        type_zero = nal(0, b"\x12\x34")
+        packets = [sps, pps, rtp(12, type_zero), rtp(13, slice_nal(2))]
+        out = self.rewrite(*packets)
+        self.assertEqual(out, packets)
+        self.assertEqual(self.rewriter.unsupported_packet_count, 1)
+        self.assertEqual(self.rewriter.malformed_count, 0)
+        self.assertEqual(self.rewriter.injected_count, 0)
+
+    def test_nal_type_zero_fail_closed_scope_is_timestamp_and_ssrc(self) -> None:
+        ts1_sps, ts1_pps = self.context(timestamp=1, ssrc=1)
+        ts2_sps, ts2_pps = self.context(timestamp=2, ssrc=1)
+        other_sps, other_pps = self.context(timestamp=1, ssrc=2)
+        packets = [
+            ts1_sps,
+            ts1_pps,
+            rtp(12, nal(0, b"\x12\x34"), timestamp=1, ssrc=1),
+            rtp(13, slice_nal(2), timestamp=1, ssrc=1),
+            ts2_sps,
+            ts2_pps,
+            rtp(22, slice_nal(2), timestamp=2, ssrc=1),
+            other_sps,
+            other_pps,
+            rtp(12, slice_nal(2), timestamp=1, ssrc=2),
+        ]
+        out = self.rewrite(*packets)
+        self.assertEqual(self.rewriter.unsupported_packet_count, 1)
+        self.assertEqual(self.rewriter.malformed_count, 0)
+        self.assertEqual(self.rewriter.injected_count, 2)
+        self.assertEqual(
+            [seq(packet) for packet in out],
+            [10, 11, 12, 13, 10, 11, 22, 23, 10, 11, 12, 13],
+        )
 
     def test_rtp_extension_preserved_on_inserted_and_original_packets(self) -> None:
         sps, pps = self.context()
