@@ -20,7 +20,7 @@ LISTENER_SOURCE_LINEAGE=safety-poc/research/door/v1_5_7/comelit-v4-persistent-ct
 
 The build script remains `safety-poc/research/media/v1/ct120_build_p80_haos_media_helper.sh`, invoked by the R29 runner with `P80_BUILD_TRANSFORM=safety-poc/research/media/v1/entrance_p116_r29_listener_attached_media_live_transform.py` and `P80_BUILD_INCLUDE_P116=1`. The builder's `SOURCE_REL` selects `safety-poc/research/door/v1_5_7/comelit-v4-persistent-ctpp-door.c`, validates `RUN_DIR=/run/comelit-media`, forbids the generated door `SIGUSR1` handler, requires P80 RTP marker strings inherited from the composed P80/P106 lane, enforces the exact generated-source SHA when supplied, builds in Alpine/musl, and gates the ELF interpreter, sorted needed libraries, absence of glibc interpreter/dependency, packaged-library identity, and absence of `/run/comelit-p2p` leakage. R29 satisfies the P80 marker gates as inherited inactive binary strings from the composed media helper; R29's own live selfcheck reports `R29_MEDIA_OPEN_MODEL=BLOCKED` and `R29_MEDIA_ONLY_TEARDOWN_MODEL=BLOCKED`.
 
-R29 generated-source gates additionally require the persistent listener lineage markers, CALL_INIT/ring markers, R29 state/function marker regions, disabled self-activation and client-001A stubs, SIGUSR2 one-shot control, measured counter print formats, and scoped forbidden-token absence in the R29/self-activation/client-001A regions.
+R29 generated-source gates additionally require the persistent listener lineage markers, CALL_INIT/ring markers, R29 state/function marker regions, disabled self-activation and client-001A stubs, SIGUSR2 one-shot control, measured counter print formats, scoped forbidden-token absence in the R29/self-activation/client-001A regions, static identifier resolution for the R29 regions, and static identifier ordering for base/composed identifiers referenced by R29. The entrance source identifier is `V4_ENTRANCE`, defined in the base listener at `safety-poc/research/door/v1_5_7/comelit-v4-persistent-ctpp-door.c:179`; the order gate fails if that or another external identifier is defined at or after its first R29-region use.
 
 ## Measured-Scalar Discipline
 
@@ -46,7 +46,7 @@ The candidate therefore prints teardown BLOCKED markers and the runner refuses l
 
 ## Blocked Conditions
 
-The runner must refuse live before handoff when the candidate selfcheck or generated-source gates report `R29_MEDIA_OPEN_MODEL=BLOCKED` or `R29_MEDIA_ONLY_TEARDOWN_MODEL=BLOCKED`. It must also refuse if the expected commit SHA, generated-source SHA, base wrapper SHA, blob gates, bash syntax gates, wrapper materialisation, or candidate selfcheck fail.
+The runner must refuse live before handoff when the candidate selfcheck or generated-source gates report `R29_MEDIA_OPEN_MODEL=BLOCKED` or `R29_MEDIA_ONLY_TEARDOWN_MODEL=BLOCKED`. It must also refuse if the expected commit SHA, generated-source SHA, base wrapper SHA, blob gates, bash syntax gates, wrapper materialisation, or candidate selfcheck fail. The candidate selfcheck is a musl ELF selfcheck and is run inside the Alpine musl rootfs used by the builder, selecting `P80_OFFLINE_ROOTFS` from build provenance first and otherwise the newest `/root/comelit-p80-haos-build-*/rootfs` with `usr/bin/gcc` and `lib/ld-musl-x86_64.so.1`; the candidate is copied only to `/r29-selfcheck/` inside that rootfs and invoked with `chroot`.
 
 ## Result Block Skeleton
 

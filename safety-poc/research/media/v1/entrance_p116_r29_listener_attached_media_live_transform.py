@@ -169,31 +169,89 @@ def _identifier_tokens(text: str) -> set[str]:
 
 
 def _defined_identifiers(text: str) -> set[str]:
+    return set(_defined_identifier_positions(text))
+
+
+def _defined_identifier_positions(text: str) -> dict[str, int]:
     stripped = _strip_c_comments_and_literals(text)
-    names = set(re.findall(r"^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)", stripped, re.M))
-    names.update(re.findall(r"}\s*([A-Za-z_][A-Za-z0-9_]*)\s*;", stripped))
-    for enum_body in re.findall(r"typedef\s+enum\s*{([^}]*)}", stripped, re.S):
-        names.update(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:=[^,}]*)?(?:,|$)", enum_body))
-    names.update(
-        re.findall(
-            r"\b(?:static\s+)?(?:const\s+)?(?:gboolean|guint|guint64|int|long\s+long|pid_t|void|R29AttachedMediaState)\s+\**\s*([A-Za-z_][A-Za-z0-9_]*)\b",
-            stripped,
+    names: dict[str, int] = {}
+
+    def add(name: str, pos: int) -> None:
+        if name not in C_KEYWORDS and (name not in names or pos < names[name]):
+            names[name] = pos
+
+    for match in re.finditer(r"^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)", stripped, re.M):
+        add(match.group(1), match.start(1))
+    for match in re.finditer(r"}\s*([A-Za-z_][A-Za-z0-9_]*)\s*;", stripped):
+        add(match.group(1), match.start(1))
+    for enum_match in re.finditer(r"typedef\s+enum\s*{([^}]*)}", stripped, re.S):
+        enum_body = enum_match.group(1)
+        for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:=[^,}]*)?(?:,|$)", enum_body):
+            add(match.group(1), enum_match.start(1) + match.start(1))
+    for pattern in (
+        r"\b(?:static\s+)?(?:const\s+)?(?:gboolean|guint|guint64|int|long\s+long|pid_t|void|R29AttachedMediaState)\s+\**\s*([A-Za-z_][A-Za-z0-9_]*)\b",
+        r"\b(?:static\s+)?(?:gboolean|int|void)\s*\n\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+        r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*void\s*\)",
+        r"\b(?:const\s+)?(?:char|gpointer|int)\s+\**\s*([A-Za-z_][A-Za-z0-9_]*)\b",
+    ):
+        for match in re.finditer(pattern, stripped):
+            add(match.group(1), match.start(1))
+    return names
+
+
+def _identifier_token_positions(text: str, base_offset: int = 0) -> dict[str, int]:
+    stripped = _strip_c_comments_and_literals(text)
+    tokens: dict[str, int] = {}
+    for match in re.finditer(r"\b[A-Za-z_][A-Za-z0-9_]*\b", stripped):
+        name = match.group(0)
+        if name in C_KEYWORDS:
+            continue
+        if name.startswith("R29_") and (name.endswith("_BEGIN") or name.endswith("_END")):
+            continue
+        before = stripped[:match.start()].rstrip()
+        if before.endswith(".") or before.endswith("->"):
+            continue
+        tokens.setdefault(name, base_offset + match.start())
+    return tokens
+
+
+def _assert_r29_identifier_ordering(
+    candidate: str,
+    region_name: str,
+    region_start: int,
+    region: str,
+    r29_defined: set[str],
+) -> list[str]:
+    definition_positions = _defined_identifier_positions(candidate)
+    references = _identifier_token_positions(region, region_start)
+    failures: list[str] = []
+    for ref, use_pos in sorted(references.items()):
+        if ref in R29_IDENTIFIER_ALLOWLIST or ref in r29_defined:
+            continue
+        if ref not in definition_positions:
+            continue
+        definition_pos = definition_positions.get(ref)
+        if definition_pos is None or definition_pos >= use_pos:
+            failures.append(
+                f"{region_name}:{ref}:definition_pos={definition_pos}:first_use_pos={use_pos}"
+            )
+    return failures
+
+
+def _assert_r29_external_identifier_ordering(candidate: str) -> None:
+    regions = _r29_audit_regions(candidate)
+    r29_defined: set[str] = set()
+    for _, _, region in regions:
+        r29_defined.update(_defined_identifiers(region))
+    failures: list[str] = []
+    for name, start, region in regions:
+        failures.extend(
+            _assert_r29_identifier_ordering(
+                candidate, name, start, region, r29_defined
+            )
         )
-    )
-    names.update(
-        re.findall(
-            r"\b(?:static\s+)?(?:gboolean|int|void)\s*\n\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(",
-            stripped,
-        )
-    )
-    names.update(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*void\s*\)", stripped))
-    names.update(
-        re.findall(
-            r"\b(?:const\s+)?(?:char|gpointer|int)\s+\**\s*([A-Za-z_][A-Za-z0-9_]*)\b",
-            stripped,
-        )
-    )
-    return {name for name in names if name not in C_KEYWORDS}
+    if failures:
+        raise RuntimeError("R29_IDENTIFIER_ORDER_GATE=FAIL " + ",".join(failures))
 
 
 def _r29_audit_regions(candidate: str) -> list[tuple[str, int, str]]:
@@ -754,14 +812,16 @@ def _assert_r29_identifiers_resolved(candidate: str) -> None:
     for _, _, region in regions:
         r29_defined.update(_defined_identifiers(region))
     failures: list[str] = []
+    full_defined = _defined_identifiers(candidate)
     for name, start, region in regions:
         prefix_defined = _defined_identifiers(candidate[:start])
-        allowed = R29_IDENTIFIER_ALLOWLIST | r29_defined | prefix_defined
+        allowed = R29_IDENTIFIER_ALLOWLIST | r29_defined | prefix_defined | full_defined
         references = _identifier_tokens(region)
         unresolved = sorted(ref for ref in references if ref not in allowed)
         failures.extend(f"{name}:{ref}" for ref in unresolved)
     if failures:
         raise RuntimeError("R29_IDENTIFIER_GATE=FAIL unresolved=" + ",".join(failures))
+    _assert_r29_external_identifier_ordering(candidate)
 
 
 def _region(text: str, start: str, end: str) -> str:
@@ -822,7 +882,7 @@ def report() -> str:
             "R29_MEDIA_OPEN_MODEL=BLOCKED",
             "R29_MEDIA_ONLY_TEARDOWN_MODEL=BLOCKED",
             "R29_ONE_SHOT_CONTROL_KIND=SIGUSR2",
-            "R29_GENERATED_SOURCE_GATES=SCOPED_FORBIDDEN_PATHS,STATIC_IDENTIFIER_GATE",
+            "R29_GENERATED_SOURCE_GATES=SCOPED_FORBIDDEN_PATHS,STATIC_IDENTIFIER_GATE,STATIC_IDENTIFIER_ORDER_GATE",
             "NETWORK_IO_PERFORMED=false",
             "CANDIDATE_EXECUTED=false",
             "=== END COMELIT P116 R29 LISTENER ATTACHED MEDIA LIVE TRANSFORM ===",

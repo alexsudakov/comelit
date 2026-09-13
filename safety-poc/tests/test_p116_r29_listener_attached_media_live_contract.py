@@ -204,7 +204,11 @@ class P116R29ListenerAttachedMediaLiveContract(unittest.TestCase):
 
     def test_24_candidate_wrapper_executes_candidate_binary(self) -> None:
         text = RUNNER.read_text(encoding="utf-8")
-        self.assertIn('"$CANDIDATE_OUTPUT" --r29-selfcheck', text)
+        self.assertIn("run_candidate_selfcheck_in_chroot", text)
+        self.assertIn('chroot "$rootfs" "/r29-selfcheck/$CANDIDATE_NAME" --r29-selfcheck', text)
+        self.assertIn("R29_SELFCHECK_ROOTFS_SELECTION=P80_OFFLINE_ROOTFS_OR_NEWEST_CACHED_CHROOT_PATTERN", text)
+        self.assertIn("P80_OFFLINE_ROOTFS", text)
+        self.assertNotIn('"$CANDIDATE_OUTPUT" --r29-selfcheck', text)
         self.assertIn("CANDIDATE_HELPER_EXECUTED=true", self.attached_region)
         self.assertIn("R29_LIVE_PREFLIGHT_REFUSED=BLOCKED_MEDIA_MODEL", text)
 
@@ -262,6 +266,29 @@ class P116R29ListenerAttachedMediaLiveContract(unittest.TestCase):
         )
         with self.assertRaisesRegex(RuntimeError, "R29_IDENTIFIER_GATE=FAIL.*r29_synthetic_missing_identifier"):
             r29._assert_r29_identifiers_resolved(bad)  # pylint: disable=protected-access
+
+    def test_static_identifier_order_gate_rejects_late_base_definition(self) -> None:
+        define = '#define V4_ENTRANCE     "00000643"\n'
+        without_define = self.generated.replace(define, "", 1)
+        bad = without_define + define
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"R29_IDENTIFIER_ORDER_GATE=FAIL.*V4_ENTRANCE.*definition_pos=.*first_use_pos=",
+        ):
+            r29._assert_r29_identifiers_resolved(bad)  # pylint: disable=protected-access
+
+    def test_static_identifier_order_gate_accepts_base_definition_before_use(self) -> None:
+        r29._assert_r29_identifiers_resolved(self.generated)  # pylint: disable=protected-access
+
+    def test_runner_selfcheck_fail_closed_before_handoff(self) -> None:
+        text = RUNNER.read_text(encoding="utf-8")
+        selfcheck_pos = text.index("run_candidate_selfcheck_in_chroot || fail")
+        blocked_pos = text.index("R29_LIVE_PREFLIGHT_REFUSED=BLOCKED_MEDIA_MODEL", selfcheck_pos)
+        status_pos = text.index('STATUS_BEFORE="$RUN_ROOT/listener-status-before.json"')
+        stop_pos = text.index('post_control stop "$STOP_RESPONSE"')
+        self.assertLess(selfcheck_pos, blocked_pos)
+        self.assertLess(blocked_pos, status_pos)
+        self.assertLess(status_pos, stop_pos)
 
     def test_runner_success_gate_function(self) -> None:
         out = self.shell(

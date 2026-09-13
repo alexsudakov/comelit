@@ -33,6 +33,7 @@ SESSION_LOG=""
 BUILD_PROVENANCE_LOG=""
 CANDIDATE_OUTPUT=""
 CANDIDATE_WRAPPER=""
+R29_SELFCHECK_ROOTFS=""
 WRAPPER_PID=""
 VIDEO_SINK_PID=""
 AUDIO_SINK_PID=""
@@ -165,6 +166,39 @@ build_marker() {
     else
         printf '%s\n' "$fallback"
     fi
+}
+
+select_selfcheck_rootfs() {
+    local rootfs
+    rootfs="$(build_marker P80_OFFLINE_ROOTFS "")"
+    if [ -n "$rootfs" ] && [ -x "$rootfs/usr/bin/gcc" ] && [ -e "$rootfs/lib/ld-musl-x86_64.so.1" ]; then
+        printf '%s\n' "$rootfs"
+        return 0
+    fi
+    find /root -maxdepth 2 -path '/root/comelit-p80-haos-build-*/rootfs' -type d \
+        -exec test -x '{}/usr/bin/gcc' ';' \
+        -exec test -e '{}/lib/ld-musl-x86_64.so.1' ';' \
+        -printf '%T@ %p\n' 2>/dev/null |
+    sort -nr |
+    awk 'NR == 1 {print $2}'
+}
+
+run_candidate_selfcheck_in_chroot() {
+    local rootfs selfcheck_dir rootfs_candidate
+    rootfs="$(select_selfcheck_rootfs)"
+    [ -n "$rootfs" ] || fail "R29_SELFCHECK_ROOTFS=ABSENT"
+    [ -x "$rootfs/usr/bin/gcc" ] || fail "R29_SELFCHECK_ROOTFS_GCC=FAIL"
+    [ -e "$rootfs/lib/ld-musl-x86_64.so.1" ] || fail "R29_SELFCHECK_ROOTFS_MUSL_LOADER=FAIL"
+    [ "$FAIL" -eq 0 ] || return 1
+    R29_SELFCHECK_ROOTFS="$rootfs"
+    echo "R29_SELFCHECK_ROOTFS=$rootfs"
+    echo "R29_SELFCHECK_ROOTFS_SELECTION=P80_OFFLINE_ROOTFS_OR_NEWEST_CACHED_CHROOT_PATTERN"
+    selfcheck_dir="$rootfs/r29-selfcheck"
+    rm -rf "$selfcheck_dir"
+    install -d -m 700 "$selfcheck_dir"
+    rootfs_candidate="$selfcheck_dir/$CANDIDATE_NAME"
+    install -m 700 "$CANDIDATE_OUTPUT" "$rootfs_candidate"
+    chroot "$rootfs" "/r29-selfcheck/$CANDIDATE_NAME" --r29-selfcheck > "$RUN_ROOT/selfcheck.log" 2>&1
 }
 
 compute_delta() {
@@ -421,7 +455,7 @@ run_main() {
     trap 'exit 130' INT TERM HUP
 
     [ "${EUID}" -eq 0 ] || fail "R29_ROOT_GATE=FAIL"
-    for command in git python3 curl sha256sum timeout awk grep bash chmod install cmp sed; do
+    for command in git python3 curl sha256sum timeout awk grep bash chmod install cmp sed chroot find sort rm; do
         command -v "$command" >/dev/null 2>&1 || fail "R29_MISSING_COMMAND=$command"
     done
     [ -n "$REPO" ] || fail "R29_REPO_REQUIRED=true"
@@ -486,7 +520,7 @@ run_main() {
 
     materialize_wrapper || fail "R29_WRAPPER_REWRITE=FAIL"
     bash -n "$CANDIDATE_WRAPPER" || fail "R29_WRAPPER_PARSE=FAIL"
-    "$CANDIDATE_OUTPUT" --r29-selfcheck > "$RUN_ROOT/selfcheck.log" 2>&1 || fail "R29_CANDIDATE_SELFCHECK=FAIL"
+    run_candidate_selfcheck_in_chroot || fail "R29_CANDIDATE_SELFCHECK=FAIL"
     grep -qx 'CANDIDATE_HELPER_EXECUTED=true' "$RUN_ROOT/selfcheck.log" || fail "R29_CANDIDATE_HELPER_EXECUTED=FAIL"
     cat "$RUN_ROOT/selfcheck.log" >> "$SESSION_LOG"
     [ "$FAIL" -eq 0 ] || exit 1
