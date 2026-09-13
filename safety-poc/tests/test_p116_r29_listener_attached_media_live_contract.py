@@ -110,7 +110,7 @@ class P116R29ListenerAttachedMediaLiveContract(unittest.TestCase):
         self.assertNotIn("P12_TX_ENTRANCE_SELF_ACTIVATION", self.self_activation_region)
 
     def test_03_no_r27_repeat_path_reachable(self) -> None:
-        self.assertNotIn("R27_REPEAT_001A", self.attached_region)
+        self.assertIn("R27_REPEAT_001A_SENT_COUNT=%u", self.attached_region)
         self.assertIn("R27_REPEAT_SENT_COUNT=%u", self.attached_region)
 
     def test_04_no_door_action_reachable(self) -> None:

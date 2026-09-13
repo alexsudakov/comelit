@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # CT120 research-only P116/R29 listener-attached inbound media live runner.
-# Default mode is dry-run preflight/build/selfcheck only.  Live mode requires
-# R29_LIVE_RUN=YES and an exact R29_EXPECTED_COMMIT_SHA.
+# Default mode is dry-run preflight/build/selfcheck only.  R29B forbids live
+# handoff even if R29_LIVE_RUN is set by an older environment.
 
 set -u -o pipefail
 umask 077
 
 REPO=${REPO:-}
 R29_LIVE_RUN=${R29_LIVE_RUN:-NO}
+LIVE_AUTHORIZED_FOR_THIS_TASK=false
 R29_EXPECTED_COMMIT_SHA=${R29_EXPECTED_COMMIT_SHA:-}
 R29_EXPECTED_GENERATED_SOURCE_SHA=${R29_EXPECTED_GENERATED_SOURCE_SHA:-}
 HA_WEBHOOK_URL=${HA_WEBHOOK_URL:-}
@@ -528,6 +529,12 @@ run_main() {
        grep -qx 'R29_MEDIA_ONLY_TEARDOWN_MODEL=BLOCKED' "$RUN_ROOT/selfcheck.log"; then
         RESULT=BLOCKED_MEDIA_MODEL
         echo "R29_LIVE_PREFLIGHT_REFUSED=BLOCKED_MEDIA_MODEL"
+        echo "LIVE_RUN=NOT_RUN"
+        exit 1
+    fi
+    if [ "$LIVE_AUTHORIZED_FOR_THIS_TASK" != true ]; then
+        RESULT=LIVE_FORBIDDEN_FOR_R29B
+        echo "R29_LIVE_PREFLIGHT_REFUSED=LIVE_FORBIDDEN_FOR_R29B"
         echo "LIVE_RUN=NOT_RUN"
         exit 1
     fi

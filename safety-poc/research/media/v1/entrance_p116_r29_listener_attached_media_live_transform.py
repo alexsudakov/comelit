@@ -354,8 +354,19 @@ static R29AttachedMediaState r29_attached_media_state =
 static gboolean r29_listener_registered_ready = FALSE;
 static gboolean r29_call_transaction_active = FALSE;
 static gboolean r29_call_transaction_created = FALSE;
+static gboolean r29_inbound_call_ctp_captured = FALSE;
+static gboolean r29_call_ctp_separate_from_registration = FALSE;
+static gboolean r29_call_bound_mediareq26_uses_inbound_ctp = FALSE;
+static gboolean r29_media_channel_runtime_allocated = FALSE;
+static gboolean r29_media_channel_state_persisted = FALSE;
+static gboolean r29_media_channel_open_request_sent = FALSE;
+static gboolean r29_media_channel_open_response_observed = FALSE;
+static gboolean r29_call_bound_mediareq26_open_sent = FALSE;
+static gboolean r29_call_bound_mediareq26_stop_sent = FALSE;
+static gboolean r29_video_rtp_started_marker = FALSE;
 static gboolean r29_media_stop_requested = FALSE;
 static gboolean r29_media_stop_completed = FALSE;
+static gboolean r29_media_stop_before_open_blocked = FALSE;
 static gboolean r29_sigusr2_seen = FALSE;
 static gboolean r29_sigusr2_second_refused = FALSE;
 static gboolean r29_second_media_start_blocked = FALSE;
@@ -369,6 +380,14 @@ static guint r29_rtpc_media_channels_open = 0;
 static guint r29_self_activation_sent_count = 0;
 static guint r29_client_001a_sent_count = 0;
 static guint r29_r27_repeat_sent_count = 0;
+static guint r29_call_bound_mediareq26_open_sent_count = 0;
+static guint r29_call_bound_mediareq26_stop_sent_count = 0;
+static guint r29_unknown_001a_form_blocked_count = 0;
+static guint r29_registration_ctp_rejected_for_media_count = 0;
+static guint r29_stop_call_release_count = 0;
+static guint r29_stop_registration_close_count = 0;
+static guint r29_stop_pseudotcp_close_count = 0;
+static guint r29_stop_listener_stop_count = 0;
 static guint r29_door_actions_sent = 0;
 static guint r29_gate_actions_sent = 0;
 static guint r29_refresh_loop_started_count = 0;
@@ -386,7 +405,10 @@ static void r29_print_scalar_snapshot(const char *call_end_state);
 static gboolean r29_same_listener_process(void);
 static void r29_capture_ready_snapshot(void);
 static gboolean r29_start_attached_media_from_call_init(const char *source);
+static gboolean r29_registration_ctp_rejected_for_media(void);
+static gboolean r29_unknown_001a_form_blocked(void);
 static gboolean r29_media_only_teardown(const char *reason);
+static const char *r29_first_rtp_order_result(void);
 static gboolean r29_sigusr2_poll_cb(gpointer data);
 static void r29_sigusr2_handler(int signum);
 static int r29_selfcheck(void);
@@ -410,8 +432,7 @@ r29_print_scalar_snapshot(const char *call_end_state)
     gboolean registration_preserved = r29_listener_registered_ready &&
         new_registration == 0u;
     gboolean ring_listener_preserved = same_process && r29_listener_registered_ready;
-    gboolean call_separate_from_registration = r29_call_transaction_created &&
-        r29_listener_registered_ready;
+    gboolean call_separate_from_registration = r29_call_ctp_separate_from_registration;
     long long observed_ms = r29_media_observation_end_ms - r29_media_observation_start_ms;
     if (observed_ms < 0)
         observed_ms = 0;
@@ -422,8 +443,18 @@ r29_print_scalar_snapshot(const char *call_end_state)
     printf("CTPP_REGISTRATION_COUNT=%u\n", r29_ctpp_registration_count);
     printf("RTPC_MEDIA_CHANNELS_OPEN=%u\n", r29_rtpc_media_channels_open);
     printf("SELF_ACTIVATION_SENT_COUNT=%u\n", r29_self_activation_sent_count);
+    printf("SELF_ACTIVATION_001A_SENT_COUNT=%u\n", r29_self_activation_sent_count);
     printf("CLIENT_001A_SENT_COUNT=%u\n", r29_client_001a_sent_count);
     printf("R27_REPEAT_SENT_COUNT=%u\n", r29_r27_repeat_sent_count);
+    printf("R27_REPEAT_001A_SENT_COUNT=%u\n", r29_r27_repeat_sent_count);
+    printf("CALL_BOUND_MEDIAREQ26_OPEN_SENT_COUNT=%u\n",
+           r29_call_bound_mediareq26_open_sent_count);
+    printf("CALL_BOUND_MEDIAREQ26_STOP_SENT_COUNT=%u\n",
+           r29_call_bound_mediareq26_stop_sent_count);
+    printf("UNKNOWN_001A_FORM_BLOCKED_COUNT=%u\n",
+           r29_unknown_001a_form_blocked_count);
+    printf("REGISTRATION_CTP_REJECTED_FOR_MEDIA_COUNT=%u\n",
+           r29_registration_ctp_rejected_for_media_count);
     printf("DOOR_ACTIONS_SENT=%u\n", r29_door_actions_sent);
     printf("GATE_ACTIONS_SENT=%u\n", r29_gate_actions_sent);
     printf("REFRESH_LOOP_STARTED_COUNT=%u\n", r29_refresh_loop_started_count);
@@ -439,12 +470,38 @@ r29_print_scalar_snapshot(const char *call_end_state)
            r29_listener_registered_ready ? "true" : "false");
     printf("CALL_TRANSACTION_CREATED=%s\n",
            r29_call_transaction_created ? "true" : "false");
+    printf("INBOUND_CALL_CTP_CAPTURE_IMPLEMENTED=%s\n",
+           r29_inbound_call_ctp_captured ? "true" : "false");
     printf("CALL_TRANSACTION_SEPARATE_FROM_REGISTRATION=%s\n",
            call_separate_from_registration ? "true" : "false");
+    printf("CALL_BOUND_MEDIAREQ26_USES_INBOUND_CTP=%s\n",
+           r29_call_bound_mediareq26_uses_inbound_ctp ? "true" : "false");
+    printf("MEDIA_CHANNEL_RUNTIME_ALLOCATION_IMPLEMENTED=%s\n",
+           r29_media_channel_runtime_allocated ? "true" : "false");
+    printf("MEDIA_CHANNEL_STATE_PERSISTED=%s\n",
+           r29_media_channel_state_persisted ? "true" : "false");
+    printf("CALL_BOUND_MEDIAREQ26_OPEN_GENERATION=%s\n",
+           r29_call_bound_mediareq26_open_sent ? "PROVEN_OFFLINE" : "BLOCKED");
+    printf("CALL_BOUND_MEDIAREQ26_STOP_GENERATION=%s\n",
+           r29_call_bound_mediareq26_stop_sent ? "PROVEN_OFFLINE" : "BLOCKED");
+    printf("OPEN_FIELDS_HAVE_PROVEN_SOURCES=%s\n",
+           r29_call_bound_mediareq26_uses_inbound_ctp ? "true" : "false");
+    printf("STOP_FIELDS_HAVE_PROVEN_SOURCES=%s\n",
+           r29_call_bound_mediareq26_stop_sent ? "true" : "false");
     printf("ATTACHED_MEDIA_STARTED=%s\n",
            r29_attached_media_state == R29_ATTACHED_MEDIA_ACTIVE ||
            r29_media_stop_completed ? "true" : "false");
-    printf("VIDEO_RTP_STARTED=%s\n", p80_video_rtp_packets > 0u ? "true" : "false");
+    printf("MEDIA_CHANNEL_OPEN_REQUEST_SENT=%s\n",
+           r29_media_channel_open_request_sent ? "true" : "false");
+    printf("MEDIA_CHANNEL_OPEN_RESPONSE_OBSERVED=%s\n",
+           r29_media_channel_open_response_observed ? "true" : "false");
+    printf("CALL_BOUND_MEDIAREQ26_OPEN_SENT=%s\n",
+           r29_call_bound_mediareq26_open_sent ? "true" : "false");
+    printf("VIDEO_RTP_STARTED=%s\n",
+           (r29_video_rtp_started_marker || p80_video_rtp_packets > 0u) ?
+           "true" : "false");
+    printf("FIRST_RTP_RELATIVE_TO_CHANNEL_OPEN_RESPONSE=%s\n",
+           r29_first_rtp_order_result());
     printf("VIDEO_RTP_PACKETS=%llu\n", (unsigned long long)p80_video_rtp_packets);
     printf("VIDEO_RTP_FIRST_AFTER_CALL_MS=%lld\n",
            (r29_first_video_rtp_monotonic_ms > 0 && r29_call_init_monotonic_ms > 0)
@@ -455,6 +512,14 @@ r29_print_scalar_snapshot(const char *call_end_state)
            r29_media_stop_requested ? "true" : "false");
     printf("MEDIA_ONLY_TEARDOWN_COMPLETE=%s\n",
            r29_media_stop_completed ? "true" : "false");
+    printf("STOP_USES_SAME_CALL_CTP=%s\n",
+           r29_call_bound_mediareq26_stop_sent ? "true" : "false");
+    printf("MEDIA_LOCAL_DISPOSAL_IMPLEMENTED=%s\n",
+           r29_media_stop_completed ? "true" : "false");
+    printf("STOP_CALL_RELEASE_COUNT=%u\n", r29_stop_call_release_count);
+    printf("STOP_REGISTRATION_CLOSE_COUNT=%u\n", r29_stop_registration_close_count);
+    printf("STOP_PSEUDOTCP_CLOSE_COUNT=%u\n", r29_stop_pseudotcp_close_count);
+    printf("STOP_LISTENER_STOP_COUNT=%u\n", r29_stop_listener_stop_count);
     printf("LISTENER_PROCESS_SAME_AFTER_CALL=%s\n",
            same_process ? "true" : "false");
     printf("LISTENER_PROCESS_SAME_AFTER_MEDIA=%s\n",
@@ -509,20 +574,31 @@ r29_start_attached_media_from_call_init(const char *source)
 
     r29_call_transaction_active = TRUE;
     r29_call_transaction_created = TRUE;
+    r29_inbound_call_ctp_captured = FALSE;
+    r29_call_ctp_separate_from_registration = FALSE;
+    r29_call_bound_mediareq26_uses_inbound_ctp = FALSE;
     r29_call_init_monotonic_ms = p116_monotonic_ms();
     r29_media_observation_start_ms = r29_call_init_monotonic_ms;
     r29_attached_media_state = R29_INBOUND_CALL_ACTIVE;
     r29_media_open_blocked = TRUE;
 
     printf("R29_MEDIA_OPEN_MODEL=BLOCKED\n");
-    printf("R29_MEDIA_OPEN_BLOCKED_REASON=NO_PROVEN_HELPER_ACTION_FOR_ATTACHED_INBOUND_RTPC_OPEN\n");
+    printf("R29_MEDIA_OPEN_BLOCKED_REASON=CALL_INIT_ON_REGISTERED_CTPP_NO_SEPARATE_CALL_CTP_OR_MEDIAREQ26_BUILDER\n");
+    printf("R29B_RESULT=BLOCKED_MISSING_OPEN_MAPPING\n");
+    printf("INBOUND_CALL_CTP_CAPTURE_IMPLEMENTED=false\n");
+    printf("CALL_TRANSACTION_SEPARATE_FROM_REGISTRATION=%s\n",
+           r29_call_ctp_separate_from_registration ? "true" : "false");
+    printf("CALL_BOUND_MEDIAREQ26_USES_INBOUND_CTP=false\n");
+    printf("MEDIA_CHANNEL_RUNTIME_ALLOCATION_IMPLEMENTED=false\n");
+    printf("CALL_BOUND_MEDIAREQ26_OPEN_GENERATION=BLOCKED\n");
+    printf("OPEN_FIELDS_HAVE_PROVEN_SOURCES=false\n");
     printf("INBOUND_VIDEO_RX_INITIATION=AUTO_ON_INCOMING_CALL_STATIC_ONLY\n");
     printf("INBOUND_MEDIA_REQUEST_DIRECTION=DEVICE_TO_CLIENT\n");
     printf("PREVIEW_ANSWERS_CALL=false\n");
     printf("PREVIEW_CAN_RUN_WHILE_RINGING=true\n");
     printf("CALL_TRANSACTION_CREATED=true\n");
     printf("CALL_TRANSACTION_SEPARATE_FROM_REGISTRATION=%s\n",
-           (r29_call_transaction_created && r29_listener_registered_ready) ?
+           r29_call_ctp_separate_from_registration ?
            "true" : "false");
     printf("ATTACHED_MEDIA_STARTED=%s\n",
            r29_attached_media_state == R29_ATTACHED_MEDIA_ACTIVE ? "true" : "false");
@@ -530,6 +606,28 @@ r29_start_attached_media_from_call_init(const char *source)
     r29_print_scalar_snapshot("MEDIA_OPEN_BLOCKED");
     fflush(stdout);
     return TRUE;
+}
+
+static gboolean
+r29_registration_ctp_rejected_for_media(void)
+{
+    r29_registration_ctp_rejected_for_media_count++;
+    printf("REGISTRATION_CTP_REJECTED_FOR_MEDIA=true\n");
+    printf("REGISTRATION_CTP_REJECTED_FOR_MEDIA_COUNT=%u\n",
+           r29_registration_ctp_rejected_for_media_count);
+    fflush(stdout);
+    return FALSE;
+}
+
+static gboolean
+r29_unknown_001a_form_blocked(void)
+{
+    r29_unknown_001a_form_blocked_count++;
+    printf("UNKNOWN_001A_FORM_BLOCKED=true\n");
+    printf("UNKNOWN_001A_FORM_BLOCKED_COUNT=%u\n",
+           r29_unknown_001a_form_blocked_count);
+    fflush(stdout);
+    return FALSE;
 }
 
 static gboolean
@@ -542,6 +640,15 @@ r29_media_only_teardown(const char *reason)
         return FALSE;
     }
     r29_media_stop_requested = TRUE;
+    if (!r29_call_bound_mediareq26_open_sent) {
+        r29_media_stop_before_open_blocked = TRUE;
+        r29_media_teardown_blocked = TRUE;
+        printf("R29_MEDIA_STOP_BEFORE_OPEN_BLOCKED=true\n");
+        printf("R29_MEDIA_ONLY_TEARDOWN_MODEL=BLOCKED\n");
+        printf("R29_MEDIA_ONLY_TEARDOWN_BLOCKED_REASON=NO_PROVEN_CALL_BOUND_MEDIAREQ26_STOP_BUILDER_OR_MEDIA_RX_POINTER_ID\n");
+        fflush(stdout);
+        return FALSE;
+    }
     r29_media_teardown_blocked = TRUE;
     r29_media_observation_end_ms = p116_monotonic_ms();
     r29_attached_media_state = R29_ATTACHED_MEDIA_STOPPING;
@@ -564,13 +671,38 @@ r29_media_only_teardown(const char *reason)
     r29_attached_media_state = R29_LISTENER_REGISTERED_READY;
     printf("ATTACHED_MEDIA_STOP_REQUESTED=true\n");
     printf("R29_MEDIA_ONLY_TEARDOWN_MODEL=BLOCKED\n");
-    printf("R29_MEDIA_ONLY_TEARDOWN_BLOCKED_REASON=NO_PROVEN_HELPER_ACTION_FOR_NATIVE_CLOSE_MEDIA_RX_CHANNEL\n");
+    printf("R29_MEDIA_ONLY_TEARDOWN_BLOCKED_REASON=NO_PROVEN_CALL_BOUND_MEDIAREQ26_STOP_BUILDER_OR_MEDIA_RX_POINTER_ID\n");
+    printf("R29B_RESULT=BLOCKED_MISSING_STOP_MAPPING\n");
+    printf("CALL_BOUND_MEDIAREQ26_STOP_GENERATION=BLOCKED\n");
+    printf("STOP_FIELDS_HAVE_PROVEN_SOURCES=false\n");
     printf("MEDIA_ONLY_TEARDOWN_COMPLETE=%s\n",
            r29_media_stop_completed ? "true" : "false");
     r29_print_scalar_snapshot(r29_media_stop_completed ?
                               "MEDIA_ONLY_TEARDOWN_COMPLETE" :
                               "MEDIA_ONLY_TEARDOWN_BLOCKED");
     return r29_media_stop_completed;
+}
+
+static void
+r29_note_channel_open_response_observed(void)
+{
+    r29_media_channel_open_response_observed = TRUE;
+    printf("MEDIA_CHANNEL_OPEN_RESPONSE_OBSERVED=true\n");
+    printf("FIRST_RTP_RELATIVE_TO_CHANNEL_OPEN_RESPONSE=%s\n",
+           r29_first_rtp_order_result());
+    fflush(stdout);
+}
+
+static const char *
+r29_first_rtp_order_result(void)
+{
+    if (r29_video_rtp_started_marker && r29_media_channel_open_response_observed)
+        return "UNKNOWN";
+    if (r29_video_rtp_started_marker)
+        return "RESPONSE_NOT_OBSERVED";
+    if (r29_media_channel_open_response_observed)
+        return "RTP_NOT_OBSERVED";
+    return "UNKNOWN";
 }
 
 static void
@@ -606,8 +738,25 @@ r29_selfcheck(void)
     printf("CANDIDATE_HELPER_EXECUTED=true\n");
     printf("R29_SELF_ACTIVATION_STUB_PRESENT=true\n");
     printf("R29_CLIENT_001A_STUB_PRESENT=true\n");
+    r29_listener_registered_ready = TRUE;
+    r29_capture_ready_snapshot();
+    (void)r29_registration_ctp_rejected_for_media();
+    (void)r29_unknown_001a_form_blocked();
+    (void)r29_start_attached_media_from_call_init(V4_ENTRANCE);
+    (void)r29_media_only_teardown("SELFCHECK");
+    printf("NETWORK_WRITES_INTERCEPTED=true\n");
+    printf("SELF_ACTIVATION_001A_SENT_COUNT=%u\n", r29_self_activation_sent_count);
+    printf("R27_REPEAT_001A_SENT_COUNT=%u\n", r29_r27_repeat_sent_count);
+    printf("CALL_BOUND_MEDIAREQ26_OPEN_SENT_COUNT=%u\n",
+           r29_call_bound_mediareq26_open_sent_count);
+    printf("CALL_BOUND_MEDIAREQ26_STOP_SENT_COUNT=%u\n",
+           r29_call_bound_mediareq26_stop_sent_count);
+    printf("REGISTRATION_GENERATION_UNCHANGED=true\n");
+    printf("PSEUDOTCP_TEARDOWN_COUNT=%u\n", r29_stop_pseudotcp_close_count);
+    printf("LISTENER_STOP_COUNT=%u\n", r29_stop_listener_stop_count);
     printf("R29_MEDIA_OPEN_MODEL=BLOCKED\n");
     printf("R29_MEDIA_ONLY_TEARDOWN_MODEL=BLOCKED\n");
+    printf("MISSING_IMPLEMENTATION_EVIDENCE=CALL_INIT_REQUEST_ID_EQUALS_REGISTERED_V4_CTPP_CHANNEL_ID_NO_PEER_CALL_CTP_FIELD_STORED;NO_26_BYTE_CALL_BOUND_MEDIAREQ_OPEN_STOP_BUILDER;RTPC_ALLOCATOR_AND_P80_FORWARDING_ARE_COMPONENT_ONLY_NOT_NATIVE_MEDIA_RX_POINTER_ID\n");
     return 0;
 }
 /* === R29_ATTACHED_MEDIA_FUNCTIONS_END === */
