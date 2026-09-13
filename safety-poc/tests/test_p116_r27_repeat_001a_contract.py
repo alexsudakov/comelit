@@ -16,7 +16,52 @@ ROOT = Path(__file__).resolve().parents[2]
 MEDIA = ROOT / "safety-poc" / "research" / "media" / "v1"
 SOURCE = ROOT / "safety-poc" / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-ctpp-door.c"
 TRANSFORM = MEDIA / "entrance_p116_r27_repeat_001a_transform.py"
-EXPECTED_GENERATED_SOURCE_SHA = "0b9d4d1a75d3852989a1457dce867bb8c0a31f8ac6518779de0e58e801dd5fcb"
+EXPECTED_GENERATED_SOURCE_SHA = "62e0023521cef0e4178248beb78408f89752d108d9d009c388ff153d94195368"
+
+# This is an explicit source-local declaration-order gate for R27-added code in
+# the composed candidate. It is not a C parser and it does not prove system or
+# GLib header declarations; it proves that the in-file types, globals, arrays,
+# callbacks, and helpers R27 references are declared before the R27 use patterns
+# listed here.
+R27_DECLARATION_BEFORE_USE = (
+    ("pseudotcp_begin_graceful_stop", "static gboolean pseudotcp_begin_graceful_stop(const char *reason);", '(void)pseudotcp_begin_graceful_stop("r27-observation-bound");'),
+    ("p78_rtpc_client_001a body capture", "static guint8 p78_rtpc_client_001a[P76_MAX_BODY];", "r27_initial_001a_sequence = read_le32(p78_rtpc_client_001a + 2u);"),
+    ("p78_rtpc_client_001a semantic compare", "static guint8 p78_rtpc_client_001a[P76_MAX_BODY];", "memcmp(r27_rtpc_client_001a_repeat + 10u,\n               p78_rtpc_client_001a + 10u,"),
+    ("p76_u32", "typedef unsigned int p76_u32;", "static p76_u32 p78_rtpc_client_001a_len = 0;"),
+    ("p78_rtpc_client_001a_len", "static p76_u32 p78_rtpc_client_001a_len = 0;", "r27_rtpc_client_001a_repeat_len = p78_rtpc_client_001a_len;"),
+    ("p78_rtpc_runtime", "static P76Runtime p78_rtpc_runtime;", "&p78_rtpc_runtime,\n        r27_rtpc_client_001a_repeat,"),
+    ("P76Status", "typedef enum {\n    P76_OK = 0,", "    P76Status status;\n    (void)reason;"),
+    ("P76_OK", "typedef enum {\n    P76_OK = 0,", "if (status != P76_OK)"),
+    ("P78_RTPC_COMPLETE", "    P78_RTPC_COMPLETE,\n    P78_RTPC_FAILED\n} P78RtpcLiveStage;", "p78_rtpc_stage != P78_RTPC_COMPLETE"),
+    ("R27_TX_RTPC_CLIENT_001A_REPEAT", "    R27_TX_RTPC_CLIENT_001A_REPEAT,", "            R27_TX_RTPC_CLIENT_001A_REPEAT)) {"),
+    ("p78_rtpc_client_001a_sent", "static gboolean p78_rtpc_client_001a_sent = FALSE;", "if (!p78_rtpc_client_001a_sent || !p97_device_ack_001a_observed ||"),
+    ("p97_device_ack_001a_observed", "static gboolean p97_device_ack_001a_observed = FALSE;", "if (!p78_rtpc_client_001a_sent || !p97_device_ack_001a_observed ||"),
+    ("p97_signaling_finished", "static gboolean p97_signaling_finished = FALSE;", "        !p97_signaling_finished || !p80_media_forwarding_enabled)"),
+    ("p80_media_forwarding_enabled", "static gboolean p80_media_forwarding_enabled = FALSE;", "        !p97_signaling_finished || !p80_media_forwarding_enabled)"),
+    ("p80_video_rtp_packets", "static guint64 p80_video_rtp_packets = 0;", "if (p80_video_rtp_packets == 0u)"),
+    ("pseudo_tcp", "static PseudoTcpSocket *pseudo_tcp = NULL;", "if (!pseudo_tcp || !pseudotcp_open || pseudotcp_graceful_stop_started)"),
+    ("pseudotcp_open", "static gboolean pseudotcp_open = FALSE;", "if (!pseudo_tcp || !pseudotcp_open || pseudotcp_graceful_stop_started)"),
+    ("pseudotcp_graceful_stop_started", "static gboolean pseudotcp_graceful_stop_started = FALSE;", "if (!pseudo_tcp || !pseudotcp_open || pseudotcp_graceful_stop_started)"),
+    ("v4_ctpp_channel_id", "static guint16 v4_ctpp_channel_id = 0;", "if (v4_ctpp_channel_id == 0 || p12_tx_pending)"),
+    ("p12_tx_pending", "static gboolean p12_tx_pending = FALSE;", "if (v4_ctpp_channel_id == 0 || p12_tx_pending)"),
+    ("p78_rtpc_stage", "static P78RtpcLiveStage p78_rtpc_stage = P78_RTPC_IDLE;", "if (p78_rtpc_stage != P78_RTPC_COMPLETE ||"),
+    ("p116_video_rtp", "static P116RtpTelemetry p116_video_rtp = {", "        p116_video_rtp.packet_count > 0u &&"),
+    ("read_le32", "static guint32\nread_le32(", "r27_initial_001a_sequence = read_le32(p78_rtpc_client_001a + 2u);"),
+    ("write_le32", "static void\nwrite_le32(", "write_le32(r27_rtpc_client_001a_repeat + 2u, r27_repeat_001a_sequence);"),
+    ("p116_monotonic_ms", "static long long\np116_monotonic_ms(void)", "r27_media_active_monotonic_ms = p116_monotonic_ms();"),
+    ("p12_queue_vip_frame", "p12_queue_vip_frame(\n    guint32 request_id,", "if (!p12_queue_vip_frame(\n            v4_ctpp_channel_id,\n            r27_rtpc_client_001a_repeat,"),
+    ("p12_flush_tx", "p12_flush_tx(void);", "if (!p12_flush_tx()) {\n        p78_fail_rtpc(\"R27_REPEAT_001A_FLUSH=FAIL\");"),
+    ("p78_fail_rtpc", "static void p78_fail_rtpc(const char *marker);", "p78_fail_rtpc(\"R27_REPEAT_001A_GENERATION=FAIL\");"),
+    ("p76_generate_client_001a", "static P76Status p76_generate_client_001a(P76Runtime *runtime, const p76_u8 body[P76_MAX_BODY], p76_u32 len)", "status = p76_generate_client_001a(\n        &p78_rtpc_runtime,"),
+    ("P97_CLIENT_001A_SEQUENCE_DELTA_FROM_ACK", "#define P97_CLIENT_001A_SEQUENCE_DELTA_FROM_ACK 0x00010000u", "r27_initial_001a_sequence + P97_CLIENT_001A_SEQUENCE_DELTA_FROM_ACK;"),
+    ("p99_state_scoped_structural_ack", "p99_state_scoped_structural_ack(guint16 request_id, const guint8 *body, guint body_len)", "if (p99_state_scoped_structural_ack(request_id, body, body_len)) {"),
+    ("r27_repeat_delay_cb", "static gboolean r27_repeat_delay_cb(gpointer data);", "if (g_timeout_add_seconds(R27_REPEAT_DELAY_SECONDS, r27_repeat_delay_cb, NULL) == 0)"),
+    ("r27_live_observation_timeout_cb", "static gboolean r27_live_observation_timeout_cb(gpointer data);", "                              r27_live_observation_timeout_cb, NULL) == 0)"),
+    ("r27_repeat_ack_timeout_cb", "static gboolean r27_repeat_ack_timeout_cb(gpointer data);", "                                      r27_repeat_ack_timeout_cb, NULL) == 0)"),
+    ("r27_handle_repeat_ack", "static gboolean r27_handle_repeat_ack(guint16 request_id, const guint8 *body, guint body_len);", "if (r27_handle_repeat_ack(request_id, body, body_len)) {"),
+    ("r27_cancel_repeat_timers", "static void r27_cancel_repeat_timers(void);", "    r27_cancel_repeat_timers();\n    r27_print_final_summary();"),
+    ("r27_print_final_summary", "static void r27_print_final_summary(void);", "    r27_cancel_repeat_timers();\n    r27_print_final_summary();"),
+)
 
 sys.path.insert(0, str(MEDIA))
 
@@ -106,7 +151,7 @@ def _compile_and_run_harness(candidate: str) -> str:
         static long long r27_repeat_sent_monotonic_ms;
         static guint64 r27_video_packet_count_at_repeat;
         static guint8 r27_rtpc_client_001a_repeat[128];
-        static p76_u32 r27_rtpc_client_001a_repeat_len;
+        static guint r27_rtpc_client_001a_repeat_len;
         static guint32 r27_initial_001a_sequence;
         static guint32 r27_repeat_001a_sequence;
         static gboolean r27_sequence_model_pass;
@@ -431,11 +476,25 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
     def test_repeat_uses_fresh_semantic_sequence_state_not_literal_replay(self) -> None:
         self.assertIn("p76_generate_client_001a(", self.r27_helpers)
         self.assertIn("&p78_rtpc_runtime", self.r27_helpers)
-        self.assertIn("r27_initial_001a_sequence = read_le32(p78_rtpc_client_001a + 2u);", self.r27_completion)
+        self.assertIn("r27_initial_001a_sequence = read_le32(p78_rtpc_client_001a + 2u);", self.r27_queue)
+        self.assertNotIn("p78_rtpc_client_001a + 2u", self.r27_completion)
         self.assertIn("r27_repeat_001a_sequence =", self.r27_helpers)
         self.assertIn("P97_CLIENT_001A_SEQUENCE_DELTA_FROM_ACK", self.r27_helpers)
         self.assertIn("r27_repeat_001a_sequence != r27_initial_001a_sequence", self.r27_helpers)
         self.assertIn("CAPTURED_LITERAL_REUSE=false", self.r27_helpers)
+
+    def test_r27_source_local_declarations_precede_r27_uses(self) -> None:
+        for symbol, declaration_pattern, use_pattern in R27_DECLARATION_BEFORE_USE:
+            with self.subTest(symbol=symbol):
+                self.assertIn(declaration_pattern, self.candidate)
+                self.assertIn(use_pattern, self.candidate)
+                declaration_index = self.candidate.index(declaration_pattern)
+                use_index = self.candidate.index(use_pattern)
+                self.assertLess(
+                    declaration_index,
+                    use_index,
+                    f"{symbol}: declaration index {declaration_index} must be < R27 use index {use_index}",
+                )
 
     def test_repeat_preserves_target_geometry_address_role_semantics(self) -> None:
         self.assertIn("memcmp(r27_rtpc_client_001a_repeat + 10u", self.r27_helpers)

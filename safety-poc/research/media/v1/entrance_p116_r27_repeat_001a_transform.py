@@ -60,11 +60,12 @@ static long long r27_media_active_monotonic_ms = 0;
 static long long r27_repeat_sent_monotonic_ms = 0;
 static guint64 r27_video_packet_count_at_repeat = 0;
 static guint8 r27_rtpc_client_001a_repeat[128];
-static p76_u32 r27_rtpc_client_001a_repeat_len = 0;
+static guint r27_rtpc_client_001a_repeat_len = 0;
 static guint32 r27_initial_001a_sequence = 0;
 static guint32 r27_repeat_001a_sequence = 0;
 static gboolean r27_sequence_model_pass = FALSE;
 
+static gboolean pseudotcp_begin_graceful_stop(const char *reason);
 static gboolean r27_repeat_delay_cb(gpointer data);
 static gboolean r27_repeat_ack_timeout_cb(gpointer data);
 static gboolean r27_live_observation_timeout_cb(gpointer data);
@@ -96,7 +97,12 @@ p78_queue_rtpc_client_001a(void)
 }
 """
 
-_QUEUE_FUNCTION_NEW = _QUEUE_FUNCTION_OLD + r'''
+_QUEUE_FUNCTION_NEW = _QUEUE_FUNCTION_OLD.replace(
+    "    p78_rtpc_stage = P78_RTPC_CLIENT_001A_TX;\n",
+    "    p78_rtpc_stage = P78_RTPC_CLIENT_001A_TX;\n"
+    "    r27_initial_001a_sequence = read_le32(p78_rtpc_client_001a + 2u);\n",
+    1,
+) + r'''
 /* === R27_REPEAT_001A_BEGIN === */
 static gboolean
 r27_queue_rtpc_client_001a_repeat(void)
@@ -146,7 +152,6 @@ _TX_COMPLETION_OLD = r'''        case P78_TX_RTPC_CLIENT_001A:
 _TX_COMPLETION_NEW = r'''        case P78_TX_RTPC_CLIENT_001A:
             p78_rtpc_client_001a_sent = TRUE;
             r27_initial_001a_sent_count++;
-            r27_initial_001a_sequence = read_le32(p78_rtpc_client_001a + 2u);
             printf("P78_RTPC_CLIENT_001A_SENT=PASS\n");
             printf("INITIAL_001A_SENT_COUNT=%u\n", r27_initial_001a_sent_count);
             printf("REPEAT_001A_SENT_COUNT=%u\n", r27_repeat_001a_sent_count);
@@ -237,6 +242,67 @@ _ACK_HOOK_NEW = """        } else if (r27_repeat_outstanding) {
             }
         }
 """
+
+_GRACEFUL_HELPER_ANCHOR = """    printf("PSEUDOTCP_GRACEFUL_CLOSE_FORCE_RST_SENT=false\\n");
+    fflush(stdout);
+
+    return G_SOURCE_CONTINUE;
+}
+"""
+
+_GRACEFUL_HELPER_NEW = _GRACEFUL_HELPER_ANCHOR + r'''
+
+/* R27 exposes the existing graceful PseudoTCP stop path as a callable helper. */
+static gboolean
+pseudotcp_begin_graceful_stop(const char *reason)
+{
+    guint drained;
+    guint timer;
+    (void)reason;
+
+    if (pseudotcp_graceful_stop_started)
+        return TRUE;
+
+    pseudotcp_graceful_stop_started = TRUE;
+    printf("ICE_HOLDER_STOP=true\n");
+
+    if (!pseudo_tcp || !pseudotcp_open) {
+        printf("PSEUDOTCP_GRACEFUL_CLOSE_SKIPPED_NOT_OPEN=true\n");
+        fflush(stdout);
+        if (loop)
+            g_main_loop_quit(loop);
+        return TRUE;
+    }
+
+    drained = pseudotcp_drain_before_graceful_close();
+    printf("PSEUDOTCP_GRACEFUL_CLOSE_DRAINED_BYTES=%u\n", drained);
+
+    pseudo_tcp_socket_close(pseudo_tcp, FALSE);
+    printf("PSEUDOTCP_GRACEFUL_CLOSE_REQUESTED=true\n");
+    printf("PSEUDOTCP_GRACEFUL_CLOSE_FORCE=false\n");
+
+    pseudotcp_graceful_stop_deadline_us =
+        g_get_monotonic_time() +
+        ((gint64)PSEUDOTCP_GRACEFUL_STOP_TIMEOUT_MS * 1000);
+
+    timer = g_timeout_add(
+        PSEUDOTCP_GRACEFUL_STOP_POLL_MS,
+        pseudotcp_graceful_stop_poll_cb,
+        NULL
+    );
+    if (timer == 0) {
+        fprintf(stderr, "PSEUDOTCP_GRACEFUL_CLOSE_POLL_START=FAIL\n");
+        if (loop)
+            g_main_loop_quit(loop);
+        return FALSE;
+    }
+
+    printf("PSEUDOTCP_GRACEFUL_CLOSE_POLL_START=PASS\n");
+    printf("PSEUDOTCP_GRACEFUL_CLOSE_FORCE_RST_SENT=false\n");
+    fflush(stdout);
+    return TRUE;
+}
+'''
 
 _HELPER_ANCHOR = """static gboolean
 p97_handle_device_ack(guint16 request_id, const guint8 *body, guint body_len)
@@ -485,6 +551,7 @@ def transform(source: str, *, include_p116: bool = True) -> str:
         (_TX_COMPLETION_OLD, _TX_COMPLETION_NEW, "R27 tx completion"),
         (_MEDIA_ACTIVE_OLD, _MEDIA_ACTIVE_NEW, "R27 media active timers"),
         (_ACK_HOOK_OLD, _ACK_HOOK_NEW, "R27 ACK hook"),
+        (_GRACEFUL_HELPER_ANCHOR, _GRACEFUL_HELPER_NEW, "R27 graceful stop helper"),
         (_HELPER_ANCHOR, _R27_HELPERS + _HELPER_ANCHOR, "R27 helpers"),
         (_MAIN_FINAL_OLD, _MAIN_FINAL_NEW, "R27 final summary"),
     ):
