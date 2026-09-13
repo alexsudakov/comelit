@@ -242,6 +242,71 @@ class P116R24RecoveryRewriterTests(unittest.TestCase):
         self.assertEqual(self.rewriter.existing_recovery_count, 1)
         self.assertEqual(self.rewriter.injected_count, 0)
 
+    def test_unsupported_aggregation_before_i_slice_suppresses_injection(self) -> None:
+        sps, pps = self.context()
+        unsupported = b"\x19\x01\x02"
+        packets = [sps, pps, rtp(12, unsupported), rtp(13, slice_nal(2))]
+        out = self.rewrite(*packets)
+        self.assertEqual(out, packets)
+        self.assertEqual(self.rewriter.unsupported_packet_count, 1)
+        self.assertEqual(self.rewriter.injected_count, 0)
+
+    def test_fragmented_sei_before_i_slice_suppresses_injection(self) -> None:
+        sps, pps = self.context()
+        fragmented_sei = fu_a_start(nal(6, b"\x06\x01"))
+        packets = [sps, pps, rtp(12, fragmented_sei), rtp(13, slice_nal(2))]
+        out = self.rewrite(*packets)
+        self.assertEqual(out, packets)
+        self.assertEqual(self.rewriter.injected_count, 0)
+
+    def test_malformed_sei_before_i_slice_suppresses_injection(self) -> None:
+        sps, pps = self.context()
+        malformed_sei = nal(6, b"\x06\x02\x80")
+        packets = [sps, pps, rtp(12, malformed_sei), rtp(13, slice_nal(2))]
+        out = self.rewrite(*packets)
+        self.assertEqual(out, packets)
+        self.assertEqual(self.rewriter.injected_count, 0)
+
+    def test_malformed_stap_a_before_i_slice_suppresses_injection(self) -> None:
+        sps, pps = self.context()
+        malformed_stap = b"\x18\x00\x10\x67"
+        packets = [sps, pps, rtp(12, malformed_stap), rtp(13, slice_nal(2))]
+        out = self.rewrite(*packets)
+        self.assertEqual(out, packets)
+        self.assertEqual(self.rewriter.malformed_count, 1)
+        self.assertEqual(self.rewriter.injected_count, 0)
+
+    def test_unprovable_recovery_signal_scope_is_timestamp_and_ssrc(self) -> None:
+        ts1_sps, ts1_pps = self.context(timestamp=1, ssrc=1)
+        ts2_sps, ts2_pps = self.context(timestamp=2, ssrc=1)
+        other_sps, other_pps = self.context(timestamp=1, ssrc=2)
+        packets = [
+            ts1_sps,
+            ts1_pps,
+            rtp(12, b"\x19\x01\x02", timestamp=1, ssrc=1),
+            rtp(13, slice_nal(2), timestamp=1, ssrc=1),
+            ts2_sps,
+            ts2_pps,
+            rtp(22, slice_nal(2), timestamp=2, ssrc=1),
+            other_sps,
+            other_pps,
+            rtp(12, b"\x19\x01\x02", timestamp=1, ssrc=1),
+            rtp(12, slice_nal(2), timestamp=1, ssrc=2),
+        ]
+        out = self.rewrite(*packets)
+        original_payloads = [payload(packet) for packet in packets]
+        output_original_payloads = [
+            payload(packet)
+            for packet in out
+            if not (payload(packet)[0] & 0x1F == 6 and packet not in packets)
+        ]
+        self.assertEqual(output_original_payloads, original_payloads)
+        self.assertEqual(self.rewriter.injected_count, 2)
+        self.assertEqual(
+            [seq(packet) for packet in out],
+            [10, 11, 12, 13, 10, 11, 22, 23, 10, 11, 13, 12, 13],
+        )
+
     def test_unsupported_h264_aggregation_type_is_unchanged(self) -> None:
         unsupported = b"\x19\x01\x02"
         out = self.rewrite(rtp(1, unsupported))

@@ -63,6 +63,19 @@ True IDR type 5 never causes injection. Existing valid recovery-point SEI with
 `recovery_frame_cnt=0` suppresses duplicate injection. If the slice or SEI cannot be
 parsed confidently, the shim passes through.
 
+## Fail-Closed Recovery Signalling
+
+For each per-SSRC RTP timestamp access unit, the shim treats unprovable recovery
+signalling before the first VCL as a fail-closed condition for that access unit. This
+includes unsupported H.264 aggregation or fragmentation packetization, fragmented SEI,
+malformed SEI, and malformed H.264 structures encountered before the first VCL.
+
+This records the contract requirement to prefer pass-through/no-injection for that
+access unit when avoiding duplicate recovery signalling cannot be proven safely. The
+rule only narrows injection eligibility. It does not fabricate IDR, drop RTP, change
+original RTP payload bytes, or widen live activity. This phase remains offline-only with
+LIVE_AUTHORIZED=false and no live network activity.
+
 The inserted SEI is generated semantically with:
 
 ```text

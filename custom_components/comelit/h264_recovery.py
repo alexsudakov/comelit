@@ -49,6 +49,7 @@ class _AccessUnitState:
     seen_idr: bool = False
     seen_recovery_point_sei: bool = False
     injected_recovery_point: bool = False
+    unprovable_recovery_signal: bool = False
 
 
 class _BitReader:
@@ -136,16 +137,18 @@ def _parse_slice_header(nal_payload_after_header: bytes) -> tuple[int, int] | No
     return first_mb_in_slice, slice_type
 
 
-def _sei_recovery_point_is_zero(nal_payload_after_header: bytes) -> bool:
+def _sei_recovery_point_status(nal_payload_after_header: bytes) -> tuple[bool, bool]:
     rbsp = _remove_emulation_prevention(nal_payload_after_header)
     pos = 0
     while pos < len(rbsp):
+        if rbsp[pos] == 0x80 and all(byte == 0 for byte in rbsp[pos + 1 :]):
+            return False, False
         payload_type = 0
         while pos < len(rbsp) and rbsp[pos] == 0xFF:
             payload_type += 255
             pos += 1
         if pos >= len(rbsp):
-            return False
+            return False, True
         payload_type += rbsp[pos]
         pos += 1
 
@@ -154,12 +157,12 @@ def _sei_recovery_point_is_zero(nal_payload_after_header: bytes) -> bool:
             payload_size += 255
             pos += 1
         if pos >= len(rbsp):
-            return False
+            return False, True
         payload_size += rbsp[pos]
         pos += 1
 
         if payload_size > len(rbsp) - pos:
-            return False
+            return False, True
         payload = rbsp[pos : pos + payload_size]
         pos += payload_size
         if payload_type != 6:
@@ -168,9 +171,9 @@ def _sei_recovery_point_is_zero(nal_payload_after_header: bytes) -> bool:
             reader = _BitReader(payload)
             recovery_frame_cnt = reader.read_ue()
         except ValueError:
-            return False
-        return recovery_frame_cnt == 0
-    return False
+            return False, True
+        return recovery_frame_cnt == 0, False
+    return False, False
 
 
 def build_recovery_point_sei_nal() -> bytes:
@@ -291,6 +294,10 @@ class H264RecoveryRewriter:
         self.unsupported_packet_count = _inc(self.unsupported_packet_count)
         self.last_error = "unsupported_packet"
 
+    def _mark_unprovable_recovery_signal(self, au: _AccessUnitState) -> None:
+        if not au.seen_vcl:
+            au.unprovable_recovery_signal = True
+
     def _observe_nal(
         self,
         au: _AccessUnitState,
@@ -306,7 +313,12 @@ class H264RecoveryRewriter:
             au.seen_pps = True
             return False
         if nal_type == 6:
-            if _sei_recovery_point_is_zero(nal_payload_after_header):
+            is_recovery_point, malformed = _sei_recovery_point_status(
+                nal_payload_after_header
+            )
+            if malformed:
+                self._mark_unprovable_recovery_signal(au)
+            if is_recovery_point:
                 if not au.seen_recovery_point_sei:
                     self.existing_recovery_count = _inc(self.existing_recovery_count)
                 au.seen_recovery_point_sei = True
@@ -327,7 +339,11 @@ class H264RecoveryRewriter:
             return False
         if not au.seen_sps or not au.seen_pps:
             return False
-        if au.seen_recovery_point_sei or au.injected_recovery_point:
+        if (
+            au.seen_recovery_point_sei
+            or au.injected_recovery_point
+            or au.unprovable_recovery_signal
+        ):
             return False
 
         parsed = _parse_slice_header(nal_payload_after_header)
@@ -343,10 +359,11 @@ class H264RecoveryRewriter:
 
     def _inspect_h264_payload(self, rtp: _RtpPacket) -> bool:
         payload = rtp.payload
+        au = self._au(rtp)
         if not payload:
             self._mark_malformed("malformed_h264_payload")
+            self._mark_unprovable_recovery_signal(au)
             return False
-        au = self._au(rtp)
         nal_type = payload[0] & 0x1F
         if 1 <= nal_type <= 23:
             return self._observe_nal(
@@ -361,11 +378,13 @@ class H264RecoveryRewriter:
             while pos < len(payload):
                 if pos + 2 > len(payload):
                     self._mark_malformed("malformed_stap_a")
+                    self._mark_unprovable_recovery_signal(au)
                     return False
                 nal_len = struct.unpack_from("!H", payload, pos)[0]
                 pos += 2
                 if nal_len == 0 or pos + nal_len > len(payload):
                     self._mark_malformed("malformed_stap_a")
+                    self._mark_unprovable_recovery_signal(au)
                     return False
                 nal = payload[pos : pos + nal_len]
                 pos += nal_len
@@ -382,11 +401,15 @@ class H264RecoveryRewriter:
         if nal_type == 28:
             if len(payload) < 2:
                 self._mark_malformed("malformed_fu_a")
+                self._mark_unprovable_recovery_signal(au)
                 return False
             fu_header = payload[1]
             start = bool(fu_header & 0x80)
             reconstructed_type = fu_header & 0x1F
             if not start:
+                return False
+            if reconstructed_type == 6:
+                self._mark_unprovable_recovery_signal(au)
                 return False
             if reconstructed_type == 1:
                 return self._observe_nal(
@@ -402,6 +425,8 @@ class H264RecoveryRewriter:
                 can_inject_before_this_packet=False,
             )
         self._mark_unsupported()
+        if nal_type in {25, 26, 27, 29, 30, 31}:
+            self._mark_unprovable_recovery_signal(au)
         return False
 
     def rewrite_rtp_packet(self, packet: bytes) -> list[bytes]:
