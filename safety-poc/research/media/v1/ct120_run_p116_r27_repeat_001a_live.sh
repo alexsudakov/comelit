@@ -23,6 +23,8 @@ MAX_LIVE_OBSERVATION_SECONDS=70
 OUTER_TIMEOUT_SECONDS=150
 RUN_DIR=/run/comelit-media
 STOP_FILE="$RUN_DIR/stop"
+CANDIDATE_HOLDER_NAME=comelit-r27-repeat-001a
+WRAPPER_NAME=comelit-p2p-cloud-probe-r27
 
 FAIL=0
 LISTENER_STOPPED=0
@@ -34,7 +36,9 @@ WRAPPER_PID=""
 VIDEO_SINK_PID=""
 AUDIO_SINK_PID=""
 RUN_ROOT=""
-LOG=""
+SESSION_LOG=""
+BUILD_PROVENANCE_LOG=""
+CANDIDATE_WRAPPER=""
 LISTENER_READY_BEFORE=false
 LISTENER_RUNNING_AFTER=false
 LISTENER_READY_AFTER=false
@@ -46,6 +50,7 @@ R27_SESSION_CLOSED=false
 TEARDOWN_CONFIDENCE=UNCERTAIN
 R27_RUN_CLASSIFICATION=NOT_RUN
 R27_REPEAT_EXECUTED=false
+R27_HELPER_EVIDENCE=false
 
 fail() {
     echo "$1"
@@ -201,18 +206,60 @@ restore_listener() {
 last_marker() {
     local key="$1"
     local fallback="$2"
-    if [ -f "$LOG" ]; then
+    if [ -f "$SESSION_LOG" ]; then
         awk -v key="$key" -v fallback="$fallback" '
             index($0, key "=") == 1 { value = substr($0, length(key) + 2); found = 1 }
             END { if (found) print value; else print fallback }
-        ' "$LOG"
+        ' "$SESSION_LOG"
     else
         printf '%s\n' "$fallback"
     fi
 }
 
+build_provenance_marker() {
+    local key="$1"
+    local fallback="$2"
+    if [ -f "$BUILD_PROVENANCE_LOG" ]; then
+        awk -v key="$key" -v fallback="$fallback" '
+            index($0, key "=") == 1 { value = substr($0, length(key) + 2); found = 1 }
+            END { if (found) print value; else print fallback }
+        ' "$BUILD_PROVENANCE_LOG"
+    else
+        printf '%s\n' "$fallback"
+    fi
+}
+
+last_marker_equals() {
+    local key="$1"
+    local expected="$2"
+    [ "$(last_marker "$key" __MISSING__)" = "$expected" ]
+}
+
+p80_video_rtp_progress_positive() {
+    [ -f "$SESSION_LOG" ] || return 1
+    awk -F= '
+        $1 ~ /^P80_VIDEO_RTP_PACKETS(_.*)?$/ && $2 ~ /^[0-9]+$/ && $2 + 0 > 0 { found = 1 }
+        END { exit found ? 0 : 1 }
+    ' "$SESSION_LOG"
+}
+
+evaluate_helper_evidence() {
+    R27_HELPER_EVIDENCE=false
+    if last_marker_equals P78_CTPP_REGISTERED_REUSED true &&
+       last_marker_equals P78_SECOND_CTPP_OPEN false &&
+       last_marker_equals P78_RTPC_CLIENT_001A_SENT PASS &&
+       last_marker_equals P80_MEDIA_ACTIVE true &&
+       p80_video_rtp_progress_positive; then
+        R27_HELPER_EVIDENCE=true
+        echo "R27_HELPER_EVIDENCE_GATE=PASS"
+    else
+        echo "R27_HELPER_EVIDENCE_GATE=FAIL"
+        echo "R27_HELPER_EVIDENCE_REQUIRED=P78_CTPP_REGISTERED_REUSED,P78_SECOND_CTPP_OPEN,P78_RTPC_CLIENT_001A_SENT,P80_MEDIA_ACTIVE,P80_VIDEO_RTP_PACKETS_POSITIVE"
+    fi
+}
+
 campaign_processes_remaining() {
-    local pattern="$BASE_WRAPPER"
+    local pattern="$BASE_WRAPPER|$WRAPPER_NAME|$CANDIDATE_HOLDER_NAME"
     if [ -n "${R27_OUTPUT:-}" ]; then
         pattern="$pattern|$R27_OUTPUT"
     fi
@@ -247,8 +294,14 @@ derive_teardown_confidence() {
 
     if [ "$WRAPPER_RC" = 124 ] || [ "$WRAPPER_RC" = 137 ]; then
         R27_RUN_CLASSIFICATION=INCONCLUSIVE_OUTER_TIMEOUT
+    elif [ "$LIVE_INVOCATIONS" -ne 1 ]; then
+        R27_RUN_CLASSIFICATION=NOT_RUN
     elif [ "$TEARDOWN_CONFIDENCE" = CONFIRMED ]; then
-        R27_RUN_CLASSIFICATION=OBSERVATION_USABLE
+        if [ "$R27_HELPER_EVIDENCE" = true ]; then
+            R27_RUN_CLASSIFICATION=OBSERVATION_USABLE
+        else
+            R27_RUN_CLASSIFICATION=INSUFFICIENT_HELPER_EVIDENCE
+        fi
     else
         R27_RUN_CLASSIFICATION=INCONCLUSIVE_TEARDOWN_UNPROVEN
     fi
@@ -281,14 +334,18 @@ print_final_block() {
     echo "TEARDOWN_CONFIDENCE=$TEARDOWN_CONFIDENCE"
     echo "R27_RUN_CLASSIFICATION=$R27_RUN_CLASSIFICATION"
     echo "R27_REPEAT_EXECUTED=$R27_REPEAT_EXECUTED"
-    echo "GENERATED_SOURCE_SHA256=$(last_marker GENERATED_SOURCE_SHA256 NOT_REACHED)"
+    echo "GENERATED_SOURCE_SHA256=$(build_provenance_marker GENERATED_SOURCE_SHA256 NOT_REACHED)"
     echo "R27_REPEAT_DELAY_SECONDS=20"
     echo "R27_REPEAT_DELAY_IS_PROTOCOL_CONSTANT=false"
     echo "R27_REPEAT_DELAY_PROMOTED_TO_PRODUCTION=false"
-    if [ "$R27_RUN_CLASSIFICATION" = INCONCLUSIVE_OUTER_TIMEOUT ]; then
+    if [ "$R27_RUN_CLASSIFICATION" != OBSERVATION_USABLE ]; then
         echo "R27_USABLE_EVIDENCE=false"
         echo "R27_SCALARS_SUPPRESSED=true"
-        echo "R27_SCALARS_SUPPRESSED_REASON=OUTER_TIMEOUT_OR_SIGKILL"
+        if [ "$R27_RUN_CLASSIFICATION" = INCONCLUSIVE_OUTER_TIMEOUT ]; then
+            echo "R27_SCALARS_SUPPRESSED_REASON=OUTER_TIMEOUT_OR_SIGKILL"
+        else
+            echo "R27_SCALARS_SUPPRESSED_REASON=$R27_RUN_CLASSIFICATION"
+        fi
     else
         echo "R27_USABLE_EVIDENCE=true"
         echo "INITIAL_001A_SENT_COUNT=$(last_marker INITIAL_001A_SENT_COUNT NOT_REACHED)"
@@ -383,9 +440,12 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_ROOT="/root/comelit-r27-repeat-001a-$STAMP"
 mkdir -p "$RUN_ROOT"
 chmod 700 "$RUN_ROOT"
-LOG="$RUN_ROOT/live.log"
-: > "$LOG"
-chmod 600 "$LOG"
+SESSION_LOG="$RUN_ROOT/session.log"
+BUILD_PROVENANCE_LOG="$RUN_ROOT/build-provenance.log"
+CANDIDATE_WRAPPER="$RUN_ROOT/$WRAPPER_NAME"
+: > "$SESSION_LOG"
+: > "$BUILD_PROVENANCE_LOG"
+chmod 600 "$SESSION_LOG" "$BUILD_PROVENANCE_LOG"
 
 if [ "$FAIL" -eq 0 ]; then
     git -C "$REPO" show "$R27_EXPECTED_COMMIT_SHA:$TRANSFORM_REL" > "$RUN_ROOT/transform.py" || fail "R27_TRANSFORM_BLOB=FAIL"
@@ -416,12 +476,51 @@ R27_OUTPUT="$RUN_ROOT/comelit-media-r27"
     P80_BUILD_EXPECTED_SOURCE_SHA="$EXPECTED_SOURCE_SHA" \
     OUTPUT="$R27_OUTPUT" \
     bash "$RUN_ROOT/builder.sh"
-) | tee "$RUN_ROOT/build.log"
+) | tee "$BUILD_PROVENANCE_LOG"
 build_rc=${PIPESTATUS[0]}
 echo "R27_BUILD_RC=$build_rc"
 [ "$build_rc" -eq 0 ] || exit 1
-grep -F "GENERATED_SOURCE_SHA256=$EXPECTED_SOURCE_SHA" "$RUN_ROOT/build.log" | tee -a "$LOG" >/dev/null || fail "R27_GENERATED_SOURCE_SHA_GATE=FAIL"
+grep -F "GENERATED_SOURCE_SHA256=$EXPECTED_SOURCE_SHA" "$BUILD_PROVENANCE_LOG" >/dev/null || fail "R27_GENERATED_SOURCE_SHA_GATE=FAIL"
 [ -x "$R27_OUTPUT" ] || fail "R27_OUTPUT_PRESENT=false"
+[ "$FAIL" -eq 0 ] || exit 1
+
+echo "=== MATERIALIZE R27 CANDIDATE WRAPPER ==="
+python3 - "$BASE_WRAPPER" "$CANDIDATE_WRAPPER" "$R27_OUTPUT" <<'PY'
+from pathlib import Path
+import os
+import sys
+
+src = Path(sys.argv[1])
+out = Path(sys.argv[2])
+holder = sys.argv[3]
+text = src.read_text(encoding="utf-8")
+holder_needle = '"$BASE/bin/comelit_ice_offer_holder"'
+if text.count(holder_needle) != 1:
+    raise SystemExit("R27_WRAPPER_HOLDER_ANCHOR=FAIL")
+text = text.replace(holder_needle, f'"{holder}"', 1)
+legacy_run_dir = "/run/comelit-p2p"
+media_run_dir = "/run/comelit-media"
+run_dir_count = text.count(legacy_run_dir)
+if run_dir_count < 1:
+    raise SystemExit("R27_WRAPPER_RUN_DIR_ANCHOR=FAIL")
+text = text.replace(legacy_run_dir, media_run_dir)
+if holder_needle in text:
+    raise SystemExit("R27_WRAPPER_SUBSTITUTION_BASE_ABSENT=FAIL")
+if f'"{holder}"' not in text:
+    raise SystemExit("R27_WRAPPER_SUBSTITUTION_CANDIDATE_PRESENT=FAIL")
+out.write_text(text, encoding="utf-8")
+os.chmod(out, 0o700)
+print("R27_WRAPPER_SUBSTITUTION_BASE_ABSENT=PASS")
+print("R27_WRAPPER_SUBSTITUTION_CANDIDATE_PRESENT=PASS")
+print(f"R27_WRAPPER_RUN_DIR_REPLACEMENTS={run_dir_count}")
+PY
+wrapper_rewrite_rc=$?
+echo "R27_WRAPPER_REWRITE_RC=$wrapper_rewrite_rc"
+if [ "$wrapper_rewrite_rc" -eq 0 ]; then
+    bash -n "$CANDIDATE_WRAPPER" || fail "R27_WRAPPER_PARSE=FAIL"
+else
+    fail "R27_WRAPPER_REWRITE=FAIL"
+fi
 [ "$FAIL" -eq 0 ] || exit 1
 
 echo "=== VERIFY LISTENER READY ==="
@@ -457,9 +556,8 @@ LIVE_INVOCATIONS=1
 echo "LIVE_INVOCATIONS=$LIVE_INVOCATIONS"
 [ "$LIVE_INVOCATIONS" -eq 1 ] || exit 1
 (
-    COMELIT_MEDIA_HELPER="$R27_OUTPUT" \
-    timeout "$OUTER_TIMEOUT_SECONDS" "$BASE_WRAPPER"
-) > "$LOG" 2>&1 &
+    timeout --signal=TERM --kill-after=5s "$OUTER_TIMEOUT_SECONDS" "$CANDIDATE_WRAPPER"
+) > "$SESSION_LOG" 2>&1 &
 WRAPPER_PID=$!
 wait "$WRAPPER_PID"
 WRAPPER_RC=$?
@@ -467,6 +565,7 @@ WRAPPER_PID=""
 echo "WRAPPER_RC=$WRAPPER_RC"
 R27_REPEAT_EXECUTED="$(last_marker R27_REPEAT_001A_SENT false)"
 [ "$R27_REPEAT_EXECUTED" = PASS ] && R27_REPEAT_EXECUTED=true
+evaluate_helper_evidence
 campaign_processes_remaining
 derive_teardown_confidence
 

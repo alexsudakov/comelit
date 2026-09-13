@@ -591,6 +591,59 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
         self.assertIn("R27_SCALARS_SUPPRESSED=true", runner)
         self.assertIn("PRODUCTION_MEDIA_ACTIVE_DERIVED_FROM=LISTENER_READY_AFTER", runner)
 
+    def test_runner_materializes_candidate_wrapper_instead_of_base_wrapper_override(self) -> None:
+        runner = (MEDIA / "ct120_run_p116_r27_repeat_001a_live.sh").read_text(encoding="utf-8")
+        self.assertNotIn("COMELIT_MEDIA_HELPER", runner)
+        self.assertNotRegex(runner, r"timeout[^\n]+\"\$BASE_WRAPPER\"")
+        self.assertIn("CANDIDATE_HOLDER_NAME=comelit-r27-repeat-001a", runner)
+        self.assertIn("WRAPPER_NAME=comelit-p2p-cloud-probe-r27", runner)
+        self.assertIn('CANDIDATE_WRAPPER="$RUN_ROOT/$WRAPPER_NAME"', runner)
+        self.assertIn('python3 - "$BASE_WRAPPER" "$CANDIDATE_WRAPPER" "$R27_OUTPUT"', runner)
+        self.assertIn('timeout --signal=TERM --kill-after=5s "$OUTER_TIMEOUT_SECONDS" "$CANDIDATE_WRAPPER"', runner)
+
+    def test_runner_wrapper_substitution_is_verified_and_fail_closed(self) -> None:
+        runner = (MEDIA / "ct120_run_p116_r27_repeat_001a_live.sh").read_text(encoding="utf-8")
+        for required in (
+            'holder_needle = \'"$BASE/bin/comelit_ice_offer_holder"\'',
+            "R27_WRAPPER_HOLDER_ANCHOR=FAIL",
+            "R27_WRAPPER_RUN_DIR_ANCHOR=FAIL",
+            "R27_WRAPPER_SUBSTITUTION_BASE_ABSENT=FAIL",
+            "R27_WRAPPER_SUBSTITUTION_CANDIDATE_PRESENT=FAIL",
+            "R27_WRAPPER_SUBSTITUTION_BASE_ABSENT=PASS",
+            "R27_WRAPPER_SUBSTITUTION_CANDIDATE_PRESENT=PASS",
+            'bash -n "$CANDIDATE_WRAPPER" || fail "R27_WRAPPER_PARSE=FAIL"',
+            'fail "R27_WRAPPER_REWRITE=FAIL"',
+        ):
+            self.assertIn(required, runner)
+
+    def test_runner_requires_helper_evidence_before_r27_observation_is_usable(self) -> None:
+        runner = (MEDIA / "ct120_run_p116_r27_repeat_001a_live.sh").read_text(encoding="utf-8")
+        for required in (
+            "evaluate_helper_evidence()",
+            "last_marker_equals P78_CTPP_REGISTERED_REUSED true",
+            "last_marker_equals P78_SECOND_CTPP_OPEN false",
+            "last_marker_equals P78_RTPC_CLIENT_001A_SENT PASS",
+            "last_marker_equals P80_MEDIA_ACTIVE true",
+            "p80_video_rtp_progress_positive",
+            "R27_HELPER_EVIDENCE_GATE=FAIL",
+            "R27_RUN_CLASSIFICATION=INSUFFICIENT_HELPER_EVIDENCE",
+            'if [ "$R27_RUN_CLASSIFICATION" != OBSERVATION_USABLE ]; then',
+            "R27_USABLE_EVIDENCE=false",
+            "R27_SCALARS_SUPPRESSED=true",
+        ):
+            self.assertIn(required, runner)
+        self.assertRegex(runner, r"\^P80_VIDEO_RTP_PACKETS\(_\.\*\)\?\$")
+
+    def test_runner_build_provenance_is_separate_from_session_output(self) -> None:
+        runner = (MEDIA / "ct120_run_p116_r27_repeat_001a_live.sh").read_text(encoding="utf-8")
+        self.assertIn('BUILD_PROVENANCE_LOG="$RUN_ROOT/build-provenance.log"', runner)
+        self.assertIn('SESSION_LOG="$RUN_ROOT/session.log"', runner)
+        self.assertIn('tee "$BUILD_PROVENANCE_LOG"', runner)
+        self.assertIn('build_provenance_marker GENERATED_SOURCE_SHA256 NOT_REACHED', runner)
+        self.assertIn(') > "$SESSION_LOG" 2>&1 &', runner)
+        self.assertNotIn('tee -a "$SESSION_LOG"', runner)
+        self.assertNotIn('tee -a "$LOG"', runner)
+
     def test_behavioural_harness_third_001a_blocked(self) -> None:
         self.assertIn("HARNESS_PASS", _compile_and_run_harness(self.candidate))
 
