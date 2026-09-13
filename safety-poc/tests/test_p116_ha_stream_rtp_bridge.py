@@ -48,8 +48,9 @@ class P116HaStreamRtpBridgeTests(unittest.TestCase):
 
     def test_t2_helper_rtp_contract_matches_sdp_ports_payload_types_and_forms(self) -> None:
         self.assertIn("MEDIA_VIDEO_RTP_PORT = 17899", self.transport)
+        self.assertIn("MEDIA_VIDEO_HA_RTP_PORT = 17999", self.transport)
         self.assertIn("MEDIA_AUDIO_RTP_PORT = 17808", self.transport)
-        self.assertIn("m=video {MEDIA_VIDEO_RTP_PORT} RTP/AVP 99", self.transport)
+        self.assertIn("m=video {MEDIA_VIDEO_HA_RTP_PORT} RTP/AVP 99", self.transport)
         self.assertIn("m=audio {MEDIA_AUDIO_RTP_PORT} RTP/AVP 8", self.transport)
         self.assertIn("a=rtpmap:99 H264/90000", self.transport)
         self.assertIn("a=rtpmap:8 PCMA/8000/1", self.transport)
@@ -91,7 +92,8 @@ class P116HaStreamRtpBridgeTests(unittest.TestCase):
         self.assertIn("def _remove_local_sdp() -> None:", self.transport)
         self.assertIn("await self._hass.async_add_executor_job(_remove_local_sdp)", self.transport)
         self.assertIn("def local_sdp_ready(self) -> bool:", self.transport)
-        self.assertIn("return self.active and _MEDIA_LOCAL_SDP_FILE.is_file()", self.transport)
+        self.assertIn("shim.running", self.transport)
+        self.assertIn("_MEDIA_LOCAL_SDP_FILE.is_file()", self.transport)
         run_cycle = self.transport.split("async def _async_run_cycle", 1)[1].split(
             "async def _async_read_output", 1
         )[0]

@@ -13,6 +13,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .cloud import ComelitCloudError, async_negotiate_p2p
+from .h264_recovery import H264RecoveryRtpShim
 from .media_diagnostics import MediaProgressDiagnostics
 from .oauth import ComelitOAuthError, ComelitOAuthManager
 from .sdp import ComelitSdpError, transform_offer
@@ -33,6 +34,7 @@ MEDIA_NATIVE_BINARY_SHA256 = (
     "35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622"
 )
 MEDIA_VIDEO_RTP_PORT = 17899
+MEDIA_VIDEO_HA_RTP_PORT = 17999
 MEDIA_AUDIO_RTP_PORT = 17808
 
 _HEX32_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
@@ -84,7 +86,7 @@ o=- 0 0 IN IP4 127.0.0.1\r
 s=Comelit entrance media\r
 c=IN IP4 127.0.0.1\r
 t=0 0\r
-m=video {MEDIA_VIDEO_RTP_PORT} RTP/AVP 99\r
+m=video {MEDIA_VIDEO_HA_RTP_PORT} RTP/AVP 99\r
 a=rtpmap:99 H264/90000\r
 a=fmtp:99 packetization-mode=1\r
 a=recvonly\r
@@ -248,6 +250,7 @@ class ComelitEntranceMediaTransport:
         self._last_native_exit_code: int | None = None
         self._last_native_failure_markers: list[str] = []
         self._progress = MediaProgressDiagnostics()
+        self._video_recovery_shim: H264RecoveryRtpShim | None = None
         self._status_listeners: set[Callable[[], None]] = set()
         self._status_notify_handle: asyncio.TimerHandle | None = None
         self._last_status_notify_monotonic: float | None = None
@@ -267,7 +270,13 @@ class ComelitEntranceMediaTransport:
 
     @property
     def local_sdp_ready(self) -> bool:
-        return self.active and _MEDIA_LOCAL_SDP_FILE.is_file()
+        shim = self._video_recovery_shim
+        return (
+            self.active
+            and shim is not None
+            and shim.running
+            and _MEDIA_LOCAL_SDP_FILE.is_file()
+        )
 
     @property
     def video_forwarding(self) -> bool:
@@ -300,6 +309,40 @@ class ComelitEntranceMediaTransport:
     @property
     def audio_last_packet_age_seconds(self) -> float | None:
         return self._progress.audio_last_packet_age_seconds
+
+    @property
+    def video_recovery_shim_running(self) -> bool:
+        shim = self._video_recovery_shim
+        return shim is not None and shim.running
+
+    def video_recovery_diagnostics(self) -> dict[str, int | str | bool | None]:
+        shim = self._video_recovery_shim
+        if shim is None:
+            return {
+                "video_recovery_shim_running": False,
+                "video_recovery_input_packets": 0,
+                "video_recovery_output_packets": 0,
+                "video_recovery_eligible_nonidr_i_count": 0,
+                "video_recovery_injected_count": 0,
+                "video_recovery_existing_recovery_count": 0,
+                "video_recovery_idr_count": 0,
+                "video_recovery_unsupported_packet_count": 0,
+                "video_recovery_malformed_count": 0,
+                "video_recovery_last_error": None,
+            }
+        diagnostics = shim.diagnostics()
+        return {
+            "video_recovery_shim_running": diagnostics.running,
+            "video_recovery_input_packets": diagnostics.input_packets,
+            "video_recovery_output_packets": diagnostics.output_packets,
+            "video_recovery_eligible_nonidr_i_count": diagnostics.eligible_nonidr_i_count,
+            "video_recovery_injected_count": diagnostics.injected_count,
+            "video_recovery_existing_recovery_count": diagnostics.existing_recovery_count,
+            "video_recovery_idr_count": diagnostics.idr_count,
+            "video_recovery_unsupported_packet_count": diagnostics.unsupported_packet_count,
+            "video_recovery_malformed_count": diagnostics.malformed_count,
+            "video_recovery_last_error": diagnostics.last_error,
+        }
 
     @property
     def last_error(self) -> str | None:
@@ -423,6 +466,7 @@ class ComelitEntranceMediaTransport:
         self._media_active.clear()
         self._video_forwarding.clear()
         self._audio_forwarding.clear()
+        self._video_recovery_shim = None
         self._task = self._entry.async_create_background_task(
             self._hass,
             self._async_run_once(),
@@ -489,8 +533,30 @@ class ComelitEntranceMediaTransport:
         self._video_forwarding.clear()
         self._audio_forwarding.clear()
         self._cancel_status_notify()
+        await self._async_stop_video_recovery_shim()
         await self._hass.async_add_executor_job(_remove_helper_secret)
         await self._hass.async_add_executor_job(_remove_local_sdp)
+
+    async def _async_start_video_recovery_shim(self) -> None:
+        shim = H264RecoveryRtpShim(
+            input_port=MEDIA_VIDEO_RTP_PORT,
+            output_port=MEDIA_VIDEO_HA_RTP_PORT,
+        )
+        self._video_recovery_shim = shim
+        try:
+            await shim.async_start()
+        except OSError as exc:
+            await self._async_stop_video_recovery_shim()
+            raise ComelitMediaTransportError("video_recovery_shim_bind_failed") from exc
+        except BaseException:
+            await self._async_stop_video_recovery_shim()
+            raise
+
+    async def _async_stop_video_recovery_shim(self) -> None:
+        shim = self._video_recovery_shim
+        self._video_recovery_shim = None
+        if shim is not None:
+            await shim.async_stop()
 
     async def _async_run_once(self) -> None:
         try:
@@ -527,12 +593,14 @@ class ComelitEntranceMediaTransport:
         finally:
             self._media_active.clear()
             self._process = None
+            await self._async_stop_video_recovery_shim()
             await self._hass.async_add_executor_job(_remove_helper_secret)
             await self._hass.async_add_executor_job(_remove_local_sdp)
 
     async def _async_run_cycle(self) -> None:
         await self._hass.async_add_executor_job(_native_gate)
         await self._hass.async_add_executor_job(_prepare_run_dir)
+        await self._async_start_video_recovery_shim()
         await self._hass.async_add_executor_job(_prepare_helper_secret, self._vip_token)
 
         child_env = os.environ.copy()
