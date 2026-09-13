@@ -11,6 +11,7 @@ The transform performs no network I/O and never executes the candidate.
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 from entrance_p106_teardown_state_classification_transform import (
@@ -25,6 +26,20 @@ LINEAGE_MARKERS = (
     "V4_RING_KIND=CALL_INIT",
     "Persistent listener:",
 )
+
+
+C_KEYWORDS = {
+    "break", "case", "char", "const", "continue", "default", "do", "else",
+    "enum", "for", "if", "int", "long", "return", "sizeof", "static",
+    "struct", "switch", "typedef", "unsigned", "void", "while",
+}
+
+
+R29_IDENTIFIER_ALLOWLIST = {
+    "FALSE", "G_SOURCE_CONTINUE", "G_SOURCE_REMOVE", "NULL", "SIGUSR2",
+    "TRUE", "close", "fflush", "gboolean", "gpointer", "guint", "guint64",
+    "getpid", "pid_t", "printf", "signal", "stdout", "strcmp",
+}
 
 
 def _replace_once(text: str, old: str, new: str, label: str) -> str:
@@ -87,6 +102,183 @@ def _replace_named_function(text: str, signature: str, replacement: str) -> str:
         raise RuntimeError(f"function opening brace not found: {signature!r}")
     end = _block_end(text, opening)
     return text[:start] + replacement + text[end:]
+
+
+def _strip_c_comments_and_literals(text: str) -> str:
+    out: list[str] = []
+    i = 0
+    state = "normal"
+    while i < len(text):
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < len(text) else ""
+        if state == "normal":
+            if ch == '"':
+                out.append(" ")
+                state = "string"
+            elif ch == "'":
+                out.append(" ")
+                state = "char"
+            elif ch == "/" and nxt == "/":
+                out.append("  ")
+                state = "line_comment"
+                i += 1
+            elif ch == "/" and nxt == "*":
+                out.append("  ")
+                state = "block_comment"
+                i += 1
+            else:
+                out.append(ch)
+        elif state in {"string", "char"}:
+            out.append("\n" if ch == "\n" else " ")
+            if ch == "\\":
+                i += 1
+                if i < len(text):
+                    out.append("\n" if text[i] == "\n" else " ")
+            elif (state == "string" and ch == '"') or (
+                state == "char" and ch == "'"
+            ):
+                state = "normal"
+        elif state == "line_comment":
+            out.append("\n" if ch == "\n" else " ")
+            if ch == "\n":
+                state = "normal"
+        elif state == "block_comment":
+            out.append("\n" if ch == "\n" else " ")
+            if ch == "*" and nxt == "/":
+                out.append(" ")
+                state = "normal"
+                i += 1
+        i += 1
+    return "".join(out)
+
+
+def _identifier_tokens(text: str) -> set[str]:
+    stripped = _strip_c_comments_and_literals(text)
+    tokens: set[str] = set()
+    for match in re.finditer(r"\b[A-Za-z_][A-Za-z0-9_]*\b", stripped):
+        name = match.group(0)
+        if name in C_KEYWORDS:
+            continue
+        if name.startswith("R29_") and (name.endswith("_BEGIN") or name.endswith("_END")):
+            continue
+        before = stripped[:match.start()].rstrip()
+        if before.endswith(".") or before.endswith("->"):
+            continue
+        tokens.add(name)
+    return tokens
+
+
+def _defined_identifiers(text: str) -> set[str]:
+    stripped = _strip_c_comments_and_literals(text)
+    names = set(re.findall(r"^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)", stripped, re.M))
+    names.update(re.findall(r"}\s*([A-Za-z_][A-Za-z0-9_]*)\s*;", stripped))
+    for enum_body in re.findall(r"typedef\s+enum\s*{([^}]*)}", stripped, re.S):
+        names.update(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:=[^,}]*)?(?:,|$)", enum_body))
+    names.update(
+        re.findall(
+            r"\b(?:static\s+)?(?:const\s+)?(?:gboolean|guint|guint64|int|long\s+long|pid_t|void|R29AttachedMediaState)\s+\**\s*([A-Za-z_][A-Za-z0-9_]*)\b",
+            stripped,
+        )
+    )
+    names.update(
+        re.findall(
+            r"\b(?:static\s+)?(?:gboolean|int|void)\s*\n\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+            stripped,
+        )
+    )
+    names.update(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*void\s*\)", stripped))
+    names.update(
+        re.findall(
+            r"\b(?:const\s+)?(?:char|gpointer|int)\s+\**\s*([A-Za-z_][A-Za-z0-9_]*)\b",
+            stripped,
+        )
+    )
+    return {name for name in names if name not in C_KEYWORDS}
+
+
+def _r29_audit_regions(candidate: str) -> list[tuple[str, int, str]]:
+    spans = [
+        (
+            "state",
+            "R29_LISTENER_ATTACHED_MEDIA_STATE_BEGIN",
+            "R29_LISTENER_ATTACHED_MEDIA_STATE_END",
+        ),
+        (
+            "functions",
+            "R29_ATTACHED_MEDIA_FUNCTIONS_BEGIN",
+            "R29_ATTACHED_MEDIA_FUNCTIONS_END",
+        ),
+        (
+            "self_activation_stub",
+            "static gboolean\nentrance_signal_queue_self_activation(void)\n{",
+            "static gboolean\nentrance_signal_queue_video_event",
+        ),
+        (
+            "client_001a_stub",
+            "static gboolean\np78_queue_rtpc_client_001a(void)\n{",
+            "static gboolean\np78_begin_rtpc_control",
+        ),
+        (
+            "ready_hook",
+            "r29_ctpp_registration_count++;",
+            "V4_RING_LISTENER_READY=true",
+        ),
+        (
+            "call_init_hook",
+            "r29_start_attached_media_from_call_init(source)",
+            "                fflush(stdout);\n",
+        ),
+        (
+            "pseudotcp_counter",
+            "r29_pseudotcp_open_count++;",
+            "PSEUDOTCP_OPEN_COUNT=%u",
+        ),
+        (
+            "cloud_counter",
+            "r29_cloud_negotiation_count++;",
+            "REMOTE_PRIMITIVES_IMPORT=PASS",
+        ),
+        (
+            "ice_counter",
+            "r29_ice_bootstrap_count++;",
+            "ICE_GATHER_START=PASS",
+        ),
+        (
+            "rtp_progress_hook",
+            "r29_first_video_rtp_monotonic_ms = p116_monotonic_ms();",
+            "P80_VIDEO_RTP_FORWARDING=PASS",
+        ),
+        (
+            "forbidden_call_site_stub",
+            "r29_client_001a_sent_count++;\n    printf(\"R29_CLIENT_001A_DISABLED=true\\n\");",
+            "return FALSE;\n}",
+        ),
+        (
+            "main_selfcheck_patch",
+            "argc == 2 && strcmp(argv[1], \"--r29-selfcheck\") == 0",
+            "return r29_selfcheck();",
+        ),
+        (
+            "main_signal_patch",
+            "signal(SIGUSR2, r29_sigusr2_handler);",
+            "R29_ONE_SHOT_CONTROL_KIND=SIGUSR2",
+        ),
+        (
+            "main_poll_patch",
+            "        r29_sigusr2_poll_cb,\n        NULL\n    );",
+            "NULL\n    );",
+        ),
+    ]
+    regions: list[tuple[str, int, str]] = []
+    for name, start, end in spans:
+        s = candidate.find(start)
+        if s < 0:
+            raise RuntimeError(f"R29_IDENTIFIER_GATE=FAIL region_missing={name}:start")
+        e = candidate.find(end, s)
+        if e < 0:
+            raise RuntimeError(f"R29_IDENTIFIER_GATE=FAIL region_missing={name}:end")
+        regions.append((name, s, candidate[s:e]))
+    return regions
 
 
 R29_STATE = r'''
@@ -556,6 +748,22 @@ def _assert_generated_gates(candidate: str) -> None:
         raise RuntimeError("R29_GENERATED_SOURCE_FORBIDDEN_GATE=FAIL " + ",".join(failures))
 
 
+def _assert_r29_identifiers_resolved(candidate: str) -> None:
+    regions = _r29_audit_regions(candidate)
+    r29_defined: set[str] = set()
+    for _, _, region in regions:
+        r29_defined.update(_defined_identifiers(region))
+    failures: list[str] = []
+    for name, start, region in regions:
+        prefix_defined = _defined_identifiers(candidate[:start])
+        allowed = R29_IDENTIFIER_ALLOWLIST | r29_defined | prefix_defined
+        references = _identifier_tokens(region)
+        unresolved = sorted(ref for ref in references if ref not in allowed)
+        failures.extend(f"{name}:{ref}" for ref in unresolved)
+    if failures:
+        raise RuntimeError("R29_IDENTIFIER_GATE=FAIL unresolved=" + ",".join(failures))
+
+
 def _region(text: str, start: str, end: str) -> str:
     s = text.find(start)
     if s < 0:
@@ -577,8 +785,8 @@ def transform(source: str) -> str:
     )
     candidate = _replace_once(
         candidate,
-        "static gboolean\np80_rtp_v2_shape",
-        R29_FUNCTIONS + "\nstatic gboolean\np80_rtp_v2_shape",
+        '#define V4_GATE         "00000610"\n',
+        '#define V4_GATE         "00000610"\n' + R29_FUNCTIONS,
         "R29 function insertion",
     )
     candidate = _replace_named_function(
@@ -602,6 +810,7 @@ def transform(source: str) -> str:
     candidate = _patch_forbidden_call_sites(candidate)
     candidate = _patch_main(candidate)
     _assert_generated_gates(candidate)
+    _assert_r29_identifiers_resolved(candidate)
     return candidate
 
 
@@ -613,7 +822,7 @@ def report() -> str:
             "R29_MEDIA_OPEN_MODEL=BLOCKED",
             "R29_MEDIA_ONLY_TEARDOWN_MODEL=BLOCKED",
             "R29_ONE_SHOT_CONTROL_KIND=SIGUSR2",
-            "R29_GENERATED_SOURCE_GATES=SCOPED_FORBIDDEN_PATHS",
+            "R29_GENERATED_SOURCE_GATES=SCOPED_FORBIDDEN_PATHS,STATIC_IDENTIFIER_GATE",
             "NETWORK_IO_PERFORMED=false",
             "CANDIDATE_EXECUTED=false",
             "=== END COMELIT P116 R29 LISTENER ATTACHED MEDIA LIVE TRANSFORM ===",

@@ -59,12 +59,12 @@ class P116R29ListenerAttachedMediaLiveContract(unittest.TestCase):
         )
         cls.teardown_region = region(
             cls.generated,
-            "r29_media_only_teardown",
+            "static gboolean\nr29_media_only_teardown",
             "static void\nr29_sigusr2_handler",
         )
         cls.control_region = region(
             cls.generated,
-            "r29_sigusr2_handler",
+            "static void\nr29_sigusr2_handler",
             "static int\nr29_selfcheck",
         )
         cls.ready_region = region(
@@ -238,7 +238,7 @@ class P116R29ListenerAttachedMediaLiveContract(unittest.TestCase):
                 imports.add((node.module or "").split(".")[0])
         self.assertLessEqual(
             imports,
-            {"argparse", "pathlib", "entrance_p106_teardown_state_classification_transform"},
+            {"argparse", "pathlib", "re", "entrance_p106_teardown_state_classification_transform"},
         )
 
     def test_transform_refuses_unknown_lineage(self) -> None:
@@ -253,6 +253,15 @@ class P116R29ListenerAttachedMediaLiveContract(unittest.TestCase):
         )
         with self.assertRaises(RuntimeError):
             r29._assert_generated_gates(bad)  # pylint: disable=protected-access
+
+    def test_static_identifier_gate_rejects_bad_r29_identifier(self) -> None:
+        bad = self.generated.replace(
+            "r29_media_open_blocked = TRUE;",
+            "r29_media_open_blocked = TRUE;\n    r29_synthetic_missing_identifier = TRUE;",
+            1,
+        )
+        with self.assertRaisesRegex(RuntimeError, "R29_IDENTIFIER_GATE=FAIL.*r29_synthetic_missing_identifier"):
+            r29._assert_r29_identifiers_resolved(bad)  # pylint: disable=protected-access
 
     def test_runner_success_gate_function(self) -> None:
         out = self.shell(
