@@ -282,6 +282,7 @@ class ComelitEntranceCamera(Camera):
             "automatic_session_start": False,
             "hard_limit_seconds": self._manager.hard_limit_seconds,
         }
+        attrs.update(self._transport.video_recovery_diagnostics())
         attrs.update(self._hls_runtime_diagnostics())
         attrs.update(self._hls_http_boundary_diagnostics())
         return attrs

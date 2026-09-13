@@ -27,7 +27,7 @@ class P116HandoffAnalysisTests(unittest.TestCase):
     def test_local_sdp_shape_is_static_loopback_recvonly_without_ssrc(self) -> None:
         for expected in (
             'c=IN IP4 127.0.0.1\\r',
-            'm=video {MEDIA_VIDEO_RTP_PORT} RTP/AVP 99\\r',
+            'm=video {MEDIA_VIDEO_HA_RTP_PORT} RTP/AVP 99\\r',
             'a=rtpmap:99 H264/90000\\r',
             'a=fmtp:99 packetization-mode=1\\r',
             'a=recvonly\\r',
