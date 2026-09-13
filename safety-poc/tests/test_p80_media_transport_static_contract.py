@@ -9,7 +9,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 TRANSPORT = ROOT / "custom_components" / "comelit" / "media_transport.py"
 BINARY = ROOT / "custom_components" / "comelit" / "native" / "comelit-media"
-EXPECTED_SHA256 = "91335b4490bc58910c78cb58b9c2d3eccc13f40dcfff7651995ad428cd71ddc7"
+EXPECTED_SHA256 = "35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622"
 
 
 class P80MediaTransportStaticContractTests(unittest.TestCase):
@@ -52,9 +52,12 @@ class P80MediaTransportStaticContractTests(unittest.TestCase):
         self.assertIn("MEDIA_AUDIO_RTP_PORT = 17808", self.source)
         self.assertIn("RTP/AVP 99", self.source)
         self.assertIn("a=rtpmap:99 H264/90000", self.source)
+        self.assertIn("a=fmtp:99 packetization-mode=1", self.source)
         self.assertIn("RTP/AVP 8", self.source)
         self.assertIn("a=rtpmap:8 PCMA/8000/1", self.source)
         self.assertIn("127.0.0.1", self.source)
+        self.assertIn("_LOCAL_RTP_SDP.encode(\"ascii\")", self.source)
+        self.assertIn("_atomic_write(_MEDIA_LOCAL_SDP_FILE", self.source)
 
     def test_media_bootstrap_has_exactly_one_cloud_negotiation(self) -> None:
         method = next(
@@ -128,12 +131,15 @@ class P80MediaTransportStaticContractTests(unittest.TestCase):
 
     def test_native_failure_diagnostics_are_allowlisted_redacted_and_bounded(self) -> None:
         self.assertIn("_MEDIA_NATIVE_MARKER_SAFE_VALUE_RE", self.source)
+        self.assertIn("_MEDIA_NATIVE_PROTOCOL_MARKER_LIMIT = 80", self.source)
+        self.assertIn("_MEDIA_NATIVE_PROTOCOL_MARKER_PREFIXES = (", self.source)
         self.assertIn('"P78_",', self.source)
         self.assertIn('"P80_",', self.source)
         self.assertIn('"PSEUDOTCP_",', self.source)
         self.assertIn('else "<redacted>"', self.source)
         self.assertIn("_MEDIA_NATIVE_MARKER_TAIL_LIMIT = 40", self.source)
         self.assertIn("self._remember_native_marker(line)", self.source)
+        self.assertIn("protocol_native_markers=%s", self.source)
         self.assertIn("self._capture_native_failure(process.returncode)", self.source)
         self.assertIn("self._capture_native_failure(rc)", self.source)
         self.assertIn("safe_native_markers=%s", self.source)

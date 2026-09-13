@@ -79,8 +79,43 @@ def _replace_once(source: str, old: str, new: str, label: str) -> str:
     return source.replace(old, new, 1)
 
 
-def transform(source: str) -> str:
+def _strip_p116_from_packaged_binary_provenance(candidate: str) -> str:
+    """Keep programmatic packaged-binary provenance pinned to the shipped build."""
+    for line in (
+        "#define P116_RTP_TELEMETRY_CADENCE 50u\n",
+        "#define P116_RTP_TELEMETRY_MAX_PERIODIC_SUMMARIES 12u\n",
+        "#define P116_RTP_PT_WORD_BITS 128u\n",
+        "#define P116_RTP_MAX_TRACKED_SSRC 8u\n",
+    ):
+        candidate = _replace_once(candidate, line, "", "P116 provenance define")
+
+    state_start = candidate.index("\ntypedef struct {\n    guint8 payload_type;")
+    state_end = candidate.index("\nstatic guint16\np80_read_le16", state_start)
+    candidate = candidate[:state_start] + candidate[state_end:]
+
+    funcs_start = candidate.index("\nstatic guint32\np116_read_be32")
+    funcs_end = candidate.index("\nstatic gboolean\np80_rtp_v2_shape", funcs_start)
+    candidate = candidate[:funcs_start] + candidate[funcs_end:]
+
+    candidate = _replace_once(
+        candidate,
+        "    p116_observe_rtp(inner, inner_len, payload_type);\n\n",
+        "",
+        "P116 provenance observe call",
+    )
+    candidate = _replace_once(
+        candidate,
+        "    p116_print_final_rtp_summary();\n\n",
+        "",
+        "P116 provenance final summary",
+    )
+    return candidate
+
+
+def transform(source: str, *, include_p116: bool = False) -> str:
     candidate = add_p105_runtime(source)
+    if not include_p116:
+        candidate = _strip_p116_from_packaged_binary_provenance(candidate)
     return _replace_once(
         candidate,
         _NOTIFY_FAILURE_ANCHOR,
@@ -112,6 +147,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--report", action="store_true")
+    p116 = parser.add_mutually_exclusive_group()
+    p116.add_argument(
+        "--include-p116",
+        dest="include_p116",
+        action="store_true",
+        help="include P116 RTP telemetry in the generated source",
+    )
+    p116.add_argument(
+        "--no-include-p116",
+        dest="include_p116",
+        action="store_false",
+        help="emit historical/P106 source without P116 RTP telemetry",
+    )
+    parser.set_defaults(include_p116=False)
     args = parser.parse_args(argv)
 
     if args.report:
@@ -124,7 +173,10 @@ def main(argv: list[str] | None = None) -> int:
     if not source_path.exists() and str(source_path).startswith("safety-poc/"):
         source_path = Path(str(source_path)[len("safety-poc/"):])
 
-    args.output.write_text(transform(source_path.read_text(encoding="utf-8")), encoding="utf-8")
+    args.output.write_text(
+        transform(source_path.read_text(encoding="utf-8"), include_p116=args.include_p116),
+        encoding="utf-8",
+    )
     print("P106_TEARDOWN_STATE_TRANSFORM=PASS")
     print("P106_NOTIFY_CLASSIFIER=EVIDENCE_GATED")
     print("P106_BLANKET_SUPPRESSION=false")

@@ -1,0 +1,16 @@
+P116_MEDIA_TELEMETRY_BUILD=PROVEN_OFFLINE
+GENERATED_SOURCE_SHA256=93756730fd088b9227f37c4e0e3edbd18ac30c110db03b75bcc63f1c93952e66
+NATIVE_BINARY_SHA256=35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622
+canonical_generator=entrance_p106_teardown_state_classification_transform.py (include_p116=1)
+generator_tree_commit=6fe4413861e7f597bb2f05f445eeb6513d7e8406
+toolchain=Alpine 3.24.1 chroot (cached), cc (Alpine 15.2.0) 15.2.0, glib/gobject 2.88.1, libnice 0.1.22
+flags=-O2 -g -Wall -Wextra -Wl,--as-needed
+interpreter=/lib/ld-musl-x86_64.so.1
+needed=libc.musl-x86_64.so.1,libglib-2.0.so.0,libgobject-2.0.so.0,libnice.so.10
+gates=MUSL_INTERPRETER_GATE=PASS, NO_GLIBC_DEPENDENCY=PASS, NO_NEW_RUNTIME_DEPENDENCY=PASS, LIB_IDENTICAL=PASS
+reproducibility=two independent clean builds produced byte-identical 35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622
+historical=f17ad2d6efbe002335a658c075da84677ced44246d556afe80953a8f59129841 same source vs pinned 91335b4490bc58910c78cb58b9c2d3eccc13f40dcfff7651995ad428cd71ddc7 -> HISTORICAL_HASH_MISMATCH_CLASS=NON_RUNTIME_BUILD_METADATA
+candidate_executed=false
+LIVE_INVOCATIONS=0
+DOOR_ACTIONS=0
+GATE_ACTIONS=0

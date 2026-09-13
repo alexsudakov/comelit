@@ -17,9 +17,9 @@ TRANSPORT = ROOT / "custom_components" / "comelit" / "media_transport.py"
 BINARY = ROOT / "custom_components" / "comelit" / "native" / "comelit-media"
 NATIVE_LIB = ROOT / "custom_components" / "comelit" / "native" / "lib"
 SOURCE = SAFETY_ROOT / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-ctpp-door.c"
-EXPECTED_MUSL_SHA256 = "91335b4490bc58910c78cb58b9c2d3eccc13f40dcfff7651995ad428cd71ddc7"
+EXPECTED_MUSL_SHA256 = "35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622"
 EXPECTED_RUN3_GLIBC_SHA256 = "94063498a35a886dc4cb735c3e629a5097b965224cb3354192723d30e70c16ac"
-EXPECTED_SOURCE_SHA256 = "0c15927dbc40bdb1f7c522f063a8a2f38c557f9eb735cdd981cdd49449595c79"
+EXPECTED_SOURCE_SHA256 = "93756730fd088b9227f37c4e0e3edbd18ac30c110db03b75bcc63f1c93952e66"
 EXPECTED_INTERPRETER = "/lib/ld-musl-x86_64.so.1"
 EXPECTED_NEEDED = (
     "libc.musl-x86_64.so.1",
@@ -204,7 +204,7 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         for marker in markers:
             self.assertIn(marker, self.binary_blob)
 
-    def test_generated_source_provenance_matches_p106_transform_digest(self) -> None:
+    def test_generated_source_provenance_matches_p116_p106_transform_digest(self) -> None:
         sys.path.insert(0, str(MEDIA_DIR))
         from entrance_p106_teardown_state_classification_transform import transform
 
@@ -212,8 +212,11 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         # PYTHONPATH=safety-poc/research/media/v1 python3 -c
         # 'from pathlib import Path; import hashlib; from
         # entrance_p106_teardown_state_classification_transform import transform;
-        # print(hashlib.sha256(transform(Path("safety-poc/research/door/v1_5_7/comelit-v4-persistent-ctpp-door.c").read_text(encoding="utf-8")).encode("utf-8")).hexdigest())'
-        candidate = transform(SOURCE.read_text(encoding="utf-8")).encode("utf-8")
+        # print(hashlib.sha256(transform(Path("safety-poc/research/door/v1_5_7/comelit-v4-persistent-ctpp-door.c").read_text(encoding="utf-8"), include_p116=True).encode("utf-8")).hexdigest())'
+        candidate = transform(
+            SOURCE.read_text(encoding="utf-8"),
+            include_p116=True,
+        ).encode("utf-8")
         self.assertEqual(hashlib.sha256(candidate).hexdigest(), EXPECTED_SOURCE_SHA256)
 
     def test_p106_terminal_classes_are_diagnostic_allowlist_only(self) -> None:

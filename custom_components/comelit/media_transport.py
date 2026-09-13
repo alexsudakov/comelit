@@ -30,7 +30,7 @@ _MEDIA_STOP_FILE = _MEDIA_RUN_DIR / "stop"
 _MEDIA_LOCAL_SDP_FILE = _MEDIA_RUN_DIR / "local-rtp.sdp"
 
 MEDIA_NATIVE_BINARY_SHA256 = (
-    "91335b4490bc58910c78cb58b9c2d3eccc13f40dcfff7651995ad428cd71ddc7"
+    "35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622"
 )
 MEDIA_VIDEO_RTP_PORT = 17899
 MEDIA_AUDIO_RTP_PORT = 17808
@@ -40,12 +40,13 @@ _MEDIA_NATIVE_MARKER_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,79}$")
 _MEDIA_NATIVE_MARKER_SAFE_VALUE_RE = re.compile(
     r"^(?:PASS|FAIL|true|false|READY|OPEN|CLOSED|UNKNOWN_OUTCOME|"
     r"REJECTED|REJECTED_NOT_READY|FAILED_SAFE|EXPECTED_TERMINAL_SHUTDOWN|"
-    r"FATAL|[0-9]{1,10})$"
+    r"FATAL|NONE|[0-9]{1,20}|[0-9]{1,3}(?:,[0-9]{1,3}){0,127})$"
 )
 _MEDIA_NATIVE_MARKER_PREFIXES = (
     "ICE_",
     "REMOTE_SDP_",
     "PSEUDOTCP_",
+    "CONVERSATION_",
     "SELECTED_PAIR_",
     "V4_",
     "P12_",
@@ -56,8 +57,26 @@ _MEDIA_NATIVE_MARKER_PREFIXES = (
     "DEVICE_VIDEO_",
     "P78_",
     "P80_",
+    "P116_",
 )
 _MEDIA_NATIVE_MARKER_TAIL_LIMIT = 40
+_MEDIA_NATIVE_PROTOCOL_MARKER_LIMIT = 80
+_MEDIA_NATIVE_PROTOCOL_MARKER_PREFIXES = (
+    "ICE_",
+    "REMOTE_SDP_",
+    "PSEUDOTCP_",
+    "CONVERSATION_",
+    "CTPP_",
+    "V4_CTPP_",
+    "P78_RTPC_",
+    "P80_PREACTIVE_",
+    "P80_DEVICE_",
+    "P80_MEDIA_",
+    "P80_VIDEO_RTP_PORT",
+    "P80_AUDIO_RTP_PORT",
+    "P80_VIDEO_RTP_FORWARDING",
+    "P80_AUDIO_RTP_FORWARDING",
+)
 _MEDIA_STATUS_NOTIFY_MIN_INTERVAL_SECONDS = 1.0
 
 _LOCAL_RTP_SDP = f"""v=0\r
@@ -67,6 +86,7 @@ c=IN IP4 127.0.0.1\r
 t=0 0\r
 m=video {MEDIA_VIDEO_RTP_PORT} RTP/AVP 99\r
 a=rtpmap:99 H264/90000\r
+a=fmtp:99 packetization-mode=1\r
 a=recvonly\r
 m=audio {MEDIA_AUDIO_RTP_PORT} RTP/AVP 8\r
 a=rtpmap:8 PCMA/8000/1\r
@@ -148,6 +168,13 @@ def _write_local_sdp() -> None:
     _atomic_write(_MEDIA_LOCAL_SDP_FILE, _LOCAL_RTP_SDP.encode("ascii"))
 
 
+def _remove_local_sdp() -> None:
+    try:
+        _MEDIA_LOCAL_SDP_FILE.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def _touch_stop() -> None:
     _MEDIA_RUN_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     _MEDIA_STOP_FILE.touch(mode=0o600, exist_ok=True)
@@ -217,6 +244,7 @@ class ComelitEntranceMediaTransport:
         self._stopping = False
         self._last_error: str | None = None
         self._native_marker_tail: list[str] = []
+        self._native_protocol_markers: list[str] = []
         self._last_native_exit_code: int | None = None
         self._last_native_failure_markers: list[str] = []
         self._progress = MediaProgressDiagnostics()
@@ -236,6 +264,10 @@ class ComelitEntranceMediaTransport:
     @property
     def local_sdp_path(self) -> Path:
         return _MEDIA_LOCAL_SDP_FILE
+
+    @property
+    def local_sdp_ready(self) -> bool:
+        return self.active and _MEDIA_LOCAL_SDP_FILE.is_file()
 
     @property
     def video_forwarding(self) -> bool:
@@ -320,26 +352,55 @@ class ComelitEntranceMediaTransport:
             delay = _MEDIA_STATUS_NOTIFY_MIN_INTERVAL_SECONDS - (now - last)
             self._status_notify_handle = loop.call_later(delay, self._notify_status_now)
 
-    def _remember_native_marker(self, line: str) -> None:
+    def _safe_native_marker(self, line: str) -> tuple[str, str] | None:
         if "=" not in line:
-            return
+            return None
         key, value = line.split("=", 1)
         if not _MEDIA_NATIVE_MARKER_KEY_RE.fullmatch(key):
-            return
+            return None
         if not key.startswith(_MEDIA_NATIVE_MARKER_PREFIXES):
-            return
+            return None
         safe_value = (
             value
             if _MEDIA_NATIVE_MARKER_SAFE_VALUE_RE.fullmatch(value)
             else "<redacted>"
         )
-        self._native_marker_tail.append(f"{key}={safe_value}")
+        return key, f"{key}={safe_value}"
+
+    def _remember_native_marker(self, line: str) -> None:
+        safe_marker = self._safe_native_marker(line)
+        if safe_marker is None:
+            return
+        key, marker = safe_marker
+        self._native_marker_tail.append(marker)
         if len(self._native_marker_tail) > _MEDIA_NATIVE_MARKER_TAIL_LIMIT:
             del self._native_marker_tail[:-_MEDIA_NATIVE_MARKER_TAIL_LIMIT]
+        if key.startswith(_MEDIA_NATIVE_PROTOCOL_MARKER_PREFIXES):
+            self._native_protocol_markers.append(marker)
+            if len(self._native_protocol_markers) > _MEDIA_NATIVE_PROTOCOL_MARKER_LIMIT:
+                del self._native_protocol_markers[
+                    :-_MEDIA_NATIVE_PROTOCOL_MARKER_LIMIT
+                ]
 
     def _capture_native_failure(self, returncode: int) -> None:
         self._last_native_exit_code = returncode
         self._last_native_failure_markers = list(self._native_marker_tail)
+
+    def _emit_native_success_summary(self) -> None:
+        protocol_markers = list(dict.fromkeys(self._native_protocol_markers))
+        p116_markers = list(
+            dict.fromkeys(
+                marker
+                for marker in self._native_marker_tail
+                if marker.startswith("P116_")
+            )
+        )
+        _LOGGER.info(
+            "Comelit entrance media transport completed: "
+            "protocol_native_markers=%s p116_native_markers=%s",
+            protocol_markers,
+            p116_markers,
+        )
 
     async def async_start(self, panel: str) -> None:
         if panel != "entrance":
@@ -352,6 +413,7 @@ class ComelitEntranceMediaTransport:
         self._stopping = False
         self._last_error = None
         self._native_marker_tail.clear()
+        self._native_protocol_markers.clear()
         self._last_native_exit_code = None
         self._last_native_failure_markers = []
         self._cancel_status_notify()
@@ -428,6 +490,7 @@ class ComelitEntranceMediaTransport:
         self._audio_forwarding.clear()
         self._cancel_status_notify()
         await self._hass.async_add_executor_job(_remove_helper_secret)
+        await self._hass.async_add_executor_job(_remove_local_sdp)
 
     async def _async_run_once(self) -> None:
         try:
@@ -465,6 +528,7 @@ class ComelitEntranceMediaTransport:
             self._media_active.clear()
             self._process = None
             await self._hass.async_add_executor_job(_remove_helper_secret)
+            await self._hass.async_add_executor_job(_remove_local_sdp)
 
     async def _async_run_cycle(self) -> None:
         await self._hass.async_add_executor_job(_native_gate)
@@ -548,6 +612,8 @@ class ComelitEntranceMediaTransport:
             reader = self._reader_task
             if reader is not None:
                 await reader
+            if self._stopping:
+                self._emit_native_success_summary()
             if not self._stopping:
                 self._capture_native_failure(rc)
                 raise ComelitMediaTransportError(f"media_native_exit:{rc}")
