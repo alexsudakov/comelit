@@ -81,6 +81,8 @@ CANDIDATE_PID=""
 WATCHDOG_PID=""
 WATCHDOG_ARM_MODE=NOT_ARMED
 WATCHDOG_DISARMED=NOT_ARMED
+RUN_DIR_PRESENT_BEFORE=unknown
+STALE_CANDIDATE_LOG_PRESENT=unknown
 
 PRODUCTION_LISTENER_RUNNING_BEFORE=unknown
 PRODUCTION_LISTENER_READY_BEFORE=unknown
@@ -424,6 +426,37 @@ print("R29C_WRAPPER_SUBSTITUTION_SHIM_PRESENT=PASS")
 PY
     [ -x "$CANDIDATE_WRAPPER" ] || fail "R29C_WRAPPER_WRITE=FAIL"
     bash -n "$CANDIDATE_WRAPPER" || fail "R29C_WRAPPER_PARSE_GATE=FAIL"
+}
+
+# The candidate's markers are read from $RUN_DIR/ice-holder.log.  A stale log left by an
+# earlier lane in the same scratch dir could be read as a fresh marker (false READY /
+# stale RTP counters) if the wrapper had not wiped the dir yet.  Detect, report and clear
+# it fail-closed before the handoff.
+report_run_dir_state() {
+    if [ -e "$RUN_DIR" ]; then
+        RUN_DIR_PRESENT_BEFORE=true
+    else
+        RUN_DIR_PRESENT_BEFORE=false
+    fi
+    if [ -e "$CANDIDATE_LOG" ]; then
+        STALE_CANDIDATE_LOG_PRESENT=true
+    else
+        STALE_CANDIDATE_LOG_PRESENT=false
+    fi
+    echo "R29C_RUN_DIR_PRESENT_BEFORE=$RUN_DIR_PRESENT_BEFORE"
+    echo "R29C_STALE_CANDIDATE_LOG_PRESENT=$STALE_CANDIDATE_LOG_PRESENT"
+}
+
+clear_run_dir_or_fail() {
+    report_run_dir_state
+    rm -rf "$RUN_DIR" || fail "R29C_RUN_DIR_CLEAR=FAIL"
+    install -d -m 700 "$RUN_DIR" || fail "R29C_RUN_DIR_RECREATE=FAIL"
+    if [ -e "$CANDIDATE_LOG" ]; then
+        fail "R29C_RUN_DIR_CLEAR=FAIL"
+    else
+        echo "R29C_RUN_DIR_CLEAR=PASS"
+    fi
+    [ "$FAIL" -eq 0 ] || exit 1
 }
 
 start_udp_sink() {
@@ -969,6 +1002,7 @@ main() {
     PREP_READY=true
 
     if [ "$R29C_PHASE" != LIVE ]; then
+        report_run_dir_state
         validate_watchdog_arm_disarm
         HANDOFF_PATH_READY="$RESTORE_PATH_READY"
         WATCHDOG_ARMED=false
@@ -989,6 +1023,8 @@ main() {
     [ "$PRODUCTION_LISTENER_RUNNING_BEFORE" = true ] || fail "PRODUCTION_LISTENER_RUNNING_BEFORE=false"
     [ "$PRODUCTION_LISTENER_READY_BEFORE" = true ] || fail "PRODUCTION_LISTENER_READY_BEFORE=false"
     [ "$FAIL" -eq 0 ] || exit 1
+
+    clear_run_dir_or_fail
 
     arm_autorestore_watchdog
     [ "$WATCHDOG_READY" = true ] || fail "R29C_WATCHDOG_ARMED=false"
