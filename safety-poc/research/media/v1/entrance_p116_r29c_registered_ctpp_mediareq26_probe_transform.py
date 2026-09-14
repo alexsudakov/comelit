@@ -153,6 +153,8 @@ static pid_t r29_listener_ready_pid = 0;
 	static guint16 v4_ctpp_channel_id;
 	static gboolean v4_registered;
 
+	static guint16 read_le16(const guint8 *p);
+	static guint32 read_le32(const guint8 *p);
 	static void r29_print_scalar_snapshot(const char *call_end_state);
 static gboolean r29_same_listener_process(void);
 static void r29_capture_ready_snapshot(void);

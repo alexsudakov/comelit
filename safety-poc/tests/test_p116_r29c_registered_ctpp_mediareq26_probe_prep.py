@@ -52,6 +52,14 @@ def transform_cli_flags() -> set[str]:
     return flags
 
 
+def spans(pattern: str, text: str) -> list[tuple[int, int]]:
+    return [match.span() for match in re.finditer(pattern, text)]
+
+
+def within_any_span(pos: int, ranges: list[tuple[int, int]]) -> bool:
+    return any(start <= pos < end for start, end in ranges)
+
+
 class P116R29CRegisteredCtppMediaReq26ProbePrep(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -113,6 +121,33 @@ class P116R29CRegisteredCtppMediaReq26ProbePrep(unittest.TestCase):
                 len(definitions),
                 1,
                 f"{helper} must have exactly one generated definition",
+            )
+
+    def test_generated_source_declares_le_helpers_before_first_use(self) -> None:
+        helper_types = {"read_le16": "guint16", "read_le32": "guint32"}
+        for helper, return_type in helper_types.items():
+            definition_spans = spans(
+                rf"static\s+{return_type}\s+{helper}\s*\([^)]*\)\s*\{{",
+                self.generated,
+            )
+            prototype_spans = spans(
+                rf"static\s+{return_type}\s+{helper}\s*\(\s*const\s+guint8\s+\*p\s*\)\s*;",
+                self.generated,
+            )
+            self.assertEqual(len(definition_spans), 1, f"{helper} definition count changed")
+            self.assertEqual(len(prototype_spans), 1, f"{helper} prototype count changed")
+
+            declaration_spans = prototype_spans + definition_spans
+            call_positions = [
+                match.start()
+                for match in re.finditer(rf"\b{helper}\s*\(", self.generated)
+                if not within_any_span(match.start(), declaration_spans)
+            ]
+            self.assertGreater(len(call_positions), 0, f"{helper} has no call sites")
+            self.assertLess(
+                min(start for start, _ in declaration_spans),
+                min(call_positions),
+                f"{helper} must be declared before its first call site",
             )
 
     def test_builder_has_exact_r29a_layout_and_distinct_states(self) -> None:
