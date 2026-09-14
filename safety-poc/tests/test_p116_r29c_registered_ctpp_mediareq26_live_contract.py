@@ -195,6 +195,17 @@ class P116R29CRegisteredCtppMediaReq26LiveRunner(unittest.TestCase):
         self.assertIn('VIDEO_SINK_PID="$(start_udp_sink', self.text)
         self.assertIn('AUDIO_SINK_PID="$(start_udp_sink', self.text)
 
+    def test_watchdog_cannot_create_a_second_upstream_owner(self) -> None:
+        # Armed before the stop, so it must survive a grace window instead of self-skipping
+        # on the still-running production listener, and it must refuse to start production
+        # while a research candidate process is still alive.
+        self.assertIn("GRACE=60", self.text)
+        self.assertIn("R29C_WATCHDOG_CANDIDATE_NEEDLE", self.text)
+        self.assertIn("AUTO_RESTORE_BLOCKED_RESEARCH_PROCESS_PRESENT", self.text)
+        self.assertIn("AUTO_RESTORE_SKIPPED_ALREADY_RUNNING", self.text)
+        self.assertIn("WATCHDOG_ARM_MODE=", self.text)
+        self.assertIn("ARMED_SELF_SKIPPED_ALREADY_RUNNING", self.text)
+
     def test_mandatory_report_fields_are_emitted(self) -> None:
         for field in (
             "MAIN_SHA=",

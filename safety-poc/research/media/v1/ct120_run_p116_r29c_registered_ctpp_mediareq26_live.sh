@@ -79,6 +79,8 @@ AUDIO_SINK_PID=""
 WRAPPER_PID=""
 CANDIDATE_PID=""
 WATCHDOG_PID=""
+WATCHDOG_ARM_MODE=NOT_ARMED
+WATCHDOG_DISARMED=NOT_ARMED
 
 PRODUCTION_LISTENER_RUNNING_BEFORE=unknown
 PRODUCTION_LISTENER_READY_BEFORE=unknown
@@ -309,7 +311,9 @@ PY
 # preparation: arm it, confirm it logged AUTO_RESTORE_ARMED, then disarm it.
 validate_watchdog_arm_disarm() {
     arm_autorestore_watchdog
-    if [ "$WATCHDOG_READY" = true ]; then
+    if [ "$WATCHDOG_ARM_MODE" = ARMED_SELF_SKIPPED_ALREADY_RUNNING ]; then
+        WATCHDOG_DISARMED=NOT_NEEDED_SELF_EXITED
+    elif [ "$WATCHDOG_READY" = true ]; then
         kill -TERM "$WATCHDOG_PID" 2>/dev/null || true
         sleep 1
         stop_pid "$WATCHDOG_PID"
@@ -506,8 +510,13 @@ URL="${R29C_WATCHDOG_URL:?R29C_WATCHDOG_URL}"
 LOG="${R29C_WATCHDOG_LOG:?R29C_WATCHDOG_LOG}"
 BUDGET=600
 INTERVAL=30
+GRACE=60
+CANDIDATE_NEEDLE="${R29C_WATCHDOG_CANDIDATE_NEEDLE:?R29C_WATCHDOG_CANDIDATE_NEEDLE}"
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >> "$LOG"; }
 log "AUTO_RESTORE_ARMED"
+# Grace window: the watchdog is armed BEFORE the production listener is stopped, so it
+# must not self-skip just because the listener is still up at arm time.
+sleep "$GRACE"
 deadline=$(( $(date +%s) + BUDGET ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
     status="$LOG.status.json"
@@ -520,6 +529,12 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
     fi
     sleep "$INTERVAL"
 done
+# Never create a second upstream owner: refuse to start production while a research
+# candidate process is still present.
+if pgrep -f "$CANDIDATE_NEEDLE" >/dev/null 2>&1; then
+    log "AUTO_RESTORE_BLOCKED_RESEARCH_PROCESS_PRESENT"
+    exit 0
+fi
 curl --silent --show-error --connect-timeout 5 --max-time 35 \
   --header 'Content-Type: application/json' --output "$LOG.start.json" \
   --data '{"action":"start"}' "$URL" >/dev/null 2>&1 || true
@@ -531,16 +546,26 @@ PY
     bash -n "$watchdog" || return 1
     : > "$log"
     chmod 600 "$log"
-    R29C_WATCHDOG_URL="$HA_WEBHOOK_URL" R29C_WATCHDOG_LOG="$log" setsid "$watchdog" >/dev/null 2>&1 < /dev/null &
+    R29C_WATCHDOG_URL="$HA_WEBHOOK_URL" R29C_WATCHDOG_LOG="$log" \
+      R29C_WATCHDOG_CANDIDATE_NEEDLE="$CANDIDATE_NAME" \
+      setsid "$watchdog" >/dev/null 2>&1 < /dev/null &
     WATCHDOG_PID=$!
-    sleep 1
-    if kill -0 "$WATCHDOG_PID" 2>/dev/null && grep -q 'AUTO_RESTORE_ARMED' "$log" 2>/dev/null; then
+    sleep 2
+    WATCHDOG_ARM_MODE=NOT_ARMED
+    if grep -q 'AUTO_RESTORE_ARMED' "$log" 2>/dev/null; then
+        if kill -0 "$WATCHDOG_PID" 2>/dev/null; then
+            WATCHDOG_ARM_MODE=ARMED_AND_WAITING
+        elif grep -q 'AUTO_RESTORE_SKIPPED_ALREADY_RUNNING' "$log" 2>/dev/null; then
+            WATCHDOG_ARM_MODE=ARMED_SELF_SKIPPED_ALREADY_RUNNING
+        fi
+    fi
+    if [ "$WATCHDOG_ARM_MODE" != NOT_ARMED ]; then
         WATCHDOG_READY=true
-        echo "WATCHDOG_ARMED=true"
     else
         WATCHDOG_READY=false
-        echo "WATCHDOG_ARMED=false"
     fi
+    echo "WATCHDOG_ARMED=$WATCHDOG_READY"
+    echo "WATCHDOG_ARM_MODE=$WATCHDOG_ARM_MODE"
 }
 
 read_sink_count() {
