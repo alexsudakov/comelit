@@ -130,7 +130,10 @@ class P116R29CRegisteredCtppMediaReq26LiveRunner(unittest.TestCase):
     def test_generated_shim_watchdog_and_reports_do_not_embed_raw_paths_or_secrets(self) -> None:
         self.assertIn('URL="${R29C_WATCHDOG_URL:?R29C_WATCHDOG_URL}"', self.text)
         self.assertIn('LOG="${R29C_WATCHDOG_LOG:?R29C_WATCHDOG_LOG}"', self.text)
-        self.assertIn('R29C_WATCHDOG_URL="$HA_WEBHOOK_URL" R29C_WATCHDOG_LOG="$log" setsid "$watchdog"', self.text)
+        self.assertIn('R29C_WATCHDOG_URL="$HA_WEBHOOK_URL"', self.text)
+        self.assertIn('R29C_WATCHDOG_LOG="$log"', self.text)
+        self.assertIn('R29C_WATCHDOG_CANDIDATE_NEEDLE="$CANDIDATE_NAME"', self.text)
+        self.assertIn('setsid "$watchdog"', self.text)
         self.assertIn('echo "R29C_RUN_ROOT=REDACTED"', self.text)
         self.assertIn('echo "RUNTIME_ROOT=REDACTED"', self.text)
         self.assertIn('echo "R29C_RUNTIME_ROOT=SELECTED"', self.text)
