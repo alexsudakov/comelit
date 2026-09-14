@@ -56,10 +56,34 @@ typedef enum {
     R29_ATTACHED_MEDIA_STOPPING
 } R29AttachedMediaState;
 
-typedef enum {
-    R29C_MEDIAREQ26_OPEN = 0,
-    R29C_MEDIAREQ26_STOP
-} R29CMediaReq26State;
+	typedef enum {
+	    R29C_MEDIAREQ26_OPEN = 0,
+	    R29C_MEDIAREQ26_STOP
+	} R29CMediaReq26State;
+
+	typedef struct {
+	    guint16 max_rtp_payload;
+	    guint32 bitrate;
+	    guint16 max_width;
+	    guint16 max_height;
+	    guint16 requested_width;
+	    guint16 requested_height;
+	    guint8 fps;
+	    guint8 reserved;
+	    const char *provenance;
+	} R29CMediaProfile;
+
+	static const R29CMediaProfile r29c_external_tested_client_profile = {
+	    0xffffu,
+	    0u,
+	    800u,
+	    480u,
+	    320u,
+	    240u,
+	    16u,
+	    0u,
+	    "EXTERNAL_TESTED_CLIENT_PROFILE:public-jfmlima:e3714dcccadb5bf934c32ce1400d891c3cfc61bb:call.py:_video_settings"
+	};
 
 static R29AttachedMediaState r29_attached_media_state =
     R29_LISTENER_REGISTERED_READY;
@@ -88,8 +112,9 @@ static gboolean r29c_live_probe_prepared = FALSE;
 static gboolean r29c_registered_ctpp_mediareq26_open_sent = FALSE;
 static gboolean r29c_registered_ctpp_mediareq26_stop_sent = FALSE;
 static gboolean r29c_registered_ctpp_mediareq26_open_serialized = FALSE;
-static gboolean r29c_registered_ctpp_mediareq26_stop_serialized = FALSE;
-static gboolean r29c_open_fields_have_proven_sources = FALSE;
+	static gboolean r29c_registered_ctpp_mediareq26_stop_serialized = FALSE;
+	static gboolean r29c_external_profile_accepted_for_bounded_probe = TRUE;
+	static gboolean r29c_open_fields_have_proven_sources = FALSE;
 static gboolean r29c_stop_fields_have_proven_sources = FALSE;
 static gboolean r29c_stop_generation_failed = FALSE;
 static gboolean r29c_media_only_stop_result = FALSE;
@@ -125,10 +150,10 @@ static long long r29_first_video_rtp_monotonic_ms = 0;
 static long long r29_media_observation_start_ms = 0;
 static long long r29_media_observation_end_ms = 0;
 static pid_t r29_listener_ready_pid = 0;
-static guint16 v4_ctpp_channel_id;
-static gboolean v4_registered;
+	static guint16 v4_ctpp_channel_id;
+	static gboolean v4_registered;
 
-static void r29_print_scalar_snapshot(const char *call_end_state);
+	static void r29_print_scalar_snapshot(const char *call_end_state);
 static gboolean r29_same_listener_process(void);
 static void r29_capture_ready_snapshot(void);
 static gboolean r29_start_attached_media_from_call_init(const char *source);
@@ -140,12 +165,20 @@ static gboolean r29_sigusr2_poll_cb(gpointer data);
 static void r29_sigusr2_handler(int signum);
 static int r29_selfcheck(void);
 static gboolean r29c_allocate_media_channel_id(guint32 seed);
-static gboolean r29c_mediareq26_open_fields_proven(void);
-static gboolean r29c_mediareq26_stop_fields_proven(void);
-static void r29c_print_field_source_table(void);
-static gboolean r29c_build_mediareq26(R29CMediaReq26State state, guint8 out[26]);
-static gboolean r29c_emit_registered_mediareq26(R29CMediaReq26State state);
-static gboolean r29c_queue_registered_mediareq26(R29CMediaReq26State state);
+	static gboolean r29c_mediareq26_open_fields_proven(void);
+	static gboolean r29c_mediareq26_stop_fields_proven(void);
+	static gboolean r29c_validate_media_profile(const R29CMediaProfile *profile);
+	static gboolean r29c_assert_open_body_semantics(
+	    const guint8 body[26],
+	    const R29CMediaProfile *profile);
+	static gboolean r29c_assert_stop_body_semantics(const guint8 body[26]);
+	static void r29c_print_field_source_table(void);
+	static gboolean r29c_build_mediareq26(
+	    R29CMediaReq26State state,
+	    const R29CMediaProfile *profile,
+	    guint8 out[26]);
+	static gboolean r29c_emit_registered_mediareq26(R29CMediaReq26State state);
+	static gboolean r29c_queue_registered_mediareq26(R29CMediaReq26State state);
 static void r29c_note_final_research_session_cleanup(void);
 /* === R29_LISTENER_ATTACHED_MEDIA_STATE_END === */
 '''
@@ -154,10 +187,25 @@ static void r29c_note_final_research_session_cleanup(void);
 R29C_FUNCTIONS = r'''
 
 /* === R29_ATTACHED_MEDIA_FUNCTIONS_BEGIN === */
-static void write_le16(guint8 *p, guint16 value);
-static void write_le32(guint8 *p, guint32 value);
-static gboolean p12_queue_vip_frame(guint32 request_id, const guint8 *body, guint body_len, P12TxKind kind);
-static gboolean p12_flush_tx(void);
+	static void write_le16(guint8 *p, guint16 value);
+	static void write_le32(guint8 *p, guint32 value);
+	static gboolean p12_queue_vip_frame(guint32 request_id, const guint8 *body, guint body_len, P12TxKind kind);
+	static gboolean p12_flush_tx(void);
+
+	static guint16
+	read_le16(const guint8 *p)
+	{
+	    return (guint16)(((guint16)p[1] << 8) | p[0]);
+	}
+
+	static guint32
+	read_le32(const guint8 *p)
+	{
+	    return ((guint32)p[3] << 24) |
+	           ((guint32)p[2] << 16) |
+	           ((guint32)p[1] << 8) |
+	           (guint32)p[0];
+	}
 
 static gboolean
 r29c_allocate_media_channel_id(guint32 seed)
@@ -172,65 +220,164 @@ r29c_allocate_media_channel_id(guint32 seed)
     return r29c_saved_media_channel_id != 0u;
 }
 
-static gboolean
-r29c_mediareq26_open_fields_proven(void)
-{
-    return FALSE;
-}
+	static gboolean
+	r29c_mediareq26_open_fields_proven(void)
+	{
+	    return r29c_external_profile_accepted_for_bounded_probe;
+	}
 
 static gboolean
-r29c_mediareq26_stop_fields_proven(void)
-{
-    return r29c_saved_media_channel_id != 0u;
-}
+	r29c_mediareq26_stop_fields_proven(void)
+	{
+	    return r29c_saved_media_channel_id != 0u;
+	}
+
+	static gboolean
+	r29c_validate_media_profile(const R29CMediaProfile *profile)
+	{
+	    if (!profile || !profile->provenance)
+	        return FALSE;
+	    if (strcmp(profile->provenance,
+	               "EXTERNAL_TESTED_CLIENT_PROFILE:public-jfmlima:e3714dcccadb5bf934c32ce1400d891c3cfc61bb:call.py:_video_settings") != 0)
+	        return FALSE;
+	    if (profile->max_rtp_payload == 0u)
+	        return FALSE;
+	    if (profile->max_width < 320u || profile->max_height < 240u)
+	        return FALSE;
+	    if (profile->requested_width < 320u || profile->requested_height < 240u)
+	        return FALSE;
+	    if (profile->requested_width > profile->max_width ||
+	        profile->requested_height > profile->max_height)
+	        return FALSE;
+	    if (profile->fps < 1u || profile->fps > 30u)
+	        return FALSE;
+	    return TRUE;
+	}
+
+	static gboolean
+	r29c_assert_open_body_semantics(const guint8 body[26],
+	                                const R29CMediaProfile *profile)
+	{
+	    if (!body || !r29c_validate_media_profile(profile))
+	        return FALSE;
+	    if (read_le16(body + 0) != 0x1100u)
+	        return FALSE;
+	    if (body[2] != 0x14u || body[3] != 0x32u)
+	        return FALSE;
+	    if (read_le32(body + 4) != 0u)
+	        return FALSE;
+	    if (read_le16(body + 8) != r29c_saved_media_channel_id)
+	        return FALSE;
+	    if (read_le16(body + 10) != profile->max_rtp_payload)
+	        return FALSE;
+	    if (read_le32(body + 12) != profile->bitrate)
+	        return FALSE;
+	    if (read_le16(body + 16) != profile->max_width)
+	        return FALSE;
+	    if (read_le16(body + 18) != profile->max_height)
+	        return FALSE;
+	    if (read_le16(body + 20) != profile->requested_width)
+	        return FALSE;
+	    if (read_le16(body + 22) != profile->requested_height)
+	        return FALSE;
+	    if (body[24] != profile->fps || body[25] != profile->reserved)
+	        return FALSE;
+	    printf("MEDIAREQ26_OPEN_STRUCTURAL_LAYOUT=PASS\n");
+	    printf("MEDIAREQ26_OPEN_PROFILE_SOURCE=%s\n", profile->provenance);
+	    printf("MEDIAREQ26_OPEN_OFFSET_10_11_MAX_RTP_PAYLOAD=PASS\n");
+	    printf("MEDIAREQ26_OPEN_OFFSET_12_15_BITRATE=PASS\n");
+	    printf("MEDIAREQ26_OPEN_OFFSET_16_17_MAX_WIDTH=PASS\n");
+	    printf("MEDIAREQ26_OPEN_OFFSET_18_19_MAX_HEIGHT=PASS\n");
+	    printf("MEDIAREQ26_OPEN_OFFSET_20_21_REQUESTED_WIDTH=PASS\n");
+	    printf("MEDIAREQ26_OPEN_OFFSET_22_23_REQUESTED_HEIGHT=PASS\n");
+	    printf("MEDIAREQ26_OPEN_OFFSET_24_FPS=PASS\n");
+	    printf("MEDIAREQ26_OPEN_OFFSET_25_RESERVED=PASS\n");
+	    fflush(stdout);
+	    return TRUE;
+	}
+
+	static gboolean
+	r29c_assert_stop_body_semantics(const guint8 body[26])
+	{
+	    guint i;
+	    if (!body)
+	        return FALSE;
+	    if (read_le16(body + 0) != 0x1100u)
+	        return FALSE;
+	    if (body[2] != 0x94u || body[3] != 0x00u)
+	        return FALSE;
+	    if (read_le32(body + 4) != 0u)
+	        return FALSE;
+	    if (read_le16(body + 8) != r29c_saved_media_channel_id)
+	        return FALSE;
+	    for (i = 10u; i < 26u; i++) {
+	        if (body[i] != 0u)
+	            return FALSE;
+	    }
+	    printf("MEDIAREQ26_STOP_STRUCTURAL_LAYOUT=PASS\n");
+	    fflush(stdout);
+	    return TRUE;
+	}
 
 static void
-r29c_print_field_source_table(void)
-{
-    printf("FIELD_SOURCE_TABLE_ROWS=14\n");
-    printf("FIELD_SOURCE[00..01]=prefix_0x1100:SOURCED_SHAPE_CONSTANT:disasm2-csp_send_mediareq26_mov_w8_0x1100\n");
-    printf("FIELD_SOURCE[02_OPEN]=action_0x14:SOURCED_SHAPE_CONSTANT:CallFsm_start_videorx_mov_w1_0x14\n");
-    printf("FIELD_SOURCE[02_STOP]=action_0x94:SOURCED_SHAPE_CONSTANT:CallFsm_stop_videorx_mov_w1_0x94\n");
-    printf("FIELD_SOURCE[03_OPEN]=flags_0x32:SOURCED_SHAPE_CONSTANT:CallFsm_start_videorx_mov_w2_0x32\n");
-    printf("FIELD_SOURCE[03_STOP]=flags_0x00:SOURCED_SHAPE_CONSTANT:CallFsm_stop_videorx_mov_w2_wzr\n");
-    printf("FIELD_SOURCE[04..07]=address_zero_tunnel_channel_form:SOURCED_SHAPE_CONSTANT:start_videorx_x3_xzr_stop_zero_slot\n");
-    printf("FIELD_SOURCE[08..09]=saved_media_channel_id:SOURCED_RUNTIME:r29c_allocator_result_persisted\n");
-    printf("FIELD_SOURCE[10..11_OPEN]=max_rtp_payload:UNSOURCED:no_helper_runtime_accessor_equivalent\n");
-    printf("FIELD_SOURCE[10..11_STOP]=max_rtp_payload_zero:SOURCED_SHAPE_CONSTANT:R29A_stop_zero_payload_profile_slots\n");
-    printf("FIELD_SOURCE[12..15_OPEN]=media_profile_0:UNSOURCED:no_helper_call_config_runtime_source\n");
-    printf("FIELD_SOURCE[16..17_OPEN]=media_profile_1:UNSOURCED:no_helper_call_config_runtime_source\n");
-    printf("FIELD_SOURCE[18..19_OPEN]=media_profile_2:UNSOURCED:no_helper_call_config_runtime_source\n");
-    printf("FIELD_SOURCE[20..25_OPEN]=media_profile_3_4_5_and_reserved:UNSOURCED:no_helper_call_config_runtime_source\n");
-    printf("FIELD_SOURCE[12..25_STOP]=media_profile_zero_tail:SOURCED_SHAPE_CONSTANT:R29A_stop_zero_payload_profile_slots\n");
-    fflush(stdout);
-}
+	r29c_print_field_source_table(void)
+	{
+	    printf("FIELD_SOURCE_TABLE_ROWS=17\n");
+	    printf("FIELD_SOURCE[00..01]=prefix_0x1100:SOURCED_SHAPE_CONSTANT:disasm2-csp_send_mediareq26_mov_w8_0x1100\n");
+	    printf("FIELD_SOURCE[02_OPEN]=action_0x14:SOURCED_SHAPE_CONSTANT:CallFsm_start_videorx_mov_w1_0x14\n");
+	    printf("FIELD_SOURCE[02_STOP]=action_0x94:SOURCED_SHAPE_CONSTANT:CallFsm_stop_videorx_mov_w1_0x94\n");
+	    printf("FIELD_SOURCE[03_OPEN]=flags_0x32:SOURCED_SHAPE_CONSTANT:CallFsm_start_videorx_mov_w2_0x32\n");
+	    printf("FIELD_SOURCE[03_STOP]=flags_0x00:SOURCED_SHAPE_CONSTANT:CallFsm_stop_videorx_mov_w2_wzr\n");
+	    printf("FIELD_SOURCE[04..07]=address_zero_tunnel_channel_form:SOURCED_SHAPE_CONSTANT:start_videorx_x3_xzr_stop_zero_slot\n");
+	    printf("FIELD_SOURCE[08..09]=saved_media_channel_id:SOURCED_RUNTIME:r29c_allocator_result_persisted\n");
+	    printf("FIELD_SOURCE[10..11_OPEN]=max_rtp_payload:CLIENT_SUPPLIED_CONFIGURATION:public-jfmlima_call.py_MAX_PAYLOAD_and_native_RtpDispatcher_getMaxRtpPayload\n");
+	    printf("FIELD_SOURCE[10..11_STOP]=max_rtp_payload_zero:SOURCED_SHAPE_CONSTANT:R29A_stop_zero_payload_profile_slots\n");
+	    printf("FIELD_SOURCE[12..15_OPEN]=bitrate:CLIENT_SUPPLIED_CONFIGURATION:public-jfmlima_VideoCall_bitrate_and_native_VipUnitImpl_setBitrate\n");
+	    printf("FIELD_SOURCE[16..17_OPEN]=max_width:CLIENT_SUPPLIED_CONFIGURATION:public-jfmlima_MAX_RESOLUTION_and_native_setMaxVideoStreamResolution\n");
+	    printf("FIELD_SOURCE[18..19_OPEN]=max_height:CLIENT_SUPPLIED_CONFIGURATION:public-jfmlima_MAX_RESOLUTION_and_native_setMaxVideoStreamResolution\n");
+	    printf("FIELD_SOURCE[20..21_OPEN]=requested_width:CLIENT_SUPPLIED_CONFIGURATION:public-jfmlima_SD_RESOLUTION_and_native_setPrefVideoStreamResolution\n");
+	    printf("FIELD_SOURCE[22..23_OPEN]=requested_height:CLIENT_SUPPLIED_CONFIGURATION:public-jfmlima_SD_RESOLUTION_and_native_setPrefVideoStreamResolution\n");
+	    printf("FIELD_SOURCE[24_OPEN]=fps:CLIENT_SUPPLIED_CONFIGURATION:public-jfmlima_VIDEO_FPS_and_native_setMaxVideoStreamResolution\n");
+	    printf("FIELD_SOURCE[25_OPEN]=reserved:CLIENT_SUPPLIED_CONFIGURATION:public-jfmlima_pack_reserved_zero_and_native_stack_zero\n");
+	    printf("FIELD_SOURCE[12..25_STOP]=media_profile_zero_tail:SOURCED_SHAPE_CONSTANT:R29A_stop_zero_payload_profile_slots\n");
+	    fflush(stdout);
+	}
 
-static gboolean
-r29c_build_mediareq26(R29CMediaReq26State state, guint8 out[26])
-{
-    guint i;
+	static gboolean
+	r29c_build_mediareq26(R29CMediaReq26State state,
+	                       const R29CMediaProfile *profile,
+	                       guint8 out[26])
+	{
+	    guint i;
 
-    r29c_open_fields_have_proven_sources = r29c_mediareq26_open_fields_proven();
-    r29c_stop_fields_have_proven_sources = r29c_mediareq26_stop_fields_proven();
-    if (!out || r29c_saved_media_channel_id == 0u)
-        return FALSE;
-    if (state == R29C_MEDIAREQ26_OPEN && !r29c_open_fields_have_proven_sources)
-        return FALSE;
-    if (state == R29C_MEDIAREQ26_STOP &&
-        (!r29c_open_fields_have_proven_sources ||
-         !r29c_stop_fields_have_proven_sources))
-        return FALSE;
+	    r29c_open_fields_have_proven_sources = r29c_mediareq26_open_fields_proven();
+	    r29c_stop_fields_have_proven_sources = r29c_mediareq26_stop_fields_proven();
+	    if (!out || r29c_saved_media_channel_id == 0u ||
+	        !r29c_validate_media_profile(profile))
+	        return FALSE;
+	    if (state == R29C_MEDIAREQ26_OPEN && !r29c_open_fields_have_proven_sources)
+	        return FALSE;
+	    if (state == R29C_MEDIAREQ26_STOP && !r29c_stop_fields_have_proven_sources)
+	        return FALSE;
 
-    write_le16(out + 0, 0x1100u);
+	    write_le16(out + 0, 0x1100u);
     for (i = 2u; i < 26u; i++)
         out[i] = 0;
 
-    if (state == R29C_MEDIAREQ26_OPEN) {
-        out[2] = 0x14u;
-        out[3] = 0x32u;
-    } else if (state == R29C_MEDIAREQ26_STOP) {
-        out[2] = 0x94u;
-        out[3] = 0x00u;
+	    if (state == R29C_MEDIAREQ26_OPEN) {
+	        out[2] = 0x14u;
+	        out[3] = 0x32u;
+	        write_le16(out + 10, profile->max_rtp_payload);
+	        write_le32(out + 12, profile->bitrate);
+	        write_le16(out + 16, profile->max_width);
+	        write_le16(out + 18, profile->max_height);
+	        write_le16(out + 20, profile->requested_width);
+	        write_le16(out + 22, profile->requested_height);
+	        out[24] = profile->fps;
+	        out[25] = profile->reserved;
+	    } else if (state == R29C_MEDIAREQ26_STOP) {
+	        out[2] = 0x94u;
+	        out[3] = 0x00u;
     } else {
         return FALSE;
     }
@@ -240,11 +387,11 @@ r29c_build_mediareq26(R29CMediaReq26State state, guint8 out[26])
 }
 
 static gboolean
-r29c_emit_registered_mediareq26(R29CMediaReq26State state)
-{
-    guint8 body[26];
-    if (!r29c_build_mediareq26(state, body))
-        return FALSE;
+	r29c_emit_registered_mediareq26(R29CMediaReq26State state)
+	{
+	    guint8 body[26];
+	    if (!r29c_build_mediareq26(state, &r29c_external_tested_client_profile, body))
+	        return FALSE;
     if (state == R29C_MEDIAREQ26_OPEN) {
         if (r29c_registered_ctpp_mediareq26_open_sent_count >= 1u)
             return FALSE;
@@ -273,12 +420,12 @@ r29c_emit_registered_mediareq26(R29CMediaReq26State state)
 static gboolean
 r29c_queue_registered_mediareq26(R29CMediaReq26State state)
 {
-    guint8 body[26];
-    P12TxKind kind = state == R29C_MEDIAREQ26_OPEN ?
-        P116_R29C_TX_MEDIAREQ26_OPEN : P116_R29C_TX_MEDIAREQ26_STOP;
+	    guint8 body[26];
+	    P12TxKind kind = state == R29C_MEDIAREQ26_OPEN ?
+	        P116_R29C_TX_MEDIAREQ26_OPEN : P116_R29C_TX_MEDIAREQ26_STOP;
 
-    if (!r29c_build_mediareq26(state, body))
-        return FALSE;
+	    if (!r29c_build_mediareq26(state, &r29c_external_tested_client_profile, body))
+	        return FALSE;
     if (state == R29C_MEDIAREQ26_OPEN &&
         r29c_registered_ctpp_mediareq26_open_sent_count >= 1u)
         return FALSE;
@@ -343,10 +490,15 @@ r29_print_scalar_snapshot(const char *call_end_state)
     printf("NEW_PSEUDOTCP_COUNT=%u\n", new_pseudotcp);
     printf("NEW_REGISTRATION_COUNT=%u\n", new_registration);
     printf("R29_MEDIA_OPEN_MODEL=BLOCKED\n");
-    printf("R29_MEDIA_ONLY_TEARDOWN_MODEL=BLOCKED\n");
-    printf("MEDIAREQ26_OPEN_BUILDER=%s\n",
-           r29c_open_fields_have_proven_sources &&
-           r29c_registered_ctpp_mediareq26_open_serialized ?
+	    printf("R29_MEDIA_ONLY_TEARDOWN_MODEL=BLOCKED\n");
+	    printf("R29E_MEDIA_PROFILE_MODEL=CLIENT_SUPPLIED_CONFIGURATION\n");
+	    printf("R29C_MEDIA_PROFILE_IMPLEMENTED=true\n");
+	    printf("R29C_PROFILE_SOURCE=EXTERNAL_TESTED_CLIENT_PROFILE\n");
+	    printf("R29C_EXTERNAL_PROFILE_ACCEPTED_FOR_BOUNDED_PROBE=%s\n",
+	           r29c_external_profile_accepted_for_bounded_probe ? "true" : "false");
+	    printf("MEDIAREQ26_OPEN_BUILDER=%s\n",
+	           r29c_open_fields_have_proven_sources &&
+	           r29c_registered_ctpp_mediareq26_open_serialized ?
            "PROVEN_OFFLINE" : "BLOCKED");
     printf("MEDIAREQ26_STOP_BUILDER=%s\n",
            r29c_open_fields_have_proven_sources &&
@@ -399,11 +551,11 @@ r29_print_scalar_snapshot(const char *call_end_state)
     printf("VIDEO_RTP_PACKETS=%llu\n", (unsigned long long)p80_video_rtp_packets);
     printf("VIDEO_RTP_OBSERVATION_SECONDS=%lld\n", observed_ms / 1000LL);
     printf("CALL_TRANSACTION_END_STATE=%s\n", call_end_state);
-    printf("R29C_BUILDER=%s\n",
-           r29c_open_fields_have_proven_sources &&
-           r29c_stop_fields_have_proven_sources ? "PASS" : "BLOCKED");
-    printf("LIVE_PROBE_PREPARED=%s\n",
-           r29c_live_probe_prepared ? "true" : "false");
+	    printf("R29C_BUILDER=%s\n",
+	           r29c_open_fields_have_proven_sources &&
+	           r29c_stop_fields_have_proven_sources ? "PASS" : "BLOCKED");
+	    printf("LIVE_PROBE_PREPARED=%s\n",
+	           r29c_live_probe_prepared ? "true" : "false");
     fflush(stdout);
 }
 
@@ -602,46 +754,59 @@ r29_sigusr2_poll_cb(gpointer data)
 }
 
 static int
-r29_selfcheck(void)
-{
-    guint8 body[26];
-    printf("CANDIDATE_HELPER_EXECUTED=true\n");
-    printf("REGISTERED_CTPP_MEDIAREQ26_HYPOTHESIS=true\n");
-    printf("NETWORK_WRITES_INTERCEPTED=true\n");
-    r29_ctpp_registration_count = 1u;
-    r29_listener_registered_ready = TRUE;
-    v4_registered = TRUE;
+	r29_selfcheck(void)
+	{
+	    guint8 body[26];
+	    const R29CMediaProfile *profile = &r29c_external_tested_client_profile;
+	    printf("CANDIDATE_HELPER_EXECUTED=true\n");
+	    printf("REGISTERED_CTPP_MEDIAREQ26_HYPOTHESIS=true\n");
+	    printf("NETWORK_WRITES_INTERCEPTED=true\n");
+	    printf("R29C_PROFILE_SOURCE=EXTERNAL_TESTED_CLIENT_PROFILE\n");
+	    printf("R29C_EXTERNAL_PROFILE_ACCEPTED_FOR_BOUNDED_PROBE=true\n");
+	    r29_ctpp_registration_count = 1u;
+	    r29_listener_registered_ready = TRUE;
+	    v4_registered = TRUE;
     v4_ctpp_channel_id = 1u;
     r29_capture_ready_snapshot();
     if (!r29c_allocate_media_channel_id(0x0000002au))
         return 2;
     r29_call_transaction_active = TRUE;
     r29_call_transaction_created = TRUE;
-    r29_attached_media_state = R29_INBOUND_CALL_ACTIVE;
-    r29_call_init_monotonic_ms = p116_monotonic_ms();
-    r29_media_observation_start_ms = r29_call_init_monotonic_ms;
-    r29_media_observation_end_ms = r29_media_observation_start_ms + 10000LL;
-    if (r29c_build_mediareq26(R29C_MEDIAREQ26_OPEN, body))
-        return 3;
-    printf("R29C_OPEN_BLOCKED_UNSOURCED_FIELDS=true\n");
-    if (r29c_build_mediareq26(R29C_MEDIAREQ26_STOP, body))
-        return 4;
-    printf("R29C_STOP_BLOCKED_BY_OPEN_PROVENANCE=true\n");
-    p80_media_forwarding_enabled = FALSE;
-    r29_call_transaction_active = FALSE;
-    r29_rtpc_media_channels_open = 0u;
-    r29_media_stop_completed = FALSE;
-    r29c_media_only_stop_result = FALSE;
-    r29_attached_media_state = R29_LISTENER_REGISTERED_READY;
-    r29c_live_probe_prepared = FALSE;
-    r29c_note_final_research_session_cleanup();
-    r29_print_scalar_snapshot("SELFCHECK_MEDIA_CLOSED");
-    printf("REGISTRATION_STATE_UNCHANGED=true\n");
-    printf("PSEUDOTCP_TEARDOWN_COUNT=%u\n", r29_stop_pseudotcp_close_count);
-    printf("LISTENER_STOP_COUNT=%u\n", r29_stop_listener_stop_count);
-    printf("R29C_PROBE_READY=false\n");
-    return 0;
-}
+	    r29_attached_media_state = R29_INBOUND_CALL_ACTIVE;
+	    r29_call_init_monotonic_ms = p116_monotonic_ms();
+	    r29_media_observation_start_ms = r29_call_init_monotonic_ms;
+	    r29_media_observation_end_ms = r29_media_observation_start_ms + 10000LL;
+	    if (!r29c_build_mediareq26(R29C_MEDIAREQ26_OPEN, profile, body))
+	        return 3;
+	    if (!r29c_assert_open_body_semantics(body, profile))
+	        return 4;
+	    memset(body, 0, sizeof(body));
+	    if (!r29c_emit_registered_mediareq26(R29C_MEDIAREQ26_OPEN))
+	        return 5;
+	    r29_attached_media_state = R29_ATTACHED_MEDIA_ACTIVE;
+	    r29_media_channel_open_request_sent = TRUE;
+	    if (!r29c_build_mediareq26(R29C_MEDIAREQ26_STOP, profile, body))
+	        return 6;
+	    if (!r29c_assert_stop_body_semantics(body))
+	        return 7;
+	    memset(body, 0, sizeof(body));
+	    if (!r29c_emit_registered_mediareq26(R29C_MEDIAREQ26_STOP))
+	        return 8;
+	    p80_media_forwarding_enabled = FALSE;
+	    r29_call_transaction_active = FALSE;
+	    r29_rtpc_media_channels_open = 0u;
+	    r29_media_stop_completed = TRUE;
+	    r29c_media_only_stop_result = TRUE;
+	    r29_attached_media_state = R29_LISTENER_REGISTERED_READY;
+	    r29c_live_probe_prepared = TRUE;
+	    r29c_note_final_research_session_cleanup();
+	    r29_print_scalar_snapshot("SELFCHECK_MEDIA_CLOSED");
+	    printf("REGISTRATION_STATE_UNCHANGED=true\n");
+	    printf("PSEUDOTCP_TEARDOWN_COUNT=%u\n", r29_stop_pseudotcp_close_count);
+	    printf("LISTENER_STOP_COUNT=%u\n", r29_stop_listener_stop_count);
+	    printf("R29C_PROBE_READY=true\n");
+	    return 0;
+	}
 /* === R29_ATTACHED_MEDIA_FUNCTIONS_END === */
 '''
 
@@ -685,16 +850,18 @@ def _assert_r29c_gates(candidate: str) -> None:
         "R29_ATTACHED_MEDIA_FUNCTIONS_BEGIN",
         "R29_ATTACHED_MEDIA_FUNCTIONS_END",
     )
-    selfcheck = _region(candidate, "static int\nr29_selfcheck", "/* === R29_ATTACHED_MEDIA_FUNCTIONS_END === */")
+    selfcheck = _region(candidate, "r29_selfcheck(void)\n", "/* === R29_ATTACHED_MEDIA_FUNCTIONS_END === */")
     for marker in (
         "REGISTERED_CTPP_MEDIAREQ26_HYPOTHESIS=true",
         "R29C_MEDIAREQ26_OPEN",
         "R29C_MEDIAREQ26_STOP",
         "MEDIAREQ26_OPEN_BUILDER=%s",
         "MEDIAREQ26_STOP_BUILDER=%s",
-        "FIELD_SOURCE_TABLE_ROWS=14",
-        "max_rtp_payload:UNSOURCED",
-        "media_profile_0:UNSOURCED",
+        "FIELD_SOURCE_TABLE_ROWS=17",
+        "R29CMediaProfile",
+        "EXTERNAL_TESTED_CLIENT_PROFILE",
+        "max_rtp_payload:CLIENT_SUPPLIED_CONFIGURATION",
+        "requested_height:CLIENT_SUPPLIED_CONFIGURATION",
         "flags_0x00:SOURCED_SHAPE_CONSTANT:CallFsm_stop_videorx_mov_w2_wzr",
     ):
         if marker not in state + functions:
@@ -746,41 +913,59 @@ def transform(source: str, *, include_p116: bool = True) -> str:
             "P76Allocation",
             "P76_OK",
             "P76Runtime",
-            "P12TxKind",
-            "R29C_MEDIAREQ26_OPEN",
-            "R29C_MEDIAREQ26_STOP",
-            "R29CMediaReq26State",
-            "action",
-            "allocation",
-            "body",
-            "candidate",
-            "g_random_int",
-            "guint16",
-            "guint32",
-            "guint8",
-            "kind",
-            "max_payload",
-            "memset",
-            "out",
-            "p",
-            "p12_flush_tx",
-            "p12_queue_vip_frame",
+	            "P12TxKind",
+	            "R29CMediaProfile",
+	            "R29C_MEDIAREQ26_OPEN",
+	            "R29C_MEDIAREQ26_STOP",
+	            "R29CMediaReq26State",
+	            "action",
+	            "allocation",
+	            "bitrate",
+	            "body",
+	            "candidate",
+	            "fps",
+	            "g_random_int",
+	            "guint16",
+	            "guint32",
+	            "guint8",
+	            "kind",
+	            "max_height",
+	            "max_payload",
+	            "max_rtp_payload",
+	            "max_width",
+	            "memset",
+	            "out",
+	            "p",
+	            "p12_flush_tx",
+	            "p12_queue_vip_frame",
             "p76_allocate_target_id",
             "p76_runtime_init",
             "profile0",
             "profile1",
-            "profile2",
-            "profile3",
-            "profile4",
-            "profile5",
-            "r29c_media_channel_allocator",
-            "r29c_mediareq26_open_fields_proven",
-            "r29c_mediareq26_stop_fields_proven",
-            "r29c_print_field_source_table",
-            "r29c_saved_media_channel_id",
-            "request_id",
-            "seed",
-            "state",
+	            "profile2",
+	            "profile",
+		            "profile3",
+	            "profile4",
+	            "profile5",
+	            "provenance",
+	            "r29c_media_channel_allocator",
+	            "r29c_assert_open_body_semantics",
+	            "r29c_assert_stop_body_semantics",
+	            "r29c_external_profile_accepted_for_bounded_probe",
+	            "r29c_external_tested_client_profile",
+	            "r29c_mediareq26_open_fields_proven",
+	            "r29c_mediareq26_stop_fields_proven",
+	            "r29c_print_field_source_table",
+	            "r29c_saved_media_channel_id",
+	            "r29c_validate_media_profile",
+	            "read_le16",
+	            "read_le32",
+	            "requested_height",
+	            "requested_width",
+	            "request_id",
+	            "reserved",
+	            "seed",
+	        "state",
             "v4_ctpp_channel_id",
             "v4_registered",
             "value",
@@ -799,16 +984,20 @@ def report() -> str:
             "=== COMELIT P116 R29C REGISTERED CTPP MEDIAREQ26 PROBE PREP ===",
             "REGISTERED_CTPP_MEDIAREQ26_HYPOTHESIS=true",
             "LIVE_RUN=NOT_RUN",
-            "MEDIAREQ26_OPEN_BUILDER=BLOCKED",
-            "MEDIAREQ26_STOP_BUILDER=BLOCKED",
-            "OPEN_FIELDS_HAVE_PROVEN_SOURCES=false",
-            "STOP_FIELDS_HAVE_PROVEN_SOURCES=true",
-            "FIELD_SOURCE_TABLE_ROWS=14",
-            "UNSOURCED_FIELDS=max_rtp_payload,media_profile_0,media_profile_1,media_profile_2,media_profile_3,media_profile_4,media_profile_5",
-            "R29C_BUILDER=BLOCKED",
-            "LIVE_PROBE_PREPARED=false",
-            "R29_MEDIA_OPEN_MODEL=BLOCKED",
-            "R29_MEDIA_ONLY_TEARDOWN_MODEL=BLOCKED",
+	            "R29E_MEDIA_PROFILE_MODEL=CLIENT_SUPPLIED_CONFIGURATION",
+	            "R29C_MEDIA_PROFILE_IMPLEMENTED=true",
+	            "R29C_PROFILE_SOURCE=EXTERNAL_TESTED_CLIENT_PROFILE",
+	            "R29C_EXTERNAL_PROFILE_ACCEPTED_FOR_BOUNDED_PROBE=true",
+	            "MEDIAREQ26_OPEN_BUILDER=PROVEN_OFFLINE",
+	            "MEDIAREQ26_STOP_BUILDER=PROVEN_OFFLINE",
+	            "OPEN_FIELDS_HAVE_PROVEN_SOURCES=true",
+	            "STOP_FIELDS_HAVE_PROVEN_SOURCES=true",
+	            "FIELD_SOURCE_TABLE_ROWS=17",
+	            "UNSOURCED_FIELDS=none",
+	            "R29C_BUILDER=PASS",
+	            "LIVE_PROBE_PREPARED=true",
+	            "R29_MEDIA_OPEN_MODEL=BLOCKED",
+	            "R29_MEDIA_ONLY_TEARDOWN_MODEL=BLOCKED",
             "PRODUCTION_FILES_CHANGED=0",
             "NATIVE_PRODUCTION_BINARY_CHANGED=false",
             "=== END COMELIT P116 R29C REGISTERED CTPP MEDIAREQ26 PROBE PREP ===",
