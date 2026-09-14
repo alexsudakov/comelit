@@ -234,8 +234,12 @@ run_main() {
 
     run_candidate_selfcheck_in_chroot || fail "R29C_CANDIDATE_SELFCHECK=FAIL"
     grep -qx 'CANDIDATE_HELPER_EXECUTED=true' "$RUN_ROOT/selfcheck.log" || fail "R29C_CANDIDATE_HELPER_EXECUTED=FAIL"
-    grep -qx 'R29C_BUILDER=BLOCKED' "$RUN_ROOT/selfcheck.log" || fail "R29C_BUILDER_BLOCKED_GATE=FAIL"
-    grep -qx 'R29C_PROBE_READY=false' "$RUN_ROOT/selfcheck.log" || fail "R29C_PROBE_READY_FALSE_GATE=FAIL"
+    grep -qx 'MEDIAREQ26_OPEN_STRUCTURAL_LAYOUT=PASS' "$RUN_ROOT/selfcheck.log" || fail "R29C_OPEN_LAYOUT_GATE=FAIL"
+    grep -qx 'MEDIAREQ26_STOP_STRUCTURAL_LAYOUT=PASS' "$RUN_ROOT/selfcheck.log" || fail "R29C_STOP_LAYOUT_GATE=FAIL"
+    grep -qx 'REGISTERED_CTPP_MEDIAREQ26_OPEN_SENT_COUNT=1' "$RUN_ROOT/selfcheck.log" || fail "R29C_OPEN_SENT_COUNT_GATE=FAIL"
+    grep -qx 'REGISTERED_CTPP_MEDIAREQ26_STOP_SENT_COUNT=1' "$RUN_ROOT/selfcheck.log" || fail "R29C_STOP_SENT_COUNT_GATE=FAIL"
+    grep -qx 'R29C_BUILDER=PASS' "$RUN_ROOT/selfcheck.log" || fail "R29C_BUILDER_PASS_GATE=FAIL"
+    grep -qx 'R29C_PROBE_READY=true' "$RUN_ROOT/selfcheck.log" || fail "R29C_PROBE_READY_TRUE_GATE=FAIL"
     [ "$FAIL" -eq 0 ] || exit 1
     CANDIDATE_SELFCHECK=PASS
 

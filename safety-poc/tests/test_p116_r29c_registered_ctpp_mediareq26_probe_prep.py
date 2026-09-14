@@ -52,6 +52,14 @@ def transform_cli_flags() -> set[str]:
     return flags
 
 
+def spans(pattern: str, text: str) -> list[tuple[int, int]]:
+    return [match.span() for match in re.finditer(pattern, text)]
+
+
+def within_any_span(pos: int, ranges: list[tuple[int, int]]) -> bool:
+    return any(start <= pos < end for start, end in ranges)
+
+
 class P116R29CRegisteredCtppMediaReq26ProbePrep(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -68,8 +76,8 @@ class P116R29CRegisteredCtppMediaReq26ProbePrep(unittest.TestCase):
         )
         cls.builder_region = region(
             cls.generated,
-            "static gboolean\nr29c_build_mediareq26",
-            "static gboolean\nr29c_emit_registered_mediareq26",
+            "r29c_build_mediareq26(R29CMediaReq26State state,",
+            "r29c_emit_registered_mediareq26",
         )
         cls.live_queue_region = region(
             cls.generated,
@@ -78,7 +86,7 @@ class P116R29CRegisteredCtppMediaReq26ProbePrep(unittest.TestCase):
         )
         cls.selfcheck_region = region(
             cls.generated,
-            "static int\nr29_selfcheck",
+            "static int\n\tr29_selfcheck(void)",
             "/* === R29_ATTACHED_MEDIA_FUNCTIONS_END === */",
         )
         cls.self_activation_region = region(
@@ -103,10 +111,52 @@ class P116R29CRegisteredCtppMediaReq26ProbePrep(unittest.TestCase):
         )
         return proc.stdout
 
+    def test_generated_source_defines_le_helpers_once(self) -> None:
+        for helper in ("read_le16", "read_le32"):
+            definitions = re.findall(
+                rf"static\s+guint(?:16|32)\s+{helper}\s*\([^)]*\)\s*\{{",
+                self.generated,
+            )
+            self.assertEqual(
+                len(definitions),
+                1,
+                f"{helper} must have exactly one generated definition",
+            )
+
+    def test_generated_source_declares_le_helpers_before_first_use(self) -> None:
+        helper_types = {"read_le16": "guint16", "read_le32": "guint32"}
+        for helper, return_type in helper_types.items():
+            definition_spans = spans(
+                rf"static\s+{return_type}\s+{helper}\s*\([^)]*\)\s*\{{",
+                self.generated,
+            )
+            prototype_spans = spans(
+                rf"static\s+{return_type}\s+{helper}\s*\(\s*const\s+guint8\s+\*p\s*\)\s*;",
+                self.generated,
+            )
+            self.assertEqual(len(definition_spans), 1, f"{helper} definition count changed")
+            self.assertEqual(len(prototype_spans), 1, f"{helper} prototype count changed")
+
+            declaration_spans = prototype_spans + definition_spans
+            call_positions = [
+                match.start()
+                for match in re.finditer(rf"\b{helper}\s*\(", self.generated)
+                if not within_any_span(match.start(), declaration_spans)
+            ]
+            self.assertGreater(len(call_positions), 0, f"{helper} has no call sites")
+            self.assertLess(
+                min(start for start, _ in declaration_spans),
+                min(call_positions),
+                f"{helper} must be declared before its first call site",
+            )
+
     def test_builder_has_exact_r29a_layout_and_distinct_states(self) -> None:
         for needle in (
             "R29C_MEDIAREQ26_OPEN",
             "R29C_MEDIAREQ26_STOP",
+            "R29CMediaProfile",
+            "r29c_build_mediareq26(R29CMediaReq26State state,",
+            "const R29CMediaProfile *profile,",
             "write_le16(out + 0, 0x1100u);",
             "out[2] = 0x14u;",
             "out[2] = 0x94u;",
@@ -114,10 +164,19 @@ class P116R29CRegisteredCtppMediaReq26ProbePrep(unittest.TestCase):
             "out[3] = 0x00u;",
             "write_le32(out + 4, 0u);",
             "write_le16(out + 8, r29c_saved_media_channel_id);",
+            "write_le16(out + 10, profile->max_rtp_payload);",
+            "write_le32(out + 12, profile->bitrate);",
+            "write_le16(out + 16, profile->max_width);",
+            "write_le16(out + 18, profile->max_height);",
+            "write_le16(out + 20, profile->requested_width);",
+            "write_le16(out + 22, profile->requested_height);",
+            "out[24] = profile->fps;",
+            "out[25] = profile->reserved;",
         ):
             self.assertIn(needle, self.builder_region)
+        self.assertIn("r29c_external_tested_client_profile", self.state_region)
 
-    def test_open_stop_anchors_and_unsourced_runtime_fields_are_explicit(self) -> None:
+    def test_open_stop_anchors_and_explicit_profile_sources_are_explicit(self) -> None:
         for needle in (
             "prefix_0x1100:SOURCED_SHAPE_CONSTANT:disasm2-csp_send_mediareq26_mov_w8_0x1100",
             "action_0x14:SOURCED_SHAPE_CONSTANT:CallFsm_start_videorx_mov_w1_0x14",
@@ -126,18 +185,21 @@ class P116R29CRegisteredCtppMediaReq26ProbePrep(unittest.TestCase):
             "flags_0x00:SOURCED_SHAPE_CONSTANT:CallFsm_stop_videorx_mov_w2_wzr",
             "address_zero_tunnel_channel_form:SOURCED_SHAPE_CONSTANT:start_videorx_x3_xzr_stop_zero_slot",
             "saved_media_channel_id:SOURCED_RUNTIME:r29c_allocator_result_persisted",
-            "max_rtp_payload:UNSOURCED:no_helper_runtime_accessor_equivalent",
-            "media_profile_0:UNSOURCED:no_helper_call_config_runtime_source",
-            "media_profile_1:UNSOURCED:no_helper_call_config_runtime_source",
-            "media_profile_2:UNSOURCED:no_helper_call_config_runtime_source",
-            "media_profile_3_4_5_and_reserved:UNSOURCED:no_helper_call_config_runtime_source",
+            "max_rtp_payload:CLIENT_SUPPLIED_CONFIGURATION",
+            "bitrate:CLIENT_SUPPLIED_CONFIGURATION",
+            "max_width:CLIENT_SUPPLIED_CONFIGURATION",
+            "max_height:CLIENT_SUPPLIED_CONFIGURATION",
+            "requested_width:CLIENT_SUPPLIED_CONFIGURATION",
+            "requested_height:CLIENT_SUPPLIED_CONFIGURATION",
+            "fps:CLIENT_SUPPLIED_CONFIGURATION",
+            "reserved:CLIENT_SUPPLIED_CONFIGURATION",
             "max_rtp_payload_zero:SOURCED_SHAPE_CONSTANT:R29A_stop_zero_payload_profile_slots",
             "media_profile_zero_tail:SOURCED_SHAPE_CONSTANT:R29A_stop_zero_payload_profile_slots",
         ):
             self.assertIn(needle, self.attached_region)
         self.assertNotIn("flags = 0x02u;", self.generated)
-        self.assertNotIn("r29c_runtime_max_rtp_payload = 1200", self.generated)
-        self.assertNotIn("r29c_runtime_media_profile_1 = 800", self.generated)
+        self.assertNotIn("UNSOURCED:no_helper_runtime_accessor_equivalent", self.generated)
+        self.assertNotIn("UNSOURCED:no_helper_call_config_runtime_source", self.generated)
 
     def test_registered_ctpp_binding_is_hypothesis_and_isolated(self) -> None:
         self.assertIn("REGISTERED_CTPP_MEDIAREQ26_HYPOTHESIS=true", self.attached_region)
@@ -165,13 +227,15 @@ class P116R29CRegisteredCtppMediaReq26ProbePrep(unittest.TestCase):
         ordered = (
             "r29_listener_registered_ready = TRUE;",
             "r29c_allocate_media_channel_id(0x0000002au)",
-            "r29c_build_mediareq26(R29C_MEDIAREQ26_OPEN, body)",
-            "R29C_OPEN_BLOCKED_UNSOURCED_FIELDS=true",
-            "r29c_build_mediareq26(R29C_MEDIAREQ26_STOP, body)",
-            "R29C_STOP_BLOCKED_BY_OPEN_PROVENANCE=true",
-            "r29_media_stop_completed = FALSE;",
+            "r29c_build_mediareq26(R29C_MEDIAREQ26_OPEN, profile, body)",
+            "r29c_assert_open_body_semantics(body, profile)",
+            "r29c_emit_registered_mediareq26(R29C_MEDIAREQ26_OPEN)",
+            "r29c_build_mediareq26(R29C_MEDIAREQ26_STOP, profile, body)",
+            "r29c_assert_stop_body_semantics(body)",
+            "r29c_emit_registered_mediareq26(R29C_MEDIAREQ26_STOP)",
+            "r29_media_stop_completed = TRUE;",
             "r29c_note_final_research_session_cleanup();",
-            "R29C_PROBE_READY=false",
+            "R29C_PROBE_READY=true",
         )
         last = -1
         for needle in ordered:
@@ -185,6 +249,10 @@ class P116R29CRegisteredCtppMediaReq26ProbePrep(unittest.TestCase):
         for marker in (
             "MEDIAREQ26_OPEN_BUILDER=%s",
             "MEDIAREQ26_STOP_BUILDER=%s",
+            "R29E_MEDIA_PROFILE_MODEL=CLIENT_SUPPLIED_CONFIGURATION",
+            "R29C_MEDIA_PROFILE_IMPLEMENTED=true",
+            "R29C_PROFILE_SOURCE=EXTERNAL_TESTED_CLIENT_PROFILE",
+            "R29C_EXTERNAL_PROFILE_ACCEPTED_FOR_BOUNDED_PROBE=%s",
             "OPEN_FIELDS_HAVE_PROVEN_SOURCES=%s",
             "STOP_FIELDS_HAVE_PROVEN_SOURCES=%s",
             "SELF_ACTIVATION_PATH_UNREACHABLE=true",
@@ -201,8 +269,8 @@ class P116R29CRegisteredCtppMediaReq26ProbePrep(unittest.TestCase):
         self.assertIn("LIVE_RUN=NOT_RUN", text)
         self.assertIn("R29_LIVE_RUN_IGNORED=$R29_LIVE_RUN", text)
         self.assertIn("R29C_LIVE_PREFLIGHT_REFUSED=LIVE_FORBIDDEN", text)
-        self.assertIn("R29C_BUILDER=BLOCKED", text)
-        self.assertIn("R29C_PROBE_READY=false", text)
+        self.assertIn("R29C_BUILDER=PASS", text)
+        self.assertIn("R29C_PROBE_READY=true", text)
         self.assertIn("PRODUCTION_LISTENER_STOP_REQUESTED=false", text)
         self.assertIn("PRODUCTION_LISTENER_RESTORE_REQUESTED=false", text)
         self.assertNotIn("R29C_LIVE_AUTHORIZED=" + "true", text)
