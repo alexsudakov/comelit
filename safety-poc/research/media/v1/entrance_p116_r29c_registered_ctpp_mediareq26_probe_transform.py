@@ -192,21 +192,6 @@ R29C_FUNCTIONS = r'''
 	static gboolean p12_queue_vip_frame(guint32 request_id, const guint8 *body, guint body_len, P12TxKind kind);
 	static gboolean p12_flush_tx(void);
 
-	static guint16
-	read_le16(const guint8 *p)
-	{
-	    return (guint16)(((guint16)p[1] << 8) | p[0]);
-	}
-
-	static guint32
-	read_le32(const guint8 *p)
-	{
-	    return ((guint32)p[3] << 24) |
-	           ((guint32)p[2] << 16) |
-	           ((guint32)p[1] << 8) |
-	           (guint32)p[0];
-	}
-
 static gboolean
 r29c_allocate_media_channel_id(guint32 seed)
 {

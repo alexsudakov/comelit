@@ -103,6 +103,18 @@ class P116R29CRegisteredCtppMediaReq26ProbePrep(unittest.TestCase):
         )
         return proc.stdout
 
+    def test_generated_source_defines_le_helpers_once(self) -> None:
+        for helper in ("read_le16", "read_le32"):
+            definitions = re.findall(
+                rf"static\s+guint(?:16|32)\s+{helper}\s*\([^)]*\)\s*\{{",
+                self.generated,
+            )
+            self.assertEqual(
+                len(definitions),
+                1,
+                f"{helper} must have exactly one generated definition",
+            )
+
     def test_builder_has_exact_r29a_layout_and_distinct_states(self) -> None:
         for needle in (
             "R29C_MEDIAREQ26_OPEN",
