@@ -119,10 +119,38 @@ class P116R29CRegisteredCtppMediaReq26LiveRunner(unittest.TestCase):
 
     def test_research_candidate_runs_through_the_musl_holder_shim(self) -> None:
         self.assertIn("R29C_SHIM_MUSL_EXEC_GATE=PASS", self.text)
+        self.assertIn('CANDIDATE="${R29C_CANDIDATE_PATH:?R29C_CANDIDATE_PATH}"', self.text)
+        self.assertIn('RUNTIME_ROOT="${R29C_RUNTIME_ROOT:?R29C_RUNTIME_ROOT}"', self.text)
+        self.assertIn('R29C_EXPECTED_CANDIDATE_SHA256="$CANDIDATE_SHA256"', self.text)
         self.assertIn('exec "$RUNTIME_LOADER" --library-path "$RUNTIME_LIBRARY_PATH" "$CANDIDATE"', self.text)
         self.assertIn("R29C_SHIM_CANDIDATE_SHA_GATE=FAIL", self.text)
         self.assertIn('"$BASE/bin/comelit_ice_offer_holder"', self.text)
         self.assertNotIn("aiohttp", self.text)
+
+    def test_generated_shim_watchdog_and_reports_do_not_embed_raw_paths_or_secrets(self) -> None:
+        self.assertIn('URL="${R29C_WATCHDOG_URL:?R29C_WATCHDOG_URL}"', self.text)
+        self.assertIn('LOG="${R29C_WATCHDOG_LOG:?R29C_WATCHDOG_LOG}"', self.text)
+        self.assertIn('R29C_WATCHDOG_URL="$HA_WEBHOOK_URL" R29C_WATCHDOG_LOG="$log" setsid "$watchdog"', self.text)
+        self.assertIn('echo "R29C_RUN_ROOT=REDACTED"', self.text)
+        self.assertIn('echo "RUNTIME_ROOT=REDACTED"', self.text)
+        self.assertIn('echo "R29C_RUNTIME_ROOT=SELECTED"', self.text)
+        self.assertIn('echo "R29C_RUNTIME_LOADER=SELECTED"', self.text)
+        self.assertIn('echo "CANDIDATE_WRAPPER_STARTED=true"', self.text)
+        self.assertIn('echo "RESEARCH_LISTENER_PID_OBSERVED=$([ -n "$CANDIDATE_PID" ] && echo true || echo false)"', self.text)
+        for forbidden in (
+            'CANDIDATE="__CANDIDATE__"',
+            'RUNTIME_ROOT="__RUNTIME_ROOT__"',
+            'URL="__URL__"',
+            'LOG="__LOG__"',
+            'echo "R29C_RUN_ROOT=$RUN_ROOT"',
+            'echo "R29C_RUNTIME_ROOT=$RUNTIME_ROOT"',
+            'echo "R29C_RUNTIME_LOADER=$RUNTIME_LOADER"',
+            'echo "WATCHDOG_PID=$WATCHDOG_PID"',
+            'echo "CANDIDATE_WRAPPER_PID=$WRAPPER_PID"',
+            'echo "RESEARCH_LISTENER_PID=$CANDIDATE_PID"',
+            'echo "R29C_SHIM_PID=$$"',
+        ):
+            self.assertNotIn(forbidden, self.text)
 
     def test_live_sequence_requires_inactive_production_before_candidate_start(self) -> None:
         stop_site = self.text.index("post_control stop")

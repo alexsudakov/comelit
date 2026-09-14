@@ -360,21 +360,18 @@ run_candidate_selfcheck_in_chroot() {
 
 prepare_holder_shim() {
     HOLDER_SHIM="$RUN_ROOT/$SHIM_NAME"
-    python3 - "$HOLDER_SHIM" "$CANDIDATE_OUTPUT" "$CANDIDATE_SHA256" "$RUNTIME_ROOT" <<'PY'
+    python3 - "$HOLDER_SHIM" <<'PY'
 from pathlib import Path
 import os
 import sys
 
 out = Path(sys.argv[1])
-candidate = sys.argv[2]
-candidate_sha = sys.argv[3]
-runtime_root = sys.argv[4]
 template = r'''#!/usr/bin/env bash
 set -u -o pipefail
 umask 077
-R29C_CANDIDATE_SHA256=__SHA__
-CANDIDATE="__CANDIDATE__"
-RUNTIME_ROOT="__RUNTIME_ROOT__"
+CANDIDATE="${R29C_CANDIDATE_PATH:?R29C_CANDIDATE_PATH}"
+R29C_CANDIDATE_SHA256="${R29C_EXPECTED_CANDIDATE_SHA256:?R29C_EXPECTED_CANDIDATE_SHA256}"
+RUNTIME_ROOT="${R29C_RUNTIME_ROOT:?R29C_RUNTIME_ROOT}"
 RUNTIME_LOADER="$RUNTIME_ROOT/lib/ld-musl-x86_64.so.1"
 RUNTIME_LIBRARY_PATH="$RUNTIME_ROOT/lib:$RUNTIME_ROOT/usr/lib"
 die() { echo "$1"; exit 126; }
@@ -386,13 +383,9 @@ actual_sha="$(sha256sum "$CANDIDATE" | awk '{print $1}')"
 echo "R29C_SHIM_CANDIDATE_SHA_BEFORE_EXEC=$actual_sha"
 [ "$actual_sha" = "$R29C_CANDIDATE_SHA256" ] || die "R29C_SHIM_CANDIDATE_SHA_GATE=FAIL"
 echo "R29C_SHIM_MUSL_EXEC_GATE=PASS"
-echo "R29C_SHIM_PID=$$"
 exec "$RUNTIME_LOADER" --library-path "$RUNTIME_LIBRARY_PATH" "$CANDIDATE"
 '''
-text = template.replace("__SHA__", candidate_sha)
-text = text.replace("__CANDIDATE__", candidate)
-text = text.replace("__RUNTIME_ROOT__", runtime_root)
-out.write_text(text, encoding="utf-8")
+out.write_text(template, encoding="utf-8")
 os.chmod(out, 0o700)
 PY
     [ -x "$HOLDER_SHIM" ] || fail "R29C_HOLDER_SHIM_WRITE=FAIL"
@@ -497,19 +490,17 @@ find_candidate_pid() {
 arm_autorestore_watchdog() {
     local watchdog="$RUN_ROOT/r29c-autorestore-watchdog.sh"
     local log="$RUN_ROOT/r29c-autorestore-watchdog.log"
-    python3 - "$watchdog" "$HA_WEBHOOK_URL" "$log" <<'PY'
+    python3 - "$watchdog" <<'PY'
 from pathlib import Path
 import os
 import sys
 
 out = Path(sys.argv[1])
-url = sys.argv[2]
-log = sys.argv[3]
 text = r'''#!/usr/bin/env bash
 set -u -o pipefail
 umask 077
-URL="__URL__"
-LOG="__LOG__"
+URL="${R29C_WATCHDOG_URL:?R29C_WATCHDOG_URL}"
+LOG="${R29C_WATCHDOG_LOG:?R29C_WATCHDOG_LOG}"
 BUDGET=600
 INTERVAL=30
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >> "$LOG"; }
@@ -531,20 +522,18 @@ curl --silent --show-error --connect-timeout 5 --max-time 35 \
   --data '{"action":"start"}' "$URL" >/dev/null 2>&1 || true
 log "AUTO_RESTORE_START_SENT"
 '''
-text = text.replace("__URL__", url).replace("__LOG__", log)
 out.write_text(text, encoding="utf-8")
 os.chmod(out, 0o700)
 PY
     bash -n "$watchdog" || return 1
     : > "$log"
     chmod 600 "$log"
-    setsid "$watchdog" >/dev/null 2>&1 < /dev/null &
+    R29C_WATCHDOG_URL="$HA_WEBHOOK_URL" R29C_WATCHDOG_LOG="$log" setsid "$watchdog" >/dev/null 2>&1 < /dev/null &
     WATCHDOG_PID=$!
     sleep 1
     if kill -0 "$WATCHDOG_PID" 2>/dev/null && grep -q 'AUTO_RESTORE_ARMED' "$log" 2>/dev/null; then
         WATCHDOG_READY=true
         echo "WATCHDOG_ARMED=true"
-        echo "WATCHDOG_PID=$WATCHDOG_PID"
     else
         WATCHDOG_READY=false
         echo "WATCHDOG_ARMED=false"
@@ -704,7 +693,7 @@ print_arm_block() {
     echo "GENERATED_SOURCE_SHA256=$(build_marker GENERATED_SOURCE_SHA256 NOT_REACHED)"
     echo "CANDIDATE_BINARY_SHA256=$CANDIDATE_SHA256"
     echo "HOLDER_SHIM_SHA256=$HOLDER_SHIM_SHA256"
-    echo "RUNTIME_ROOT=$RUNTIME_ROOT"
+    echo "RUNTIME_ROOT=REDACTED"
     echo "PREP_READY=$PREP_READY"
     echo "LIVE_RUNNER_PREFLIGHT=$LIVE_RUNNER_PREFLIGHT"
     echo "HANDOFF_PATH_READY=$HANDOFF_PATH_READY"
@@ -908,7 +897,7 @@ main() {
     : > "$SELFCHECK_LOG"
     : > "$WRAPPER_LOG"
     chmod 600 "$BUILD_PROVENANCE_LOG" "$SELFCHECK_LOG" "$WRAPPER_LOG"
-    echo "R29C_RUN_ROOT=$RUN_ROOT"
+    echo "R29C_RUN_ROOT=REDACTED"
     case "$CANDIDATE_OUTPUT" in "$RUN_ROOT"/*) echo "R29C_CANDIDATE_OUTPUT_SCOPE=RUN_ROOT" ;; *) fail "R29C_CANDIDATE_OUTPUT_SCOPE=FAIL" ;; esac
 
     preflight_gates || exit 1
@@ -921,8 +910,8 @@ main() {
     [ -n "$RUNTIME_ROOT" ] || fail "R29C_RUNTIME_ROOT=ABSENT"
     RUNTIME_LOADER="$RUNTIME_ROOT/lib/ld-musl-x86_64.so.1"
     [ -x "$RUNTIME_LOADER" ] || fail "R29C_RUNTIME_LOADER=ABSENT"
-    echo "R29C_RUNTIME_ROOT=$RUNTIME_ROOT"
-    echo "R29C_RUNTIME_LOADER=$RUNTIME_LOADER"
+    echo "R29C_RUNTIME_ROOT=SELECTED"
+    echo "R29C_RUNTIME_LOADER=SELECTED"
     [ "$FAIL" -eq 0 ] || exit 1
 
     prepare_holder_shim
@@ -999,10 +988,13 @@ main() {
     LIVE_ATTEMPT_BUDGET_USED=1
     echo "LIVE_ATTEMPT_BUDGET_USED=$LIVE_ATTEMPT_BUDGET_USED"
     (
+        R29C_CANDIDATE_PATH="$CANDIDATE_OUTPUT" \
+        R29C_EXPECTED_CANDIDATE_SHA256="$CANDIDATE_SHA256" \
+        R29C_RUNTIME_ROOT="$RUNTIME_ROOT" \
         timeout --signal=TERM --kill-after=5s "$R29C_OUTER_TIMEOUT_SECONDS" "$CANDIDATE_WRAPPER"
     ) > "$WRAPPER_LOG" 2>&1 &
     WRAPPER_PID=$!
-    echo "CANDIDATE_WRAPPER_PID=$WRAPPER_PID"
+    echo "CANDIDATE_WRAPPER_STARTED=true"
 
     if ! wait_for_marker RESEARCH_LISTENER_READY true "$R29C_READY_MAX_SECONDS"; then
         set_result BOOTSTRAP_FAILURE INCONCLUSIVE_CANDIDATE_BOOTSTRAP_FAILURE
@@ -1011,7 +1003,7 @@ main() {
     fi
     RESEARCH_LISTENER_READY=true
     CANDIDATE_PID="$(find_candidate_pid)"
-    echo "RESEARCH_LISTENER_PID=$CANDIDATE_PID"
+    echo "RESEARCH_LISTENER_PID_OBSERVED=$([ -n "$CANDIDATE_PID" ] && echo true || echo false)"
     snapshot_counters READY
     echo "RESEARCH_LISTENER_READY=true"
     echo "COMELIT R29C RING NOW"
