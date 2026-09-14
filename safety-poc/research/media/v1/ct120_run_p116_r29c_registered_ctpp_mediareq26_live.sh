@@ -427,7 +427,10 @@ start_udp_sink() {
     local count_file="$2"
     local first_file="$3"
     local label="$4"
-    python3 - "$port" "$count_file" "$first_file" "$R29C_OUTER_TIMEOUT_SECONDS" <<'PY' &
+    # The sink is started with & inside a command substitution: its stdout/stderr MUST be
+    # redirected away from the inherited pipe, otherwise $(...) never sees EOF and the
+    # caller blocks until the sink's own deadline (observed in the first ARM run).
+    python3 - "$port" "$count_file" "$first_file" "$R29C_OUTER_TIMEOUT_SECONDS" <<'PY' > "$count_file.stdout" 2>&1 &
 from pathlib import Path
 import signal
 import socket

@@ -187,6 +187,14 @@ class P116R29CRegisteredCtppMediaReq26LiveRunner(unittest.TestCase):
         self.assertIn("DOOR_ACTIONS_SENT=0", self.text)
         self.assertIn("GATE_ACTIONS_SENT=0", self.text)
 
+    def test_rtp_sink_stdio_is_detached_from_the_substitution_pipe(self) -> None:
+        # $(start_udp_sink ...) must not inherit the sink's stdout/stderr: otherwise the
+        # command substitution never sees EOF and the caller blocks until the sink's own
+        # deadline (observed in the first ARM preflight run).
+        self.assertIn("<<'PY' > \"$count_file.stdout\" 2>&1 &", self.text)
+        self.assertIn('VIDEO_SINK_PID="$(start_udp_sink', self.text)
+        self.assertIn('AUDIO_SINK_PID="$(start_udp_sink', self.text)
+
     def test_mandatory_report_fields_are_emitted(self) -> None:
         for field in (
             "MAIN_SHA=",
