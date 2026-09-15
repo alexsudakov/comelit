@@ -89,6 +89,11 @@ class P116R29CRegisteredCtppMediaReq26ProbePrep(unittest.TestCase):
             "static int\n\tr29_selfcheck(void)",
             "/* === R29_ATTACHED_MEDIA_FUNCTIONS_END === */",
         )
+        cls.main_region = region(
+            cls.generated,
+            "main(int argc, char **argv)",
+            "return r29c_exit_code;",
+        )
         cls.self_activation_region = region(
             cls.generated,
             "entrance_signal_queue_self_activation(void)\n{",
@@ -230,6 +235,7 @@ class P116R29CRegisteredCtppMediaReq26ProbePrep(unittest.TestCase):
             "r29c_build_mediareq26(R29C_MEDIAREQ26_OPEN, profile, body)",
             "r29c_assert_open_body_semantics(body, profile)",
             "r29c_emit_registered_mediareq26(R29C_MEDIAREQ26_OPEN)",
+            "r29c_waiting_for_stop = TRUE;",
             "r29c_build_mediareq26(R29C_MEDIAREQ26_STOP, profile, body)",
             "r29c_assert_stop_body_semantics(body)",
             "r29c_emit_registered_mediareq26(R29C_MEDIAREQ26_STOP)",
@@ -259,10 +265,66 @@ class P116R29CRegisteredCtppMediaReq26ProbePrep(unittest.TestCase):
             "R27_REPEAT_PATH_UNREACHABLE=true",
             "MEDIA_ONLY_STOP_RESULT=%s",
             "FINAL_RESEARCH_SESSION_CLEANUP=%s",
+            "R29C_OPEN_WRITE_COMPLETED_AT_MS=%lld",
+            "R29C_RTP_OBSERVATION_STARTED_AT_MS=%lld",
+            "R29C_RTP_OBSERVATION_ENDED_AT_MS=%lld",
+            "R29C_WAITING_FOR_STOP=%s",
+            "R29C_CANDIDATE_EXIT_REASON=%s",
+            "R29C_CANDIDATE_EXIT_CODE=%d",
+            "R29C_CANDIDATE_EXIT_AFTER_OPEN=%s",
+            "R29C_CANDIDATE_EXIT_BEFORE_STOP=%s",
             "R29C_BUILDER=%s",
             "LIVE_PROBE_PREPARED=%s",
         ):
             self.assertIn(marker, self.attached_region)
+
+    def test_candidate_lifetime_waits_for_sigusr2_after_full_observation(self) -> None:
+        ordered = (
+            "r29c_queue_registered_mediareq26(R29C_MEDIAREQ26_OPEN)",
+            "R29C_RTP_OBSERVATION_STARTED_AT_MS=%lld",
+            "g_timeout_add_seconds(10, r29c_rtp_observation_complete_cb, NULL)",
+            "OPEN_SENT_OBSERVING_RTP",
+            "r29c_rtp_observation_complete_cb(gpointer data)",
+            "r29_media_observation_end_ms = p116_monotonic_ms();",
+            "r29c_waiting_for_stop = TRUE;",
+            "entrance_signal_stage = ENTRANCE_SIGNAL_DONE;",
+            "R29C_WAITING_FOR_STOP=true",
+            "OPEN_SENT_WAITING_FOR_STOP",
+        )
+        last = -1
+        for needle in ordered:
+            pos = self.attached_region.index(needle, max(0, last))
+            self.assertGreater(pos, last)
+            last = pos
+        self.assertIn("R29C_OPEN_WRITE_COMPLETED_AT_MS=%lld", self.generated)
+        poll_site = self.attached_region.index("r29_sigusr2_poll_cb(gpointer data)")
+        stop_call_site = self.attached_region.index("r29_media_only_teardown(\"SIGUSR2\")", poll_site)
+        stop_tx_site = self.attached_region.index("r29c_queue_registered_mediareq26(R29C_MEDIAREQ26_STOP)")
+        self.assertGreater(stop_call_site, poll_site)
+        self.assertGreater(stop_tx_site, 0)
+        for scalar in (
+            "REGISTERED_CTPP_MEDIAREQ26_OPEN_SENT_COUNT=%u",
+            "REGISTERED_CTPP_MEDIAREQ26_STOP_SENT_COUNT=%u",
+            "SELF_ACTIVATION_001A_SENT_COUNT=%u",
+            "R27_REPEAT_001A_SENT_COUNT=%u",
+            "REFRESH_LOOP_STARTED_COUNT=%u",
+            "NEW_ICE_COUNT=%u",
+            "NEW_CLOUD_NEGOTIATION_COUNT=%u",
+            "NEW_PSEUDOTCP_COUNT=%u",
+            "NEW_REGISTRATION_COUNT=%u",
+        ):
+            self.assertIn(scalar, self.attached_region)
+
+    def test_candidate_exit_is_closed_enum_and_code_is_reconciled(self) -> None:
+        self.assertIn("int r29c_exit_code = failed ? 6 : 0;", self.main_region)
+        self.assertIn("r29c_print_candidate_exit(r29c_exit_code);", self.main_region)
+        for reason in (
+            '"MAIN_LOOP_RETURNED"',
+            '"MAIN_LOOP_FAILED"',
+            '"STOP_SENT_MAIN_LOOP_RETURNED"',
+            '"OPEN_SENT_MAIN_LOOP_RETURNED_BEFORE_STOP"',
+        ):
+            self.assertIn(reason, self.attached_region)
 
     def test_runner_forbids_live_and_only_dry_runs_restore(self) -> None:
         text = RUNNER.read_text(encoding="utf-8")

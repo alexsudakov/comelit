@@ -29,9 +29,12 @@ R29C_TX_ENUM_INSERT = """    P95_TX_DEVICE_0002_ACK,
 
 R29C_TX_COMPLETION_CASES = """        case P116_R29C_TX_MEDIAREQ26_OPEN:
             r29c_registered_ctpp_mediareq26_open_sent = TRUE;
+            r29c_open_write_completed_ms = p116_monotonic_ms();
             printf("REGISTERED_CTPP_MEDIAREQ26_OPEN_SENT=true\\n");
             printf("REGISTERED_CTPP_MEDIAREQ26_OPEN_SENT_COUNT=%u\\n",
                    r29c_registered_ctpp_mediareq26_open_sent_count);
+            printf("R29C_OPEN_WRITE_COMPLETED_AT_MS=%lld\\n",
+                   r29c_open_write_completed_ms);
             fflush(stdout);
             break;
 
@@ -119,6 +122,7 @@ static gboolean r29c_stop_fields_have_proven_sources = FALSE;
 static gboolean r29c_stop_generation_failed = FALSE;
 static gboolean r29c_media_only_stop_result = FALSE;
 static gboolean r29c_final_research_session_cleanup = FALSE;
+static gboolean r29c_waiting_for_stop = FALSE;
 static guint r29_ice_bootstrap_count = 0;
 static guint r29_cloud_negotiation_count = 0;
 static guint r29_pseudotcp_open_count = 0;
@@ -149,6 +153,7 @@ static long long r29_call_init_monotonic_ms = 0;
 static long long r29_first_video_rtp_monotonic_ms = 0;
 static long long r29_media_observation_start_ms = 0;
 static long long r29_media_observation_end_ms = 0;
+static long long r29c_open_write_completed_ms = 0;
 static pid_t r29_listener_ready_pid = 0;
 	static guint16 v4_ctpp_channel_id;
 	static gboolean v4_registered;
@@ -179,10 +184,12 @@ static gboolean r29c_allocate_media_channel_id(guint32 seed);
 	    R29CMediaReq26State state,
 	    const R29CMediaProfile *profile,
 	    guint8 out[26]);
-	static gboolean r29c_emit_registered_mediareq26(R29CMediaReq26State state);
-	static gboolean r29c_queue_registered_mediareq26(R29CMediaReq26State state);
+		static gboolean r29c_emit_registered_mediareq26(R29CMediaReq26State state);
+		static gboolean r29c_queue_registered_mediareq26(R29CMediaReq26State state);
 static void r29c_note_final_research_session_cleanup(void);
-/* === R29_LISTENER_ATTACHED_MEDIA_STATE_END === */
+static gboolean r29c_rtp_observation_complete_cb(gpointer data);
+static void r29c_print_candidate_exit(int code);
+	/* === R29_LISTENER_ATTACHED_MEDIA_STATE_END === */
 '''
 
 
@@ -425,13 +432,13 @@ r29c_queue_registered_mediareq26(R29CMediaReq26State state)
         memset(body, 0, sizeof(body));
         return FALSE;
     }
-    if (state == R29C_MEDIAREQ26_OPEN)
-        r29c_registered_ctpp_mediareq26_open_sent_count++;
-    else
-        r29c_registered_ctpp_mediareq26_stop_sent_count++;
-    memset(body, 0, sizeof(body));
-    return p12_flush_tx();
-}
+	    if (state == R29C_MEDIAREQ26_OPEN)
+	        r29c_registered_ctpp_mediareq26_open_sent_count++;
+	    else
+	        r29c_registered_ctpp_mediareq26_stop_sent_count++;
+	    memset(body, 0, sizeof(body));
+	    return p12_flush_tx();
+	}
 
 static void
 r29_print_scalar_snapshot(const char *call_end_state)
@@ -537,9 +544,17 @@ r29_print_scalar_snapshot(const char *call_end_state)
            "true" : "false");
     printf("VIDEO_RTP_PACKETS=%llu\n", (unsigned long long)p80_video_rtp_packets);
     printf("VIDEO_RTP_OBSERVATION_SECONDS=%lld\n", observed_ms / 1000LL);
+    printf("R29C_OPEN_WRITE_COMPLETED_AT_MS=%lld\n",
+           r29c_open_write_completed_ms);
+    printf("R29C_RTP_OBSERVATION_STARTED_AT_MS=%lld\n",
+           r29_media_observation_start_ms);
+    printf("R29C_RTP_OBSERVATION_ENDED_AT_MS=%lld\n",
+           r29_media_observation_end_ms);
+    printf("R29C_WAITING_FOR_STOP=%s\n",
+           r29c_waiting_for_stop ? "true" : "false");
     printf("CALL_TRANSACTION_END_STATE=%s\n", call_end_state);
-	    printf("R29C_BUILDER=%s\n",
-	           r29c_open_fields_have_proven_sources &&
+		    printf("R29C_BUILDER=%s\n",
+		           r29c_open_fields_have_proven_sources &&
 	           r29c_stop_fields_have_proven_sources ? "PASS" : "BLOCKED");
 	    printf("LIVE_PROBE_PREPARED=%s\n",
 	           r29c_live_probe_prepared ? "true" : "false");
@@ -608,6 +623,10 @@ r29_start_attached_media_from_call_init(const char *source)
     p80_media_forwarding_enabled = TRUE;
     r29_attached_media_state = R29_ATTACHED_MEDIA_ACTIVE;
     r29c_live_probe_prepared = TRUE;
+    r29_media_observation_start_ms = r29c_open_write_completed_ms;
+    printf("R29C_RTP_OBSERVATION_STARTED_AT_MS=%lld\n",
+           r29_media_observation_start_ms);
+    g_timeout_add_seconds(10, r29c_rtp_observation_complete_cb, NULL);
     r29_print_scalar_snapshot("OPEN_SENT_OBSERVING_RTP");
     return TRUE;
 }
@@ -685,11 +704,49 @@ r29_media_only_teardown(const char *reason)
     return r29_media_stop_completed;
 }
 
+static gboolean
+r29c_rtp_observation_complete_cb(gpointer data)
+{
+    (void)data;
+    if (!r29c_registered_ctpp_mediareq26_open_sent ||
+        r29c_registered_ctpp_mediareq26_stop_sent ||
+        r29_media_stop_requested)
+        return G_SOURCE_REMOVE;
+    r29_media_observation_end_ms = p116_monotonic_ms();
+    r29c_waiting_for_stop = TRUE;
+    entrance_signal_stage = ENTRANCE_SIGNAL_DONE;
+    printf("R29C_RTP_OBSERVATION_ENDED_AT_MS=%lld\n",
+           r29_media_observation_end_ms);
+    printf("R29C_WAITING_FOR_STOP=true\n");
+    r29_print_scalar_snapshot("OPEN_SENT_WAITING_FOR_STOP");
+    fflush(stdout);
+    return G_SOURCE_REMOVE;
+}
+
 static void
 r29c_note_final_research_session_cleanup(void)
 {
     r29c_final_research_session_cleanup = TRUE;
     printf("FINAL_RESEARCH_SESSION_CLEANUP=PASS\n");
+    fflush(stdout);
+}
+
+static void
+r29c_print_candidate_exit(int code)
+{
+    const char *reason = "MAIN_LOOP_RETURNED";
+    if (code != 0)
+        reason = "MAIN_LOOP_FAILED";
+    else if (r29c_registered_ctpp_mediareq26_stop_sent)
+        reason = "STOP_SENT_MAIN_LOOP_RETURNED";
+    else if (r29c_registered_ctpp_mediareq26_open_sent)
+        reason = "OPEN_SENT_MAIN_LOOP_RETURNED_BEFORE_STOP";
+    printf("R29C_CANDIDATE_EXIT_REASON=%s\n", reason);
+    printf("R29C_CANDIDATE_EXIT_CODE=%d\n", code);
+    printf("R29C_CANDIDATE_EXIT_AFTER_OPEN=%s\n",
+           r29c_registered_ctpp_mediareq26_open_sent ? "true" : "false");
+    printf("R29C_CANDIDATE_EXIT_BEFORE_STOP=%s\n",
+           !r29c_registered_ctpp_mediareq26_stop_sent ? "true" : "false");
     fflush(stdout);
 }
 
@@ -768,12 +825,13 @@ static int
 	    if (!r29c_assert_open_body_semantics(body, profile))
 	        return 4;
 	    memset(body, 0, sizeof(body));
-	    if (!r29c_emit_registered_mediareq26(R29C_MEDIAREQ26_OPEN))
-	        return 5;
-	    r29_attached_media_state = R29_ATTACHED_MEDIA_ACTIVE;
-	    r29_media_channel_open_request_sent = TRUE;
-	    if (!r29c_build_mediareq26(R29C_MEDIAREQ26_STOP, profile, body))
-	        return 6;
+		    if (!r29c_emit_registered_mediareq26(R29C_MEDIAREQ26_OPEN))
+		        return 5;
+		    r29_attached_media_state = R29_ATTACHED_MEDIA_ACTIVE;
+		    r29_media_channel_open_request_sent = TRUE;
+		    r29c_waiting_for_stop = TRUE;
+		    if (!r29c_build_mediareq26(R29C_MEDIAREQ26_STOP, profile, body))
+		        return 6;
 	    if (!r29c_assert_stop_body_semantics(body))
 	        return 7;
 	    memset(body, 0, sizeof(body));
@@ -892,6 +950,14 @@ def transform(source: str, *, include_p116: bool = True) -> str:
         "/* === R29_ATTACHED_MEDIA_FUNCTIONS_END === */",
         R29C_FUNCTIONS.strip("\n"),
     )
+    candidate = _replace_once(
+        candidate,
+        "    return failed ? 6 : 0;\n",
+        "    int r29c_exit_code = failed ? 6 : 0;\n"
+        "    r29c_print_candidate_exit(r29c_exit_code);\n"
+        "    return r29c_exit_code;\n",
+        "R29C candidate exit instrumentation",
+    )
     r29._assert_generated_gates(candidate)  # pylint: disable=protected-access
     r29.R29_IDENTIFIER_ALLOWLIST.update(  # pylint: disable=protected-access
         {
@@ -899,8 +965,9 @@ def transform(source: str, *, include_p116: bool = True) -> str:
             "P116_R29C_TX_MEDIAREQ26_STOP",
             "P76Allocation",
             "P76_OK",
-            "P76Runtime",
-	            "P12TxKind",
+	            "P76Runtime",
+	            "ENTRANCE_SIGNAL_DONE",
+		            "P12TxKind",
 	            "R29CMediaProfile",
 	            "R29C_MEDIAREQ26_OPEN",
 	            "R29C_MEDIAREQ26_STOP",
@@ -910,8 +977,10 @@ def transform(source: str, *, include_p116: bool = True) -> str:
 	            "bitrate",
 	            "body",
 	            "candidate",
-	            "fps",
-	            "g_random_int",
+		            "fps",
+		            "entrance_signal_stage",
+		            "g_timeout_add_seconds",
+		            "g_random_int",
 	            "guint16",
 	            "guint32",
 	            "guint8",

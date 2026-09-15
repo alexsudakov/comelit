@@ -105,6 +105,47 @@ class P116R29CRegisteredCtppMediaReq26LiveRunner(unittest.TestCase):
         self.assertLess(rtp_decision, stop_site)
         self.assertIn("STOP_SENT=true\n        STOP_BUDGET_USED=1", self.text)
 
+    def test_rtp_sink_counters_are_finalized_before_final_report(self) -> None:
+        self.assertIn("finalize_sinks()", self.text)
+        cleanup_site = self.text.index("close_research_session()")
+        finalize_site = self.text.index("    finalize_sinks", cleanup_site)
+        final_report_site = self.text.index("print_final_block", finalize_site)
+        self.assertLess(finalize_site, final_report_site)
+        self.assertNotIn('VIDEO_RTP_DATAGRAMS_SINK="$(read_sink_count "$RUN_ROOT/video.count"', self.text)
+        for marker in (
+            "CANDIDATE_REPORTED_VIDEO_RTP_PACKETS=",
+            "SINK_FINAL_VIDEO_RTP_DATAGRAMS=",
+            "SINK_FINAL_AUDIO_RTP_DATAGRAMS=",
+            "RTP_COUNTER_CONSISTENCY=",
+        ):
+            self.assertIn(marker, self.text)
+
+    def test_runner_records_phase_timestamps_and_alive_before_stop(self) -> None:
+        ordered = (
+            "OPEN_OBSERVED_AT_MS=\"$(now_ms)\"",
+            "RTP_OBSERVATION_STARTED_AT_MS=\"$(now_ms)\"",
+            "sleep \"$R29C_RTP_OBSERVATION_SECONDS\"",
+            "RTP_OBSERVATION_ENDED_AT_MS=\"$(now_ms)\"",
+            "PROCESS_ALIVE_AFTER_OBSERVATION=true",
+            "PROCESS_ALIVE_BEFORE_STOP=\"$PROCESS_ALIVE_AFTER_OBSERVATION\"",
+            "STOP_ATTEMPT_AT_MS=\"$(now_ms)\"",
+            "kill -USR2",
+        )
+        last = -1
+        for needle in ordered:
+            pos = self.text.index(needle)
+            self.assertGreater(pos, last)
+            last = pos
+        for marker in (
+            "OPEN_OBSERVED_AT_MS=",
+            "RTP_OBSERVATION_STARTED_AT_MS=",
+            "RTP_OBSERVATION_ENDED_AT_MS=",
+            "STOP_ATTEMPT_AT_MS=",
+            "PROCESS_ALIVE_AFTER_OBSERVATION=",
+            "PROCESS_ALIVE_BEFORE_STOP=",
+        ):
+            self.assertIn(marker, self.text)
+
     def test_classification_cases_are_present_and_distinct(self) -> None:
         for needle in (
             "RESULT=REGISTERED_CTPP_MEDIAREQ26_NOT_PROVEN",
@@ -229,7 +270,17 @@ class P116R29CRegisteredCtppMediaReq26LiveRunner(unittest.TestCase):
             "OPEN_BUDGET_USED=",
             "VIDEO_RTP_STARTED=",
             "VIDEO_RTP_PACKETS=",
+            "CANDIDATE_REPORTED_VIDEO_RTP_PACKETS=",
+            "SINK_FINAL_VIDEO_RTP_DATAGRAMS=",
+            "SINK_FINAL_AUDIO_RTP_DATAGRAMS=",
+            "RTP_COUNTER_CONSISTENCY=",
             "RTP_OBSERVATION_SECONDS=",
+            "OPEN_OBSERVED_AT_MS=",
+            "RTP_OBSERVATION_STARTED_AT_MS=",
+            "RTP_OBSERVATION_ENDED_AT_MS=",
+            "STOP_ATTEMPT_AT_MS=",
+            "PROCESS_ALIVE_AFTER_OBSERVATION=",
+            "PROCESS_ALIVE_BEFORE_STOP=",
             "FIRST_RTP_RELATIVE_TO_CHANNEL_OPEN_RESPONSE=",
             "STOP_SENT=",
             "STOP_BUDGET_USED=",
