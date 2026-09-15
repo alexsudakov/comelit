@@ -189,7 +189,7 @@ def _defined_identifier_positions(text: str) -> dict[str, int]:
         for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:=[^,}]*)?(?:,|$)", enum_body):
             add(match.group(1), enum_match.start(1) + match.start(1))
     for pattern in (
-        r"\b(?:static\s+)?(?:const\s+)?(?:gboolean|guint|guint64|int|long\s+long|pid_t|void|R29AttachedMediaState)\s+\**\s*([A-Za-z_][A-Za-z0-9_]*)\b",
+        r"\b(?:static\s+)?(?:const\s+)?(?:gboolean|guint|guint64|int|long\s+long|pid_t|void|EntranceSignalStage|R29AttachedMediaState)\s+\**\s*([A-Za-z_][A-Za-z0-9_]*)\b",
         r"\b(?:static\s+)?(?:gboolean|int|void)\s*\n\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(",
         r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*void\s*\)",
         r"\b(?:const\s+)?(?:char|gpointer|int)\s+\**\s*([A-Za-z_][A-Za-z0-9_]*)\b",

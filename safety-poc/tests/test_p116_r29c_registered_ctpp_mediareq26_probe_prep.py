@@ -315,6 +315,46 @@ class P116R29CRegisteredCtppMediaReq26ProbePrep(unittest.TestCase):
         ):
             self.assertIn(scalar, self.attached_region)
 
+    def test_r29f_order_gate_declares_base_entrance_state_before_callback_use(self) -> None:
+        declaration_positions = {
+            "ENTRANCE_SIGNAL_DONE": self.generated.index("ENTRANCE_SIGNAL_DONE"),
+            "entrance_signal_stage": self.generated.index(
+                "static EntranceSignalStage entrance_signal_stage"
+            ),
+        }
+        callback_start = self.generated.index(
+            "static gboolean\nr29c_rtp_observation_complete_cb(gpointer data)"
+        )
+        callback = self.generated[callback_start:self.generated.index(
+            "static void\nr29c_note_final_research_session_cleanup", callback_start
+        )]
+        use_positions = {
+            "ENTRANCE_SIGNAL_DONE": self.generated.index(
+                "ENTRANCE_SIGNAL_DONE", callback_start
+            ),
+            "entrance_signal_stage": self.generated.index(
+                "entrance_signal_stage = ENTRANCE_SIGNAL_DONE;", callback_start
+            ),
+        }
+        for name in r29c.R29F_ORDERED_EXTERNAL_IDENTIFIERS:
+            self.assertIn(name, callback)
+            self.assertLess(declaration_positions[name], use_positions[name])
+        r29c._assert_r29f_identifier_ordering(self.generated)  # pylint: disable=protected-access
+
+    def test_r29f_order_gate_rejects_callback_before_base_entrance_state(self) -> None:
+        start = self.generated.index("/* === R29_ATTACHED_MEDIA_FUNCTIONS_BEGIN === */")
+        end = self.generated.index("/* === R29_ATTACHED_MEDIA_FUNCTIONS_END === */", start)
+        end += len("/* === R29_ATTACHED_MEDIA_FUNCTIONS_END === */")
+        functions_block = self.generated[start:end]
+        without_functions = self.generated[:start] + self.generated[end:]
+        insertion = without_functions.index("typedef enum {\n    ENTRANCE_SIGNAL_IDLE")
+        bad = without_functions[:insertion] + functions_block + "\n\n" + without_functions[insertion:]
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"R29F_IDENTIFIER_ORDER_GATE=FAIL.*entrance_signal_stage.*definition_pos=.*first_use_pos=",
+        ):
+            r29c._assert_r29f_identifier_ordering(bad)  # pylint: disable=protected-access
+
     def test_candidate_exit_is_closed_enum_and_code_is_reconciled(self) -> None:
         self.assertIn("int r29c_exit_code = failed ? 6 : 0;", self.main_region)
         self.assertIn("r29c_print_candidate_exit(r29c_exit_code);", self.main_region)

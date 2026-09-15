@@ -18,6 +18,12 @@ import entrance_p116_r29_listener_attached_media_live_transform as r29
 DEFAULT_SOURCE = r29.DEFAULT_SOURCE
 
 
+R29F_ORDERED_EXTERNAL_IDENTIFIERS = (
+    "ENTRANCE_SIGNAL_DONE",
+    "entrance_signal_stage",
+)
+
+
 R29C_TX_ENUM_INSERT = """    P95_TX_DEVICE_0002_ACK,
     P97_TX_DEVICE_000A_ACK,
 
@@ -884,6 +890,51 @@ def _replace_region(text: str, start: str, end: str, replacement: str) -> str:
     return text[:s] + replacement + text[e:]
 
 
+def _move_region_after(text: str, start: str, end: str, anchor: str) -> str:
+    s = text.find(start)
+    if s < 0:
+        raise RuntimeError(f"region start missing: {start}")
+    e = text.find(end, s)
+    if e < 0:
+        raise RuntimeError(f"region end missing: {end}")
+    e += len(end)
+    block = text[s:e]
+    without_block = text[:s] + text[e:]
+    anchor_pos = without_block.find(anchor)
+    if anchor_pos < 0:
+        raise RuntimeError(f"region relocation anchor missing: {anchor}")
+    insert_pos = anchor_pos + len(anchor)
+    return without_block[:insert_pos] + "\n\n" + block + without_block[insert_pos:]
+
+
+def _first_identifier_reference(region: str, name: str, offset: int) -> int | None:
+    positions = r29._identifier_token_positions(region, offset)  # pylint: disable=protected-access
+    return positions.get(name)
+
+
+def _assert_r29f_identifier_ordering(candidate: str) -> None:
+    functions_start = candidate.find("R29_ATTACHED_MEDIA_FUNCTIONS_BEGIN")
+    if functions_start < 0:
+        raise RuntimeError("R29F_IDENTIFIER_ORDER_GATE=FAIL region_missing=functions")
+    functions_end = candidate.find("R29_ATTACHED_MEDIA_FUNCTIONS_END", functions_start)
+    if functions_end < 0:
+        raise RuntimeError("R29F_IDENTIFIER_ORDER_GATE=FAIL region_missing=functions:end")
+    functions = candidate[functions_start:functions_end]
+    definitions = r29._defined_identifier_positions(candidate)  # pylint: disable=protected-access
+    failures: list[str] = []
+    for name in R29F_ORDERED_EXTERNAL_IDENTIFIERS:
+        use_pos = _first_identifier_reference(functions, name, functions_start)
+        definition_pos = definitions.get(name)
+        if use_pos is None:
+            failures.append(f"{name}:first_use_pos=None")
+        elif definition_pos is None or definition_pos >= use_pos:
+            failures.append(
+                f"{name}:definition_pos={definition_pos}:first_use_pos={use_pos}"
+            )
+    if failures:
+        raise RuntimeError("R29F_IDENTIFIER_ORDER_GATE=FAIL " + ",".join(failures))
+
+
 def _assert_r29c_gates(candidate: str) -> None:
     state = _region(
         candidate,
@@ -950,6 +1001,12 @@ def transform(source: str, *, include_p116: bool = True) -> str:
         "/* === R29_ATTACHED_MEDIA_FUNCTIONS_END === */",
         R29C_FUNCTIONS.strip("\n"),
     )
+    candidate = _move_region_after(
+        candidate,
+        "/* === R29_ATTACHED_MEDIA_FUNCTIONS_BEGIN === */",
+        "/* === R29_ATTACHED_MEDIA_FUNCTIONS_END === */",
+        "static EntranceSignalStage entrance_signal_stage = ENTRANCE_SIGNAL_IDLE;\n",
+    )
     candidate = _replace_once(
         candidate,
         "    return failed ? 6 : 0;\n",
@@ -966,7 +1023,6 @@ def transform(source: str, *, include_p116: bool = True) -> str:
             "P76Allocation",
             "P76_OK",
 	            "P76Runtime",
-	            "ENTRANCE_SIGNAL_DONE",
 		            "P12TxKind",
 	            "R29CMediaProfile",
 	            "R29C_MEDIAREQ26_OPEN",
@@ -978,7 +1034,6 @@ def transform(source: str, *, include_p116: bool = True) -> str:
 	            "body",
 	            "candidate",
 		            "fps",
-		            "entrance_signal_stage",
 		            "g_timeout_add_seconds",
 		            "g_random_int",
 	            "guint16",
@@ -1030,6 +1085,7 @@ def transform(source: str, *, include_p116: bool = True) -> str:
         }
     )
     r29._assert_r29_identifiers_resolved(candidate)  # pylint: disable=protected-access
+    _assert_r29f_identifier_ordering(candidate)
     _assert_r29c_gates(candidate)
     return candidate
 
@@ -1050,6 +1106,7 @@ def report() -> str:
 	            "STOP_FIELDS_HAVE_PROVEN_SOURCES=true",
 	            "FIELD_SOURCE_TABLE_ROWS=17",
 	            "UNSOURCED_FIELDS=none",
+	            "R29F_IDENTIFIER_ORDER_GATE=PASS",
 	            "R29C_BUILDER=PASS",
 	            "LIVE_PROBE_PREPARED=true",
 	            "R29_MEDIA_OPEN_MODEL=BLOCKED",
@@ -1083,6 +1140,7 @@ def main(argv: list[str] | None = None) -> int:
         transform(source_path.read_text(encoding="utf-8"), include_p116=args.include_p116),
         encoding="utf-8",
     )
+    print("R29F_IDENTIFIER_ORDER_GATE=PASS")
     return 0
 
 
