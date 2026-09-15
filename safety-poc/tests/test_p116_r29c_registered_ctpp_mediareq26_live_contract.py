@@ -123,12 +123,17 @@ class P116R29CRegisteredCtppMediaReq26LiveRunner(unittest.TestCase):
     def test_runner_records_phase_timestamps_and_alive_before_stop(self) -> None:
         ordered = (
             "OPEN_OBSERVED_AT_MS=\"$(now_ms)\"",
+            "RUNNER_MONOTONIC_OPEN_OBSERVED_AT_MS=\"$(now_mono_ms)\"",
+            "PROCESS_RUNNING_AFTER_OPEN=\"$(process_running_state \"$CANDIDATE_PID\")\"",
             "RTP_OBSERVATION_STARTED_AT_MS=\"$(now_ms)\"",
+            "RUNNER_MONOTONIC_RTP_OBSERVATION_STARTED_AT_MS=\"$(now_mono_ms)\"",
             "sleep \"$R29C_RTP_OBSERVATION_SECONDS\"",
             "RTP_OBSERVATION_ENDED_AT_MS=\"$(now_ms)\"",
-            "PROCESS_ALIVE_AFTER_OBSERVATION=true",
-            "PROCESS_ALIVE_BEFORE_STOP=\"$PROCESS_ALIVE_AFTER_OBSERVATION\"",
+            "RUNNER_MONOTONIC_RTP_OBSERVATION_ENDED_AT_MS=\"$(now_mono_ms)\"",
+            "PROCESS_RUNNING_AT_OBSERVATION_END=\"$(process_running_state \"$CANDIDATE_PID\")\"",
+            "PROCESS_RUNNING_BEFORE_STOP=\"$(process_running_state \"$CANDIDATE_PID\")\"",
             "STOP_ATTEMPT_AT_MS=\"$(now_ms)\"",
+            "RUNNER_MONOTONIC_STOP_ATTEMPT_AT_MS=\"$(now_mono_ms)\"",
             "kill -USR2",
         )
         last = -1
@@ -141,10 +146,19 @@ class P116R29CRegisteredCtppMediaReq26LiveRunner(unittest.TestCase):
             "RTP_OBSERVATION_STARTED_AT_MS=",
             "RTP_OBSERVATION_ENDED_AT_MS=",
             "STOP_ATTEMPT_AT_MS=",
-            "PROCESS_ALIVE_AFTER_OBSERVATION=",
-            "PROCESS_ALIVE_BEFORE_STOP=",
+            "RUNNER_MONOTONIC_OPEN_OBSERVED_AT_MS=",
+            "RUNNER_MONOTONIC_RTP_OBSERVATION_STARTED_AT_MS=",
+            "RUNNER_MONOTONIC_RTP_OBSERVATION_ENDED_AT_MS=",
+            "RUNNER_MONOTONIC_STOP_ATTEMPT_AT_MS=",
+            "PROCESS_RUNNING_AFTER_OPEN=",
+            "PROCESS_RUNNING_AT_OBSERVATION_END=",
+            "PROCESS_RUNNING_BEFORE_STOP=",
+            "PROCESS_RUNNING_AFTER_STOP=",
+            "PROCESS_EXIT_STATUS=",
+            "LIVENESS_EVIDENCE=",
         ):
             self.assertIn(marker, self.text)
+        self.assertNotIn("PROCESS_ALIVE_AFTER_OBSERVATION=true\n", self.text)
 
     def test_classification_cases_are_present_and_distinct(self) -> None:
         for needle in (
