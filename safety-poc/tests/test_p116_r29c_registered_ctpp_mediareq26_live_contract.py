@@ -9,6 +9,7 @@ execute a live phase and never touch the network.
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
 import unittest
 from pathlib import Path
@@ -19,6 +20,19 @@ MEDIA = ROOT / "research" / "media" / "v1"
 RUNNER = MEDIA / "ct120_run_p116_r29c_registered_ctpp_mediareq26_live.sh"
 PROBE_TRANSFORM = MEDIA / "entrance_p116_r29c_registered_ctpp_mediareq26_probe_transform.py"
 BUILDER = MEDIA / "ct120_build_p80_haos_media_helper.sh"
+BASE_MAIN_SHA = "062dbc2dbb55f99dc685ed1702c81f28798532a2"
+
+KNOWN_9_FILE_DELTA = (
+    "safety-poc/research/media/v1/P116_R29F_EXIT_FORENSICS.md",
+    "safety-poc/research/media/v1/P116_R29H_LIFETIME_AND_EVIDENCE_HARDENING.md",
+    "safety-poc/research/media/v1/ct120_run_p116_r29c_registered_ctpp_mediareq26_live.sh",
+    "safety-poc/research/media/v1/entrance_p116_r29_listener_attached_media_live_transform.py",
+    "safety-poc/research/media/v1/entrance_p116_r29c_registered_ctpp_mediareq26_probe_transform.py",
+    "safety-poc/research/media/v1/entrance_p116_r29h_lifetime_model.py",
+    "safety-poc/tests/test_p116_r29c_registered_ctpp_mediareq26_live_contract.py",
+    "safety-poc/tests/test_p116_r29c_registered_ctpp_mediareq26_probe_prep.py",
+    "safety-poc/tests/test_p116_r29h_lifetime_and_evidence_hardening.py",
+)
 
 
 class P116R29CRegisteredCtppMediaReq26LiveRunner(unittest.TestCase):
@@ -26,9 +40,63 @@ class P116R29CRegisteredCtppMediaReq26LiveRunner(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.text = RUNNER.read_text(encoding="utf-8")
 
+    def shell(self, script: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", "-c", script],
+            cwd=REPO,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=check,
+        )
+
+    def lineage_unexpected_paths(self, paths: tuple[str, ...]) -> str:
+        payload = "\n".join(paths) + "\n"
+        script = f"""set -u -o pipefail
+R29C_UNIT_TEST=1
+source {shlex.quote(str(RUNNER))}
+r29c_main_lineage_unexpected_paths <<'EOF'
+{payload}EOF
+"""
+        return self.shell(script).stdout
+
     def test_runner_exists_and_parses(self) -> None:
         self.assertTrue(RUNNER.exists(), RUNNER)
         subprocess.run(["bash", "-n", str(RUNNER)], check=True)
+
+    def test_r29c_main_lineage_allowlist_accepts_only_known_accumulated_delta(self) -> None:
+        self.assertEqual(self.lineage_unexpected_paths(KNOWN_9_FILE_DELTA), "")
+
+        unknown = "safety-poc/research/media/v1/arbitrary_unknown_file.txt"
+        self.assertEqual(
+            self.lineage_unexpected_paths(KNOWN_9_FILE_DELTA + (unknown,)).strip(),
+            unknown,
+        )
+
+    def test_r29c_main_lineage_diff_helper_fails_closed(self) -> None:
+        script = f"""set -u -o pipefail
+REPO={shlex.quote(str(REPO))}
+R29C_UNIT_TEST=1
+source {shlex.quote(str(RUNNER))}
+r29c_main_lineage_changed_paths {BASE_MAIN_SHA} does-not-exist
+"""
+        proc = self.shell(script, check=False)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(proc.stdout, "")
+
+    def test_r29c_main_lineage_allowlist_has_no_production_paths(self) -> None:
+        start = self.text.index("r29c_main_lineage_unexpected_paths() {")
+        end = self.text.index("\n}\n\narm_autorestore_watchdog", start)
+        allowlist_region = self.text[start:end]
+        self.assertEqual(allowlist_region.count("\n      -e "), len(KNOWN_9_FILE_DELTA))
+        for forbidden in (
+            "custom_components/",
+            "docs/",
+            "native/",
+            "comelit-v4-persistent-ctpp-door.c",
+            "comelit_ice_offer_holder",
+        ):
+            self.assertNotIn(forbidden, allowlist_region)
 
     def test_runner_reuses_the_r29c_probe_transform_and_builder(self) -> None:
         for needle in (

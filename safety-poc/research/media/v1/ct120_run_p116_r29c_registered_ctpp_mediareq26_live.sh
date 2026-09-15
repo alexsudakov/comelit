@@ -633,6 +633,26 @@ find_candidate_pid() {
     printf '%s\n' "$(printf '%s\n' "$pids" | awk 'NF {print; exit}')"
 }
 
+r29c_main_lineage_changed_paths() {
+    [ -n "${1:-}" ] || return 2
+    [ -n "${2:-}" ] || return 2
+    git -C "$REPO" diff --name-only "$1" "$2" | sort
+}
+
+r29c_main_lineage_unexpected_paths() {
+    grep -v \
+      -e "^$RUNNER_REL$" \
+      -e "^$TRANSFORM_REL$" \
+      -e '^safety-poc/research/media/v1/P116_R29F_EXIT_FORENSICS.md$' \
+      -e '^safety-poc/research/media/v1/P116_R29H_LIFETIME_AND_EVIDENCE_HARDENING.md$' \
+      -e '^safety-poc/research/media/v1/entrance_p116_r29_listener_attached_media_live_transform.py$' \
+      -e '^safety-poc/research/media/v1/entrance_p116_r29h_lifetime_model.py$' \
+      -e '^safety-poc/tests/test_p116_r29c_registered_ctpp_mediareq26_live_contract.py$' \
+      -e '^safety-poc/tests/test_p116_r29c_registered_ctpp_mediareq26_probe_prep.py$' \
+      -e '^safety-poc/tests/test_p116_r29h_lifetime_and_evidence_hardening.py$' |
+    grep -v '^$' || true
+}
+
 arm_autorestore_watchdog() {
     local watchdog="$RUN_ROOT/r29c-autorestore-watchdog.sh"
     local log="$RUN_ROOT/r29c-autorestore-watchdog.log"
@@ -1013,18 +1033,10 @@ preflight_gates() {
 
     if [ -n "$R29C_MAIN_SHA" ]; then
         local changed
-        changed="$(git -C "$REPO" diff --name-only "$R29C_MAIN_SHA" "$R29C_EXPECTED_COMMIT_SHA" | sort)"
+        changed="$(r29c_main_lineage_changed_paths "$R29C_MAIN_SHA" "$R29C_EXPECTED_COMMIT_SHA")" || fail "R29C_MAIN_LINEAGE_DIFF=FAIL"
         echo "R29C_MAIN_LINEAGE_DIFF_FILES=$(printf '%s' "$changed" | tr '\n' ',')"
         local unexpected
-        unexpected="$(printf '%s\n' "$changed" |
-            grep -v \
-              -e "^$RUNNER_REL$" \
-              -e "^$TRANSFORM_REL$" \
-              -e '^safety-poc/research/media/v1/P116_R29H_LIFETIME_AND_EVIDENCE_HARDENING.md$' \
-              -e '^safety-poc/research/media/v1/entrance_p116_r29h_lifetime_model.py$' \
-              -e '^safety-poc/tests/test_p116_r29c_registered_ctpp_mediareq26_live_contract.py$' \
-              -e '^safety-poc/tests/test_p116_r29h_lifetime_and_evidence_hardening.py$' |
-            grep -v '^$' || true)"
+        unexpected="$(printf '%s\n' "$changed" | r29c_main_lineage_unexpected_paths)"
         if [ -n "$unexpected" ]; then
             fail "R29C_MAIN_LINEAGE_GATE=FAIL"
         else
