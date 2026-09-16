@@ -63,6 +63,19 @@ class P116R29IPreopenIdleAndSinkOwnership(unittest.TestCase):
         self.assertTrue(evidence["after_call"]["call_init"])
         self.assertEqual(evidence["after_call"]["open_sent_count"], 1)
 
+    def test_call_transaction_timeout_before_open_remains_fail_closed(self) -> None:
+        model = R29IPreopenIdleModel()
+        model.ready()
+        model.entrance_call_init()
+        model.inherited_signaling_timeout()
+        self.assertFalse(model.process_valid)
+        self.assertEqual(
+            model.terminal_reason,
+            "ENTRANCE_SIGNALING_TIMEOUT_DURING_CALL_TRANSACTION",
+        )
+        self.assertEqual(model.open_sent_count, 0)
+        self.assertEqual(model.inherited_idle_timeouts_suppressed, 0)
+
     def test_real_transport_and_registration_failures_still_fail_closed(self) -> None:
         for method, reason in (
             ("transport_failure", "TRANSPORT_FAILURE"),
@@ -74,12 +87,13 @@ class P116R29IPreopenIdleAndSinkOwnership(unittest.TestCase):
             self.assertFalse(model.process_valid)
             self.assertEqual(model.terminal_reason, reason)
 
-    def test_generated_candidate_suppresses_only_ready_no_open_timeout(self) -> None:
+    def test_generated_candidate_suppresses_only_waiting_for_ring_timeout(self) -> None:
         timeout_start = self.generated.index("entrance_signal_timeout_cb")
         timeout_end = self.generated.index("static void\np12_tx_completed", timeout_start)
         timeout_cb = self.generated[timeout_start:timeout_end]
         for marker in (
             "r29_listener_registered_ready &&",
+            "!r29_call_transaction_created &&",
             "!r29c_registered_ctpp_mediareq26_open_sent",
             "R29I_WAITING_FOR_RING=true",
             "R29I_PREOPEN_IDLE_SIGNALING_TIMEOUT_SUPPRESSED=true",
