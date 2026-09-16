@@ -119,6 +119,43 @@ class P116R29IPreopenIdleAndSinkOwnership(unittest.TestCase):
         self.assertIn("SINK_FINALIZATION_GATE=FAIL", self.runner)
         self.assertIn("RESULT=INCONCLUSIVE_TOOLING_FAILURE", self.runner)
 
+    def _run_lineage_filter(self, paths: list[str]) -> list[str]:
+        start = self.runner.index("r29c_main_lineage_unexpected_paths() {")
+        end = self.runner.index("\n}\n\narm_autorestore_watchdog()", start) + 2
+        function = self.runner[start:end]
+        script = "\n".join(
+            (
+                "set -euo pipefail",
+                "RUNNER_REL=safety-poc/research/media/v1/ct120_run_p116_r29c_registered_ctpp_mediareq26_live.sh",
+                "TRANSFORM_REL=safety-poc/research/media/v1/entrance_p116_r29i_preopen_idle_transform.py",
+                function,
+                "r29c_main_lineage_unexpected_paths",
+            )
+        )
+        proc = subprocess.run(
+            ["bash", "-c", script],
+            input="\n".join(paths) + "\n",
+            text=True,
+            capture_output=True,
+            cwd=REPO,
+            check=True,
+        )
+        return [line for line in proc.stdout.splitlines() if line]
+
+    def test_lineage_filter_allows_exact_r29i_delta_and_rejects_unknown(self) -> None:
+        known = [
+            "safety-poc/research/media/v1/P116_R29I_PREOPEN_IDLE_AND_SINK_OWNERSHIP_HARDENING.md",
+            "safety-poc/research/media/v1/ct120_run_p116_r29i_registered_ctpp_mediareq26_live.sh",
+            "safety-poc/research/media/v1/entrance_p116_r29i_live_runner_transform.py",
+            "safety-poc/research/media/v1/entrance_p116_r29i_preopen_idle_model.py",
+            "safety-poc/research/media/v1/entrance_p116_r29i_preopen_idle_transform.py",
+            "safety-poc/research/media/v1/entrance_p116_r29i_udp_sink.py",
+            "safety-poc/tests/test_p116_r29i_preopen_idle_and_sink_ownership.py",
+        ]
+        self.assertEqual(self._run_lineage_filter(known), [])
+        unknown = "custom_components/comelit/runtime.py"
+        self.assertEqual(self._run_lineage_filter(known + [unknown]), [unknown])
+
     def test_ring_prompt_and_call_init_evidence_are_separate(self) -> None:
         for marker in (
             "RING_PROMPT_ISSUED_COUNT=0",
