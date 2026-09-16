@@ -34,6 +34,7 @@ from entrance_p116_r30b_call_transaction_model import (  # noqa: E402
     build_mediareq26_open,
     build_mediareq26_stop,
     create_call_transaction,
+    derive_native_local_connection_id,
     report,
     run_offline_happy_path,
     verify_happy_path,
@@ -111,8 +112,8 @@ class P116R30BOfflineCallTransaction(unittest.TestCase):
             "SELF_ACTIVATION_ACTIONS=0",
             "REFRESH_OR_REPEAT_ACTIONS=0",
             "PRODUCTION_FILES_CHANGED=0",
-            "LOCAL_CONNECTION_DIRECTION_RULE=CORROBORATING_EXTERNAL_ONLY",
-            "OFFICIAL_NATIVE_LOCAL_ID_EQUIVALENCE=NOT_PROVEN",
+            "LOCAL_CONNECTION_DIRECTION_RULE=NATIVE_PROVEN",
+            "OFFICIAL_NATIVE_LOCAL_ID_EQUIVALENCE=PROVEN",
             "LIVE_CALL_BOUND_MEDIA=NOT_PROVEN",
             "LIVE_AUTHORIZED=false",
         ):
@@ -430,6 +431,124 @@ class P116R30BOfflineCallTransaction(unittest.TestCase):
         barrier_corrupt_evidence = verify_happy_path(barrier_corrupt_transaction, writer)
         self.assertFalse(barrier_corrupt_evidence["CALL_SIGNALING_ORDER_BARRIER"])
 
+    def test_native_adopted_state_comes_from_inbound_sequence_and_ack_bytes(self) -> None:
+        packet = self.make_invite_packet(sequence=0xA6, acknowledgement=0x3C)
+        transaction = create_call_transaction(
+            outer_ctpp_handle=OuterCtppHandle(7),
+            serialized_ctp_packet=packet,
+            next_tx_sequence_seed=0x00,
+        )
+        same_transaction = create_call_transaction(
+            outer_ctpp_handle=OuterCtppHandle(7),
+            serialized_ctp_packet=packet,
+            next_tx_sequence_seed=0xFF,
+        )
+        parsed = parse_ctp_envelope(packet)
+        self.assertEqual(transaction.local_tx_sequence, parsed.acknowledgement)
+        self.assertEqual(transaction.local_acknowledgement, parsed.sequence)
+        self.assertEqual(same_transaction.local_tx_sequence, transaction.local_tx_sequence)
+        self.assertEqual(same_transaction.local_acknowledgement, transaction.local_acknowledgement)
+
+        corrupted = bytearray(packet)
+        corrupted[5] ^= 0x01
+        corrupted_transaction = create_call_transaction(
+            outer_ctpp_handle=OuterCtppHandle(7),
+            serialized_ctp_packet=bytes(corrupted),
+            next_tx_sequence_seed=0x00,
+        )
+        self.assertFalse(
+            corrupted_transaction.local_tx_sequence == parsed.acknowledgement
+            and corrupted_transaction.local_acknowledgement == parsed.sequence
+        )
+
+    def test_sequence_wrap_does_not_carry_into_acknowledgement(self) -> None:
+        transaction = self.make_transaction(seed=0x01)
+        transaction.next_tx_sequence = 0xFF
+        transaction.next_tx_acknowledgement = 0x44
+        writer = InterceptedWriter()
+        self.advance_to_barrier(transaction, writer)
+        transaction.allocate_media_channel(lambda: 0x3456)
+        open_write = transaction.intercept_media_open(writer)
+        open_packet = parse_ctp_envelope(open_write.serialized_ctp_packet)
+        self.assertEqual(open_packet.sequence, 0xFF)
+        self.assertEqual(open_packet.acknowledgement, 0x44)
+        self.assertEqual(transaction.local_tx_sequence, 0x00)
+        self.assertEqual(transaction.local_acknowledgement, 0x44)
+
+        corrupted = bytearray(open_write.serialized_ctp_packet)
+        corrupted[5] ^= 0x01
+        corrupted_packet = parse_ctp_envelope(bytes(corrupted))
+        self.assertFalse(
+            corrupted_packet.sequence == 0xFF and corrupted_packet.acknowledgement == 0x44
+        )
+
+    def test_peer_sequence_wrap_updates_ack_without_advancing_local_sequence(self) -> None:
+        transaction = create_call_transaction(
+            outer_ctpp_handle=OuterCtppHandle(7),
+            serialized_ctp_packet=self.make_invite_packet(sequence=0xFF, acknowledgement=0x22),
+        )
+        before_tx_sequence = transaction.local_tx_sequence
+        body_packet = build_ctp_envelope(
+            flags=FLAG_DATA,
+            connection=transaction.peer_connection_id,
+            sequence=0xFF,
+            acknowledgement=0x00,
+            inner_body=b"\x00\x11body",
+            source_raw=transaction.destination_logical_address,
+            destination_raw=transaction.source_logical_address,
+        )
+        transaction.accept_inbound_body_packet(body_packet)
+        self.assertEqual(transaction.local_acknowledgement, 0x00)
+        self.assertEqual(transaction.local_tx_sequence, before_tx_sequence)
+
+        corrupted = bytearray(body_packet)
+        corrupted[4] = 0xFE
+        with self.assertRaises(TransactionRejected):
+            transaction.accept_inbound_body_packet(bytes(corrupted))
+
+    def test_empty_ack_does_not_advance_local_tx_sequence(self) -> None:
+        transaction = self.make_transaction(seed=0x01)
+        before = transaction.local_tx_sequence
+        writer = InterceptedWriter()
+        ack_write = transaction.intercept_transport_ack(writer)
+        ack_packet = parse_ctp_envelope(ack_write.serialized_ctp_packet)
+        self.assertEqual(len(ack_packet.inner_body), 0)
+        self.assertEqual(transaction.local_tx_sequence, before)
+
+        corrupted = bytearray(ack_write.serialized_ctp_packet)
+        corrupted[4] = (corrupted[4] + 1) % 256
+        corrupted_packet = parse_ctp_envelope(bytes(corrupted))
+        self.assertFalse(corrupted_packet.sequence == before)
+
+    def test_native_connection_transform_does_not_mutate_sequence_or_acknowledgement(self) -> None:
+        packet = self.make_invite_packet(connection=b"\x12\x34", sequence=0xB1, acknowledgement=0xC2)
+        transaction = create_call_transaction(
+            outer_ctpp_handle=OuterCtppHandle(7),
+            serialized_ctp_packet=packet,
+        )
+        parsed = parse_ctp_envelope(packet)
+        self.assertEqual(transaction.candidate_local_connection_id, b"\x92\x34")
+        self.assertEqual(transaction.local_tx_sequence, parsed.acknowledgement)
+        self.assertEqual(transaction.local_acknowledgement, parsed.sequence)
+
+        corrupted = self.make_invite_packet(connection=b"\x12\x35", sequence=0xB1, acknowledgement=0xC2)
+        corrupted_transaction = create_call_transaction(
+            outer_ctpp_handle=OuterCtppHandle(7),
+            serialized_ctp_packet=corrupted,
+        )
+        self.assertNotEqual(corrupted_transaction.candidate_local_connection_id, transaction.candidate_local_connection_id)
+        self.assertEqual(corrupted_transaction.local_tx_sequence, transaction.local_tx_sequence)
+        self.assertEqual(corrupted_transaction.local_acknowledgement, transaction.local_acknowledgement)
+
+    def test_native_derived_local_connection_id_invalid_zero_and_reserved_fail_closed(self) -> None:
+        for inbound_connection in (b"\x80\x00", b"\x7f\xff", b"\xff\xff"):
+            with self.assertRaises(TransactionRejected):
+                create_call_transaction(
+                    outer_ctpp_handle=OuterCtppHandle(7),
+                    serialized_ctp_packet=self.make_invite_packet(connection=inbound_connection),
+                )
+        self.assertEqual(derive_native_local_connection_id(b"\x12\x34"), b"\x92\x34")
+
     def test_open_and_stop_mediareq26_body_fields_match_r29c_lineage(self) -> None:
         media_channel_id = 0x3456
         open_body = build_mediareq26_open(media_channel_id)
@@ -509,6 +628,7 @@ class P116R30BOfflineCallTransaction(unittest.TestCase):
         from entrance_p116_r30b_call_transaction_model import InterceptedWriter
 
         transaction = self.make_transaction(seed=0xFE)
+        transaction.next_tx_sequence = 0xFE
         writer = InterceptedWriter()
         transaction.intercept_transport_ack(writer)
         self.assertEqual(transaction.next_tx_sequence, 0xFE)
@@ -522,11 +642,11 @@ class P116R30BOfflineCallTransaction(unittest.TestCase):
         stop_write = transaction.intercept_media_stop(writer)
         self.assertEqual(stop_write.sequence, 0xFF)
         self.assertEqual(transaction.next_tx_sequence, 0x00)
-        self.assertEqual(transaction.next_tx_acknowledgement, 0x57)
+        self.assertEqual(transaction.next_tx_acknowledgement, 0x56)
 
     def test_required_unknown_and_allocator_markers_remain_explicit(self) -> None:
         self.assertEqual(MEDIA_CHANNEL_ALLOCATOR_STATUS, "OFFLINE_COMPONENT_ONLY")
-        self.assertEqual(OFFICIAL_NATIVE_LOCAL_ID_EQUIVALENCE, "NOT_PROVEN")
+        self.assertEqual(OFFICIAL_NATIVE_LOCAL_ID_EQUIVALENCE, "PROVEN")
 
     def test_forbidden_counters_are_read_only_zero_properties(self) -> None:
         writer = InterceptedWriter()
