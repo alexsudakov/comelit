@@ -252,6 +252,32 @@ EXIT_CODE=0
 OUTPUT=<none>
 ```
 
+Local reproduction of the remaining `.github/workflows/offline-safety.yml` steps, executed by the
+Hermes orchestrator on the host in this worktree (same `working-directory: safety-poc`):
+
+```text
+python3 -m py_compile scripts/*.py
+EXIT_CODE=0  PYCOMPILE_OK
+
+for script in scripts/*.sh deploy/*.sh; do bash -n "$script"; done
+EXIT_CODE=0  BASH_N_OK
+
+TMPD=$(mktemp -d); DB="$TMPD/poc.sqlite3"
+python3 -m comelit_safety_poc.cli --db "$DB" run --operation-id ci-ack  --target demo-door   --scenario ack                  --min-interval-seconds 0
+python3 -m comelit_safety_poc.cli --db "$DB" run --operation-id ci-amb  --target demo-door-2 --scenario timeout_after_accept --min-interval-seconds 0
+EXIT_CODE=0  SCENARIO_1_2_OK
+python3 -m comelit_safety_poc.cli --db "$DB" run --operation-id ci-crash --target demo-door-3 --scenario ack --fault crash_after_arm --min-interval-seconds 0
+EXIT_CODE=75  CRASH_RC=75   (workflow expects 75)
+python3 -m comelit_safety_poc.cli --db "$DB" recover
+EXIT_CODE=0  RECOVER_OK
+python3 -m comelit_safety_poc.cli --db "$DB" show --operation-id ci-crash
+STATE=UNKNOWN_OUTCOME   (workflow expects UNKNOWN_OUTCOME)
+```
+
+Every step of `offline-safety.yml` therefore reproduces green locally on the reviewed bytes. This is
+local reproduction only: the GitHub `offline-safety` check itself has no run, because the branch was
+pushed as `research/**` (the workflow triggers on `main` and `feat/**`) and no PR could be created.
+
 ## Scope Gate
 
 ```text
