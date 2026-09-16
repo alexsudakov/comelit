@@ -23,10 +23,89 @@ unset R29C_UNIT_TEST
 TRANSFORM_REL=safety-poc/research/media/v1/entrance_p116_r29i_preopen_idle_transform.py
 RUNNER_REL=safety-poc/research/media/v1/ct120_run_p116_r29i_preopen_idle_sink_live.sh
 SINK_HELPER_REL=safety-poc/research/media/v1/r29i_udp_sink.py
+MODEL_REL=safety-poc/research/media/v1/entrance_p116_r29i_preopen_idle_model.py
+DOC_REL=safety-poc/research/media/v1/P116_R29I_PREOPEN_IDLE_AND_SINK_OWNERSHIP_HARDENING.md
+TEST_REL=safety-poc/tests/test_p116_r29i_preopen_idle_and_sink_ownership.py
+R29I_BASE_MAIN_SHA=${R29I_BASE_MAIN_SHA:-${R29C_MAIN_SHA:-}}
 RING_PROMPT_ISSUED_COUNT=0
 
-# Preserve the base final report and append R29I evidence semantics afterwards.
+# Preserve inherited functions before overriding them.
+eval "$(declare -f preflight_gates | sed '1s/preflight_gates/r29i_base_preflight_gates/')"
 eval "$(declare -f print_final_block | sed '1s/print_final_block/r29i_base_print_final_block/')"
+eval "$(declare -f wait_for_call_init | sed '1s/wait_for_call_init/r29i_base_wait_for_call_init/')"
+
+r29i_lineage_gate() {
+    [ -n "$R29I_BASE_MAIN_SHA" ] || {
+        fail "R29I_BASE_MAIN_SHA_REQUIRED=true"
+        return 1
+    }
+    [ -n "$REPO" ] || {
+        fail "R29I_REPO_REQUIRED=true"
+        return 1
+    }
+    [ -n "$R29C_EXPECTED_COMMIT_SHA" ] || {
+        fail "R29I_EXPECTED_COMMIT_SHA_REQUIRED=true"
+        return 1
+    }
+
+    local changed unexpected
+    changed="$(git -C "$REPO" diff --name-only "$R29I_BASE_MAIN_SHA" "$R29C_EXPECTED_COMMIT_SHA" | sort)"
+    echo "R29I_MAIN_LINEAGE_DIFF_FILES=$(printf '%s' "$changed" | tr '\n' ',')"
+    unexpected="$(printf '%s\n' "$changed" |
+        grep -v \
+          -e "^$RUNNER_REL$" \
+          -e "^$TRANSFORM_REL$" \
+          -e "^$SINK_HELPER_REL$" \
+          -e "^$MODEL_REL$" \
+          -e "^$DOC_REL$" \
+          -e "^$TEST_REL$" |
+        grep -v '^$' || true)"
+    if [ -n "$unexpected" ]; then
+        echo "R29I_MAIN_LINEAGE_UNEXPECTED=$unexpected"
+        fail "R29I_MAIN_LINEAGE_GATE=FAIL"
+        return 1
+    fi
+
+    local required
+    for required in \
+        "$RUNNER_REL" \
+        "$TRANSFORM_REL" \
+        "$SINK_HELPER_REL" \
+        "$MODEL_REL" \
+        "$DOC_REL" \
+        "$TEST_REL"
+    do
+        printf '%s\n' "$changed" | grep -Fxq "$required" || {
+            fail "R29I_MAIN_LINEAGE_REQUIRED_FILE_MISSING=$required"
+            return 1
+        }
+        git -C "$REPO" cat-file -e "$R29C_EXPECTED_COMMIT_SHA:$required" 2>/dev/null || {
+            fail "R29I_EXPECTED_BLOB_MISSING=$required"
+            return 1
+        }
+    done
+    echo "R29I_MAIN_LINEAGE_GATE=PASS"
+}
+
+preflight_gates() {
+    r29i_lineage_gate || return 1
+    python3 -m py_compile \
+        "$REPO/$TRANSFORM_REL" \
+        "$REPO/$MODEL_REL" \
+        "$REPO/$SINK_HELPER_REL" || {
+        fail "R29I_PY_COMPILE_GATE=FAIL"
+        return 1
+    }
+
+    # The exact R29I lineage gate above supersedes only the older R29C delta allowlist.
+    # All other inherited provenance/blob/build/runtime gates remain active.
+    local saved_main_sha="$R29C_MAIN_SHA"
+    R29C_MAIN_SHA=""
+    r29i_base_preflight_gates
+    local rc=$?
+    R29C_MAIN_SHA="$saved_main_sha"
+    return "$rc"
+}
 
 start_udp_sink() {
     local port="$1"
@@ -57,7 +136,7 @@ wait_for_sink_done() {
         if [ -f "$done_file" ]; then
             return 0
         fi
-        # If the process is gone without a done marker, finalization evidence failed.
+        # A gone process without the atomically written done marker is an evidence failure.
         if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
             return 2
         fi
@@ -123,10 +202,7 @@ finalize_sinks() {
     echo "R29I_AUDIO_SINK_JOIN_CONTRACT=$AUDIO_SINK_FINALIZED"
 }
 
-# This function is called exactly once after the runner has emitted `COMELIT R29C RING NOW`.
-# It records only what the runner itself can prove. A physical press is external evidence
-# and is deliberately not inferred from CALL_INIT presence/absence.
-eval "$(declare -f wait_for_call_init | sed '1s/wait_for_call_init/r29i_base_wait_for_call_init/')"
+# Called once after `COMELIT R29C RING NOW`; record only runner-observable evidence.
 wait_for_call_init() {
     RING_PROMPT_ISSUED_COUNT=$((RING_PROMPT_ISSUED_COUNT + 1))
     r29i_base_wait_for_call_init "$@"
