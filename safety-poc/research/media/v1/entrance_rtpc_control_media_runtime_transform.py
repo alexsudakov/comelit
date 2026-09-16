@@ -134,6 +134,14 @@ static void p76_write_le32(p76_u8 *dst, p76_u32 value)
     dst[3] = (p76_u8)((value >> 24) & 0xffu);
 }
 
+static void p76_write_ctp_state_advance_sequence(p76_u8 *dst, p76_u32 previous)
+{
+    dst[0] = (p76_u8)(previous & 0xffu);
+    dst[1] = (p76_u8)((previous >> 8) & 0xffu);
+    dst[2] = (p76_u8)(((previous >> 16) + 1u) & 0xffu);
+    dst[3] = (p76_u8)((previous >> 24) & 0xffu);
+}
+
 static void p76_write_be16(p76_u8 *dst, p76_u16 value)
 {
     dst[0] = (p76_u8)((value >> 8) & 0xffu);
@@ -294,7 +302,7 @@ static p76_u32 p76_build_client_001a(
     for (i = 0; i < 60u; i++)
         out[i] = 0;
     p76_write_le16(out + 0, 0x1840u);
-    p76_write_le32(out + 2, previous_client_ctpp_sequence + 0x00010000u);
+    p76_write_ctp_state_advance_sequence(out + 2, previous_client_ctpp_sequence);
     p76_write_be16(out + 6, 0x001au);
     p76_write_be16(out + 8, 0x0011u);
     out[10] = 0x14; out[11] = 0x32;
@@ -593,6 +601,17 @@ static int p76_run_success(const char *scenario, p76_u32 rand_result)
     return p76_is_complete(&rt) ? 0 : p76_fail(P76_ERR_PARTIAL_COMPLETE);
 }
 
+static int p76_run_sequence_wrap(void)
+{
+    p76_u8 media_001a[P76_MAX_BODY];
+    p76_u32 media_001a_len;
+    media_001a_len = p76_build_client_001a(0x88ff1234u, 0x4567u, P76_ROLE_A, P76_ROLE_B, media_001a);
+    p76_print_hex("CLIENT_001A", media_001a, media_001a_len);
+    printf("NETWORK_IO_PERFORMED=false\n");
+    printf("LIVE_INVOCATIONS=0\n");
+    return 0;
+}
+
 static int p76_run_failure(const char *scenario, p76_u32 rand_result)
 {
     P76Runtime rt;
@@ -696,6 +715,8 @@ int main(int argc, char **argv)
         strcmp(scenario, "alternative") == 0 ||
         strcmp(scenario, "collision") == 0)
         return p76_run_success(scenario, rand_result);
+    if (strcmp(scenario, "sequence-wrap") == 0)
+        return p76_run_sequence_wrap();
     return p76_run_failure(scenario, rand_result);
 }
 #endif

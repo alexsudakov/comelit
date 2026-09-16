@@ -158,6 +158,30 @@ class P76RtpcControlMediaRuntimeParityTests(unittest.TestCase):
         for marker in ("HARNESS_NETWORK_CAPABLE=false", "LIVE_INVOCATIONS=0", "DOOR_ACTION_SENT=false"):
             self.assertIn(marker, self.harness_source)
 
+    def test_001a_sequence_wrap_advances_sequence_byte_without_ack_carry(self) -> None:
+        result = self.run_harness("sequence-wrap")
+        emitted = parse_emit(result.stdout)
+        packet = emitted["CLIENT_001A"]
+        original = 0x88FF1234
+        invariant = (
+            packet[2] == (original & 0xFF)
+            and packet[3] == ((original >> 8) & 0xFF)
+            and packet[4] == 0x00
+            and packet[5] == ((original >> 24) & 0xFF)
+        )
+        self.assertTrue(invariant)
+
+        corrupted = bytearray(packet)
+        corrupted[5] = (corrupted[5] + 1) % 256
+        corrupt_invariant = (
+            corrupted[2] == (original & 0xFF)
+            and corrupted[3] == ((original >> 8) & 0xFF)
+            and corrupted[4] == 0x00
+            and corrupted[5] == ((original >> 24) & 0xFF)
+        )
+        self.assertFalse(corrupt_invariant)
+        self.assertNotIn("previous_client_ctpp_sequence + 0x00010000u", self.transform_text)
+
     def test_candidate_preserves_no_second_ctpp_and_door_negative_markers(self) -> None:
         self.assertIn("ENTRANCE_SIGNALING_SECOND_CTPP_OPEN=false", self.candidate)
         self.assertIn("ENTRANCE_DOOR_ACTION_SENT=false", self.candidate)

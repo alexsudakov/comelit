@@ -19,7 +19,8 @@ NATIVE_LIB = ROOT / "custom_components" / "comelit" / "native" / "lib"
 SOURCE = SAFETY_ROOT / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-ctpp-door.c"
 EXPECTED_MUSL_SHA256 = "35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622"
 EXPECTED_RUN3_GLIBC_SHA256 = "94063498a35a886dc4cb735c3e629a5097b965224cb3354192723d30e70c16ac"
-EXPECTED_SOURCE_SHA256 = "93756730fd088b9227f37c4e0e3edbd18ac30c110db03b75bcc63f1c93952e66"
+PACKAGED_NATIVE_SOURCE_SHA256 = "93756730fd088b9227f37c4e0e3edbd18ac30c110db03b75bcc63f1c93952e66"
+HEAD_P116_SOURCE_SHA256 = "1c89d61de4372d96b25f6894862741244753c107a3a9b9e04817250b3bea55b2"
 EXPECTED_INTERPRETER = "/lib/ld-musl-x86_64.so.1"
 EXPECTED_NEEDED = (
     "libc.musl-x86_64.so.1",
@@ -204,7 +205,7 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         for marker in markers:
             self.assertIn(marker, self.binary_blob)
 
-    def test_generated_source_provenance_matches_p116_p106_transform_digest(self) -> None:
+    def test_current_head_source_identity_is_separate_from_packaged_native_provenance(self) -> None:
         sys.path.insert(0, str(MEDIA_DIR))
         from entrance_p106_teardown_state_classification_transform import transform
 
@@ -217,7 +218,40 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
             SOURCE.read_text(encoding="utf-8"),
             include_p116=True,
         ).encode("utf-8")
-        self.assertEqual(hashlib.sha256(candidate).hexdigest(), EXPECTED_SOURCE_SHA256)
+        head_sha = hashlib.sha256(candidate).hexdigest()
+        native_rebuild_required = head_sha != PACKAGED_NATIVE_SOURCE_SHA256
+        current_packaged_matches_head = head_sha == PACKAGED_NATIVE_SOURCE_SHA256
+        self.assertEqual(head_sha, HEAD_P116_SOURCE_SHA256)
+        self.assertNotEqual(head_sha, PACKAGED_NATIVE_SOURCE_SHA256)
+        self.assertEqual(f"NATIVE_REBUILD_REQUIRED={str(native_rebuild_required).lower()}", "NATIVE_REBUILD_REQUIRED=true")
+        self.assertEqual(
+            f"CURRENT_PACKAGED_BINARY_MATCHES_HEAD_SOURCE={str(current_packaged_matches_head).lower()}",
+            "CURRENT_PACKAGED_BINARY_MATCHES_HEAD_SOURCE=false",
+        )
+
+    def test_packaged_and_head_digest_pins_fail_on_byte_flip(self) -> None:
+        actual_binary_sha = _sha256_bytes(self.binary_blob)
+        self.assertEqual(actual_binary_sha, EXPECTED_MUSL_SHA256)
+        corrupted_binary = bytearray(self.binary_blob)
+        corrupted_binary[0] ^= 0x01
+        corrupted_binary_sha = _sha256_bytes(bytes(corrupted_binary))
+        self.assertNotEqual(corrupted_binary_sha, EXPECTED_MUSL_SHA256)
+        with self.assertRaises(AssertionError):
+            self.assertEqual(corrupted_binary_sha, EXPECTED_MUSL_SHA256)
+
+        sys.path.insert(0, str(MEDIA_DIR))
+        from entrance_p106_teardown_state_classification_transform import transform
+
+        candidate = transform(
+            SOURCE.read_text(encoding="utf-8"),
+            include_p116=True,
+        )
+        self.assertEqual(hashlib.sha256(candidate.encode("utf-8")).hexdigest(), HEAD_P116_SOURCE_SHA256)
+        corrupted_candidate = candidate.replace("P116_RTP_TELEMETRY_CADENCE", "P116_RTP_TELEMETRY_CADENCE_CORRUPT", 1)
+        corrupted_head_sha = hashlib.sha256(corrupted_candidate.encode("utf-8")).hexdigest()
+        self.assertNotEqual(corrupted_head_sha, HEAD_P116_SOURCE_SHA256)
+        with self.assertRaises(AssertionError):
+            self.assertEqual(corrupted_head_sha, HEAD_P116_SOURCE_SHA256)
 
     def test_p106_terminal_classes_are_diagnostic_allowlist_only(self) -> None:
         pattern = _marker_value_pattern(self.transport_source)

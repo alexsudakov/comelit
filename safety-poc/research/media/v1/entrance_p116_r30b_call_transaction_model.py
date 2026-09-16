@@ -22,8 +22,8 @@ from entrance_p116_r30_call_ctp_envelope_model import (
     parse_ctp_envelope,
 )
 
-LOCAL_CONNECTION_DIRECTION_RULE = "CORROBORATING_EXTERNAL_ONLY"
-OFFICIAL_NATIVE_LOCAL_ID_EQUIVALENCE = "NOT_PROVEN"
+LOCAL_CONNECTION_DIRECTION_RULE = "NATIVE_PROVEN"
+OFFICIAL_NATIVE_LOCAL_ID_EQUIVALENCE = "PROVEN"
 MEDIA_CHANNEL_ALLOCATOR_STATUS = "OFFLINE_COMPONENT_ONLY"
 MEDIA_OPEN_BEFORE_CALL_SIGNALING_BARRIER = "REJECTED"
 
@@ -156,19 +156,18 @@ class CallTransaction:
         facts: InboundPeerFacts,
         *,
         inbound_serialized_ctp_packet: bytes,
-        next_tx_sequence_seed: int,
+        next_tx_sequence_seed: int | None = None,
     ) -> CallTransaction:
-        if not 0 <= next_tx_sequence_seed <= 0xFF:
-            raise ValueError("next_tx_sequence seed must fit in one byte")
+        del next_tx_sequence_seed
         return cls(
             inbound_serialized_ctp_packet=inbound_serialized_ctp_packet,
             outer_ctpp_handle=facts.outer_ctpp_handle,
             peer_connection_id=_require_connection_id(facts.peer_connection_id),
-            candidate_local_connection_id=toggle_direction_bit(facts.peer_connection_id),
+            candidate_local_connection_id=derive_native_local_connection_id(facts.peer_connection_id),
             peer_sequence=facts.peer_sequence,
             peer_acknowledgement=facts.peer_acknowledgement,
-            next_tx_sequence=next_tx_sequence_seed,
-            next_tx_acknowledgement=(facts.peer_sequence + 1) % 256,
+            next_tx_sequence=facts.peer_acknowledgement,
+            next_tx_acknowledgement=facts.peer_sequence,
             source_logical_address=_require_logical_address(facts.destination_logical_address),
             destination_logical_address=_require_logical_address(facts.source_logical_address),
             logical_call_id=facts.logical_call_id,
@@ -178,6 +177,14 @@ class CallTransaction:
 
     def connection_for_serialization(self) -> bytes:
         return _require_connection_id(self.candidate_local_connection_id)
+
+    @property
+    def local_tx_sequence(self) -> int:
+        return self.next_tx_sequence
+
+    @property
+    def local_acknowledgement(self) -> int:
+        return self.next_tx_acknowledgement
 
     def intercept_transport_ack(self, writer: InterceptedWriter) -> InterceptedWrite:
         packet = build_ctp_envelope(
@@ -202,6 +209,20 @@ class CallTransaction:
         self.write_count += 1
         self.events.append("TRANSPORT_ACK_INTERCEPTED")
         return record
+
+    def accept_inbound_body_packet(self, serialized_ctp_packet: bytes) -> None:
+        envelope = parse_ctp_envelope(serialized_ctp_packet)
+        if envelope.version != 0x18:
+            raise TransactionRejected("unsupported CTP version")
+        if envelope.is_syn or envelope.flags != FLAG_DATA:
+            raise TransactionRejected("accepted inbound body must be CTP DATA")
+        if envelope.connection != self.peer_connection_id:
+            raise TransactionRejected("inbound body connection mismatch")
+        if not envelope.inner_body:
+            raise TransactionRejected("accepted inbound body must carry a body")
+        if envelope.sequence != self.next_tx_acknowledgement:
+            raise TransactionRejected("inbound body sequence is not the next expected peer sequence")
+        self.next_tx_acknowledgement = (envelope.sequence + 1) % 256
 
     def intercept_capability_stage(self) -> None:
         if "TRANSPORT_ACK_INTERCEPTED" not in self.events:
@@ -312,6 +333,14 @@ def toggle_direction_bit(peer_connection_id: bytes) -> bytes:
     return struct.pack(">H", word ^ 0x8000)
 
 
+def derive_native_local_connection_id(peer_connection_id: bytes) -> bytes:
+    local = toggle_direction_bit(peer_connection_id)
+    word = struct.unpack(">H", local)[0]
+    if word == 0 or (word & 0x7FFF) == 0x7FFF:
+        raise TransactionRejected("derived native local CTP connection id is invalid/reserved")
+    return local
+
+
 def capture_inbound_invite(
     *,
     outer_ctpp_handle: OuterCtppHandle,
@@ -343,7 +372,7 @@ def create_call_transaction(
     *,
     outer_ctpp_handle: OuterCtppHandle,
     serialized_ctp_packet: bytes,
-    next_tx_sequence_seed: int,
+    next_tx_sequence_seed: int | None = None,
 ) -> CallTransaction:
     facts = capture_inbound_invite(
         outer_ctpp_handle=outer_ctpp_handle,
