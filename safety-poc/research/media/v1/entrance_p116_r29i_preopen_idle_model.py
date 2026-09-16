@@ -4,8 +4,9 @@
 This model captures the research-only contract needed after the no-CALL_INIT
 live attempt: once the persistent research listener is READY, the inherited
 entrance signaling timeout must not terminate an otherwise healthy listener
-merely because no human ring has arrived yet. Real transport/registration
-failures remain fatal. No network I/O is performed here.
+merely because no human ring has arrived yet. The suppression ends at CALL_INIT;
+pre-OPEN call-transaction timeouts and real transport/registration failures
+remain fail-closed. No network I/O is performed here.
 """
 from __future__ import annotations
 
@@ -44,8 +45,12 @@ class R29IPreopenIdleModel:
             self.process_valid = False
             self.terminal_reason = "ENTRANCE_SIGNALING_TIMEOUT_NOT_READY"
             return
-        if self.open_sent_count == 0:
+        if not self.call_init and self.open_sent_count == 0:
             self.inherited_idle_timeouts_suppressed += 1
+            return
+        if self.call_init and self.open_sent_count == 0:
+            self.process_valid = False
+            self.terminal_reason = "ENTRANCE_SIGNALING_TIMEOUT_DURING_CALL_TRANSACTION"
             return
         self.terminal_reason = "ENTRANCE_SIGNALING_TIMEOUT_AFTER_OPEN"
 
