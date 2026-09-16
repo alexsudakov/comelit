@@ -24,20 +24,21 @@ class P116R29IPreOpenIdleAndSinkOwnership(unittest.TestCase):
         cls.generated = r29i.transform(SOURCE.read_text(encoding="utf-8"))
         cls.runner = RUNNER.read_text(encoding="utf-8")
 
-    def test_waiting_for_ring_survives_inherited_timeout_and_long_idle(self) -> None:
+    def test_waiting_for_ring_survives_30_and_90_seconds_without_legacy_timer(self) -> None:
         model = R29IPreOpenIdleModel()
         model.ready()
+        self.assertFalse(model.legacy_signaling_timeout_armed)
+        self.assertTrue(model.runner_ring_timeout_active)
         model.advance_waiting_for_ring(30_000)
-        model.inherited_signaling_timeout()
         self.assertTrue(model.process_valid)
         self.assertTrue(model.waiting_for_ring)
-        self.assertEqual(model.idle_timeout_deferred_count, 1)
         model.advance_waiting_for_ring(60_000)
         self.assertEqual(model.now_ms, 90_000)
         self.assertTrue(model.process_valid)
         model.entrance_call_init()
         self.assertTrue(model.call_init)
         self.assertFalse(model.waiting_for_ring)
+        self.assertFalse(model.runner_ring_timeout_active)
         model.send_open()
         self.assertEqual(model.open_sent_count, 1)
 
@@ -49,37 +50,28 @@ class P116R29IPreOpenIdleAndSinkOwnership(unittest.TestCase):
         self.assertTrue(model.controlled_exit)
         self.assertEqual(model.abort_class, "TRANSPORT_HARD_FAILURE_PRE_OPEN")
 
-    def test_call_transaction_timeout_before_open_still_fails_closed(self) -> None:
+    def test_real_preopen_registration_failure_still_fails_closed(self) -> None:
         model = R29IPreOpenIdleModel()
         model.ready()
-        model.entrance_call_init()
-        model.inherited_signaling_timeout()
+        model.registration_hard_failure()
         self.assertFalse(model.process_valid)
-        self.assertEqual(model.terminal_reason, "ENTRANCE_SIGNALING_TIMEOUT_BEFORE_OPEN")
+        self.assertTrue(model.controlled_exit)
+        self.assertEqual(model.abort_class, "REGISTRATION_HARD_FAILURE_PRE_OPEN")
 
-    def test_generated_callback_defers_only_registered_ready_idle(self) -> None:
-        start = self.generated.index("entrance_signal_timeout_cb")
-        end = self.generated.index("static void\np12_tx_completed", start)
-        callback = self.generated[start:end]
+    def test_generated_candidate_does_not_arm_obsolete_signaling_timeout(self) -> None:
+        timeout_schedule = '''g_timeout_add(\n                        ENTRANCE_SIGNAL_TIMEOUT_MS,\n                        entrance_signal_timeout_cb,\n                        NULL)'''
+        settle_schedule = '''g_timeout_add(\n                        ENTRANCE_SIGNAL_SETTLE_MS,\n                        entrance_signal_start_cb,\n                        NULL)'''
+        self.assertNotIn(timeout_schedule, self.generated)
+        self.assertEqual(self.generated.count(settle_schedule), 1)
+        self.assertEqual(self.generated.count("entrance_signal_timeout_cb"), 1)
+        self.assertIn("R29I_LEGACY_SIGNALING_TIMEOUT_ARMED=false", self.generated)
+        self.assertIn("R29I_WAITING_FOR_RING_TIMEOUT_OWNER=RUNNER", self.generated)
         for marker in (
-            "r29_listener_registered_ready",
-            "r29_attached_media_state == R29_LISTENER_REGISTERED_READY",
-            "!r29_call_transaction_created",
-            "!r29_call_transaction_active",
-            "!r29c_registered_ctpp_mediareq26_open_sent",
-            "R29I_WAITING_FOR_RING_SIGNALING_TIMEOUT_DEFERRED=true",
-            "r29h_defer_inherited_main_loop_quit",
-            "failed = TRUE;",
+            "RESEARCH_LISTENER_READY=true",
+            "V4_RING_LISTENER_READY=true",
+            "r29_capture_ready_snapshot();",
         ):
-            self.assertIn(marker, callback)
-        self.assertLess(
-            callback.index("R29I_WAITING_FOR_RING_SIGNALING_TIMEOUT_DEFERRED=true"),
-            callback.index("r29h_defer_inherited_main_loop_quit"),
-        )
-        self.assertLess(
-            callback.index("r29h_defer_inherited_main_loop_quit"),
-            callback.index("failed = TRUE;"),
-        )
+            self.assertIn(marker, self.generated)
 
     def test_mediareq26_semantics_are_inherited_unchanged(self) -> None:
         base = __import__("entrance_p116_r29c_registered_ctpp_mediareq26_probe_transform")
@@ -91,6 +83,65 @@ class P116R29IPreOpenIdleAndSinkOwnership(unittest.TestCase):
             "ONE_SHOT_STOP_GATE=%s",
         ):
             self.assertEqual(self.generated.count(marker), base_generated.count(marker))
+
+        # Compare the actual serializer functions, not only report markers.
+        for function in (
+            "r29c_build_mediareq26",
+            "r29c_emit_registered_mediareq26",
+            "r29c_queue_registered_mediareq26",
+        ):
+            self.assertEqual(
+                self._extract_c_function(self.generated, function),
+                self._extract_c_function(base_generated, function),
+            )
+
+    @staticmethod
+    def _extract_c_function(text: str, name: str) -> str:
+        needle = f"\n{name}("
+        start = text.find(needle)
+        if start < 0:
+            raise AssertionError(f"missing C function {name}")
+        start += 1
+        brace = text.find("{", start)
+        if brace < 0:
+            raise AssertionError(f"missing C function body {name}")
+        depth = 0
+        i = brace
+        state = "normal"
+        while i < len(text):
+            ch = text[i]
+            nxt = text[i + 1] if i + 1 < len(text) else ""
+            if state == "normal":
+                if ch == '"':
+                    state = "string"
+                elif ch == "'":
+                    state = "char"
+                elif ch == "/" and nxt == "/":
+                    state = "line_comment"
+                    i += 1
+                elif ch == "/" and nxt == "*":
+                    state = "block_comment"
+                    i += 1
+                elif ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return text[start : i + 1]
+            elif state in {"string", "char"}:
+                if ch == "\\":
+                    i += 1
+                elif (state == "string" and ch == '"') or (state == "char" and ch == "'"):
+                    state = "normal"
+            elif state == "line_comment":
+                if ch == "\n":
+                    state = "normal"
+            elif state == "block_comment":
+                if ch == "*" and nxt == "/":
+                    state = "normal"
+                    i += 1
+            i += 1
+        raise AssertionError(f"unterminated C function {name}")
 
     def _run_sink_case(self, datagrams: int) -> dict[str, str]:
         script = f'''set -euo pipefail
