@@ -5,9 +5,8 @@ Research-only. Builds on the R29C registered-CTPP mediareq26 candidate and chang
 only the inherited entrance signaling timeout ownership before CALL_INIT:
 while the registered listener is ready and no call transaction has been created,
 the timeout is treated as WAITING_FOR_RING idle and does not fail the process.
-After CALL_INIT a short bounded grace protects against a same-tick inherited timer
-race while preserving fail-closed behavior until OPEN; after OPEN the R29H bounded
-section remains unchanged.
+Once CALL_INIT has created a real call transaction, the inherited pre-OPEN fail-closed
+behavior is retained unchanged; after OPEN the R29H bounded section remains unchanged.
 """
 from __future__ import annotations
 
@@ -17,7 +16,6 @@ from pathlib import Path
 import entrance_p116_r29c_registered_ctpp_mediareq26_probe_transform as r29c
 
 DEFAULT_SOURCE = r29c.DEFAULT_SOURCE
-R29I_PREOPEN_CALL_GRACE_MS = 5000
 
 
 def _replace_once(text: str, old: str, new: str, label: str) -> str:
@@ -45,31 +43,22 @@ def transform(source: str, *, include_p116: bool = True) -> str:
     return G_SOURCE_REMOVE;
 }'''
 
-    new = f'''    fprintf(
+    new = '''    fprintf(
         stderr,
         "ENTRANCE_SIGNALING_TIMEOUT=true STAGE=%u\\n",
         (unsigned)entrance_signal_stage
     );
     if (r29_listener_registered_ready &&
         !r29_call_transaction_created &&
+        !r29_call_transaction_active &&
         !r29c_registered_ctpp_mediareq26_open_sent &&
-        r29h_lifetime_phase == R29H_LIFETIME_PRE_OPEN) {{
+        r29h_lifetime_phase == R29H_LIFETIME_PRE_OPEN) {
         printf("R29I_WAITING_FOR_RING_IDLE_TIMEOUT_DEFERRED=true\\n");
         printf("R29I_WAITING_FOR_RING_STAGE=%u\\n",
                (unsigned)entrance_signal_stage);
         fflush(stdout);
         return G_SOURCE_CONTINUE;
-    }}
-    if (r29_listener_registered_ready &&
-        r29_call_transaction_created &&
-        !r29c_registered_ctpp_mediareq26_open_sent &&
-        r29h_lifetime_phase == R29H_LIFETIME_PRE_OPEN &&
-        r29_call_init_monotonic_ms > 0 &&
-        (p116_monotonic_ms() - r29_call_init_monotonic_ms) < {R29I_PREOPEN_CALL_GRACE_MS}LL) {{
-        printf("R29I_PREOPEN_CALL_GRACE_ACTIVE=true\\n");
-        fflush(stdout);
-        return G_SOURCE_CONTINUE;
-    }}
+    }
     if (r29h_defer_inherited_main_loop_quit(
             "ENTRANCE_SIGNALING_TIMEOUT",
             (guint)entrance_signal_stage))
@@ -78,7 +67,7 @@ def transform(source: str, *, include_p116: bool = True) -> str:
     if (loop)
         g_main_loop_quit(loop);
     return G_SOURCE_REMOVE;
-}}'''
+}'''
 
     candidate = _replace_once(
         candidate,
@@ -96,13 +85,15 @@ def transform(source: str, *, include_p116: bool = True) -> str:
         "DOOR_ACTIONS_SENT=%u",
         "GATE_ACTIONS_SENT=%u",
         "R29I_WAITING_FOR_RING_IDLE_TIMEOUT_DEFERRED=true",
-        "R29I_PREOPEN_CALL_GRACE_ACTIVE=true",
-        f"< {R29I_PREOPEN_CALL_GRACE_MS}LL",
+        "!r29_call_transaction_created",
+        "!r29_call_transaction_active",
         "return G_SOURCE_CONTINUE;",
     )
     for marker in required:
         if marker not in candidate:
             raise RuntimeError(f"R29I_GATE=FAIL missing={marker}")
+    if "R29I_PREOPEN_CALL_GRACE_ACTIVE" in candidate:
+        raise RuntimeError("R29I_GATE=FAIL unexpected pre-open call grace")
     return candidate
 
 
@@ -111,7 +102,6 @@ def report() -> str:
         (
             "=== COMELIT P116 R29I PREOPEN IDLE TRANSFORM ===",
             "WAITING_FOR_RING_TIMEOUT_OWNERSHIP_FIXED=true",
-            f"PREOPEN_CALL_GRACE_MS={R29I_PREOPEN_CALL_GRACE_MS}",
             "PREOPEN_CALL_TRANSACTION_FAIL_CLOSED_PRESERVED=true",
             "POST_OPEN_R29H_BOUNDED_SECTION_PRESERVED=true",
             "MEDIAREQ26_SEMANTICS_CHANGED=false",
