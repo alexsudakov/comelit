@@ -184,11 +184,21 @@ def transform(text: str) -> str:
     )
     text = _replace_once(
         text,
-        '    echo "RING_BUDGET_USED=$RING_BUDGET_USED"\n',
+        'costs_block() {\n'
+        '    echo "R29_LIVE_RUN_IGNORED=$R29_LIVE_RUN"\n'
+        '    echo "R29C_LIVE_AUTHORIZED=$R29C_LIVE_AUTHORIZED"\n'
+        '    echo "LIVE_ATTEMPT_BUDGET_USED=$LIVE_ATTEMPT_BUDGET_USED"\n'
+        '    echo "RING_BUDGET_USED=$RING_BUDGET_USED"\n'
+        '    echo "OPEN_BUDGET_USED=$OPEN_BUDGET_USED"\n',
+        'costs_block() {\n'
+        '    echo "R29_LIVE_RUN_IGNORED=$R29_LIVE_RUN"\n'
+        '    echo "R29C_LIVE_AUTHORIZED=$R29C_LIVE_AUTHORIZED"\n'
+        '    echo "LIVE_ATTEMPT_BUDGET_USED=$LIVE_ATTEMPT_BUDGET_USED"\n'
         '    echo "RING_BUDGET_USED=$RING_BUDGET_USED"\n'
         '    echo "RING_PROMPT_ISSUED_COUNT=$RING_PROMPT_ISSUED_COUNT"\n'
         '    echo "CALL_INIT_OBSERVED_COUNT=$CALL_INIT_OBSERVED_COUNT"\n'
-        '    echo "PHYSICAL_RING_REPORTED_BY_USER=$PHYSICAL_RING_REPORTED_BY_USER"\n',
+        '    echo "PHYSICAL_RING_REPORTED_BY_USER=$PHYSICAL_RING_REPORTED_BY_USER"\n'
+        '    echo "OPEN_BUDGET_USED=$OPEN_BUDGET_USED"\n',
         "R29I costs evidence",
     )
 
@@ -213,11 +223,10 @@ def transform(text: str) -> str:
         "R29I final sink gate marker",
     )
 
-    forbidden = (
+    for marker in (
         'VIDEO_SINK_PID="$(start_udp_sink',
         'AUDIO_SINK_PID="$(start_udp_sink',
-    )
-    for marker in forbidden:
+    ):
         if marker in text:
             raise RuntimeError(f"R29I_RUNNER_GATE=FAIL forbidden={marker}")
     for marker in (
