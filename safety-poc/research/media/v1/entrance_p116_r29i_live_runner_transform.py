@@ -4,7 +4,9 @@
 The overlay is research-only. It switches candidate generation to the R29I
 pre-open-idle transform, makes UDP sinks direct children of the runner so they
 can be joined deterministically, treats missing final counters after join as a
-tooling failure, and separates ring prompt evidence from observed CALL_INIT.
+tooling failure, separates ring prompt evidence from observed CALL_INIT, and
+extends the existing fail-closed lineage gate only for the exact R29I research
+files introduced by this phase.
 """
 from __future__ import annotations
 
@@ -104,6 +106,22 @@ _FINALIZE_SINKS = r'''finalize_sinks() {
 }'''
 
 
+_LINEAGE_TAIL = r'''      -e '^safety-poc/tests/test_p116_r29h_lifetime_and_evidence_hardening.py$' |
+    grep -v '^$' || true
+}'''
+
+
+_R29I_LINEAGE_TAIL = r'''      -e '^safety-poc/tests/test_p116_r29h_lifetime_and_evidence_hardening.py$' \
+      -e '^safety-poc/research/media/v1/P116_R29I_PREOPEN_IDLE_AND_SINK_OWNERSHIP_HARDENING.md$' \
+      -e '^safety-poc/research/media/v1/ct120_run_p116_r29i_registered_ctpp_mediareq26_live.sh$' \
+      -e '^safety-poc/research/media/v1/entrance_p116_r29i_live_runner_transform.py$' \
+      -e '^safety-poc/research/media/v1/entrance_p116_r29i_preopen_idle_model.py$' \
+      -e '^safety-poc/research/media/v1/entrance_p116_r29i_udp_sink.py$' \
+      -e '^safety-poc/tests/test_p116_r29i_preopen_idle_and_sink_ownership.py$' |
+    grep -v '^$' || true
+}'''
+
+
 def transform(text: str) -> str:
     text = _replace_once(
         text,
@@ -111,6 +129,12 @@ def transform(text: str) -> str:
         "TRANSFORM_REL=safety-poc/research/media/v1/entrance_p116_r29i_preopen_idle_transform.py\n"
         "R29I_SINK_HELPER_REL=safety-poc/research/media/v1/entrance_p116_r29i_udp_sink.py\n",
         "R29I transform path",
+    )
+    text = _replace_once(
+        text,
+        _LINEAGE_TAIL,
+        _R29I_LINEAGE_TAIL,
+        "R29I exact lineage allowlist",
     )
     text = _replace_once(
         text,
@@ -235,6 +259,8 @@ def transform(text: str) -> str:
         "RING_PROMPT_ISSUED_COUNT=",
         "CALL_INIT_OBSERVED_COUNT=",
         "COMELIT R29I RING NOW",
+        "P116_R29I_PREOPEN_IDLE_AND_SINK_OWNERSHIP_HARDENING.md",
+        "test_p116_r29i_preopen_idle_and_sink_ownership.py",
     ):
         if marker not in text:
             raise RuntimeError(f"R29I_RUNNER_GATE=FAIL missing={marker}")
