@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import unittest
@@ -97,51 +98,60 @@ class P116R29IPreOpenIdleAndSinkOwnership(unittest.TestCase):
 
     @staticmethod
     def _extract_c_function(text: str, name: str) -> str:
-        needle = f"\n{name}("
-        start = text.find(needle)
-        if start < 0:
-            raise AssertionError(f"missing C function {name}")
-        start += 1
-        brace = text.find("{", start)
-        if brace < 0:
-            raise AssertionError(f"missing C function body {name}")
-        depth = 0
-        i = brace
-        state = "normal"
-        while i < len(text):
-            ch = text[i]
-            nxt = text[i + 1] if i + 1 < len(text) else ""
-            if state == "normal":
-                if ch == '"':
-                    state = "string"
-                elif ch == "'":
-                    state = "char"
-                elif ch == "/" and nxt == "/":
-                    state = "line_comment"
-                    i += 1
-                elif ch == "/" and nxt == "*":
-                    state = "block_comment"
-                    i += 1
-                elif ch == "{":
-                    depth += 1
-                elif ch == "}":
-                    depth -= 1
-                    if depth == 0:
-                        return text[start : i + 1]
-            elif state in {"string", "char"}:
-                if ch == "\\":
-                    i += 1
-                elif (state == "string" and ch == '"') or (state == "char" and ch == "'"):
-                    state = "normal"
-            elif state == "line_comment":
-                if ch == "\n":
-                    state = "normal"
-            elif state == "block_comment":
-                if ch == "*" and nxt == "/":
-                    state = "normal"
-                    i += 1
-            i += 1
-        raise AssertionError(f"unterminated C function {name}")
+        """Return a C function definition, ignoring prototypes and call sites.
+
+        Generated R29C code intentionally mixes indentation/newline styles, so a
+        literal ``\n{name}(`` anchor is too brittle.  A real definition is the
+        occurrence whose opening brace precedes the next semicolon.
+        """
+        pattern = re.compile(rf"\b{re.escape(name)}\s*\(")
+        for match in pattern.finditer(text):
+            brace = text.find("{", match.end())
+            semicolon = text.find(";", match.end())
+            if brace < 0:
+                continue
+            if semicolon >= 0 and semicolon < brace:
+                continue
+
+            start = text.rfind("\n", 0, match.start()) + 1
+            depth = 0
+            i = brace
+            state = "normal"
+            while i < len(text):
+                ch = text[i]
+                nxt = text[i + 1] if i + 1 < len(text) else ""
+                if state == "normal":
+                    if ch == '"':
+                        state = "string"
+                    elif ch == "'":
+                        state = "char"
+                    elif ch == "/" and nxt == "/":
+                        state = "line_comment"
+                        i += 1
+                    elif ch == "/" and nxt == "*":
+                        state = "block_comment"
+                        i += 1
+                    elif ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0:
+                            return text[start : i + 1]
+                elif state in {"string", "char"}:
+                    if ch == "\\":
+                        i += 1
+                    elif (state == "string" and ch == '"') or (state == "char" and ch == "'"):
+                        state = "normal"
+                elif state == "line_comment":
+                    if ch == "\n":
+                        state = "normal"
+                elif state == "block_comment":
+                    if ch == "*" and nxt == "/":
+                        state = "normal"
+                        i += 1
+                i += 1
+            raise AssertionError(f"unterminated C function {name}")
+        raise AssertionError(f"missing C function {name}")
 
     def _run_sink_case(self, datagrams: int) -> dict[str, str]:
         script = f'''set -euo pipefail
