@@ -4,6 +4,7 @@
 TASK_ID=COMELIT-P116-R30D-NATIVE-CTP-RUNTIME-INTEGRATION
 BASE_SHA=9dc2a9bec0d0dee60cfc7c66aa1588642b7d5f0f
 FINAL_SHA=43b7096309dcb8c187dbbd6c11814f4df36134e3
+FINAL_SHA_SEMANTICS=EXECUTOR_OBSERVED_BRANCH_HEAD (a commit cannot embed the sha of the commit that contains it; the authoritative pushed head is returned by the Hermes orchestrator report)
 ACTUAL_EXECUTOR=codex-cli
 CODEX_VERSION=codex-cli 0.137.0
 CHANGED_FILES=8
@@ -299,3 +300,5 @@ R27_GENERATED_SOURCE_SHA_GATE_WOULD_FAIL_CLOSED_FOR_FRESH_R30D_BUILD=true
 ```
 
 The test module preserves that runner value as `RUNNER_EMBEDDED_PRE_R30D_SOURCE_SHA` because the runner was not approved for R30D editing and because it documents the live-runner/native-helper rebuild boundary. Updating that runner pin belongs to the later native-rebuild / reproducible-provenance stage together with the rebuild itself. A green R30D is a PASS of the R30D model and sources only, not native-helper live readiness, and no live test may run before that rebuild stage.
+
+`FINAL_SHA` is the branch head the Codex executor observed during its pass, not the sha of the commit that carries this document: a commit cannot embed its own sha, and the orchestrator's commit for a review pass necessarily lands after the executor has stopped. The authoritative pushed branch head is returned in the Hermes orchestrator report. Only the orchestrator writes git in this task; the executor never commits.
