@@ -26,8 +26,7 @@ registered READY
 -> WAITING_FOR_RING
 -> inherited entrance signaling timer may fire repeatedly without killing the listener
 -> CALL_INIT accepted
--> bounded short pre-OPEN call grace protects only the same-tick timer race
--> existing fail-closed pre-OPEN behavior resumes
+-> existing pre-OPEN fail-closed behavior applies to the real call transaction
 -> real OPEN
 -> existing R29H OPEN -> observation -> STOP bounded section
 ```
@@ -36,14 +35,18 @@ The WAITING_FOR_RING exception applies only when all of these are true:
 
 - listener is registered/ready;
 - no call transaction has been created;
+- no call transaction is active;
 - no registered-CTPP mediareq26 OPEN has been sent;
 - lifetime phase is still PRE_OPEN.
 
-A 5000 ms post-CALL_INIT grace protects a timer callback already due in the same event
-loop epoch. It does not create a reconnect, retry, refresh loop, Door/Gate action or
-second OPEN. Once that bounded grace expires, the inherited pre-OPEN fail-closed path
-remains intact. After real OPEN, R29H remains the owner of the bounded observation/STOP
-section.
+There is no post-CALL_INIT grace or retry. As soon as a real call transaction exists,
+the inherited pre-OPEN fail-closed behavior is retained. Transport/registration failure
+also remains fail-closed. After a real OPEN, R29H remains the owner of the bounded
+observation/STOP section.
+
+The deterministic lifetime model exercises 30 s and 60 s inherited idle timeouts inside
+a 90 s runner-owned ring window without wall-clock sleeping, then confirms that the
+same timeout becomes fail-closed after CALL_INIT.
 
 ## R29I sink finalization contract
 
@@ -59,6 +62,14 @@ evidence failure and remains `UNKNOWN`; it is never coerced to zero.
 
 This is an explicit evidence/join contract and does not rely on Bash `wait` being able to
 reap a process launched inside command substitution.
+
+## R29I lineage gate
+
+Because R29I adds a new transform, runner wrapper, sink helper, deterministic lifetime
+model, test and research contract, it has an exact six-file lineage allowlist relative to
+the promoted pre-R29I main. Wildcards and directory-wide allowances are not used. The
+older R29C delta allowlist is bypassed only after this stricter R29I gate passes; all
+remaining inherited blob, provenance, build, runtime and authorization gates stay active.
 
 ## Ring evidence semantics
 
