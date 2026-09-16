@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import socket
 import subprocess
 import sys
@@ -15,10 +14,12 @@ REPO = ROOT.parent
 MEDIA = ROOT / "research" / "media" / "v1"
 SOURCE = ROOT / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-ctpp-door.c"
 TRANSFORM = MEDIA / "entrance_p116_r29i_preopen_idle_transform.py"
+MODEL = MEDIA / "entrance_p116_r29i_preopen_idle_model.py"
 RUNNER = MEDIA / "ct120_run_p116_r29i_preopen_idle_sink_live.sh"
 SINK = MEDIA / "r29i_udp_sink.py"
 
 sys.path.insert(0, str(MEDIA))
+import entrance_p116_r29i_preopen_idle_model as r29i_model
 import entrance_p116_r29i_preopen_idle_transform as r29i
 
 
@@ -38,6 +39,7 @@ class P116R29IPreopenIdleAndSinkOwnership(unittest.TestCase):
 
         waiting_gate = """r29_listener_registered_ready &&
         !r29_call_transaction_created &&
+        !r29_call_transaction_active &&
         !r29c_registered_ctpp_mediareq26_open_sent &&
         r29h_lifetime_phase == R29H_LIFETIME_PRE_OPEN"""
         self.assertIn(waiting_gate, timeout_cb)
@@ -48,7 +50,7 @@ class P116R29IPreopenIdleAndSinkOwnership(unittest.TestCase):
             timeout_cb.index("failed = TRUE;"),
         )
 
-    def test_call_transaction_remains_fail_closed_after_bounded_grace(self) -> None:
+    def test_call_transaction_remains_strictly_fail_closed_before_open(self) -> None:
         timeout_start = self.generated.index("entrance_signal_timeout_cb")
         timeout_end = self.generated.index(
             "static void\np12_tx_completed",
@@ -56,15 +58,48 @@ class P116R29IPreopenIdleAndSinkOwnership(unittest.TestCase):
         )
         timeout_cb = self.generated[timeout_start:timeout_end]
 
-        self.assertIn("r29_call_transaction_created &&", timeout_cb)
-        self.assertIn("R29I_PREOPEN_CALL_GRACE_ACTIVE=true", timeout_cb)
-        self.assertIn(f"< {r29i.R29I_PREOPEN_CALL_GRACE_MS}LL", timeout_cb)
-        # Once the grace predicate no longer holds, the inherited fail-closed path remains.
+        self.assertIn("!r29_call_transaction_created", timeout_cb)
+        self.assertIn("!r29_call_transaction_active", timeout_cb)
+        self.assertNotIn("R29I_PREOPEN_CALL_GRACE_ACTIVE", timeout_cb)
         self.assertIn("failed = TRUE;", timeout_cb)
         self.assertIn("g_main_loop_quit(loop);", timeout_cb)
-        self.assertLess(
-            timeout_cb.index("R29I_PREOPEN_CALL_GRACE_ACTIVE=true"),
-            timeout_cb.index("failed = TRUE;"),
+
+    def test_virtual_30s_and_60s_idle_timeouts_survive_then_call_is_fail_closed(self) -> None:
+        events, post_call = r29i_model.simulate_idle_then_call(
+            ring_window_seconds=90,
+            inherited_timeout_seconds=30,
+            call_at_seconds=90,
+        )
+        self.assertEqual([t for t, _ in events], [30, 60])
+        self.assertTrue(
+            all(
+                action is r29i_model.Action.CONTINUE_WAITING_FOR_RING
+                for _, action in events
+            )
+        )
+        self.assertIs(post_call, r29i_model.Action.FAIL_CLOSED)
+
+    def test_virtual_call_at_60s_after_long_idle_is_accepted_by_lifetime_model(self) -> None:
+        events, post_call = r29i_model.simulate_idle_then_call(
+            ring_window_seconds=90,
+            inherited_timeout_seconds=30,
+            call_at_seconds=60,
+        )
+        self.assertEqual(events, [(30, r29i_model.Action.CONTINUE_WAITING_FOR_RING)])
+        self.assertIs(post_call, r29i_model.Action.FAIL_CLOSED)
+
+    def test_transport_and_registration_failures_remain_fail_closed_while_idle(self) -> None:
+        self.assertIs(
+            r29i_model.entrance_signaling_timeout(
+                r29i_model.State(transport_healthy=False)
+            ),
+            r29i_model.Action.FAIL_CLOSED,
+        )
+        self.assertIs(
+            r29i_model.entrance_signaling_timeout(
+                r29i_model.State(registration_healthy=False)
+            ),
+            r29i_model.Action.FAIL_CLOSED,
         )
 
     def test_post_open_r29h_bounded_section_is_preserved(self) -> None:
@@ -76,6 +111,12 @@ class P116R29IPreopenIdleAndSinkOwnership(unittest.TestCase):
             "R29H_LIFETIME_POST_STOP",
         ):
             self.assertIn(marker, self.generated)
+        self.assertIs(
+            r29i_model.entrance_signaling_timeout(
+                r29i_model.State(open_sent=True, post_open_bounded_section=True)
+            ),
+            r29i_model.Action.DEFER_TO_R29H_BOUNDED_SECTION,
+        )
 
     def test_mediareq26_and_safety_surfaces_unchanged(self) -> None:
         for marker in (
@@ -100,65 +141,7 @@ class P116R29IPreopenIdleAndSinkOwnership(unittest.TestCase):
         sock.close()
         return int(port)
 
-    def _run_sink_case(self, datagrams: int) -> tuple[int, bool, int]:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            count_file = root / "video.count"
-            first_file = root / "video.first"
-            done_file = root / "video.done"
-            port = self._free_udp_port()
-            proc = subprocess.Popen(
-                [
-                    sys.executable,
-                    str(SINK),
-                    "--port",
-                    str(port),
-                    "--count-file",
-                    str(count_file),
-                    "--first-file",
-                    str(first_file),
-                    "--done-file",
-                    str(done_file),
-                    "--timeout-seconds",
-                    "10",
-                ],
-                cwd=REPO,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            try:
-                deadline = time.monotonic() + 3.0
-                while time.monotonic() < deadline:
-                    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                    try:
-                        probe.sendto(b"probe" if datagrams else b"", ("127.0.0.1", port))
-                        if datagrams:
-                            # The first packet above counts as one; send the remaining packets.
-                            for idx in range(1, datagrams):
-                                probe.sendto(f"pkt-{idx}".encode(), ("127.0.0.1", port))
-                        break
-                    except OSError:
-                        time.sleep(0.05)
-                    finally:
-                        probe.close()
-                if datagrams == 0:
-                    # Zero-count case must not inject a packet; allow bind/startup instead.
-                    time.sleep(0.2)
-                else:
-                    time.sleep(0.2)
-                proc.terminate()
-                rc = proc.wait(timeout=3)
-            finally:
-                if proc.poll() is None:
-                    proc.kill()
-                    proc.wait(timeout=3)
-            count = int(count_file.read_text(encoding="utf-8").strip())
-            done = done_file.read_text(encoding="utf-8").strip() == "done"
-            return rc, done, count
-
     def test_zero_datagram_finalization_materializes_zero_after_join(self) -> None:
-        # Run a true zero-count sink without sending traffic.
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             count_file = root / "video.count"
@@ -182,8 +165,7 @@ class P116R29IPreopenIdleAndSinkOwnership(unittest.TestCase):
                 ],
                 cwd=REPO,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
+                stderr=subprocess.DEVNULL,
             )
             time.sleep(0.25)
             proc.terminate()
@@ -216,8 +198,7 @@ class P116R29IPreopenIdleAndSinkOwnership(unittest.TestCase):
                 ],
                 cwd=REPO,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
+                stderr=subprocess.DEVNULL,
             )
             time.sleep(0.25)
             sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -253,10 +234,29 @@ class P116R29IPreopenIdleAndSinkOwnership(unittest.TestCase):
         self.assertIn('wait_for_sink_done "$VIDEO_SINK_PID"', finalize_body)
         self.assertIn('wait_for_sink_done "$AUDIO_SINK_PID"', finalize_body)
 
+    def test_runner_has_exact_r29i_lineage_gate(self) -> None:
+        for marker in (
+            "R29I_BASE_MAIN_SHA",
+            "r29i_lineage_gate()",
+            "R29I_MAIN_LINEAGE_GATE=PASS",
+            "R29I_MAIN_LINEAGE_GATE=FAIL",
+            "SINK_HELPER_REL",
+            "MODEL_REL",
+            "DOC_REL",
+            "TEST_REL",
+        ):
+            self.assertIn(marker, self.runner)
+        self.assertIn('R29C_MAIN_SHA=""', self.runner)
+        self.assertNotIn("grep -v '^safety-poc/'", self.runner)
+
     def test_runner_wrapper_parses_and_python_files_compile(self) -> None:
         subprocess.run(["bash", "-n", str(RUNNER)], cwd=REPO, check=True)
-        for path in (TRANSFORM, SINK):
-            subprocess.run([sys.executable, "-m", "py_compile", str(path)], cwd=REPO, check=True)
+        for path in (TRANSFORM, MODEL, SINK):
+            subprocess.run(
+                [sys.executable, "-m", "py_compile", str(path)],
+                cwd=REPO,
+                check=True,
+            )
 
 
 if __name__ == "__main__":
