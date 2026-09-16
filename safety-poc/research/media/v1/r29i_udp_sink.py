@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Deterministic UDP sink used by the P116/R29I research runner.
 
-The sink owns its finalization evidence: on SIGTERM/SIGINT or deadline it writes
-the final datagram count atomically and only then atomically writes a done marker.
-The runner may therefore use a bounded done-file join even when the sink was
-started from a command-substitution subshell and is not a direct shell child.
+The sink owns its evidence lifecycle:
+1. after a successful loopback bind it atomically writes a started marker;
+2. on SIGTERM/SIGINT or deadline it atomically writes the final datagram count;
+3. it atomically writes a done marker only after the count is durable.
+
+The runner can therefore distinguish successful startup from finalization and use a
+bounded done-file join without relying on Bash being able to reap a process launched
+inside command substitution.
 """
 from __future__ import annotations
 
@@ -21,7 +25,14 @@ def atomic_write(path: Path, text: str) -> None:
     tmp.replace(path)
 
 
-def run(port: int, count_file: Path, first_file: Path, done_file: Path, timeout_seconds: float) -> int:
+def run(
+    port: int,
+    count_file: Path,
+    first_file: Path,
+    started_file: Path,
+    done_file: Path,
+    timeout_seconds: float,
+) -> int:
     stop = False
 
     def handle(_signum: int, _frame: object) -> None:
@@ -34,6 +45,7 @@ def run(port: int, count_file: Path, first_file: Path, done_file: Path, timeout_
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("127.0.0.1", port))
     sock.settimeout(0.2)
+    atomic_write(started_file, "started\n")
     deadline = time.monotonic() + timeout_seconds
     count = 0
     try:
@@ -57,10 +69,18 @@ def main() -> int:
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--count-file", type=Path, required=True)
     parser.add_argument("--first-file", type=Path, required=True)
+    parser.add_argument("--started-file", type=Path, required=True)
     parser.add_argument("--done-file", type=Path, required=True)
     parser.add_argument("--timeout-seconds", type=float, required=True)
     args = parser.parse_args()
-    return run(args.port, args.count_file, args.first_file, args.done_file, args.timeout_seconds)
+    return run(
+        args.port,
+        args.count_file,
+        args.first_file,
+        args.started_file,
+        args.done_file,
+        args.timeout_seconds,
+    )
 
 
 if __name__ == "__main__":
