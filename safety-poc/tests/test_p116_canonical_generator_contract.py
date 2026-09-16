@@ -20,8 +20,9 @@ TRANSFORM_REL = Path(
     "safety-poc/research/media/v1/entrance_p106_teardown_state_classification_transform.py"
 )
 HISTORICAL_COMMIT = "a54fe39e18c9d97c515a7145d63c4e1ce7fa3afc"
-HISTORICAL_SOURCE_SHA256 = "0c15927dbc40bdb1f7c522f063a8a2f38c557f9eb735cdd981cdd49449595c79"
-P116_SOURCE_SHA256 = "93756730fd088b9227f37c4e0e3edbd18ac30c110db03b75bcc63f1c93952e66"
+ARCHIVED_P106_SOURCE_SHA256 = "0c15927dbc40bdb1f7c522f063a8a2f38c557f9eb735cdd981cdd49449595c79"
+HEAD_DEFAULT_P106_SOURCE_SHA256 = "2a96044de2455bf5f083090c691fbc693f518e8dbe0cf4d0b265327b90e21586"
+HEAD_P116_P106_SOURCE_SHA256 = "1c89d61de4372d96b25f6894862741244753c107a3a9b9e04817250b3bea55b2"
 P80_REQUIRED_MARKERS = (
     "P80_MEDIA_ACTIVE=true",
     "P80_VIDEO_RTP_FORWARDING=PASS",
@@ -98,7 +99,7 @@ class P116CanonicalGeneratorContractTests(unittest.TestCase):
 
             sha = _generate_with_script(tree, tmp_path / "historical.c")
 
-        self.assertEqual(sha, HISTORICAL_SOURCE_SHA256)
+        self.assertEqual(sha, ARCHIVED_P106_SOURCE_SHA256)
 
     def test_head_canonical_p106_emits_reachable_p116_and_preserves_p80(self) -> None:
         candidate = transform(
@@ -107,7 +108,7 @@ class P116CanonicalGeneratorContractTests(unittest.TestCase):
         )
         sha = _sha256_bytes(candidate.encode("utf-8"))
 
-        self.assertEqual(sha, P116_SOURCE_SHA256)
+        self.assertEqual(sha, HEAD_P116_P106_SOURCE_SHA256)
         self.assertGreater(candidate.count("P116_"), 0)
         for marker in P116_REQUIRED_MARKERS:
             self.assertIn(marker, candidate)
@@ -127,7 +128,7 @@ class P116CanonicalGeneratorContractTests(unittest.TestCase):
             sha2 = _generate_with_script(REPO, run2)
 
         self.assertEqual(sha1, sha2)
-        self.assertEqual(sha1, HISTORICAL_SOURCE_SHA256)
+        self.assertEqual(sha1, HEAD_DEFAULT_P106_SOURCE_SHA256)
 
     def test_head_cli_include_p116_switches_canonical_source_hash(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p116-cli-") as tmp:
@@ -140,9 +141,23 @@ class P116CanonicalGeneratorContractTests(unittest.TestCase):
             no_p116_sha = _generate_with_script(REPO, explicit_historical, "--no-include-p116")
             p116_sha = _generate_with_script(REPO, p116, "--include-p116")
 
-        self.assertEqual(default_sha, HISTORICAL_SOURCE_SHA256)
-        self.assertEqual(no_p116_sha, HISTORICAL_SOURCE_SHA256)
-        self.assertEqual(p116_sha, P116_SOURCE_SHA256)
+        self.assertEqual(default_sha, HEAD_DEFAULT_P106_SOURCE_SHA256)
+        self.assertEqual(no_p116_sha, HEAD_DEFAULT_P106_SOURCE_SHA256)
+        self.assertEqual(p116_sha, HEAD_P116_P106_SOURCE_SHA256)
+
+    def test_head_digest_pins_are_separate_from_archive_and_fail_on_byte_flip(self) -> None:
+        self.assertNotEqual(ARCHIVED_P106_SOURCE_SHA256, HEAD_DEFAULT_P106_SOURCE_SHA256)
+        self.assertNotEqual(ARCHIVED_P106_SOURCE_SHA256, HEAD_P116_P106_SOURCE_SHA256)
+        source = (REPO / SOURCE_REL).read_text(encoding="utf-8")
+        candidate = transform(source, include_p116=True)
+        candidate_sha = _sha256_bytes(candidate.encode("utf-8"))
+        self.assertEqual(candidate_sha, HEAD_P116_P106_SOURCE_SHA256)
+
+        corrupted = candidate.replace("P116_RTP_TELEMETRY_CADENCE", "P116_RTP_TELEMETRY_CADENCE_CORRUPT", 1)
+        corrupted_sha = _sha256_bytes(corrupted.encode("utf-8"))
+        self.assertNotEqual(corrupted_sha, HEAD_P116_P106_SOURCE_SHA256)
+        with self.assertRaises(AssertionError):
+            self.assertEqual(corrupted_sha, HEAD_P116_P106_SOURCE_SHA256)
 
     def test_canonical_path_uses_p106_entrypoint(self) -> None:
         self.assertTrue((REPO / TRANSFORM_REL).is_file())
