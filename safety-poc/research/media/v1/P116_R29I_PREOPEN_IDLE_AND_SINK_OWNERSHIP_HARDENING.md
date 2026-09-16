@@ -15,10 +15,12 @@ and finalized while their final count files were absent/UNKNOWN.
 
 1. In the research candidate only, an inherited entrance signaling timeout is
    treated as an idle/stale timeout while the persistent research listener is
-   already READY and no media OPEN has been sent. The listener remains alive
-   for the outer bounded human-ring window. PseudoTCP/registration and other
-   transport failures remain fail-closed, and the runner retains bounded
-   CALL_INIT/OPEN deadlines.
+   already READY, no `CALL_INIT` transaction has been created, and no media OPEN
+   has been sent. The listener remains alive for the outer bounded human-ring
+   window. Suppression ends at `CALL_INIT`: a pre-OPEN signaling timeout during
+   an actual call transaction remains fail-closed. PseudoTCP/registration and
+   other transport failures also remain fail-closed, and the runner retains
+   bounded CALL_INIT/OPEN deadlines.
 2. UDP sinks are no longer started through command substitution. They are direct
    children of the runner, are terminated and joined deterministically, and
    atomically materialize final counters even when the count is zero. Missing or
@@ -41,8 +43,9 @@ and finalized while their final count files were absent/UNKNOWN.
 
 - READY listener survives modeled 30 s and 90 s pre-ring idle windows.
 - CALL_INIT after long idle can still reach the single-OPEN-capable state.
+- A CALL_INIT-created transaction still fails closed on a pre-OPEN signaling timeout.
 - Explicit transport/registration failures remain fail-closed.
-- Generated candidate contains the READY/no-OPEN timeout ownership guard.
+- Generated candidate contains the READY/no-CALL_INIT/no-OPEN timeout ownership guard.
 - Generated runner launches sinks as direct children and joins them before
   reading counters.
 - Real subprocess tests prove zero- and nonzero-datagram final counter
