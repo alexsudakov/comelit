@@ -5,7 +5,7 @@
 # instrumentation/lifetime details:
 #   1. build the R29I candidate whose registered listener can remain in bounded
 #      WAITING_FOR_RING idle across the inherited entrance signaling timer;
-#   2. finalize UDP sinks through an explicit count-then-done evidence contract,
+#   2. finalize UDP sinks through explicit started -> count -> done evidence,
 #      avoiding reliance on `wait` for a process spawned from command substitution.
 #
 # LIVE authorization gates and one-shot media safety are inherited unchanged from R29C.
@@ -112,14 +112,17 @@ start_udp_sink() {
     local count_file="$2"
     local first_file="$3"
     local label="$4"
-    local done_file
-    done_file="${count_file%.count}.done"
-    rm -f "$count_file" "$first_file" "$done_file" \
-      "$count_file.tmp" "$first_file.tmp" "$done_file.tmp"
+    local base started_file done_file
+    base="${count_file%.count}"
+    started_file="$base.started"
+    done_file="$base.done"
+    rm -f "$count_file" "$first_file" "$started_file" "$done_file" \
+      "$count_file.tmp" "$first_file.tmp" "$started_file.tmp" "$done_file.tmp"
     python3 "$REPO/$SINK_HELPER_REL" \
       --port "$port" \
       --count-file "$count_file" \
       --first-file "$first_file" \
+      --started-file "$started_file" \
       --done-file "$done_file" \
       --timeout-seconds "$R29C_OUTER_TIMEOUT_SECONDS" \
       > "$count_file.stdout" 2>&1 &
@@ -149,6 +152,8 @@ finalize_sinks() {
     [ "$SINKS_FINALIZED" = false ] || return 0
     SINKS_FINALIZED=true
 
+    local video_started="$RUN_ROOT/video.started"
+    local audio_started="$RUN_ROOT/audio.started"
     local video_done="$RUN_ROOT/video.done"
     local audio_done="$RUN_ROOT/audio.done"
     local video_rc=0 audio_rc=0
@@ -163,7 +168,7 @@ finalize_sinks() {
     wait_for_sink_done "$VIDEO_SINK_PID" "$video_done" || video_rc=$?
     wait_for_sink_done "$AUDIO_SINK_PID" "$audio_done" || audio_rc=$?
 
-    if [ "$video_rc" -eq 0 ] && [ -f "$RUN_ROOT/video.count" ]; then
+    if [ -f "$video_started" ] && [ "$video_rc" -eq 0 ] && [ -f "$RUN_ROOT/video.count" ]; then
         VIDEO_SINK_FINALIZED=true
         SINK_FINAL_VIDEO_RTP_DATAGRAMS="$(read_sink_count "$RUN_ROOT/video.count" UNKNOWN)"
     else
@@ -172,7 +177,7 @@ finalize_sinks() {
         FAIL=1
     fi
 
-    if [ "$audio_rc" -eq 0 ] && [ -f "$RUN_ROOT/audio.count" ]; then
+    if [ -f "$audio_started" ] && [ "$audio_rc" -eq 0 ] && [ -f "$RUN_ROOT/audio.count" ]; then
         AUDIO_SINK_FINALIZED=true
         SINK_FINAL_AUDIO_RTP_DATAGRAMS="$(read_sink_count "$RUN_ROOT/audio.count" UNKNOWN)"
     else
@@ -217,7 +222,7 @@ print_final_block() {
     echo "PHYSICAL_RING_REPORTED_BY_USER=UNAVAILABLE_TO_RUNNER"
     echo "CALL_INIT_OBSERVED_COUNT=$call_init_count"
     echo "RING_BUDGET_USED_SEMANTICS=LEGACY_ACCEPTED_CALL_INIT_COUNT"
-    echo "SINK_FINALIZATION_CONTRACT=COUNT_THEN_DONE_MARKER"
+    echo "SINK_FINALIZATION_CONTRACT=STARTED_THEN_COUNT_THEN_DONE_MARKER"
     echo "=== END COMELIT P116 R29I RING EVIDENCE ==="
 }
 
