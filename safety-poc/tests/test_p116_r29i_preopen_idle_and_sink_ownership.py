@@ -15,6 +15,7 @@ MEDIA = ROOT / "research" / "media" / "v1"
 SOURCE = ROOT / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-ctpp-door.c"
 TRANSFORM = MEDIA / "entrance_p116_r29i_preopen_idle_transform.py"
 RUNNER = MEDIA / "ct120_run_p116_r29i_preopen_idle_and_sink_ownership.sh"
+BASE_RUNNER = MEDIA / "ct120_run_p116_r29c_registered_ctpp_mediareq26_live.sh"
 
 sys.path.insert(0, str(MEDIA))
 import entrance_p116_r29i_preopen_idle_transform as r29i
@@ -60,6 +61,7 @@ class P116R29IPreopenIdleAndSinkOwnership(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.generated = r29i.transform(SOURCE.read_text(encoding="utf-8"))
         cls.runner = RUNNER.read_text(encoding="utf-8")
+        cls.base_runner = BASE_RUNNER.read_text(encoding="utf-8")
 
     def test_waiting_for_ring_survives_inherited_timeout_and_late_call_init(self) -> None:
         model = WaitingForRingModel()
@@ -77,7 +79,8 @@ class P116R29IPreopenIdleAndSinkOwnership(unittest.TestCase):
         self.assertFalse(model.alive)
 
     def test_waiting_for_ring_90s_is_owned_by_runner_not_stale_signaling_timer(self) -> None:
-        self.assertIn("R29C_RING_MAX_SECONDS=${R29C_RING_MAX_SECONDS:-90}", self.runner)
+        self.assertIn('source "$BASE_RUNNER"', self.runner)
+        self.assertIn("R29C_RING_MAX_SECONDS=${R29C_RING_MAX_SECONDS:-90}", self.base_runner)
         self.assertIn("R29I_WAITING_FOR_RING_BOUNDED_BY_RUNNER=true", self.generated)
         self.assertIn("R29I_WAITING_FOR_RING_TIMEOUT_SUPPRESSED=true", self.generated)
 
