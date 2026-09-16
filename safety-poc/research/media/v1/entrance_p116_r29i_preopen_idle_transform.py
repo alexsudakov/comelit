@@ -6,10 +6,12 @@ the inherited entrance signaling timeout fail-closed before OPEN. The next live
 attempt showed that this inherited timeout can fire while the already-registered
 research listener is simply waiting for a human ring, before any CALL_INIT.
 
-R29I suppresses only that inherited timeout while the research listener is READY
-and no media OPEN has been sent. Real transport/registration failures are left
-untouched, and the outer live runner keeps bounded CALL_INIT and OPEN deadlines.
-The overlay performs no network I/O and never executes the candidate.
+R29I suppresses only that inherited timeout while the research listener is READY,
+no CALL_INIT transaction has been created, and no media OPEN has been sent. The
+suppression ends at CALL_INIT so pre-OPEN call-transaction timeout behavior stays
+fail-closed. Real transport/registration failures are untouched, and the outer
+live runner keeps bounded CALL_INIT and OPEN deadlines. The overlay performs no
+network I/O and never executes the candidate.
 """
 from __future__ import annotations
 
@@ -34,6 +36,7 @@ _R29H_TIMEOUT_FRAGMENT = r'''    if (r29h_defer_inherited_main_loop_quit(
 
 
 _R29I_TIMEOUT_FRAGMENT = r'''    if (r29_listener_registered_ready &&
+        !r29_call_transaction_created &&
         !r29c_registered_ctpp_mediareq26_open_sent) {
         printf("R29I_WAITING_FOR_RING=true\n");
         printf("R29I_PREOPEN_IDLE_SIGNALING_TIMEOUT_SUPPRESSED=true\n");
@@ -68,8 +71,13 @@ def transform(source: str, *, include_p116: bool = True) -> str:
     )
     if candidate.count("R29I_PREOPEN_IDLE_SIGNALING_TIMEOUT_SUPPRESSED=true") != 1:
         raise RuntimeError("R29I_GATE=FAIL pre-open suppression marker count")
-    if "r29_listener_registered_ready &&\n        !r29c_registered_ctpp_mediareq26_open_sent" not in candidate:
-        raise RuntimeError("R29I_GATE=FAIL ready/no-open guard missing")
+    if (
+        "r29_listener_registered_ready &&\n"
+        "        !r29_call_transaction_created &&\n"
+        "        !r29c_registered_ctpp_mediareq26_open_sent"
+        not in candidate
+    ):
+        raise RuntimeError("R29I_GATE=FAIL waiting-for-ring guard missing")
     return candidate
 
 
@@ -78,7 +86,8 @@ def report() -> str:
         (
             "=== COMELIT P116 R29I PREOPEN IDLE TRANSFORM ===",
             "WAITING_FOR_RING_TIMEOUT_OWNERSHIP_FIXED=true",
-            "PREOPEN_IDLE_TIMEOUT_SCOPE=READY_AND_NO_OPEN",
+            "PREOPEN_IDLE_TIMEOUT_SCOPE=READY_NO_CALL_INIT_NO_OPEN",
+            "PREOPEN_CALL_TRANSACTION_TIMEOUT_FAIL_CLOSED=true",
             "TRANSPORT_FAILURE_BEHAVIOR_CHANGED=false",
             "REGISTRATION_FAILURE_BEHAVIOR_CHANGED=false",
             "MEDIAREQ26_SEMANTICS_CHANGED=false",
