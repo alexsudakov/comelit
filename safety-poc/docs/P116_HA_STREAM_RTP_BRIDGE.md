@@ -253,7 +253,7 @@ FFmpeg SDP `sprop-parameter-sets` is the SDP path that seeds H264 extradata.
 session-derived `sprop-parameter-sets` в этой фазе НЕ реализуется
 (`SPS_PPS_REQUIREMENT=NOT_REQUIRED` для проверенного пути).
 P116-пин теперь указывает на установленный воспроизводимый native helper:
-`MEDIA_NATIVE_BINARY_SHA256=35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622`.
+`MEDIA_NATIVE_BINARY_SHA256=a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8`.
 
 ## Native build provenance
 
@@ -261,19 +261,19 @@ Pinned P116 native artifact:
 
 ```
 canonical_generator=entrance_p106_teardown_state_classification_transform.py (include_p116=1)
-generated_source_sha256=93756730fd088b9227f37c4e0e3edbd18ac30c110db03b75bcc63f1c93952e66
-generator_tree_commit=6fe4413861e7f597bb2f05f445eeb6513d7e8406
-toolchain=Alpine 3.24.1 chroot (cached), cc (Alpine 15.2.0) 15.2.0, glib/gobject 2.88.1, libnice 0.1.22
+generated_source_sha256=1c89d61de4372d96b25f6894862741244753c107a3a9b9e04817250b3bea55b2
+build_input_commit=53ce0632008709687d9eae69dbaa31b019f021ea
+toolchain=Alpine 3.24.1 chroot (cached), gcc (Alpine 15.2.0) 15.2.0, pkg-config 2.5.1, glib/gobject 2.88.1, libnice 0.1.22
 flags=-O2 -g -Wall -Wextra -Wl,--as-needed
 interpreter=/lib/ld-musl-x86_64.so.1
 needed=libc.musl-x86_64.so.1,libglib-2.0.so.0,libgobject-2.0.so.0,libnice.so.10
-binary_sha256=35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622
-size=270184
+binary_sha256=a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8
+size=270272
 mode=755
 glibc_interpreter=ABSENT
 P116_STRING_COUNT=26
 gates=MUSL_INTERPRETER_GATE=PASS, NO_GLIBC_DEPENDENCY=PASS, NO_NEW_RUNTIME_DEPENDENCY=PASS, LIB_IDENTICAL=PASS
-reproducibility=two independent clean builds produced byte-identical 35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622
+reproducibility=two independent clean builds produced byte-identical a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8
 historical=f17ad2d6efbe002335a658c075da84677ced44246d556afe80953a8f59129841 same source vs pinned 91335b4490bc58910c78cb58b9c2d3eccc13f40dcfff7651995ad428cd71ddc7 -> HISTORICAL_HASH_MISMATCH_CLASS=NON_RUNTIME_BUILD_METADATA
 ```
 
@@ -287,8 +287,8 @@ symbols, relocations, and PT_LOAD geometry match.
 
 Packaged native pin:
 
-- `MEDIA_NATIVE_BINARY_SHA256=35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622`
-- `GENERATED_SOURCE_SHA256=93756730fd088b9227f37c4e0e3edbd18ac30c110db03b75bcc63f1c93952e66`
+- `MEDIA_NATIVE_BINARY_SHA256=a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8`
+- `GENERATED_SOURCE_SHA256=1c89d61de4372d96b25f6894862741244753c107a3a9b9e04817250b3bea55b2`
 - Generator: `safety-poc/research/media/v1/entrance_p106_teardown_state_classification_transform.py`
   (P106 teardown-state classification composition, `include_p116=1`), not the standalone P80 transform.
 
@@ -297,7 +297,7 @@ The generator has an explicit P116 provenance switch:
 | Mode | Generator invocation | Builder env | Generated source SHA256 |
 |---|---|---|---|
 | Historical/reproduction | no flag, or `--no-include-p116` | `P80_BUILD_INCLUDE_P116=0` (default) | `0c15927dbc40bdb1f7c522f063a8a2f38c557f9eb735cdd981cdd49449595c79` |
-| P116/current | `--include-p116` | `P80_BUILD_INCLUDE_P116=1` | `93756730fd088b9227f37c4e0e3edbd18ac30c110db03b75bcc63f1c93952e66` |
+| P116/current | `--include-p116` | `P80_BUILD_INCLUDE_P116=1` | `1c89d61de4372d96b25f6894862741244753c107a3a9b9e04817250b3bea55b2` |
 
 The programmatic API remains `transform(source, *, include_p116=False)`, so direct
 historical generator use without a flag continues to emit the pinned historical C.
@@ -318,7 +318,7 @@ Provenance table for historical evidence and the current P116 pin:
 |---|---|---:|---|---|---|---|
 | Packaged historical pin | `6fe4413861e7f597bb2f05f445eeb6513d7e8406` | `0` | `0c15927dbc40bdb1f7c522f063a8a2f38c557f9eb735cdd981cdd49449595c79` | Alpine `3.24.1`, GCC `(Alpine 15.2.0) 15.2.0`, musl interpreter `/lib/ld-musl-x86_64.so.1`, C flags `-O2 -g -Wall -Wextra -Wl,--as-needed`, NEEDED `libc.musl-x86_64.so.1,libglib-2.0.so.0,libgobject-2.0.so.0,libnice.so.10` | `91335b4490bc58910c78cb58b9c2d3eccc13f40dcfff7651995ad428cd71ddc7` | Historical reference only after P116 pin |
 | Rebuilt historical source evidence | `6fe4413861e7f597bb2f05f445eeb6513d7e8406` | `0` | `0c15927dbc40bdb1f7c522f063a8a2f38c557f9eb735cdd981cdd49449595c79` | Same runtime toolchain identity as packaged pin; BuildID/debug path metadata differ | `f17ad2d6efbe002335a658c075da84677ced44246d556afe80953a8f59129841` | Runtime equivalence PASS; hash mismatch class `NON_RUNTIME_BUILD_METADATA` |
-| P116 current pin | `6fe4413861e7f597bb2f05f445eeb6513d7e8406` | `1` | `93756730fd088b9227f37c4e0e3edbd18ac30c110db03b75bcc63f1c93952e66` | Alpine `3.24.1`, GCC `(Alpine 15.2.0) 15.2.0`, glib/gobject `2.88.1`, libnice `0.1.22`, musl interpreter `/lib/ld-musl-x86_64.so.1`, C flags `-O2 -g -Wall -Wextra -Wl,--as-needed`, NEEDED `libc.musl-x86_64.so.1,libglib-2.0.so.0,libgobject-2.0.so.0,libnice.so.10` | `35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622` | MUSL_INTERPRETER_GATE PASS; NO_GLIBC_DEPENDENCY PASS; NO_NEW_RUNTIME_DEPENDENCY PASS; LIB_IDENTICAL PASS; two clean builds byte-identical |
+| P116 current pin | `53ce0632008709687d9eae69dbaa31b019f021ea` | `1` | `1c89d61de4372d96b25f6894862741244753c107a3a9b9e04817250b3bea55b2` | Alpine `3.24.1`, GCC `(Alpine 15.2.0) 15.2.0`, pkg-config `2.5.1`, glib/gobject `2.88.1`, libnice `0.1.22`, musl interpreter `/lib/ld-musl-x86_64.so.1`, C flags `-O2 -g -Wall -Wextra -Wl,--as-needed`, NEEDED `libc.musl-x86_64.so.1,libglib-2.0.so.0,libgobject-2.0.so.0,libnice.so.10` | `a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8` | MUSL_INTERPRETER_GATE PASS; NO_GLIBC_DEPENDENCY PASS; NO_NEW_RUNTIME_DEPENDENCY PASS; LIB_IDENTICAL PASS; two clean builds byte-identical |
 
 Pinned vs rebuilt-historical binary diagnosis: full-file SHA256 is not
 reproducible, but runtime semantics are equivalent. `.text`, `.rodata`,
