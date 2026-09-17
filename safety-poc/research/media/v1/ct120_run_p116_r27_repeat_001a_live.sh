@@ -39,6 +39,8 @@ RUN_ROOT=""
 SESSION_LOG=""
 BUILD_PROVENANCE_LOG=""
 CANDIDATE_WRAPPER=""
+CANDIDATE_LAUNCHER=""
+RUN_MUSL_LOADER=""
 LISTENER_READY_BEFORE=false
 LISTENER_RUNNING_AFTER=false
 LISTENER_READY_AFTER=false
@@ -417,7 +419,7 @@ if [ "${EUID}" -ne 0 ]; then
     exit 1
 fi
 
-for command in git python3 curl sha256sum timeout awk grep bash chmod install; do
+for command in git python3 curl sha256sum timeout awk grep bash chmod install readelf stat; do
     command -v "$command" >/dev/null 2>&1 || fail "R27_MISSING_COMMAND=$command"
 done
 [ -n "$R27_EXPECTED_COMMIT_SHA" ] || fail "R27_EXPECTED_COMMIT_SHA_REQUIRED=true"
@@ -485,7 +487,110 @@ grep -F "GENERATED_SOURCE_SHA256=$EXPECTED_SOURCE_SHA" "$BUILD_PROVENANCE_LOG" >
 [ "$FAIL" -eq 0 ] || exit 1
 
 echo "=== MATERIALIZE R27 CANDIDATE WRAPPER ==="
-python3 - "$BASE_WRAPPER" "$CANDIDATE_WRAPPER" "$R27_OUTPUT" <<'PY'
+BUILDER_ROOTFS="$(build_provenance_marker P80_OFFLINE_ROOTFS NOT_REACHED)"
+BUILDER_ROOTFS_MODE="$(build_provenance_marker P80_BUILD_ROOTFS_MODE NOT_REACHED)"
+SOURCE_MUSL_LOADER="$BUILDER_ROOTFS/lib/ld-musl-x86_64.so.1"
+PACKAGED_LIB_DIR="$REPO/custom_components/comelit/native/lib"
+CANDIDATE_LAUNCHER="$RUN_ROOT/$CANDIDATE_HOLDER_NAME"
+RUN_MUSL_LOADER="$RUN_ROOT/ld-musl-x86_64.so.1"
+echo "BUILDER_ROOTFS=$BUILDER_ROOTFS"
+echo "BUILDER_ROOTFS_MODE=$BUILDER_ROOTFS_MODE"
+echo "SOURCE_MUSL_LOADER=$SOURCE_MUSL_LOADER"
+[ -d "$BUILDER_ROOTFS" ] || fail "BUILDER_ROOTFS_PRESENT=false"
+[ -f "$SOURCE_MUSL_LOADER" ] || fail "SOURCE_MUSL_LOADER_PRESENT=false"
+[ -d "$PACKAGED_LIB_DIR" ] || fail "PACKAGED_NATIVE_LIB_DIR_PRESENT=false"
+if [ "$FAIL" -eq 0 ]; then
+    SOURCE_MUSL_LOADER_SHA256="$(sha256sum "$SOURCE_MUSL_LOADER" | awk '{print $1}')"
+    echo "SOURCE_MUSL_LOADER_SHA256=$SOURCE_MUSL_LOADER_SHA256"
+    install -m 700 "$SOURCE_MUSL_LOADER" "$RUN_MUSL_LOADER" || fail "RUN_MUSL_LOADER_COPY=FAIL"
+    RUN_MUSL_LOADER_SHA256="$(sha256sum "$RUN_MUSL_LOADER" | awk '{print $1}')"
+    RUN_MUSL_LOADER_MODE="$(stat -c '%a' "$RUN_MUSL_LOADER")"
+    echo "RUN_MUSL_LOADER=$RUN_MUSL_LOADER"
+    echo "RUN_MUSL_LOADER_SHA256=$RUN_MUSL_LOADER_SHA256"
+    echo "RUN_MUSL_LOADER_MODE=$RUN_MUSL_LOADER_MODE"
+    if [ "$RUN_MUSL_LOADER_SHA256" = "$SOURCE_MUSL_LOADER_SHA256" ]; then
+        echo "LOADER_COPY_SHA_GATE=PASS"
+    else
+        fail "LOADER_COPY_SHA_GATE=FAIL"
+    fi
+fi
+[ "$FAIL" -eq 0 ] || exit 1
+
+python3 - "$CANDIDATE_LAUNCHER" "$RUN_MUSL_LOADER" "$R27_OUTPUT" "$PACKAGED_LIB_DIR" "$SOURCE_MUSL_LOADER_SHA256" <<'PY'
+from pathlib import Path
+import hashlib
+import os
+import sys
+
+out = Path(sys.argv[1])
+loader = Path(sys.argv[2])
+candidate = Path(sys.argv[3])
+libdir = Path(sys.argv[4])
+expected_loader_sha = sys.argv[5]
+if not loader.is_file():
+    raise SystemExit("CANDIDATE_LAUNCHER_GATE=FAIL reason=loader_absent")
+if not candidate.is_file():
+    raise SystemExit("CANDIDATE_LAUNCHER_GATE=FAIL reason=candidate_absent")
+if not libdir.is_dir():
+    raise SystemExit("CANDIDATE_LAUNCHER_GATE=FAIL reason=libdir_absent")
+if hashlib.sha256(loader.read_bytes()).hexdigest() != expected_loader_sha:
+    raise SystemExit("CANDIDATE_LAUNCHER_GATE=FAIL reason=loader_sha")
+script = f"""#!/usr/bin/env bash
+set -u
+LOADER={str(loader)!r}
+CANDIDATE={str(candidate)!r}
+LIBDIR={str(libdir)!r}
+EXPECTED_LOADER_SHA={expected_loader_sha!r}
+if [ ! -x "$LOADER" ] || [ ! -x "$CANDIDATE" ] || [ ! -d "$LIBDIR" ]; then
+    echo "CANDIDATE_LAUNCHER_PREFLIGHT=FAIL" >&2
+    exit 127
+fi
+actual_loader_sha="$(sha256sum "$LOADER" | awk '{{print $1}}')"
+if [ "$actual_loader_sha" != "$EXPECTED_LOADER_SHA" ]; then
+    echo "CANDIDATE_LAUNCHER_LOADER_SHA_GATE=FAIL" >&2
+    exit 127
+fi
+exec "$LOADER" --library-path "$LIBDIR" "$CANDIDATE" "$@"
+"""
+if "comelit_ice_offer_holder" in script or "/root/comelit-vip-poc/bin" in script:
+    raise SystemExit("LAUNCHER_BASE_HELPER_FALLBACK=true")
+out.write_text(script, encoding="utf-8")
+os.chmod(out, 0o700)
+print("CANDIDATE_LAUNCHER_GATE=PASS")
+print("LAUNCHER_BASE_HELPER_FALLBACK=false")
+PY
+launcher_rc=$?
+echo "CANDIDATE_LAUNCHER_RC=$launcher_rc"
+[ "$launcher_rc" -eq 0 ] || fail "CANDIDATE_LAUNCHER_GATE=FAIL"
+[ "$FAIL" -eq 0 ] || exit 1
+
+if grep -Fq "$RUN_MUSL_LOADER" "$CANDIDATE_LAUNCHER"; then echo "LAUNCHER_LOADER_PATH_MATCH=true"; else fail "LAUNCHER_LOADER_PATH_MATCH=false"; fi
+if grep -Fq "$R27_OUTPUT" "$CANDIDATE_LAUNCHER"; then echo "LAUNCHER_CANDIDATE_PATH_MATCH=true"; else fail "LAUNCHER_CANDIDATE_PATH_MATCH=false"; fi
+if grep -Fq "$PACKAGED_LIB_DIR" "$CANDIDATE_LAUNCHER"; then echo "LAUNCHER_LIBRARY_PATH_MATCH=true"; else fail "LAUNCHER_LIBRARY_PATH_MATCH=false"; fi
+if grep -Fq "/root/comelit-vip-poc/bin/comelit_ice_offer_holder" "$CANDIDATE_LAUNCHER"; then fail "LAUNCHER_BASE_HELPER_FALLBACK=true"; fi
+LOADER_PROBE_OUTPUT="$RUN_ROOT/loader-probe.txt"
+set +e
+"$RUN_MUSL_LOADER" --library-path "$PACKAGED_LIB_DIR" --list "$R27_OUTPUT" > "$LOADER_PROBE_OUTPUT" 2>&1
+loader_probe_rc=$?
+set -u -o pipefail
+echo "LOADER_PROBE_EXECUTED=true"
+echo "LOADER_PROBE_RC=$loader_probe_rc"
+echo "CANDIDATE_MAIN_EXECUTED=false"
+if [ "$loader_probe_rc" -eq 0 ]; then
+    echo "LOADER_PROBE_RESOLUTION=PASS"
+else
+    fail "LOADER_PROBE_RESOLUTION=FAIL"
+fi
+if grep -Fq "libc.so.6" "$LOADER_PROBE_OUTPUT" || grep -Fq "ld-linux-x86-64" "$LOADER_PROBE_OUTPUT"; then
+    fail "GLIBC_RESOLUTION_USED=true"
+else
+    echo "GLIBC_RESOLUTION_USED=false"
+fi
+[ "$(sha256sum "$R27_OUTPUT" | awk '{print $1}')" = "$(build_provenance_marker P80_BINARY_SHA256 NOT_REACHED)" ] && echo "CANDIDATE_SHA_GATE=PASS" || fail "CANDIDATE_SHA_GATE=FAIL"
+[ "$(readelf -l "$R27_OUTPUT" | sed -n 's@.*Requesting program interpreter: \(.*\)]@\1@p')" = "/lib/ld-musl-x86_64.so.1" ] && echo "CANDIDATE_INTERPRETER_MATCH=PASS" || fail "CANDIDATE_INTERPRETER_MATCH=FAIL"
+[ "$FAIL" -eq 0 ] || exit 1
+
+python3 - "$BASE_WRAPPER" "$CANDIDATE_WRAPPER" "$CANDIDATE_LAUNCHER" "$R27_OUTPUT" <<'PY'
 from pathlib import Path
 import os
 import sys
@@ -493,8 +598,11 @@ import sys
 src = Path(sys.argv[1])
 out = Path(sys.argv[2])
 holder = sys.argv[3]
+raw_candidate = sys.argv[4]
 text = src.read_text(encoding="utf-8")
 holder_needle = '"$BASE/bin/comelit_ice_offer_holder"'
+base_holder_path = "/root/comelit-vip-poc/bin/comelit_ice_offer_holder"
+base_wrapper_path = "/usr/local/sbin/comelit-p2p-cloud-probe"
 if text.count(holder_needle) != 1:
     raise SystemExit("R27_WRAPPER_HOLDER_ANCHOR=FAIL")
 text = text.replace(holder_needle, f'"{holder}"', 1)
@@ -507,17 +615,35 @@ text = text.replace(legacy_run_dir, media_run_dir)
 if holder_needle in text:
     raise SystemExit("R27_WRAPPER_SUBSTITUTION_BASE_ABSENT=FAIL")
 if f'"{holder}"' not in text:
-    raise SystemExit("R27_WRAPPER_SUBSTITUTION_CANDIDATE_PRESENT=FAIL")
+    raise SystemExit("R27_WRAPPER_SUBSTITUTION_LAUNCHER_PRESENT=FAIL")
+if f'"{raw_candidate}"' in text:
+    raise SystemExit("RAW_CANDIDATE_PATH_PRESENT_AS_HOLDER=true")
+if base_holder_path in text:
+    raise SystemExit("BASE_HOLDER_PATH_PRESENT_IN_CANDIDATE_WRAPPER=true")
+if text.count(holder) != 1:
+    raise SystemExit("CANDIDATE_LAUNCHER_OCCURRENCES_GATE=FAIL")
+if base_wrapper_path in text:
+    raise SystemExit("BASE_WRAPPER_PATH_OCCURRENCES_GATE=FAIL")
 out.write_text(text, encoding="utf-8")
 os.chmod(out, 0o700)
 print("R27_WRAPPER_SUBSTITUTION_BASE_ABSENT=PASS")
-print("R27_WRAPPER_SUBSTITUTION_CANDIDATE_PRESENT=PASS")
+print("R27_WRAPPER_SUBSTITUTION_CANDIDATE_LAUNCHER_PRESENT=PASS")
 print(f"R27_WRAPPER_RUN_DIR_REPLACEMENTS={run_dir_count}")
+print(f"BASE_HOLDER_PATH_PRESENT_IN_CANDIDATE_WRAPPER={str(base_holder_path in text).lower()}")
+print("RAW_CANDIDATE_PATH_PRESENT_AS_HOLDER=false")
+print(f"CANDIDATE_LAUNCHER_PATH_PRESENT_IN_CANDIDATE_WRAPPER={str(holder in text).lower()}")
+print(f"CANDIDATE_LAUNCHER_OCCURRENCES={text.count(holder)}")
+print(f"BASE_WRAPPER_PATH_OCCURRENCES={text.count(base_wrapper_path)}")
 PY
 wrapper_rewrite_rc=$?
 echo "R27_WRAPPER_REWRITE_RC=$wrapper_rewrite_rc"
 if [ "$wrapper_rewrite_rc" -eq 0 ]; then
-    bash -n "$CANDIDATE_WRAPPER" || fail "R27_WRAPPER_PARSE=FAIL"
+    if bash -n "$CANDIDATE_WRAPPER"; then
+        echo "CANDIDATE_WRAPPER_PARSE=PASS"
+        echo "WRAPPER_BINDING_GATE=PASS"
+    else
+        fail "R27_WRAPPER_PARSE=FAIL"
+    fi
 else
     fail "R27_WRAPPER_REWRITE=FAIL"
 fi
