@@ -22,6 +22,7 @@ from .const import EVENT_DOOR_OPERATION, EVENT_RING
 from .oauth import ComelitOAuthError, ComelitOAuthManager
 from .ring_event import RingObservationError, parse_v4_safe_ring
 from .sdp import ComelitSdpError, transform_offer
+from .ring_media import RingMediaCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -176,6 +177,7 @@ class ComelitRingRuntime:
         self._native_marker_tail: list[str] = []
         self._last_native_exit_code: int | None = None
         self._last_native_failure_markers: list[str] = []
+        self._ring_media: RingMediaCoordinator | None = None
 
     @property
     def running(self) -> bool:
@@ -213,6 +215,21 @@ class ComelitRingRuntime:
             "door_last_operation_id": (self._last_door_result or {}).get("operation_id"),
             "door_last_state": (self._last_door_result or {}).get("state"),
         }
+
+    def set_ring_media_coordinator(
+        self,
+        coordinator: RingMediaCoordinator | None,
+    ) -> None:
+        self._ring_media = coordinator
+
+    async def _async_start_ring_media(self, event: dict[str, object]) -> None:
+        coordinator = self._ring_media
+        if coordinator is None:
+            return
+        try:
+            await coordinator.async_start_for_ring(event)
+        except Exception:
+            _LOGGER.exception("Failed to schedule Comelit ring media lifecycle")
 
     def _remember_native_marker(self, line: str) -> None:
         if "=" not in line:
@@ -682,6 +699,11 @@ class ComelitRingRuntime:
             event["timestamp"] = datetime.now(UTC).isoformat()
             self._last_ring_event = dict(event)
             self._hass.bus.async_fire(EVENT_RING, event)
+            self._entry.async_create_background_task(
+                self._hass,
+                self._async_start_ring_media(dict(event)),
+                "comelit ring media scheduler",
+            )
             _LOGGER.warning(
                 "Comelit ring event emitted: door=%s source=%s",
                 ring.door,
