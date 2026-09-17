@@ -1,0 +1,487 @@
+# P116 / R30H-D - repeat 0x001A live proof result
+
+TASK_ID=`COMELIT-P116-R30H-D-REPEAT-001A-LIVE-PROOF`
+
+Status: **completed / single live invocation consumed / no retry permitted**
+
+Result class: `INCONCLUSIVE`
+
+The corrected runner executed exactly once on CT120 from accepted main
+`849bf41480cffdbdb8776b9454703445c2ad3ada`. The R30H-C execution-boundary blocker was fixed in this
+live run: the helper reached ICE, PseudoTCP, CTPP registration, RTPC signaling, initial `0x001A`, media
+active, and RTP forwarding. The repeat question remains unresolved because the repeat body was never
+sent: after media active and RTP progress, the repeat path failed while regenerating the repeat `0x001A`
+body and printed `R27_REPEAT_001A_GENERATION=FAIL`.
+
+## Source and preflight identity
+
+```text
+FRESH_MAIN_FETCHED=true
+ACCEPTED_MAIN_SHA=849bf41480cffdbdb8776b9454703445c2ad3ada
+REPO=/root/comelit-r30h-d-live-repo
+REPO_HEAD=849bf41480cffdbdb8776b9454703445c2ad3ada
+REPO_HEAD_EQUALS_ACCEPTED_MAIN=true
+WORKTREE_CLEAN=true
+REMOTE_AUTH_MATERIAL_FREE=true
+PROJECT_AUTH_STORE_MODE=600
+PROJECT_AUTH_STORE_CONTENT_PRINTED=false
+```
+
+The accepted current runner, transform, and focused contract test were present before live execution.
+The focused R27 contract test passed: `Ran 33 tests, OK`.
+
+```text
+R30H_C_RESULT_PRESENT=true
+R30H_C_RESULT=PASS_EXECUTION_PATH_READY
+R27_RUNNER_PRESENT=true
+R27_TRANSFORM_PRESENT=true
+R27_CONTRACT_TEST_PRESENT=true
+RUNNER_PINNED_EXPECTED_SOURCE_SHA=1c9f13cff0d1d3599e00109146310c7372b1b0ae12117bb46ad68f091a841d42
+BASE_WRAPPER_SHA256=a564535dff0cf10b1fe4766171f2960c52fb581f1c816cf81d2992c5c84e79c9
+BASE_WRAPPER_MODE=755
+```
+
+Pre-live production status was healthy and stable:
+
+```text
+LISTENER_READY_BEFORE=true
+PRODUCTION_MEDIA_ACTIVE_BEFORE=false
+DOOR_ACTIONS_BEFORE=0
+GATE_ACTIONS_BEFORE=0
+CAMPAIGN_PROCESSES_BEFORE=0
+RTP_SINK_PORTS_BOUND_BEFORE=0
+HOST_LD_MUSL_PRESENT=false
+```
+
+`PRODUCTION_MEDIA_ACTIVE_BEFORE=false` is derived from the accepted media-exclusivity invariant: an
+active production media lease requires the listener to be paused, while the immediate pre-live samples
+showed `supervisor_running=true`, `running=true`, `listener_ready=true`, and `last_error=null`.
+
+## R30H-C execution-path gate
+
+The live runner rebuilt the R27 candidate, materialized the per-run musl launcher, probed the loader
+without entering candidate `main()`, and verified wrapper binding before any listener stop.
+
+```text
+R27_PREFLIGHT=PASS
+R27_RUN_ROOT=/root/comelit-r27-repeat-001a-20260917T153629Z
+P80_BUILD_REPO_HEAD=849bf41480cffdbdb8776b9454703445c2ad3ada
+P80_BUILD_EXPECTED_SHA_GATE=PASS
+P80_BUILD_WORKTREE_CLEAN=PASS
+P80_TRANSFORM_RC=0
+GENERATED_SOURCE_SHA256=1c9f13cff0d1d3599e00109146310c7372b1b0ae12117bb46ad68f091a841d42
+P80_BUILD_EXPECTED_SOURCE_SHA_GATE=PASS
+P80_CHROOT_BUILD_RC=0
+P80_OFFLINE_ROOTFS=/root/comelit-p80-haos-build-20260909T193410Z/rootfs
+P80_BUILD_ROOTFS_MODE=CACHED_CHROOT
+P80_BINARY_SHA256=baeb9406b503a43542bc89b2a89a8d18b5564b429646113ccfd81367432f69a4
+P80_INTERPRETER_GATE=PASS /lib/ld-musl-x86_64.so.1
+LIB_IDENTICAL=PASS
+NO_GLIBC_DEPENDENCY=PASS
+NO_NEW_RUNTIME_DEPENDENCY=PASS
+MUSL_INTERPRETER_GATE=PASS
+P80_HAOS_MEDIA_BUILD=PASS
+```
+
+```text
+SOURCE_MUSL_LOADER_SHA256=38d022ce7425ff105ccfb53598f606e6e5f5f0a34bfbc793d65e6f34c9d72806
+RUN_MUSL_LOADER_SHA256=38d022ce7425ff105ccfb53598f606e6e5f5f0a34bfbc793d65e6f34c9d72806
+RUN_MUSL_LOADER_MODE=700
+LOADER_COPY_SHA_GATE=PASS
+CANDIDATE_LAUNCHER_GATE=PASS
+LAUNCHER_BASE_HELPER_FALLBACK=false
+LAUNCHER_LOADER_PATH_MATCH=true
+LAUNCHER_CANDIDATE_PATH_MATCH=true
+LAUNCHER_LIBRARY_PATH_MATCH=true
+LOADER_PROBE_EXECUTED=true
+LOADER_PROBE_RC=0
+LOADER_PROBE_RESOLUTION=PASS
+CANDIDATE_MAIN_EXECUTED=false
+GLIBC_RESOLUTION_USED=false
+CANDIDATE_SHA_GATE=PASS
+CANDIDATE_INTERPRETER_MATCH=PASS
+```
+
+Wrapper binding held in the live run:
+
+```text
+R27_WRAPPER_SUBSTITUTION_BASE_ABSENT=PASS
+R27_WRAPPER_SUBSTITUTION_CANDIDATE_LAUNCHER_PRESENT=PASS
+R27_WRAPPER_RUN_DIR_REPLACEMENTS=1
+BASE_HOLDER_PATH_PRESENT_IN_CANDIDATE_WRAPPER=false
+RAW_CANDIDATE_PATH_PRESENT_AS_HOLDER=false
+CANDIDATE_LAUNCHER_PATH_PRESENT_IN_CANDIDATE_WRAPPER=true
+CANDIDATE_LAUNCHER_OCCURRENCES=1
+BASE_WRAPPER_PATH_OCCURRENCES=0
+R27_WRAPPER_REWRITE_RC=0
+CANDIDATE_WRAPPER_PARSE=PASS
+WRAPPER_BINDING_GATE=PASS
+WRAPPER_LAUNCHER_OCCURRENCES=1
+WRAPPER_RAW_CANDIDATE_OCCURRENCES=0
+WRAPPER_BASE_HOLDER_EXPR_OCCURRENCES=0
+WRAPPER_BASE_WRAPPER_PATH_OCCURRENCES=0
+WRAPPER_BASH_N=PASS
+CANDIDATE_REQUIRED_FILE_NOT_FOUND=false
+REQUIRED_FILE_NOT_FOUND_OCCURRENCES=0
+```
+
+## Live invocation identity
+
+```text
+R30H_D_WRAPPER_LOG=/root/r30h-d-live-run-20260917T153629Z.log
+R30H_D_WRAPPER_STARTED_UTC=20260917T153629Z
+R30H_D_WRAPPER_ENDED_UTC=20260917T154252Z
+R30H_D_WRAPPER_RUNNER_RC=0
+LIVE_INVOCATIONS=1
+WRAPPER_RC=27
+CONTROL_STATUS_CURL_RC=0
+CONTROL_STATUS_HTTP_STATUS=200
+LISTENER_READY_BEFORE=true
+CONTROL_STOP_CURL_RC=0
+CONTROL_STOP_HTTP_STATUS=200
+LISTENER_STOP_REQUESTED=true
+LISTENER_STOP_GATE=PASS
+R27_VIDEO_RTP_SINK=true
+R27_AUDIO_RTP_SINK=true
+```
+
+`WRAPPER_RC=27` is recorded as the wrapper-level exit code. It is not interpreted as a protocol result.
+
+## Evidence acceptance gate
+
+The contract evidence acceptance gate passed:
+
+```text
+LIVE_INVOCATIONS=1
+R27_RUN_CLASSIFICATION=OBSERVATION_USABLE
+R27_USABLE_EVIDENCE=true
+R27_HELPER_EVIDENCE_GATE=PASS
+TEARDOWN_CONFIDENCE=CONFIRMED
+```
+
+The prior R30H-B execution-boundary failure was absent:
+
+```text
+CANDIDATE_REQUIRED_FILE_NOT_FOUND=false
+REQUIRED_FILE_NOT_FOUND_OCCURRENCES=0
+```
+
+## Helper, ICE, PseudoTCP, CTPP, RTPC, and media facts
+
+The helper reached the live protocol/media path:
+
+```text
+ICE_CONNECTED_FINAL=true
+ICE_READY_FINAL=true
+SELECTED_PAIR_FINAL=true
+PSEUDOTCP_STARTED_FINAL=true
+PSEUDOTCP_OPEN_FINAL=true
+P78_CTPP_REGISTERED_REUSED=true
+P78_SECOND_CTPP_OPEN=false
+P78_RTPC_OPEN_1_SENT=PASS
+P78_RTPC_OPEN_2_SENT=PASS
+P78_RTPC_DEVICE_OPEN_OBSERVED=PASS
+P78_RTPC_CLIENT_RESPONSE_SENT=PASS
+P78_RTPC_DEVICE_RESPONSE_1=PASS
+P78_RTPC_DEVICE_RESPONSE_2=PASS
+P80_DEVICE_000A_VALIDATION=PASS
+P80_DEVICE_ACK_000A_OBSERVED=PASS
+P80_CLIENT_001A_SEQUENCE_REBOUND=PASS
+P80_DEVICE_ACK_001A_OBSERVED=PASS
+P80_POST_001A_ACK_GATE=PASS
+P78_RTPC_SIGNALING_RESULT=PASS before repeat generation failure
+P80_MEDIA_ACTIVE=true
+P80_VIDEO_RTP_FORWARDING=PASS
+P80_AUDIO_RTP_FORWARDING=PASS
+```
+
+Session identity counters remained unchanged through the observed media path:
+
+```text
+ICE_NEGOTIATION_COUNT=1
+PSEUDOTCP_OPEN_COUNT=1
+CTPP_REGISTRATION_COUNT=1
+RTPC_CLIENT_OPEN_COUNT=2
+SELF_ACTIVATION_COUNT=1
+HELPER_PROCESS_UNCHANGED=true
+NEW_ICE_NEGOTIATION_AFTER_REPEAT=false
+NEW_PSEUDOTCP_AFTER_REPEAT=false
+NEW_CTPP_REGISTRATION_AFTER_REPEAT=false
+NEW_RTPC_OPEN_AFTER_REPEAT=false
+NEW_SELF_ACTIVATION_AFTER_REPEAT=false
+```
+
+## Initial and repeat 0x001A facts
+
+The initial client `0x001A` was sent exactly once and acknowledged on the initial media path:
+
+```text
+COUNT[P78_RTPC_CLIENT_001A_SENT=PASS]=1
+COUNT[P80_DEVICE_ACK_001A_OBSERVED=PASS]=1
+INITIAL_001A_SENT_COUNT=1
+```
+
+The repeat `0x001A` was not emitted:
+
+```text
+R27_REPEAT_EXECUTED=false
+COUNT[R27_REPEAT_001A_SENT=PASS]=0
+REPEAT_001A_SENT_COUNT=0
+TOTAL_001A_SENT_COUNT=1
+COUNT[R27_REPEAT_ACK_GATE_ARMED=true]=0
+R27_REPEAT_ACK_BINDING=NOT_PRESENT
+R27_REPEAT_SEQUENCE_SOURCE=NOT_PRESENT
+CAPTURED_LITERAL_REUSE=NOT_PRESENT
+```
+
+The observed mechanism was not a fail-closed precondition block:
+
+```text
+COUNT[R27_REPEAT_PRECONDITION=FAIL]=0
+COUNT[R27_THIRD_001A_BLOCKED]=1
+R27_THIRD_001A_BLOCKED=false
+COUNT[R27_REPEAT_SEQUENCE_MODEL=PASS]=0
+```
+
+The single counted `R27_THIRD_001A_BLOCKED` line is the final summary key with value `false`; there was
+no `R27_THIRD_001A_BLOCKED=true` failure in the session log.
+
+The bounded failure mechanism was:
+
+```text
+R27_REPEAT_001A_GENERATION=FAIL
+P78_RTPC_SIGNALING_RESULT=FAIL
+WRAPPER_RC=27
+```
+
+This corresponds to the R27 repeat path after preconditions were checked and before the repeat was
+queued: `p76_generate_client_001a()` returned non-OK, causing `p78_fail_rtpc("R27_REPEAT_001A_GENERATION=FAIL")`.
+
+## Second-response classification
+
+No second request response was reached because the second request was never sent:
+
+```text
+SECOND_001A_RESPONSE=NOT_REACHED
+SECOND_001A_RESPONSE=NOT_PRESENT
+R27_REPEAT_ACK_BINDING=NOT_PRESENT
+COUNT[R27_REPEAT_ACK_GATE_ARMED=true]=0
+```
+
+No structural ACK, absent-response timeout, ambiguous response, reject, or deduplication behavior was
+observed for a repeat request.
+
+## RTP timing and effect
+
+Native helper media was active and RTP progressed before the repeat-generation failure:
+
+```text
+P80_MEDIA_ACTIVE=true
+P80_AUDIO_RTP_FORWARDING=PASS
+P80_VIDEO_RTP_FORWARDING=PASS
+P80_AUDIO_RTP_PACKETS=1050
+P80_VIDEO_RTP_PACKETS=1050
+P116_VIDEO_COUNT=1064
+P116_VIDEO_FIRST_MONOTONIC_MS=3136162187
+P116_VIDEO_LAST_MONOTONIC_MS=3136182716
+P116_AUDIO_COUNT=1032
+P116_AUDIO_FIRST_MONOTONIC_MS=3136162067
+P116_AUDIO_LAST_MONOTONIC_MS=3136182716
+```
+
+The final helper summary recorded:
+
+```text
+VIDEO_RTP_BEFORE_REPEAT=NOT_REACHED
+VIDEO_PACKET_COUNT_AT_REPEAT=NOT_REACHED
+VIDEO_RTP_AFTER_REPEAT=false
+VIDEO_RTP_PAST_35S=false
+VIDEO_RTP_PAST_40S=false
+VIDEO_RTP_LAST_SECONDS_FROM_INITIAL_START=20
+```
+
+The run ended around the repeat-generation failure at approximately 20 seconds from media active. It did
+not reach the historical approximately 35-second untreated RTP cutoff, and it did not test whether a
+sent repeat can extend RTP beyond that cutoff.
+
+The localhost sink counters were zero in this run:
+
+```text
+VIDEO_RTP_SINK_PACKETS=0
+AUDIO_RTP_SINK_PACKETS=0
+```
+
+Those sink counters are recorded as a localhost sink/forwarding-path observation. They do not override
+the native helper RTP counters and helper-lineage gate, which proved media activity and RTP progress.
+
+## Teardown and listener restoration
+
+The candidate session and runner teardown completed, and the persistent listener was restored:
+
+```text
+CAMPAIGN_PROCESSES_REMAINING=NONE
+CAMPAIGN_PROCESSES_REMAINING_AFTER=0
+CT120_RESEARCH_HELPER_STOPPED=true
+CT120_RESEARCH_SESSION_CLOSED=true
+R27_SESSION_CLOSED=true
+R30H_D_SESSION_CLOSED=true
+TEARDOWN_CONFIDENCE=CONFIRMED
+LISTENER_RESTORE_ATTEMPT=1
+LISTENER_RESTORE=PASS
+LISTENER_RUNNING_AFTER=true
+LISTENER_READY_AFTER=true
+PRODUCTION_MEDIA_ACTIVE_DERIVED_FROM=LISTENER_READY_AFTER
+PRODUCTION_MEDIA_ACTIVE_DERIVATION_LISTENER_READY_AFTER=true
+PRODUCTION_MEDIA_ACTIVE=false
+RTP_PORTS_BOUND_AFTER=0
+```
+
+Two post-run read-only listener samples, 10 seconds apart, showed:
+
+```text
+POST_SAMPLE_1_HTTP=200
+POST_SAMPLE_1_ok=true
+POST_SAMPLE_1_supervisor_running=true
+POST_SAMPLE_1_running=true
+POST_SAMPLE_1_listener_ready=true
+POST_SAMPLE_1_last_error=null
+POST_SAMPLE_1_reconnect_count=7
+POST_SAMPLE_2_HTTP=200
+POST_SAMPLE_2_ok=true
+POST_SAMPLE_2_supervisor_running=true
+POST_SAMPLE_2_running=true
+POST_SAMPLE_2_listener_ready=true
+POST_SAMPLE_2_last_error=null
+POST_SAMPLE_2_reconnect_count=7
+```
+
+## Forbidden-action evidence
+
+```text
+MAX_LIVE_INVOCATIONS=1
+LIVE_INVOCATIONS=1
+SECOND_MEDIA_SESSION=false
+THIRD_001A=false
+REFRESH_LOOP=false
+AUTOMATIC_RETRY_001A=false
+RTCP_PLI=false
+RTCP_FIR=false
+OFFICIAL_APP_CAPTURE=false
+RAW_PCAP_CAPTURE=false
+DOOR_ACTIONS_SENT=0
+GATE_ACTIONS_SENT=0
+ENTRANCE_SIGNALING_DOOR_ACTION_SENT=false
+DOOR_ACTION_SENT=false
+HA_RESTARTED=false
+HA_RELOADED=false
+HA_DEPLOYED=false
+PRODUCTION_CODE_CHANGED=false
+CUSTOM_COMPONENTS_TOUCHED=false
+PACKAGED_NATIVE_TOUCHED=false
+```
+
+R30H-D did not modify executable code. This result document is the only repository write for the live
+child.
+
+## What remains unproven
+
+```text
+REPEAT_001A_SENT=NOT_PROVEN
+SECOND_001A_RESPONSE=NOT_PROVEN
+SECOND_001A_STRUCTURAL_ACK=NOT_PROVEN
+SECOND_001A_ABSENT_RESPONSE=NOT_PROVEN
+SECOND_001A_AMBIGUOUS_RESPONSE=NOT_PROVEN
+SECOND_001A_REJECTED_OR_DEDUPED=NOT_PROVEN
+VIDEO_RTP_BEFORE_REPEAT_AT_SEND_TIME=NOT_PROVEN
+VIDEO_RTP_AFTER_REPEAT=NOT_PROVEN
+VIDEO_RTP_PAST_35S_WITH_REPEAT=NOT_PROVEN
+VIDEO_RTP_PAST_40S_WITH_REPEAT=NOT_PROVEN
+REPEAT_EXTENDS_RTP=NOT_PROVEN
+REPEAT_NO_EXTENSION=NOT_PROVEN
+UNTREATED_35S_CUTOFF_REPRODUCED_IN_THIS_RUN=NOT_PROVEN
+SAFE_REPEAT_BODY_REGENERATION_FOR_LIVE_STATE=NOT_PROVEN
+PRODUCTION_REFRESH_IMPLEMENTATION_READY=NOT_PROVEN
+REFRESH_CADENCE=NOT_PROVEN
+```
+
+No retry, cadence change, production refresh implementation, Home Assistant action, or second live run
+is authorized by this result.
+
+## Result class
+
+`INCONCLUSIVE`
+
+The evidence acceptance gate passed, so the run can be interpreted up to the observed helper and initial
+media facts. However, the repeat request itself was never emitted. The contract defines
+`PASS_REPEAT_EXTENDS_RTP` only when the repeat is sent exactly once and video RTP continues beyond 40
+seconds in the unchanged session. It defines `FAIL_REPEAT_NO_EXTENSION` only when repeat execution is
+proven exactly once but video RTP does not continue beyond 40 seconds. It defines
+`BLOCKED_REPEAT_NOT_EXECUTED` only when the repeat is not emitted because an existing bounded
+fail-closed repeat precondition prevents it.
+
+This run does not match those three classes. The precondition gate did not print
+`R27_REPEAT_PRECONDITION=FAIL`, and the repeat attempt did not reach `R27_REPEAT_001A_SENT=PASS`.
+Instead, repeat body regeneration failed after entering the repeat attempt path:
+`R27_REPEAT_001A_GENERATION=FAIL`. That is an "other state that prevents a protocol conclusion" under
+the contract's `INCONCLUSIVE` class.
+
+```text
+=== COMELIT P116 R30H-D REPEAT 001A LIVE PROOF ===
+TASK_ID=COMELIT-P116-R30H-D-REPEAT-001A-LIVE-PROOF
+BASE_SHA=849bf41480cffdbdb8776b9454703445c2ad3ada
+LIVE_AUTHORIZED=true
+MAX_LIVE_INVOCATIONS=1
+LIVE_INVOCATIONS=1
+R30H_C_RESULT=PASS_EXECUTION_PATH_READY
+EXECUTION_PATH_GATE=PASS
+CANDIDATE_SOURCE_SHA256=1c9f13cff0d1d3599e00109146310c7372b1b0ae12117bb46ad68f091a841d42
+CANDIDATE_BINARY_SHA256=baeb9406b503a43542bc89b2a89a8d18b5564b429646113ccfd81367432f69a4
+WRAPPER_BINDING_GATE=PASS
+R27_HELPER_EVIDENCE_GATE=PASS
+R27_RUN_CLASSIFICATION=OBSERVATION_USABLE
+R27_USABLE_EVIDENCE=true
+R27_REPEAT_DELAY_SECONDS=20
+R27_REPEAT_DELAY_IS_PROTOCOL_CONSTANT=false
+R27_REPEAT_DELAY_PROMOTED_TO_PRODUCTION=false
+R27_REPEAT_EXECUTED=false
+INITIAL_001A_SENT_COUNT=1
+REPEAT_001A_SENT_COUNT=0
+TOTAL_001A_SENT_COUNT=1
+SECOND_001A_RESPONSE=NOT_REACHED
+VIDEO_RTP_BEFORE_REPEAT=NOT_REACHED
+VIDEO_PACKET_COUNT_AT_REPEAT=NOT_REACHED
+VIDEO_RTP_AFTER_REPEAT=false
+VIDEO_RTP_PAST_35S=false
+VIDEO_RTP_PAST_40S=false
+VIDEO_RTP_LAST_SECONDS_FROM_INITIAL_START=20
+ICE_NEGOTIATION_COUNT=1
+PSEUDOTCP_OPEN_COUNT=1
+CTPP_REGISTRATION_COUNT=1
+RTPC_CLIENT_OPEN_COUNT=2
+SELF_ACTIVATION_COUNT=1
+HELPER_PROCESS_UNCHANGED=true
+CAMPAIGN_PROCESSES_REMAINING=NONE
+CT120_RESEARCH_HELPER_STOPPED=true
+CT120_RESEARCH_SESSION_CLOSED=true
+R30H_D_SESSION_CLOSED=true
+TEARDOWN_CONFIDENCE=CONFIRMED
+LISTENER_RUNNING_AFTER=true
+LISTENER_READY_AFTER=true
+PRODUCTION_MEDIA_ACTIVE=false
+DOOR_ACTIONS_SENT=0
+GATE_ACTIONS_SENT=0
+HA_RESTARTED=false
+HA_RELOADED=false
+HA_DEPLOYED=false
+SECOND_MEDIA_SESSION=false
+REFRESH_LOOP=false
+PRODUCTION_CODE_CHANGED=false
+RESULT_DOC=safety-poc/research/media/v1/P116_R30H_D_REPEAT_001A_LIVE_PROOF_RESULT.md
+BRANCH=research/p116-r30h-d-repeat-001a-live-proof
+BRANCH_NOTE=orchestrator_will_publish_this_result_document_on_this_branch
+REMOTE_HEAD=none
+REMOTE_HEAD_NOTE=pre_push_authoring_value_commit_cannot_embed_own_pushed_head_orchestrator_final_block_reports_authoritative_remote_head_and_pr
+PR=none
+RESULT=INCONCLUSIVE
+=== END COMELIT P116 R30H-D REPEAT 001A LIVE PROOF ===
+```
