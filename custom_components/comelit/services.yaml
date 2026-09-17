@@ -10,3 +10,49 @@ open_door:
         select:
           options:
             - entrance
+    event_id:
+      name: Event ID
+      required: false
+      example: 00000000-0000-4000-8000-000000000000
+      selector:
+        text:
+emit_ring_interaction:
+  name: Emit Comelit ring interaction outcome
+  description: Emit one safe MVP Ring to Telegram interaction outcome event from Home Assistant orchestration.
+  fields:
+    event_id:
+      name: Event ID
+      required: true
+      example: 00000000-0000-4000-8000-000000000000
+      selector:
+        text:
+    door:
+      name: Door
+      required: true
+      example: entrance
+      selector:
+        select:
+          options:
+            - entrance
+    outcome:
+      name: Outcome
+      required: true
+      example: timeout
+      selector:
+        select:
+          options:
+            - open_requested
+            - ignored
+            - timeout
+            - notification_failed
+            - media_failed
+    chat_id:
+      name: Telegram chat ID
+      required: false
+      selector:
+        text:
+    message_id:
+      name: Telegram message ID
+      required: false
+      selector:
+        text:

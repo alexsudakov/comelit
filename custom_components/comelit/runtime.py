@@ -18,7 +18,7 @@ from .cloud import (
     ComelitCloudHttpError,
     async_negotiate_p2p,
 )
-from .const import EVENT_RING
+from .const import EVENT_DOOR_OPERATION, EVENT_RING
 from .oauth import ComelitOAuthError, ComelitOAuthManager
 from .ring_event import RingObservationError, parse_v4_safe_ring
 from .sdp import ComelitSdpError, transform_offer
@@ -304,7 +304,28 @@ class ComelitRingRuntime:
         self._listener_ready.clear()
         await self._hass.async_add_executor_job(_remove_helper_secret)
 
-    async def async_open_door(self, door: str) -> dict[str, object]:
+    def _finalize_door_operation(
+        self,
+        result: dict[str, object],
+        *,
+        event_id: str | None = None,
+    ) -> dict[str, object]:
+        """Store and emit the safe result for one completed Door attempt."""
+        final = dict(result)
+        if event_id:
+            final["event_id"] = event_id
+        final["automatic_retry_allowed"] = False
+        final["physical_effect_asserted"] = False
+        self._last_door_result = dict(final)
+        self._hass.bus.async_fire(EVENT_DOOR_OPERATION, dict(final))
+        return final
+
+    async def async_open_door(
+        self,
+        door: str,
+        *,
+        event_id: str | None = None,
+    ) -> dict[str, object]:
         """Execute exactly one direct Door attempt on the persistent session."""
         if door != "entrance":
             raise ComelitRingRuntimeError("unsupported_door")
@@ -324,8 +345,7 @@ class ComelitRingRuntime:
                     "automatic_retry_allowed": False,
                     "physical_effect_asserted": False,
                 }
-                self._last_door_result = dict(result)
-                return result
+                return self._finalize_door_operation(result, event_id=event_id)
 
             process = self._process
             if process is None or process.returncode is not None:
@@ -339,8 +359,7 @@ class ComelitRingRuntime:
                     "automatic_retry_allowed": False,
                     "physical_effect_asserted": False,
                 }
-                self._last_door_result = dict(result)
-                return result
+                return self._finalize_door_operation(result, event_id=event_id)
 
             # Diagnostics are scoped to this one-shot Door operation.
             # Clearing this mapping cannot cause a retry or protocol action.
@@ -366,8 +385,7 @@ class ComelitRingRuntime:
                     "automatic_retry_allowed": False,
                     "physical_effect_asserted": False,
                 }
-                self._last_door_result = dict(result)
-                return result
+                return self._finalize_door_operation(result, event_id=event_id)
 
             try:
                 state = await asyncio.wait_for(asyncio.shield(future), timeout=10)
@@ -421,8 +439,7 @@ class ComelitRingRuntime:
                 and result.get("door_specific_ack_proven") is True
             )
 
-            self._last_door_result = dict(result)
-            return result
+            return self._finalize_door_operation(result, event_id=event_id)
 
     async def _async_run_once(self) -> None:
         try:
