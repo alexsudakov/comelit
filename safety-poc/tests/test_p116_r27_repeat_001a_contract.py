@@ -602,7 +602,9 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
         self.assertIn("CANDIDATE_HOLDER_NAME=comelit-r27-repeat-001a", runner)
         self.assertIn("WRAPPER_NAME=comelit-p2p-cloud-probe-r27", runner)
         self.assertIn('CANDIDATE_WRAPPER="$RUN_ROOT/$WRAPPER_NAME"', runner)
-        self.assertIn('python3 - "$BASE_WRAPPER" "$CANDIDATE_WRAPPER" "$R27_OUTPUT"', runner)
+        self.assertIn('CANDIDATE_LAUNCHER="$RUN_ROOT/$CANDIDATE_HOLDER_NAME"', runner)
+        self.assertIn('RUN_MUSL_LOADER="$RUN_ROOT/ld-musl-x86_64.so.1"', runner)
+        self.assertIn('python3 - "$BASE_WRAPPER" "$CANDIDATE_WRAPPER" "$CANDIDATE_LAUNCHER" "$R27_OUTPUT"', runner)
         self.assertIn('timeout --signal=TERM --kill-after=5s "$OUTER_TIMEOUT_SECONDS" "$CANDIDATE_WRAPPER"', runner)
 
     def test_runner_wrapper_substitution_is_verified_and_fail_closed(self) -> None:
@@ -612,13 +614,101 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
             "R27_WRAPPER_HOLDER_ANCHOR=FAIL",
             "R27_WRAPPER_RUN_DIR_ANCHOR=FAIL",
             "R27_WRAPPER_SUBSTITUTION_BASE_ABSENT=FAIL",
-            "R27_WRAPPER_SUBSTITUTION_CANDIDATE_PRESENT=FAIL",
+            "R27_WRAPPER_SUBSTITUTION_LAUNCHER_PRESENT=FAIL",
             "R27_WRAPPER_SUBSTITUTION_BASE_ABSENT=PASS",
-            "R27_WRAPPER_SUBSTITUTION_CANDIDATE_PRESENT=PASS",
-            'bash -n "$CANDIDATE_WRAPPER" || fail "R27_WRAPPER_PARSE=FAIL"',
+            "R27_WRAPPER_SUBSTITUTION_CANDIDATE_LAUNCHER_PRESENT=PASS",
+            "RAW_CANDIDATE_PATH_PRESENT_AS_HOLDER=false",
+            "CANDIDATE_LAUNCHER_PATH_PRESENT_IN_CANDIDATE_WRAPPER=",
+            "CANDIDATE_LAUNCHER_OCCURRENCES=",
+            "BASE_WRAPPER_PATH_OCCURRENCES=",
+            'bash -n "$CANDIDATE_WRAPPER"',
+            'echo "CANDIDATE_WRAPPER_PARSE=PASS"',
+            'echo "WRAPPER_BINDING_GATE=PASS"',
+            'fail "R27_WRAPPER_PARSE=FAIL"',
             'fail "R27_WRAPPER_REWRITE=FAIL"',
         ):
             self.assertIn(required, runner)
+
+    def test_runner_materializes_musl_launcher_and_loader_probe_before_live_steps(self) -> None:
+        runner = (MEDIA / "ct120_run_p116_r27_repeat_001a_live.sh").read_text(encoding="utf-8")
+        required = (
+            'BUILDER_ROOTFS="$(build_provenance_marker P80_OFFLINE_ROOTFS NOT_REACHED)"',
+            'BUILDER_ROOTFS_MODE="$(build_provenance_marker P80_BUILD_ROOTFS_MODE NOT_REACHED)"',
+            'SOURCE_MUSL_LOADER="$BUILDER_ROOTFS/lib/ld-musl-x86_64.so.1"',
+            'PACKAGED_LIB_DIR="$REPO/custom_components/comelit/native/lib"',
+            'install -m 700 "$SOURCE_MUSL_LOADER" "$RUN_MUSL_LOADER"',
+            "LOADER_COPY_SHA_GATE=PASS",
+            'exec "$LOADER" --library-path "$LIBDIR" "$CANDIDATE" "$@"',
+            '"$RUN_MUSL_LOADER" --library-path "$PACKAGED_LIB_DIR" --list "$R27_OUTPUT"',
+            "LOADER_PROBE_EXECUTED=true",
+            "LOADER_PROBE_RC=",
+            "LOADER_PROBE_RESOLUTION=PASS",
+            "CANDIDATE_MAIN_EXECUTED=false",
+            "GLIBC_RESOLUTION_USED=false",
+            "CANDIDATE_SHA_GATE=PASS",
+            "CANDIDATE_INTERPRETER_MATCH=PASS",
+            "LAUNCHER_LOADER_PATH_MATCH=true",
+            "LAUNCHER_CANDIDATE_PATH_MATCH=true",
+            "LAUNCHER_LIBRARY_PATH_MATCH=true",
+            "LAUNCHER_BASE_HELPER_FALLBACK=false",
+        )
+        for marker in required:
+            with self.subTest(marker=marker):
+                self.assertIn(marker, runner)
+        self.assertLess(runner.index('if [ "$R27_LIVE_RUN" != YES ]; then'), runner.index('echo "=== BUILD EPHEMERAL R27 HELPER ==="'))
+        self.assertLess(runner.index('"$RUN_MUSL_LOADER" --library-path "$PACKAGED_LIB_DIR" --list "$R27_OUTPUT"'), runner.index('echo "=== VERIFY LISTENER READY ==="'))
+
+    def test_r30h_c_offline_harness_proves_launcher_boundary_without_live_actions(self) -> None:
+        harness = (MEDIA / "ct120_run_p116_r30h_c_musl_launcher_offline.sh").read_text(encoding="utf-8")
+        required = (
+            "TASK_ID=COMELIT-P116-R30H-C-MUSL-LAUNCHER-OFFLINE-CORRECTIVE",
+            'if [ "$R30H_C_OFFLINE_RUN" != YES ]; then',
+            'if [ "$R27_LIVE_RUN" = YES ]; then',
+            'R27_LIVE_RUN=NO REPO="$REPO" R27_EXPECTED_COMMIT_SHA="$R30H_C_EXPECTED_SHA" bash "$RUN_ROOT/runner.sh"',
+            'BUILDER_ROOTFS="$(marker_or P80_OFFLINE_ROOTFS NOT_REACHED)"',
+            'SOURCE_MUSL_LOADER="$BUILDER_ROOTFS/lib/ld-musl-x86_64.so.1"',
+            'install -m 700 "$SOURCE_MUSL_LOADER" "$RUN_MUSL_LOADER"',
+            'PACKAGED_LIB_DIR="$REPO/custom_components/comelit/native/lib"',
+            'exec "$LOADER" --library-path "$LIBDIR" "$CANDIDATE" "$@"',
+            '"$RUN_MUSL_LOADER" --library-path "$PACKAGED_LIB_DIR" --list "$CANDIDATE_OUTPUT"',
+            "LOADER_PROBE_EXECUTED=true",
+            "LOADER_PROBE_RC=$LOADER_PROBE_RC",
+            "LOADER_PROBE_RESOLUTION=PASS",
+            "CANDIDATE_MAIN_EXECUTED=false",
+            "GLIBC_RESOLUTION_USED=false",
+            "COMELIT_NETWORK_REQUESTS=0",
+            "HA_TOUCHED=false",
+            "PRODUCTION_LISTENER_TOUCHED=false",
+            "LIVE_INVOCATIONS=0",
+            "CANDIDATE_BINARY_EXECUTED=false",
+            "CANDIDATE_WRAPPER_EXECUTED=false",
+            "R30H_C_HARNESS_RESULT=PASS",
+        )
+        for marker in required:
+            with self.subTest(marker=marker):
+                self.assertIn(marker, harness)
+        self.assertNotIn("curl", harness)
+        self.assertNotIn("HA_WEBHOOK_URL=${", harness)
+        self.assertNotIn("post_control", harness)
+        self.assertNotIn("listener-stop", harness)
+
+    def test_r30h_c_offline_harness_wrapper_binds_launcher_not_raw_candidate(self) -> None:
+        harness = (MEDIA / "ct120_run_p116_r30h_c_musl_launcher_offline.sh").read_text(encoding="utf-8")
+        for required in (
+            'python3 - "$BASE_WRAPPER" "$CANDIDATE_WRAPPER" "$CANDIDATE_LAUNCHER" "$CANDIDATE_OUTPUT"',
+            "BASE_HOLDER_PATH_PRESENT_IN_CANDIDATE_WRAPPER=false",
+            "RAW_CANDIDATE_PATH_PRESENT_AS_HOLDER=false",
+            "CANDIDATE_LAUNCHER_PATH_PRESENT_IN_CANDIDATE_WRAPPER=true",
+            "CANDIDATE_LAUNCHER_OCCURRENCES=1",
+            "BASE_WRAPPER_PATH_OCCURRENCES=0",
+            "CANDIDATE_WRAPPER_PARSE=PASS",
+            "WRAPPER_BINDING_GATE=$WRAPPER_BINDING_GATE",
+            "LAUNCHER_LOADER_PATH_MATCH=true",
+            "LAUNCHER_CANDIDATE_PATH_MATCH=true",
+            "LAUNCHER_LIBRARY_PATH_MATCH=true",
+            "LAUNCHER_BASE_HELPER_FALLBACK=false",
+        ):
+            self.assertIn(required, harness)
 
     def test_runner_requires_helper_evidence_before_r27_observation_is_usable(self) -> None:
         runner = (MEDIA / "ct120_run_p116_r27_repeat_001a_live.sh").read_text(encoding="utf-8")
