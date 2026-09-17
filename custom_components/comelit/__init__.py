@@ -25,6 +25,7 @@ from .const import (
     CONF_VIP_TOKEN,
     DATA_MEDIA_SESSIONS,
     DATA_MEDIA_TRANSPORTS,
+    DATA_RING_MEDIA,
     DATA_RUNTIMES,
     DATA_SUPERVISORS,
     DOMAIN,
@@ -38,6 +39,7 @@ from .const import (
 from .media_session import ComelitMediaSessionManager
 from .media_transport import ComelitEntranceMediaTransport
 from .oauth import ComelitOAuthManager
+from .ring_media import HAStreamMediaProvider, RingMediaCoordinator
 from .runtime import ComelitRingRuntime
 from .supervisor import ComelitRuntimeSupervisor
 from .test_control import async_register_test_control, async_unregister_test_control
@@ -177,6 +179,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         media_sessions = domain_data.setdefault(DATA_MEDIA_SESSIONS, {})
         media_sessions[entry.entry_id] = media_manager
 
+        ring_media_provider = HAStreamMediaProvider(
+            hass,
+            media_manager,
+            media_transport,
+        )
+        ring_media = RingMediaCoordinator(
+            hass,
+            media_manager,
+            snapshot_provider=ring_media_provider,
+            recording_provider=ring_media_provider,
+            task_factory=lambda coro, name: entry.async_create_background_task(
+                hass, coro, name
+            ),
+        )
+        ring_media_lifecycles = domain_data.setdefault(DATA_RING_MEDIA, {})
+        ring_media_lifecycles[entry.entry_id] = ring_media
+        runtime.set_ring_media_coordinator(ring_media)
+
         # Transitional validation endpoint remains available, but normal
         # operation no longer depends on CT120/Hermes: the supervisor starts
         # with the config entry and reconnects entirely inside Home Assistant.
@@ -193,11 +213,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     supervisors = domain_data.get(DATA_SUPERVISORS, {})
     media_sessions = domain_data.get(DATA_MEDIA_SESSIONS, {})
     media_transports = domain_data.get(DATA_MEDIA_TRANSPORTS, {})
+    ring_media_lifecycles = domain_data.get(DATA_RING_MEDIA, {})
 
     runtime = runtimes.pop(entry.entry_id, None)
     supervisor = supervisors.pop(entry.entry_id, None)
     media_manager = media_sessions.pop(entry.entry_id, None)
     media_transport = media_transports.pop(entry.entry_id, None)
+    ring_media = ring_media_lifecycles.pop(entry.entry_id, None)
 
     unloaded = True
     if runtime is not None:
@@ -207,6 +229,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # supervisor. This avoids creating a short-lived replacement listener
         # during config-entry unload.
         try:
+            if ring_media is not None:
+                await ring_media.async_shutdown()
             if media_manager is not None:
                 await media_manager.async_shutdown()
             elif media_transport is not None:
@@ -235,4 +259,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             domain_data.pop(DATA_MEDIA_SESSIONS, None)
         if not media_transports:
             domain_data.pop(DATA_MEDIA_TRANSPORTS, None)
+        if not ring_media_lifecycles:
+            domain_data.pop(DATA_RING_MEDIA, None)
     return unloaded

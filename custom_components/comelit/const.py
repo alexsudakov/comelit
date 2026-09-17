@@ -8,6 +8,7 @@ DATA_RUNTIMES = "ring_runtimes"
 DATA_SUPERVISORS = "runtime_supervisors"
 DATA_MEDIA_TRANSPORTS = "media_transports"
 DATA_MEDIA_SESSIONS = "media_sessions"
+DATA_RING_MEDIA = "ring_media"
 
 CONF_DEVICE_UUID = "device_uuid"
 CONF_VIP_TOKEN = "vip_token"
@@ -23,6 +24,8 @@ CONF_SHARED_SECRET = "shared_secret"
 EVENT_RING = "comelit_ring"
 EVENT_RING_INTERACTION = "comelit_ring_interaction"
 EVENT_DOOR_OPERATION = "comelit_door_operation"
+EVENT_SNAPSHOT_UPDATED = "comelit_snapshot_updated"
+EVENT_RECORDING_COMPLETE = "comelit_recording_complete"
 SERVICE_OPEN_DOOR = "open_door"
 SERVICE_EMIT_RING_INTERACTION = "emit_ring_interaction"
 ATTR_DOOR = "door"
@@ -30,8 +33,26 @@ ATTR_EVENT_ID = "event_id"
 ATTR_OUTCOME = "outcome"
 ATTR_CHAT_ID = "chat_id"
 ATTR_MESSAGE_ID = "message_id"
+ATTR_CAMERA_ENTITY = "camera_entity"
+ATTR_SNAPSHOT_PATH = "snapshot_path"
+ATTR_RECORDING_PATH = "recording_path"
+ATTR_SEQUENCE = "sequence"
+ATTR_TIMESTAMP = "timestamp"
+ATTR_DURATION_TARGET_SECONDS = "duration_target_seconds"
+ATTR_DURATION_ACTUAL_SECONDS = "duration_actual_seconds"
+ATTR_STATE = "state"
 DOOR_ENTRANCE = "entrance"
 DOOR_GATE = "gate"
+SNAPSHOT_REFRESH_TARGET_SECONDS = 1
+RECORDING_TARGET_SECONDS = 20
+RECORDING_STATE_COMPLETED = "completed"
+RECORDING_STATE_TRUNCATED = "truncated"
+RECORDING_STATE_FAILED = "failed"
+RECORDING_STATES = (
+    RECORDING_STATE_COMPLETED,
+    RECORDING_STATE_TRUNCATED,
+    RECORDING_STATE_FAILED,
+)
 RING_INTERACTION_OUTCOME_OPEN_REQUESTED = "open_requested"
 RING_INTERACTION_OUTCOME_IGNORED = "ignored"
 RING_INTERACTION_OUTCOME_TIMEOUT = "timeout"
