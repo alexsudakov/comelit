@@ -1,0 +1,255 @@
+# Home Assistant package example for the Comelit Ring -> Telegram MVP.
+# Configure these helpers and entity IDs for your deployment before enabling.
+
+input_text:
+  comelit_ring_telegram_config_entry_id:
+    name: Comelit Ring Telegram config entry ID
+    initial: configure_me
+  comelit_ring_telegram_target_chat:
+    name: Comelit Ring Telegram target chat
+    initial: configure_me
+  comelit_ring_snapshot_directory:
+    name: Comelit Ring snapshot directory
+    initial: /media/comelit
+
+automation:
+  - id: comelit_ring_telegram_mvp
+    alias: Comelit Ring Telegram MVP
+    mode: single
+    # A second ring during an active interaction is deliberately dropped by
+    # the HA runner: no second media session, no Door action, no context change.
+    max_exceeded: silent
+    trigger:
+      - platform: event
+        event_type: comelit_ring
+    variables:
+      INTERACTION_TIMEOUT_SECONDS: 30
+      SNAPSHOT_REFRESH_TARGET_SECONDS: 1
+      listener_ready_timeout_seconds: 8
+      event_id: "{{ trigger.event.data.event_id }}"
+      door: "{{ trigger.event.data.door }}"
+      telegram_config_entry_id: "{{ states('input_text.comelit_ring_telegram_config_entry_id') }}"
+      telegram_target_chat: "{{ states('input_text.comelit_ring_telegram_target_chat') }}"
+      snapshot_directory: "{{ states('input_text.comelit_ring_snapshot_directory') }}"
+      snapshot_path: "{{ snapshot_directory ~ '/comelit_ring_' ~ event_id ~ '.jpg' }}"
+      open_callback_data: "{{ 'comelit|open|' ~ event_id }}"
+      ignore_callback_data: "{{ 'comelit|ignore|' ~ event_id }}"
+      interaction_started_at: "{{ now() }}"
+      terminal_outcome: ""
+      callback_query_id: ""
+      telegram_chat_id: ""
+      telegram_message_id: ""
+    condition:
+      - condition: template
+        value_template: "{{ event_id | string | length > 0 }}"
+      - condition: template
+        value_template: "{{ door == 'entrance' }}"
+    action:
+      - action: switch.turn_on
+        target:
+          entity_id: switch.comelit_entrance_camera
+
+      - wait_template: >-
+          {{ is_state_attr('camera.comelit_entrance', 'video_forwarding', true)
+             or (state_attr('camera.comelit_entrance', 'video_packet_count') | int(0)) > 0 }}
+        timeout: "00:00:10"
+        continue_on_timeout: false
+
+      - action: camera.snapshot
+        target:
+          entity_id: camera.comelit_entrance
+        data:
+          filename: "{{ snapshot_path }}"
+
+      - action: telegram_bot.send_photo
+        continue_on_error: true
+        data:
+          config_entry_id: "{{ telegram_config_entry_id }}"
+          chat_id: "{{ telegram_target_chat }}"
+          file: "{{ snapshot_path }}"
+          caption: "Comelit: Подъезд"
+          inline_keyboard:
+            - "Открыть:{{ open_callback_data }}, Игнорировать:{{ ignore_callback_data }}"
+        response_variable: telegram_send
+
+      - variables:
+          telegram_chat_id: >-
+            {{ telegram_send.chats[0].chat_id
+               | default('') }}
+          telegram_message_id: >-
+            {{ telegram_send.chats[0].message_id
+               | default('') }}
+
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ telegram_chat_id | string | length == 0 or telegram_message_id | string | length == 0 }}"
+            sequence:
+              - variables:
+                  terminal_outcome: notification_failed
+              - action: comelit.emit_ring_interaction
+                data:
+                  event_id: "{{ event_id }}"
+                  door: "{{ door }}"
+                  outcome: notification_failed
+
+      - repeat:
+          while:
+            - condition: template
+              value_template: "{{ terminal_outcome == '' }}"
+            - condition: template
+              value_template: >-
+                {{ (as_timestamp(now()) - as_timestamp(interaction_started_at))
+                   < INTERACTION_TIMEOUT_SECONDS }}
+          sequence:
+            - wait_for_trigger:
+                - platform: event
+                  event_type: telegram_callback
+                  event_data:
+                    data: "{{ open_callback_data }}"
+                - platform: event
+                  event_type: telegram_callback
+                  event_data:
+                    data: "{{ ignore_callback_data }}"
+              timeout:
+                seconds: "{{ SNAPSHOT_REFRESH_TARGET_SECONDS }}"
+              continue_on_timeout: true
+
+            - choose:
+                - conditions:
+                    - condition: template
+                      value_template: >-
+                        {{ not is_state('switch.comelit_entrance_camera', 'on')
+                           or (
+                             not is_state_attr('camera.comelit_entrance', 'video_forwarding', true)
+                             and (state_attr('camera.comelit_entrance', 'video_packet_count') | int(0)) == 0
+                           ) }}
+                  sequence:
+                    - variables:
+                        terminal_outcome: media_failed
+                    - action: comelit.emit_ring_interaction
+                      data:
+                        event_id: "{{ event_id }}"
+                        door: "{{ door }}"
+                        outcome: media_failed
+                        chat_id: "{{ telegram_chat_id }}"
+                        message_id: "{{ telegram_message_id }}"
+                - conditions:
+                    - condition: template
+                      value_template: "{{ wait.completed }}"
+                    - condition: template
+                      value_template: >-
+                        {{ wait.trigger.event.data.data in [open_callback_data, ignore_callback_data] }}
+                  sequence:
+                    - variables:
+                        callback_query_id: "{{ wait.trigger.event.data.id | default('') }}"
+                        terminal_outcome: >-
+                          {{ 'open_requested'
+                             if wait.trigger.event.data.data == open_callback_data
+                             else 'ignored' }}
+                    - action: telegram_bot.answer_callback_query
+                      continue_on_error: true
+                      data:
+                        callback_query_id: "{{ callback_query_id }}"
+                    - action: comelit.emit_ring_interaction
+                      data:
+                        event_id: "{{ event_id }}"
+                        door: "{{ door }}"
+                        outcome: "{{ terminal_outcome }}"
+                        chat_id: "{{ telegram_chat_id }}"
+                        message_id: "{{ telegram_message_id }}"
+                - conditions:
+                    - condition: template
+                      value_template: "{{ not wait.completed }}"
+                    - condition: template
+                      value_template: >-
+                        {{ is_state('switch.comelit_entrance_camera', 'on')
+                           and (
+                             is_state_attr('camera.comelit_entrance', 'video_forwarding', true)
+                             or (state_attr('camera.comelit_entrance', 'video_packet_count') | int(0)) > 0
+                           ) }}
+                  sequence:
+                    - action: camera.snapshot
+                      continue_on_error: true
+                      target:
+                        entity_id: camera.comelit_entrance
+                      data:
+                        filename: "{{ snapshot_path }}"
+                    - choose:
+                        - conditions:
+                            - condition: template
+                              value_template: "{{ telegram_chat_id | string | length > 0 and telegram_message_id | string | length > 0 }}"
+                          sequence:
+                            - action: telegram_bot.edit_message_media
+                              continue_on_error: true
+                              data:
+                                config_entry_id: "{{ telegram_config_entry_id }}"
+                                chat_id: "{{ telegram_chat_id }}"
+                                message_id: "{{ telegram_message_id }}"
+                                media_type: photo
+                                file: "{{ snapshot_path }}"
+                                caption: "Comelit: Подъезд"
+                                inline_keyboard:
+                                  - "Открыть:{{ open_callback_data }}, Игнорировать:{{ ignore_callback_data }}"
+
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ terminal_outcome == '' }}"
+            sequence:
+              - variables:
+                  terminal_outcome: timeout
+              - action: comelit.emit_ring_interaction
+                data:
+                  event_id: "{{ event_id }}"
+                  door: "{{ door }}"
+                  outcome: timeout
+                  chat_id: "{{ telegram_chat_id }}"
+                  message_id: "{{ telegram_message_id }}"
+
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ telegram_chat_id | string | length > 0 and telegram_message_id | string | length > 0 }}"
+            sequence:
+              - action: telegram_bot.edit_replymarkup
+                continue_on_error: true
+                data:
+                  config_entry_id: "{{ telegram_config_entry_id }}"
+                  chat_id: "{{ telegram_chat_id }}"
+                  message_id: "{{ telegram_message_id }}"
+                  inline_keyboard: []
+
+      - action: switch.turn_off
+        target:
+          entity_id: switch.comelit_entrance_camera
+
+      - wait_template: >-
+          {{ is_state('sensor.comelit_listener_status', 'ready')
+             and is_state('switch.comelit_entrance_camera', 'off') }}
+        timeout:
+          seconds: "{{ listener_ready_timeout_seconds }}"
+        continue_on_timeout: true
+
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ terminal_outcome == 'open_requested' }}"
+              - condition: template
+                value_template: "{{ wait.completed }}"
+            sequence:
+              - action: comelit.open_door
+                data:
+                  door: "{{ door }}"
+                  event_id: "{{ event_id }}"
+          - conditions:
+              - condition: template
+                value_template: "{{ terminal_outcome == 'open_requested' and not wait.completed }}"
+            sequence:
+              - action: comelit.emit_ring_interaction
+                data:
+                  event_id: "{{ event_id }}"
+                  door: "{{ door }}"
+                  outcome: media_failed
+                  chat_id: "{{ telegram_chat_id }}"
+                  message_id: "{{ telegram_message_id }}"

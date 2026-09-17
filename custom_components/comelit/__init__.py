@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 import logging
 
 import voluptuous as vol
@@ -13,6 +14,10 @@ from homeassistant.helpers.typing import ConfigType
 from .client import ComelitBridgeClient
 from .const import (
     ATTR_DOOR,
+    ATTR_CHAT_ID,
+    ATTR_EVENT_ID,
+    ATTR_MESSAGE_ID,
+    ATTR_OUTCOME,
     CONF_BRIDGE_URL,
     CONF_DEVICE_UUID,
     CONF_OAUTH_ACCESS_TOKEN,
@@ -23,7 +28,10 @@ from .const import (
     DATA_RUNTIMES,
     DATA_SUPERVISORS,
     DOMAIN,
+    EVENT_RING_INTERACTION,
     PLATFORMS,
+    RING_INTERACTION_OUTCOMES,
+    SERVICE_EMIT_RING_INTERACTION,
     SERVICE_OPEN_DOOR,
     SUPPORTED_DOORS,
 )
@@ -57,14 +65,50 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 "media session owns the exclusive Comelit connection"
             )
 
-        return await runtime.async_open_door(str(call.data[ATTR_DOOR]))
+        event_id = call.data.get(ATTR_EVENT_ID)
+        return await runtime.async_open_door(
+            str(call.data[ATTR_DOOR]),
+            event_id=str(event_id) if event_id else None,
+        )
+
+    async def handle_emit_ring_interaction(call: ServiceCall) -> None:
+        payload: dict[str, object] = {
+            ATTR_EVENT_ID: str(call.data[ATTR_EVENT_ID]),
+            ATTR_DOOR: str(call.data[ATTR_DOOR]),
+            ATTR_OUTCOME: str(call.data[ATTR_OUTCOME]),
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+        for key in (ATTR_CHAT_ID, ATTR_MESSAGE_ID):
+            if key in call.data:
+                payload[key] = call.data[key]
+
+        hass.bus.async_fire(EVENT_RING_INTERACTION, payload)
 
     hass.services.async_register(
         DOMAIN,
         SERVICE_OPEN_DOOR,
         handle_open_door,
-        schema=vol.Schema({vol.Required(ATTR_DOOR): vol.In(SUPPORTED_DOORS)}),
+        schema=vol.Schema(
+            {
+                vol.Required(ATTR_DOOR): vol.In(SUPPORTED_DOORS),
+                vol.Optional(ATTR_EVENT_ID): str,
+            }
+        ),
         supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_EMIT_RING_INTERACTION,
+        handle_emit_ring_interaction,
+        schema=vol.Schema(
+            {
+                vol.Required(ATTR_EVENT_ID): str,
+                vol.Required(ATTR_DOOR): vol.In(SUPPORTED_DOORS),
+                vol.Required(ATTR_OUTCOME): vol.In(RING_INTERACTION_OUTCOMES),
+                vol.Optional(ATTR_CHAT_ID): object,
+                vol.Optional(ATTR_MESSAGE_ID): object,
+            }
+        ),
     )
     return True
 

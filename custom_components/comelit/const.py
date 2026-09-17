@@ -21,10 +21,29 @@ CONF_BRIDGE_URL = "bridge_url"
 CONF_SHARED_SECRET = "shared_secret"
 
 EVENT_RING = "comelit_ring"
+EVENT_RING_INTERACTION = "comelit_ring_interaction"
+EVENT_DOOR_OPERATION = "comelit_door_operation"
 SERVICE_OPEN_DOOR = "open_door"
+SERVICE_EMIT_RING_INTERACTION = "emit_ring_interaction"
 ATTR_DOOR = "door"
+ATTR_EVENT_ID = "event_id"
+ATTR_OUTCOME = "outcome"
+ATTR_CHAT_ID = "chat_id"
+ATTR_MESSAGE_ID = "message_id"
 DOOR_ENTRANCE = "entrance"
 DOOR_GATE = "gate"
+RING_INTERACTION_OUTCOME_OPEN_REQUESTED = "open_requested"
+RING_INTERACTION_OUTCOME_IGNORED = "ignored"
+RING_INTERACTION_OUTCOME_TIMEOUT = "timeout"
+RING_INTERACTION_OUTCOME_NOTIFICATION_FAILED = "notification_failed"
+RING_INTERACTION_OUTCOME_MEDIA_FAILED = "media_failed"
+RING_INTERACTION_OUTCOMES = (
+    RING_INTERACTION_OUTCOME_OPEN_REQUESTED,
+    RING_INTERACTION_OUTCOME_IGNORED,
+    RING_INTERACTION_OUTCOME_TIMEOUT,
+    RING_INTERACTION_OUTCOME_NOTIFICATION_FAILED,
+    RING_INTERACTION_OUTCOME_MEDIA_FAILED,
+)
 
 # Only targets with a separately proven actuation profile may be accepted by
 # the public Door service. Gate ring identity is proven, gate actuation is not.
