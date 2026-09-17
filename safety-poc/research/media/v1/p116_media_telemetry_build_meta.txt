@@ -1,16 +1,31 @@
 P116_MEDIA_TELEMETRY_BUILD=PROVEN_OFFLINE
-GENERATED_SOURCE_SHA256=93756730fd088b9227f37c4e0e3edbd18ac30c110db03b75bcc63f1c93952e66
-NATIVE_BINARY_SHA256=35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622
+GENERATED_SOURCE_SHA256=1c89d61de4372d96b25f6894862741244753c107a3a9b9e04817250b3bea55b2
+NATIVE_BINARY_SHA256=a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8
+NATIVE_BINARY_SIZE=270272
+NATIVE_BINARY_MODE=755
 canonical_generator=entrance_p106_teardown_state_classification_transform.py (include_p116=1)
-generator_tree_commit=6fe4413861e7f597bb2f05f445eeb6513d7e8406
-toolchain=Alpine 3.24.1 chroot (cached), cc (Alpine 15.2.0) 15.2.0, glib/gobject 2.88.1, libnice 0.1.22
+build_input_commit=53ce0632008709687d9eae69dbaa31b019f021ea
+selected_cached_rootfs=/root/comelit-p80-haos-build-20260909T193410Z/rootfs
+toolchain=Alpine 3.24.1 chroot (cached), gcc (Alpine 15.2.0) 15.2.0, pkg-config 2.5.1, glib/gobject 2.88.1, libnice 0.1.22
 flags=-O2 -g -Wall -Wextra -Wl,--as-needed
 interpreter=/lib/ld-musl-x86_64.so.1
 needed=libc.musl-x86_64.so.1,libglib-2.0.so.0,libgobject-2.0.so.0,libnice.so.10
+elf_build_id=c8423ab4b5026d7a9989ba4e037dee06671e4616
 gates=MUSL_INTERPRETER_GATE=PASS, NO_GLIBC_DEPENDENCY=PASS, NO_NEW_RUNTIME_DEPENDENCY=PASS, LIB_IDENTICAL=PASS
-reproducibility=two independent clean builds produced byte-identical 35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622
+reproducibility=two independent clean builds produced byte-identical a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8
+build_a_sha256=a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8
+build_b_sha256=a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8
+build_a_stat=size=270272 mode=755
+build_b_stat=size=270272 mode=755
+reproducible_binary_sha_gate=PASS
+reproducible_binary_cmp_gate=PASS
+historical_pre_r30e_generated_source_sha256=93756730fd088b9227f37c4e0e3edbd18ac30c110db03b75bcc63f1c93952e66
+historical_pre_r30e_native_binary_sha256=35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622
 historical=f17ad2d6efbe002335a658c075da84677ced44246d556afe80953a8f59129841 same source vs pinned 91335b4490bc58910c78cb58b9c2d3eccc13f40dcfff7651995ad428cd71ddc7 -> HISTORICAL_HASH_MISMATCH_CLASS=NON_RUNTIME_BUILD_METADATA
 candidate_executed=false
 LIVE_INVOCATIONS=0
 DOOR_ACTIONS=0
 GATE_ACTIONS=0
+COMELIT_NETWORK_REQUESTS=0
+LISTENER_CHANGED=NO
+HA_CORE_CHANGED=NO

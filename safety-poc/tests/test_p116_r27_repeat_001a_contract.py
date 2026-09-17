@@ -17,7 +17,8 @@ MEDIA = ROOT / "safety-poc" / "research" / "media" / "v1"
 SOURCE = ROOT / "safety-poc" / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-ctpp-door.c"
 TRANSFORM = MEDIA / "entrance_p116_r27_repeat_001a_transform.py"
 EXPECTED_GENERATED_SOURCE_SHA = "1c9f13cff0d1d3599e00109146310c7372b1b0ae12117bb46ad68f091a841d42"
-RUNNER_EMBEDDED_PRE_R30D_SOURCE_SHA = "62e0023521cef0e4178248beb78408f89752d108d9d009c388ff153d94195368"
+RUNNER_EXPECTED_SOURCE_SHA = "1c9f13cff0d1d3599e00109146310c7372b1b0ae12117bb46ad68f091a841d42"
+RUNNER_HISTORICAL_PRE_R30D_SOURCE_SHA = "62e0023521cef0e4178248beb78408f89752d108d9d009c388ff153d94195368"
 
 # This is an explicit source-local declaration-order gate for R27-added code in
 # the composed candidate. It is not a C parser and it does not prove system or
@@ -582,8 +583,9 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
     def test_runner_timeout_fail_closed_and_teardown_markers(self) -> None:
         runner = (MEDIA / "ct120_run_p116_r27_repeat_001a_live.sh").read_text(encoding="utf-8")
         self.assertIn("OUTER_TIMEOUT_SECONDS=150", runner)
-        self.assertIn(f"EXPECTED_SOURCE_SHA={RUNNER_EMBEDDED_PRE_R30D_SOURCE_SHA}", runner)
-        self.assertNotEqual(RUNNER_EMBEDDED_PRE_R30D_SOURCE_SHA, EXPECTED_GENERATED_SOURCE_SHA)
+        self.assertIn(f"EXPECTED_SOURCE_SHA={RUNNER_EXPECTED_SOURCE_SHA}", runner)
+        self.assertEqual(RUNNER_EXPECTED_SOURCE_SHA, EXPECTED_GENERATED_SOURCE_SHA)
+        self.assertNotEqual(RUNNER_HISTORICAL_PRE_R30D_SOURCE_SHA, EXPECTED_GENERATED_SOURCE_SHA)
         self.assertIn("CAMPAIGN_PROCESSES_REMAINING=", runner)
         self.assertIn("CT120_RESEARCH_HELPER_STOPPED=", runner)
         self.assertIn("CT120_RESEARCH_SESSION_CLOSED=", runner)

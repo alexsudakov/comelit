@@ -16,10 +16,12 @@ P116_BUILD_META = ROOT / "safety-poc" / "research" / "media" / "v1" / "p116_medi
 P114_BUILD_META = ROOT / "safety-poc" / "research" / "media" / "v1" / "p114_media_diagnostics_build_meta.txt"
 HISTORICAL_PINNED = ROOT / ".p116-evidence" / "bin" / "pinned-historical.bin"
 REBUILT = ROOT / ".p116-evidence" / "bin" / "rebuilt-historical-source.bin"
-PINNED_SHA256 = "35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622"
+PINNED_SHA256 = "a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8"
 HISTORICAL_PINNED_SHA256 = "91335b4490bc58910c78cb58b9c2d3eccc13f40dcfff7651995ad428cd71ddc7"
 HISTORICAL_SOURCE_SHA256 = "0c15927dbc40bdb1f7c522f063a8a2f38c557f9eb735cdd981cdd49449595c79"
-P116_SOURCE_SHA256 = "93756730fd088b9227f37c4e0e3edbd18ac30c110db03b75bcc63f1c93952e66"
+P116_SOURCE_SHA256 = "1c89d61de4372d96b25f6894862741244753c107a3a9b9e04817250b3bea55b2"
+PRE_R30E_PACKAGED_BINARY_SHA256 = "35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622"
+PRE_R30E_PACKAGED_SOURCE_SHA256 = "93756730fd088b9227f37c4e0e3edbd18ac30c110db03b75bcc63f1c93952e66"
 REBUILT_SHA256 = "f17ad2d6efbe002335a658c075da84677ced44246d556afe80953a8f59129841"
 EXPECTED_NEEDED = [
     "libc.musl-x86_64.so.1",
@@ -204,6 +206,15 @@ class P116ProvenanceBinaryAnalysisTests(unittest.TestCase):
 
         self.assertEqual(p116_meta["NATIVE_BINARY_SHA256"], PINNED_SHA256)
         self.assertEqual(p116_meta["GENERATED_SOURCE_SHA256"], P116_SOURCE_SHA256)
+        self.assertEqual(p116_meta["build_a_sha256"], PINNED_SHA256)
+        self.assertEqual(p116_meta["build_b_sha256"], PINNED_SHA256)
+        self.assertEqual(p116_meta["reproducible_binary_sha_gate"], "PASS")
+        self.assertEqual(p116_meta["reproducible_binary_cmp_gate"], "PASS")
+        self.assertEqual(p116_meta["NATIVE_BINARY_SIZE"], str(PINNED.stat().st_size))
+        self.assertEqual(p116_meta["NATIVE_BINARY_MODE"], oct(PINNED.stat().st_mode & 0o777)[2:])
+        self.assertEqual(p116_meta["historical_pre_r30e_native_binary_sha256"], PRE_R30E_PACKAGED_BINARY_SHA256)
+        self.assertEqual(p116_meta["historical_pre_r30e_generated_source_sha256"], PRE_R30E_PACKAGED_SOURCE_SHA256)
+        self.assertNotEqual(_sha256(PINNED), PRE_R30E_PACKAGED_BINARY_SHA256)
         self.assertEqual(p114_meta["NATIVE_BINARY_SHA256"], HISTORICAL_PINNED_SHA256)
         self.assertEqual(p114_meta["GENERATED_SOURCE_SHA256"], HISTORICAL_SOURCE_SHA256)
 

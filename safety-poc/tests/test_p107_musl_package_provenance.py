@@ -17,10 +17,13 @@ TRANSPORT = ROOT / "custom_components" / "comelit" / "media_transport.py"
 BINARY = ROOT / "custom_components" / "comelit" / "native" / "comelit-media"
 NATIVE_LIB = ROOT / "custom_components" / "comelit" / "native" / "lib"
 SOURCE = SAFETY_ROOT / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-ctpp-door.c"
-EXPECTED_MUSL_SHA256 = "35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622"
+BUILD_META = MEDIA_DIR / "p116_media_telemetry_build_meta.txt"
+EXPECTED_MUSL_SHA256 = "a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8"
 EXPECTED_RUN3_GLIBC_SHA256 = "94063498a35a886dc4cb735c3e629a5097b965224cb3354192723d30e70c16ac"
-PACKAGED_NATIVE_SOURCE_SHA256 = "93756730fd088b9227f37c4e0e3edbd18ac30c110db03b75bcc63f1c93952e66"
+PACKAGED_NATIVE_SOURCE_SHA256 = "1c89d61de4372d96b25f6894862741244753c107a3a9b9e04817250b3bea55b2"
 HEAD_P116_SOURCE_SHA256 = "1c89d61de4372d96b25f6894862741244753c107a3a9b9e04817250b3bea55b2"
+PRE_R30E_PACKAGED_BINARY_SHA256 = "35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622"
+PRE_R30E_PACKAGED_SOURCE_SHA256 = "93756730fd088b9227f37c4e0e3edbd18ac30c110db03b75bcc63f1c93952e66"
 EXPECTED_INTERPRETER = "/lib/ld-musl-x86_64.so.1"
 EXPECTED_NEEDED = (
     "libc.musl-x86_64.so.1",
@@ -158,6 +161,16 @@ def _marker_value_pattern(source: str) -> re.Pattern[str]:
     raise AssertionError("_MEDIA_NATIVE_MARKER_SAFE_VALUE_RE assignment not found")
 
 
+def _metadata(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key] = value
+    return values
+
+
 class P107MuslPackageProvenanceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -168,8 +181,14 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
 
     def test_packaged_binary_sha256_matches_transport_pin_and_offline_musl_artifact(self) -> None:
         actual = _sha256_bytes(self.binary_blob)
+        meta = _metadata(BUILD_META)
         self.assertEqual(actual, EXPECTED_MUSL_SHA256)
         self.assertEqual(_transport_sha_pin(self.transport_source), EXPECTED_MUSL_SHA256)
+        self.assertEqual(meta["NATIVE_BINARY_SHA256"], EXPECTED_MUSL_SHA256)
+        self.assertEqual(meta["build_a_sha256"], EXPECTED_MUSL_SHA256)
+        self.assertEqual(meta["build_b_sha256"], EXPECTED_MUSL_SHA256)
+        self.assertEqual(meta["historical_pre_r30e_native_binary_sha256"], PRE_R30E_PACKAGED_BINARY_SHA256)
+        self.assertNotEqual(actual, PRE_R30E_PACKAGED_BINARY_SHA256)
         self.assertNotEqual(actual, EXPECTED_RUN3_GLIBC_SHA256)
 
     def test_packaged_binary_is_musl_elf_with_exact_needed_set(self) -> None:
@@ -219,14 +238,18 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
             include_p116=True,
         ).encode("utf-8")
         head_sha = hashlib.sha256(candidate).hexdigest()
+        meta = _metadata(BUILD_META)
         native_rebuild_required = head_sha != PACKAGED_NATIVE_SOURCE_SHA256
         current_packaged_matches_head = head_sha == PACKAGED_NATIVE_SOURCE_SHA256
         self.assertEqual(head_sha, HEAD_P116_SOURCE_SHA256)
-        self.assertNotEqual(head_sha, PACKAGED_NATIVE_SOURCE_SHA256)
-        self.assertEqual(f"NATIVE_REBUILD_REQUIRED={str(native_rebuild_required).lower()}", "NATIVE_REBUILD_REQUIRED=true")
+        self.assertEqual(head_sha, PACKAGED_NATIVE_SOURCE_SHA256)
+        self.assertEqual(meta["GENERATED_SOURCE_SHA256"], HEAD_P116_SOURCE_SHA256)
+        self.assertEqual(meta["historical_pre_r30e_generated_source_sha256"], PRE_R30E_PACKAGED_SOURCE_SHA256)
+        self.assertNotEqual(head_sha, PRE_R30E_PACKAGED_SOURCE_SHA256)
+        self.assertEqual(f"NATIVE_REBUILD_REQUIRED={str(native_rebuild_required).lower()}", "NATIVE_REBUILD_REQUIRED=false")
         self.assertEqual(
             f"CURRENT_PACKAGED_BINARY_MATCHES_HEAD_SOURCE={str(current_packaged_matches_head).lower()}",
-            "CURRENT_PACKAGED_BINARY_MATCHES_HEAD_SOURCE=false",
+            "CURRENT_PACKAGED_BINARY_MATCHES_HEAD_SOURCE=true",
         )
 
     def test_packaged_and_head_digest_pins_fail_on_byte_flip(self) -> None:
