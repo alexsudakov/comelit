@@ -145,6 +145,7 @@ class HAStreamMediaProvider:
         self._transport = transport
         self._camera_entity = camera_entity
         self._stream: Any | None = None
+        self._create_stream_lock: asyncio.Lock | None = None
         self.last_failure_reason: str | None = None
 
     async def _async_stream_source(self) -> str | None:
@@ -163,25 +164,30 @@ class HAStreamMediaProvider:
             return self._stream
         if Stream is None or get_dynamic_camera_stream_settings is None:
             return None
-        source = await self._async_stream_source()
-        if source is None:
-            return None
-        stream = Stream(
-            self._hass,
-            source,
-            pyav_options={"protocol_whitelist": "file,udp,rtp"},
-            stream_settings=copy.copy(
-                self._hass.data[STREAM_DOMAIN][ATTR_SETTINGS]
-            ),
-            dynamic_stream_settings=await get_dynamic_camera_stream_settings(
+        if not self._create_stream_lock:
+            self._create_stream_lock = asyncio.Lock()
+        async with self._create_stream_lock:
+            if self._stream is not None:
+                return self._stream
+            source = await self._async_stream_source()
+            if source is None:
+                return None
+            stream = Stream(
                 self._hass,
-                self._camera_entity,
-            ),
-            stream_label=self._camera_entity,
-        )
-        self._hass.data[STREAM_DOMAIN][ATTR_STREAMS].append(stream)
-        self._stream = stream
-        return stream
+                source,
+                pyav_options={"protocol_whitelist": "file,udp,rtp"},
+                stream_settings=copy.copy(
+                    self._hass.data[STREAM_DOMAIN][ATTR_SETTINGS]
+                ),
+                dynamic_stream_settings=await get_dynamic_camera_stream_settings(
+                    self._hass,
+                    self._camera_entity,
+                ),
+                stream_label=self._camera_entity,
+            )
+            self._hass.data[STREAM_DOMAIN][ATTR_STREAMS].append(stream)
+            self._stream = stream
+            return stream
 
     async def async_capture_jpeg(self) -> bytes | None:
         stream = await self._async_create_stream()
