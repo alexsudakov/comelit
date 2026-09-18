@@ -71,7 +71,7 @@ class MVP1SyntheticRingControlTests(unittest.TestCase):
 
     def test_runtime_status_includes_ring_media_diagnostics(self) -> None:
         source = _method_source(RUNTIME, "ComelitRingRuntime", "status")
-        self.assertIn('"ring_media"', source)
+        self.assertIn("'ring_media'", source)
         self.assertIn("self._ring_media.status()", source)
 
 
