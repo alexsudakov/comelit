@@ -30,10 +30,10 @@ class MVP1SyntheticRingControlTests(unittest.TestCase):
             "ComelitRingRuntime",
             "async_simulate_entrance_ring",
         )
-        self.assertIn('"synthetic": True', source)
-        self.assertIn('"door": "entrance"', source)
-        self.assertIn('"kind": "CALL_INIT"', source)
-        self.assertIn('"direction": "DEVICE_TO_CLIENT"', source)
+        self.assertIn("'synthetic': True", source)
+        self.assertIn("'door': 'entrance'", source)
+        self.assertIn("'kind': 'CALL_INIT'", source)
+        self.assertIn("'direction': 'DEVICE_TO_CLIENT'", source)
         self.assertIn("EVENT_RING", source)
         self.assertIn("async_start_for_ring", source)
         self.assertIn("listener_not_ready", source)
