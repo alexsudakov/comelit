@@ -29,6 +29,8 @@ _MEDIA_OFFER_FILE = _MEDIA_RUN_DIR / "offer.sdp"
 _MEDIA_REMOTE_FILE = _MEDIA_RUN_DIR / "remote.sdp"
 _MEDIA_STOP_FILE = _MEDIA_RUN_DIR / "stop"
 _MEDIA_LOCAL_SDP_FILE = _MEDIA_RUN_DIR / "local-rtp.sdp"
+_MEDIA_STARTUP_WINDOW_SECONDS = 45.0
+_MEDIA_LOCAL_SDP_READY_REASON = "local_sdp_ready_timeout"
 
 MEDIA_NATIVE_BINARY_SHA256 = (
     "a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8"
@@ -241,6 +243,7 @@ class ComelitEntranceMediaTransport:
         self._process: asyncio.subprocess.Process | None = None
         self._offer_ready = asyncio.Event()
         self._media_active = asyncio.Event()
+        self._local_sdp_ready_event = asyncio.Event()
         self._video_forwarding = asyncio.Event()
         self._audio_forwarding = asyncio.Event()
         self._stopping = False
@@ -464,6 +467,7 @@ class ComelitEntranceMediaTransport:
         self._last_status_notify_monotonic = None
         self._offer_ready.clear()
         self._media_active.clear()
+        self._local_sdp_ready_event.clear()
         self._video_forwarding.clear()
         self._audio_forwarding.clear()
         self._video_recovery_shim = None
@@ -474,21 +478,41 @@ class ComelitEntranceMediaTransport:
         )
 
         active_wait = asyncio.create_task(self._media_active.wait())
+        sdp_wait: asyncio.Task[bool] | None = None
         task = self._task
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _MEDIA_STARTUP_WINDOW_SECONDS
         try:
+            remaining = max(0.0, deadline - loop.time())
             done, _ = await asyncio.wait(
                 {active_wait, task},
-                timeout=45,
+                timeout=remaining,
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            if active_wait in done and active_wait.result() and self.active:
-                return
             if task.done():
                 await task
                 raise ComelitMediaTransportError(
                     self._last_error or "media_transport_ended_before_active"
                 )
-            raise ComelitMediaTransportError("media_active_timeout")
+            if active_wait not in done or not active_wait.result() or not self.active:
+                raise ComelitMediaTransportError("media_active_timeout")
+
+            remaining = max(0.0, deadline - loop.time())
+            sdp_wait = asyncio.create_task(self._local_sdp_ready_event.wait())
+            done, _ = await asyncio.wait(
+                {sdp_wait, task},
+                timeout=remaining,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if task.done():
+                await task
+                raise ComelitMediaTransportError(
+                    self._last_error or "media_transport_ended_before_local_sdp"
+                )
+            if sdp_wait in done and sdp_wait.result() and self.local_sdp_ready:
+                return
+            self._last_error = _MEDIA_LOCAL_SDP_READY_REASON
+            raise ComelitMediaTransportError(_MEDIA_LOCAL_SDP_READY_REASON)
         except Exception:
             await self.async_stop()
             raise
@@ -497,6 +521,12 @@ class ComelitEntranceMediaTransport:
                 active_wait.cancel()
                 try:
                     await active_wait
+                except asyncio.CancelledError:
+                    pass
+            if sdp_wait is not None and not sdp_wait.done():
+                sdp_wait.cancel()
+                try:
+                    await sdp_wait
                 except asyncio.CancelledError:
                     pass
 
@@ -529,6 +559,7 @@ class ComelitEntranceMediaTransport:
         self._task = None
         self._process = None
         self._media_active.clear()
+        self._local_sdp_ready_event.clear()
         self._offer_ready.clear()
         self._video_forwarding.clear()
         self._audio_forwarding.clear()
@@ -592,6 +623,7 @@ class ComelitEntranceMediaTransport:
                 _LOGGER.exception("Unexpected Comelit entrance media failure")
         finally:
             self._media_active.clear()
+            self._local_sdp_ready_event.clear()
             self._process = None
             await self._async_stop_video_recovery_shim()
             await self._hass.async_add_executor_job(_remove_helper_secret)
@@ -675,6 +707,8 @@ class ComelitEntranceMediaTransport:
                 raise ComelitMediaTransportError("media_signaling_timeout")
 
             await self._hass.async_add_executor_job(_write_local_sdp)
+            if self.local_sdp_ready:
+                self._local_sdp_ready_event.set()
 
             rc = await process.wait()
             reader = self._reader_task
