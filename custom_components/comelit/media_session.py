@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime, timedelta
 import math
+import re
 from typing import Any, Protocol
 
 MEDIA_SESSION_HARD_LIMIT_SECONDS = 600
@@ -19,6 +20,12 @@ MEDIA_PHASES = (
     MEDIA_PHASE_ACTIVE,
     MEDIA_PHASE_STOPPING,
     MEDIA_PHASE_ERROR,
+)
+MEDIA_START_STAGE_LISTENER_PAUSE = "listener_pause"
+MEDIA_START_STAGE_TRANSPORT_START = "transport_start"
+MEDIA_START_FAILURE_UNSAFE_SUPPRESSED = "unsafe_reason_suppressed"
+_SAFE_MEDIA_START_FAILURE = re.compile(
+    r"(?:[a-z0-9_]{1,64}|[a-z0-9_]{1,64}:[0-9]{1,4})"
 )
 
 
@@ -59,6 +66,24 @@ def _default_task_factory(
     name: str,
 ) -> asyncio.Task[None]:
     return asyncio.create_task(coro, name=name)
+
+
+def _safe_media_start_failure(value: object) -> str | None:
+    if isinstance(value, str) and _SAFE_MEDIA_START_FAILURE.fullmatch(value):
+        return value
+    return None
+
+
+def safe_media_start_failure_reason(value: object) -> str:
+    return _safe_media_start_failure(value) or MEDIA_START_FAILURE_UNSAFE_SUPPRESSED
+
+
+def _safe_native_exit_code(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
 
 
 class ComelitMediaSessionManager:
@@ -102,6 +127,11 @@ class ComelitMediaSessionManager:
         self._expiry_task: asyncio.Task[None] | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
         self._last_error: str | None = None
+        self._last_start_failure: str | None = None
+        self._last_start_failure_stage: str | None = None
+        self._last_start_failure_at: str | None = None
+        self._transport_last_error: str | None = None
+        self._transport_native_exit_code: int | None = None
         self._status_listeners: set[Callable[[], None]] = set()
 
     @property
@@ -119,6 +149,26 @@ class ComelitMediaSessionManager:
     @property
     def last_error(self) -> str | None:
         return self._last_error
+
+    @property
+    def last_start_failure(self) -> str | None:
+        return self._last_start_failure
+
+    @property
+    def last_start_failure_stage(self) -> str | None:
+        return self._last_start_failure_stage
+
+    @property
+    def last_start_failure_at(self) -> str | None:
+        return self._last_start_failure_at
+
+    @property
+    def transport_last_error(self) -> str | None:
+        return self._transport_last_error
+
+    @property
+    def transport_native_exit_code(self) -> int | None:
+        return self._transport_native_exit_code
 
     @property
     def hard_limit_seconds(self) -> float:
@@ -143,6 +193,11 @@ class ComelitMediaSessionManager:
             "leases": dict(self._leases),
             "last_error": self._last_error,
             "listener_paused": self._listener.media_paused,
+            "last_start_failure": self._last_start_failure,
+            "last_start_failure_stage": self._last_start_failure_stage,
+            "last_start_failure_at": self._last_start_failure_at,
+            "transport_last_error": self._transport_last_error,
+            "transport_native_exit_code": self._transport_native_exit_code,
         }
 
     def async_add_status_listener(self, callback: Callable[[], None]) -> Callable[[], None]:
@@ -186,17 +241,20 @@ class ComelitMediaSessionManager:
             self._last_error = None
             self._set_phase(MEDIA_PHASE_STARTING)
 
+            failure_stage: str | None = MEDIA_START_STAGE_LISTENER_PAUSE
             try:
                 await self._listener.async_pause_for_media()
                 if not self._listener.media_paused:
                     raise ComelitMediaSessionError("listener_pause_not_confirmed")
 
+                failure_stage = MEDIA_START_STAGE_TRANSPORT_START
                 await self._transport.async_start(panel)
                 if not self._transport.active:
                     raise ComelitMediaSessionError("media_start_not_confirmed")
             except Exception as exc:
+                reason = self._capture_start_failure(exc, failure_stage)
                 await self._recover_failed_start(exc)
-                raise ComelitMediaSessionError(self._last_error or "media_start_failed") from exc
+                raise ComelitMediaSessionError(reason) from exc
 
             now = datetime.now(UTC)
             self._started_at = now
@@ -291,21 +349,64 @@ class ComelitMediaSessionManager:
         except asyncio.CancelledError:
             raise
 
+    def _capture_start_failure(self, exc: Exception, stage: str | None) -> str:
+        transport_last_error: str | None = None
+        transport_native_exit_code: int | None = None
+        if stage == MEDIA_START_STAGE_TRANSPORT_START:
+            transport_last_error = _safe_media_start_failure(
+                getattr(self._transport, "last_error", None)
+            )
+            transport_native_exit_code = _safe_native_exit_code(
+                getattr(self._transport, "last_native_exit_code", None)
+            )
+            reason = transport_last_error or "transport_error"
+        elif stage == MEDIA_START_STAGE_LISTENER_PAUSE:
+            reason = (
+                _safe_media_start_failure(str(exc))
+                if isinstance(exc, ComelitMediaSessionError)
+                else None
+            )
+            reason = reason or "listener_pause_failed"
+        else:
+            reason = None
+        reason = safe_media_start_failure_reason(reason)
+
+        self._last_start_failure = reason
+        self._last_start_failure_stage = (
+            stage
+            if stage
+            in {
+                MEDIA_START_STAGE_LISTENER_PAUSE,
+                MEDIA_START_STAGE_TRANSPORT_START,
+            }
+            else None
+        )
+        self._last_start_failure_at = datetime.now(UTC).isoformat()
+        self._transport_last_error = transport_last_error
+        self._transport_native_exit_code = transport_native_exit_code
+        return reason
+
     async def _recover_failed_start(self, exc: Exception) -> None:
-        self._last_error = f"start_failed:{type(exc).__name__}"
+        self._last_error = safe_media_start_failure_reason(
+            f"start_failed:{type(exc).__name__}"
+        )
 
         if self._transport.active:
             try:
                 await self._transport.async_stop()
             except Exception as stop_exc:
-                self._last_error = f"start_cleanup_failed:{type(stop_exc).__name__}"
+                self._last_error = safe_media_start_failure_reason(
+                    f"start_cleanup_failed:{type(stop_exc).__name__}"
+                )
                 self._set_phase(MEDIA_PHASE_ERROR)
                 return
 
         try:
             await self._listener.async_resume_after_media()
         except Exception as resume_exc:
-            self._last_error = f"listener_restore_failed:{type(resume_exc).__name__}"
+            self._last_error = safe_media_start_failure_reason(
+                f"listener_restore_failed:{type(resume_exc).__name__}"
+            )
             self._set_phase(MEDIA_PHASE_ERROR)
             return
 

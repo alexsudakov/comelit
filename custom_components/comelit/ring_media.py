@@ -50,7 +50,11 @@ from .const import (
     RECORDING_TARGET_SECONDS,
     SNAPSHOT_REFRESH_TARGET_SECONDS,
 )
-from .media_session import ComelitMediaSessionError, ComelitMediaSessionManager
+from .media_session import (
+    ComelitMediaSessionError,
+    ComelitMediaSessionManager,
+    safe_media_start_failure_reason,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -281,6 +285,11 @@ class RingMediaCoordinator:
         self._last_snapshot_path: str | None = None
         self._recording_event_count = 0
         self._last_recording_result: dict[str, object] | None = None
+        self._last_start_failure: str | None = None
+        self._last_start_failure_stage: str | None = None
+        self._last_start_failure_at: str | None = None
+        self._transport_last_error: str | None = None
+        self._transport_native_exit_code: int | None = None
 
     @property
     def active_event_id(self) -> str | None:
@@ -315,6 +324,11 @@ class RingMediaCoordinator:
                 if self._last_recording_result is not None
                 else None
             ),
+            "last_start_failure": self._last_start_failure,
+            "last_start_failure_stage": self._last_start_failure_stage,
+            "last_start_failure_at": self._last_start_failure_at,
+            "transport_last_error": self._transport_last_error,
+            "transport_native_exit_code": self._transport_native_exit_code,
         }
 
     async def async_start_for_ring(self, event: dict[str, object]) -> bool:
@@ -401,9 +415,19 @@ class RingMediaCoordinator:
                 raise
             except Exception:
                 _LOGGER.exception("Comelit snapshot loop failed")
-        except (ComelitMediaSessionError, ValueError):
+        except ComelitMediaSessionError as exc:
             recording_state = RECORDING_STATE_FAILED
             recording_failure_reason = "media_start_failed"
+            self._capture_start_failure_snapshot(
+                safe_media_start_failure_reason(str(exc))
+            )
+        except ValueError:
+            recording_state = RECORDING_STATE_FAILED
+            recording_failure_reason = "media_start_failed"
+            self._capture_start_failure_snapshot(
+                "ring_media_request_invalid",
+                read_manager=False,
+            )
         except asyncio.CancelledError:
             stop_event.set()
             recording_state = RECORDING_STATE_TRUNCATED
@@ -509,6 +533,40 @@ class RingMediaCoordinator:
         if isinstance(reason, str) and re.fullmatch(r"[a-z0-9_]{1,64}", reason):
             return reason
         return None
+
+    def _capture_start_failure_snapshot(
+        self,
+        reason: str,
+        *,
+        read_manager: bool = True,
+    ) -> None:
+        self._last_start_failure = reason
+        if not read_manager:
+            self._last_start_failure_stage = None
+            self._last_start_failure_at = None
+            self._transport_last_error = None
+            self._transport_native_exit_code = None
+            return
+        self._last_start_failure_stage = getattr(
+            self._manager,
+            "last_start_failure_stage",
+            None,
+        )
+        self._last_start_failure_at = getattr(
+            self._manager,
+            "last_start_failure_at",
+            None,
+        )
+        self._transport_last_error = getattr(
+            self._manager,
+            "transport_last_error",
+            None,
+        )
+        self._transport_native_exit_code = getattr(
+            self._manager,
+            "transport_native_exit_code",
+            None,
+        )
 
     def _fire_recording_complete(
         self,
