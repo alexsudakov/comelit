@@ -268,6 +268,13 @@ class RingMediaCoordinator:
         self._active_event_id: str | None = None
         self._task: asyncio.Task[None] | None = None
         self._stop_event: asyncio.Event | None = None
+        self._snapshot_event_count = 0
+        self._snapshot_sequence_last = 0
+        self._snapshot_first_monotonic: float | None = None
+        self._snapshot_last_monotonic: float | None = None
+        self._last_snapshot_path: str | None = None
+        self._recording_event_count = 0
+        self._last_recording_result: dict[str, object] | None = None
 
     @property
     def active_event_id(self) -> str | None:
@@ -276,6 +283,33 @@ class RingMediaCoordinator:
     @property
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
+
+    def status(self) -> dict[str, object]:
+        average_interval: float | None = None
+        if (
+            self._snapshot_event_count > 1
+            and self._snapshot_first_monotonic is not None
+            and self._snapshot_last_monotonic is not None
+        ):
+            average_interval = round(
+                (self._snapshot_last_monotonic - self._snapshot_first_monotonic)
+                / (self._snapshot_event_count - 1),
+                3,
+            )
+        return {
+            "running": self.running,
+            "active_event_id": self._active_event_id,
+            "snapshot_event_count": self._snapshot_event_count,
+            "snapshot_sequence_last": self._snapshot_sequence_last,
+            "snapshot_average_interval_seconds": average_interval,
+            "snapshot_path": self._last_snapshot_path,
+            "recording_event_count": self._recording_event_count,
+            "recording_result": (
+                dict(self._last_recording_result)
+                if self._last_recording_result is not None
+                else None
+            ),
+        }
 
     async def async_start_for_ring(self, event: dict[str, object]) -> bool:
         """Start background media work for one entrance ring without blocking listener."""
@@ -289,6 +323,13 @@ class RingMediaCoordinator:
 
         paths = safe_ring_media_paths(self._media_root, event_id)
         self._active_event_id = event_id
+        self._snapshot_event_count = 0
+        self._snapshot_sequence_last = 0
+        self._snapshot_first_monotonic = None
+        self._snapshot_last_monotonic = None
+        self._last_snapshot_path = str(paths.snapshot_path)
+        self._recording_event_count = 0
+        self._last_recording_result = None
         self._stop_event = asyncio.Event()
         self._task = self._task_factory(
             self._async_run_lifecycle(
@@ -412,6 +453,13 @@ class RingMediaCoordinator:
                     paths.snapshot_path,
                     jpeg,
                 )
+                now = self._monotonic()
+                self._snapshot_event_count += 1
+                self._snapshot_sequence_last = sequence
+                if self._snapshot_first_monotonic is None:
+                    self._snapshot_first_monotonic = now
+                self._snapshot_last_monotonic = now
+                self._last_snapshot_path = str(paths.snapshot_path)
                 self._hass.bus.async_fire(
                     EVENT_SNAPSHOT_UPDATED,
                     {
@@ -477,4 +525,6 @@ class RingMediaCoordinator:
         }
         if state == RECORDING_STATE_FAILED and reason:
             payload["reason"] = reason
+        self._recording_event_count += 1
+        self._last_recording_result = dict(payload)
         self._hass.bus.async_fire(EVENT_RECORDING_COMPLETE, payload)
