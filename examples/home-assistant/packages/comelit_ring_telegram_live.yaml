@@ -3,13 +3,18 @@
 # Preconditions:
 # - Home Assistant Telegram Bot integration is configured with Polling or Webhooks
 #   so telegram_callback events can be received.
-# - notify.home_channel exists (replace it below if the deployment uses another
-#   Telegram notify entity).
+# - input_text.comelit_ring_telegram_notify_entity is set in HA to the target
+#   Telegram notify entity. The private entity id is intentionally not stored here.
 # - /media is available to Telegram Bot through allowlist_external_dirs.
 #
 # This automation does NOT start a second camera/media session. It consumes the
 # integration-owned comelit_ring / comelit_snapshot_updated /
 # comelit_recording_complete lifecycle and the retained latest.jpg / recording.mp4.
+
+input_text:
+  comelit_ring_telegram_notify_entity:
+    name: Comelit Telegram notify entity
+    max: 255
 
 automation:
   - id: comelit_ring_telegram_live
@@ -56,7 +61,7 @@ automation:
       - wait_for_trigger:
           - trigger: event
             event_type: comelit_snapshot_updated
-        timeout: "00:00:10"
+        timeout: "00:00:30"
         continue_on_timeout: false
 
       - condition: template
