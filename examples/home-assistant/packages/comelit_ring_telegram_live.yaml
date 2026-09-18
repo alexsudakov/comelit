@@ -1,0 +1,263 @@
+# Comelit -> Telegram live interaction package.
+#
+# Preconditions:
+# - Home Assistant Telegram Bot integration is configured with Polling or Webhooks
+#   so telegram_callback events can be received.
+# - input_text.comelit_ring_telegram_notify_entity is set in HA to the target
+#   Telegram notify entity. The private entity id is intentionally not stored here.
+# - /media is available to Telegram Bot through allowlist_external_dirs.
+#
+# This automation does NOT start a second camera/media session. It consumes the
+# integration-owned comelit_ring / comelit_snapshot_updated /
+# comelit_recording_complete lifecycle and the retained latest.jpg / recording.mp4.
+
+input_text:
+  comelit_ring_telegram_notify_entity:
+    name: Comelit Telegram notify entity
+    max: 255
+
+automation:
+  - id: comelit_ring_telegram_live
+    alias: "Comelit — звонок в Telegram"
+    description: >-
+      Показывает актуальный кадр домофона в одном Telegram-сообщении,
+      обновляет его по comelit_snapshot_updated, отправляет готовую 20-секундную
+      запись и обрабатывает inline-кнопки.
+    mode: single
+    max_exceeded: silent
+
+    triggers:
+      - trigger: event
+        event_type: comelit_ring
+
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ trigger.event.data.door == 'entrance'
+             and trigger.event.data.event_id | default('') | string | length > 0 }}
+      - condition: template
+        value_template: >-
+          {{ states('input_text.comelit_ring_telegram_notify_entity')
+             not in ['', 'unknown', 'unavailable'] }}
+
+    variables:
+      telegram_notify_entity: "{{ states('input_text.comelit_ring_telegram_notify_entity') }}"
+      event_id: "{{ trigger.event.data.event_id }}"
+      door: "{{ trigger.event.data.door }}"
+      open_callback_data: "{{ 'comelit|open|' ~ event_id }}"
+      ignore_callback_data: "{{ 'comelit|ignore|' ~ event_id }}"
+      started_at: "{{ now() }}"
+      telegram_chat_id: ""
+      telegram_message_id: ""
+      snapshot_path: ""
+      snapshot_sequence: 0
+      recording_done: false
+      recording_state: ""
+      recording_path: ""
+      terminal_outcome: ""
+
+    actions:
+      # Wait for the integration-owned first decodable JPEG.
+      - wait_for_trigger:
+          - trigger: event
+            event_type: comelit_snapshot_updated
+        timeout: "00:00:30"
+        continue_on_timeout: false
+
+      - condition: template
+        value_template: >-
+          {{ wait.trigger.event.data.event_id == event_id
+             and wait.trigger.event.data.door == door }}
+
+      - variables:
+          snapshot_path: "{{ wait.trigger.event.data.snapshot_path }}"
+          snapshot_sequence: "{{ wait.trigger.event.data.sequence | int(1) }}"
+
+      - action: telegram_bot.send_photo
+        data:
+          entity_id:
+            - "{{ telegram_notify_entity }}"
+          file: "{{ snapshot_path }}"
+          caption: >-
+            🔔 Звонок в подъезд
+            Кадр {{ snapshot_sequence }}
+          inline_keyboard:
+            - - ["🚪 Открыть дверь", "{{ open_callback_data }}"]
+              - ["🙈 Игнорировать", "{{ ignore_callback_data }}"]
+        response_variable: telegram_send
+
+      - variables:
+          telegram_chat_id: >-
+            {{ telegram_send.chats[0].chat_id | default('') }}
+          telegram_message_id: >-
+            {{ telegram_send.chats[0].message_id | default('') }}
+
+      - condition: template
+        value_template: >-
+          {{ telegram_chat_id | string | length > 0
+             and telegram_message_id | string | length > 0 }}
+
+      # Keep one Telegram media message "live" while the integration refreshes
+      # latest.jpg. Also listen for the recording terminal event and callbacks.
+      - repeat:
+          while:
+            - condition: template
+              value_template: "{{ terminal_outcome == '' }}"
+            - condition: template
+              value_template: >-
+                {{ (as_timestamp(now()) - as_timestamp(started_at)) < 60 }}
+          sequence:
+            - wait_for_trigger:
+                - trigger: event
+                  event_type: comelit_snapshot_updated
+                - trigger: event
+                  event_type: comelit_recording_complete
+                - trigger: event
+                  event_type: telegram_callback
+              timeout: "00:00:02"
+              continue_on_timeout: true
+
+            - choose:
+                # Refresh the same Telegram photo for snapshots belonging to
+                # this ring. continue_on_error protects the HA automation from
+                # Telegram flood/rate-limit errors.
+                - conditions:
+                    - condition: template
+                      value_template: >-
+                        {{ wait.completed
+                           and wait.trigger.event.event_type == 'comelit_snapshot_updated'
+                           and wait.trigger.event.data.event_id == event_id }}
+                  sequence:
+                    - variables:
+                        snapshot_path: "{{ wait.trigger.event.data.snapshot_path }}"
+                        snapshot_sequence: "{{ wait.trigger.event.data.sequence | int(0) }}"
+                    - action: telegram_bot.edit_message_media
+                      continue_on_error: true
+                      data:
+                        entity_id:
+                          - "{{ telegram_notify_entity }}"
+                        message_id: "{{ telegram_message_id }}"
+                        media_type: photo
+                        file: "{{ snapshot_path }}"
+                        caption: >-
+                          🔔 Звонок в подъезд
+                          Кадр {{ snapshot_sequence }}
+                        inline_keyboard:
+                          - - ["🚪 Открыть дверь", "{{ open_callback_data }}"]
+                            - ["🙈 Игнорировать", "{{ ignore_callback_data }}"]
+
+                # Recording finished. Keep the photo/buttons alive but also
+                # send the retained MP4 as a reply; this validates that HA can
+                # read the saved recording through the normal Telegram action.
+                - conditions:
+                    - condition: template
+                      value_template: >-
+                        {{ wait.completed
+                           and wait.trigger.event.event_type == 'comelit_recording_complete'
+                           and wait.trigger.event.data.event_id == event_id }}
+                  sequence:
+                    - variables:
+                        recording_done: true
+                        recording_state: "{{ wait.trigger.event.data.state }}"
+                        recording_path: "{{ wait.trigger.event.data.recording_path }}"
+                    - action: telegram_bot.edit_caption
+                      continue_on_error: true
+                      data:
+                        entity_id:
+                          - "{{ telegram_notify_entity }}"
+                        message_id: "{{ telegram_message_id }}"
+                        caption: >-
+                          🔔 Звонок в подъезд
+                          Кадр {{ snapshot_sequence }}
+                          Запись: {{ recording_state }}
+                        inline_keyboard:
+                          - - ["🚪 Открыть дверь", "{{ open_callback_data }}"]
+                            - ["🙈 Игнорировать", "{{ ignore_callback_data }}"]
+                    - choose:
+                        - conditions:
+                            - condition: template
+                              value_template: >-
+                                {{ recording_state in ['completed', 'truncated']
+                                   and recording_path | string | length > 0 }}
+                          sequence:
+                            - action: telegram_bot.send_video
+                              continue_on_error: true
+                              data:
+                                entity_id:
+                                  - "{{ telegram_notify_entity }}"
+                                file: "{{ recording_path }}"
+                                caption: >-
+                                  🎬 Comelit — запись звонка
+                                  Состояние: {{ recording_state }}
+                                reply_to_message_id: "{{ telegram_message_id }}"
+
+                # Open is always a direct Telegram callback from this exact
+                # event/message. Stop media first because Door is unavailable
+                # while the exclusive media lease is held.
+                - conditions:
+                    - condition: template
+                      value_template: >-
+                        {{ wait.completed
+                           and wait.trigger.event.event_type == 'telegram_callback'
+                           and wait.trigger.event.data.data == open_callback_data
+                           and wait.trigger.event.data.chat_id | string == telegram_chat_id | string }}
+                  sequence:
+                    - action: telegram_bot.answer_callback_query
+                      continue_on_error: true
+                      data:
+                        callback_query_id: "{{ wait.trigger.event.data.id }}"
+                        message: "Открываю дверь…"
+                    - variables:
+                        terminal_outcome: open_requested
+
+                - conditions:
+                    - condition: template
+                      value_template: >-
+                        {{ wait.completed
+                           and wait.trigger.event.event_type == 'telegram_callback'
+                           and wait.trigger.event.data.data == ignore_callback_data
+                           and wait.trigger.event.data.chat_id | string == telegram_chat_id | string }}
+                  sequence:
+                    - action: telegram_bot.answer_callback_query
+                      continue_on_error: true
+                      data:
+                        callback_query_id: "{{ wait.trigger.event.data.id }}"
+                        message: "Звонок проигнорирован"
+                    - variables:
+                        terminal_outcome: ignored
+
+      # A callback requesting Door actuation gets exactly one semantic Door
+      # invocation. If recording is still active, terminate media safely first.
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ terminal_outcome == 'open_requested' }}"
+            sequence:
+              - if:
+                  - condition: state
+                    entity_id: switch.comelit_entrance_camera
+                    state: "on"
+                then:
+                  - action: switch.turn_off
+                    target:
+                      entity_id: switch.comelit_entrance_camera
+
+              - wait_template: >-
+                  {{ is_state('switch.comelit_entrance_camera', 'off')
+                     and is_state('sensor.comelit_listener_status', 'ready') }}
+                timeout: "00:00:10"
+                continue_on_timeout: false
+
+              - action: comelit.open_door
+                data:
+                  door: entrance
+                  event_id: "{{ event_id }}"
+
+      # Remove stale controls after Ignore/Open/timeout.
+      - action: telegram_bot.edit_replymarkup
+        continue_on_error: true
+        data:
+          entity_id:
+            - "{{ telegram_notify_entity }}"
+          message_id: "{{ telegram_message_id }}"
+          inline_keyboard: []
