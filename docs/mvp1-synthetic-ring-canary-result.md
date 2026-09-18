@@ -4,142 +4,187 @@
 
 ```text
 TASK_ID=COMELIT-MVP1-SYNTHETIC-RING-CANARY
-MODE=BOUNDED_PRELIVE_ANALYSIS_AND_OFFLINE_CORRECTIVE_RESULT
+MODE=BOUNDED_LIVE_CANARY_WITH_ONE_AUTHORIZED_HA_RESTART
 DATE_UTC=2026-09-18
-BASE_SHA=ea504d51a0095507722d749f6365e66035630fa6
-BRANCH=feat/mvp1-synthetic-ring-canary
+EXPECTED_MAIN_SHA=45854c7f0aa201fef0eb5207464e2fb9791c345d
+ACCEPTED_MAIN_SHA=45854c7f0aa201fef0eb5207464e2fb9791c345d
+ACCEPTED_MAIN_COMMIT=45854c7 Merge pull request #161 from alexsudakov/feat/mvp1-synthetic-ring-canary
+MAIN_MOVED=false
+MAIN_MOVED_EXECUTABLE=false
+COMELIT_COMPONENT_TREE_ACCEPTED_MAIN=0a3629982862b17a420adea7044aac3551343472
 PR=161
-CORRECTIVE_COMMIT=a3e25a364ab88b89a7822dff229126432f406b3e
-LIVE_EXECUTION=NOT_PERFORMED
 ```
 
-Canonical context read for this result:
+Этот документ заменяет pre-live stop документы turn 2/3. После merge PR 161 владелец отдельно разрешил один bounded live canary с ровно одним full Home Assistant restart. Exercised authorization:
 
-- `docs/mvp-integration-v1-contract.md`
-- `docs/mvp-integration-v1-offline-build-result.md`
-- `docs/mvp1-entrance-canary-contract.md`
-- `docs/mvp1-entrance-canary-main-gate-addendum.md`
-- `docs/mvp1-synthetic-ring-canary.md`
-- `docs/mvp1-entrance-canary-result.md`
+```text
+DEPLOY_MAX=1
+HA_RESTART_MAX=1
+SYNTHETIC_RING_MAX=1
+MEDIA_SESSION_MAX=1
+RECORDING_MAX=1
+RECORDING_TARGET_SECONDS=20
+DOOR_ACTIONS=0
+GATE_ACTIONS=0
+AUTOMATIC_RETRY=false
+SECOND_MEDIA_SESSION=false
+R30H_E_EXECUTED=false
+HOST_REBOOT=0
+SUPERVISOR_REBOOT=0
+NO_PHYSICAL_RING_REQUIRED=true
+```
 
-The synthetic canary document defines a non-public `simulate_entrance_ring` test-control action, a `comelit_ring` payload with `door=entrance`, `kind=CALL_INIT`, `direction=DEVICE_TO_CLIENT`, `source=synthetic_test`, and `synthetic=true`, and states that the trigger starts the existing `RingMediaCoordinator` without Door/Gate code (`docs/mvp1-synthetic-ring-canary.md:11`-`docs/mvp1-synthetic-ring-canary.md:33`). Its hard live boundary is one synthetic trigger, one media session, one recording, `RECORDING_TARGET_SECONDS=20`, `DOOR_ACTIONS=0`, `GATE_ACTIONS=0`, `AUTOMATIC_RETRY=false`, `HA_RESTARTS=0`, and no R30H-E execution (`docs/mvp1-synthetic-ring-canary.md:57`-`docs/mvp1-synthetic-ring-canary.md:73`).
+Repository context: the branch/accepted-main code contains the integration-side synthetic runtime entrypoint and shared ring handler. `ComelitRingRuntime.async_simulate_entrance_ring()` constructs only an entrance `CALL_INIT` event with `synthetic=True` and calls `ComelitRingRuntime._async_emit_ring_event(..., require_media_start=True)` (`custom_components/comelit/runtime.py:237`-`custom_components/comelit/runtime.py:285`). The test-control webhook exposes the `simulate_entrance_ring` action inside Home Assistant and is local-only with the existing webhook id and CT120 allowlist (`custom_components/comelit/test_control.py:12`-`custom_components/comelit/test_control.py:13`, `custom_components/comelit/test_control.py:73`-`custom_components/comelit/test_control.py:87`, `custom_components/comelit/test_control.py:117`-`custom_components/comelit/test_control.py:125`). The canary limit stays one trigger, one media session, no Door/Gate, no retry, and no R30H-E behavior (`docs/mvp1-synthetic-ring-canary.md:57`-`docs/mvp1-synthetic-ring-canary.md:73`).
 
 ## 2. Result class
 
 ```text
-RESULT_CLASS=BLOCKED_PRELIVE_GATE_UNMERGED_AND_HA_RESTART_REQUIRED
+RESULT_CLASS=BLOCKED_PRELIVE_GATE
 ```
 
-Этот запуск остановлен до live-действий. Терминальные блокеры точные: во-первых, synthetic entrypoint находится только в PR 161 и не включен в `origin/main`, поэтому по правилу accepted-main live не должен выполняться; во-вторых, даже файловое разворачивание этой Python-дельты не активировало бы entrypoint без полного Home Assistant restart, а данный canary запрещает restart (`HA_RESTARTS=0`). Предыдущий результат фиксирует, что reload gateway отсутствует/недостаточен и что owner UI config-entry Reload не re-import уже загруженного custom-component Python (`docs/mvp1-entrance-canary-result.md:149`-`docs/mvp1-entrance-canary-result.md:154`). R30F прямо заключает, что config-entry reload restored integration runtime health but did not re-import the updated custom-component Python module (`safety-poc/research/media/v1/P116_R30F_PACKAGED_HELPER_BOUNDED_LIVE_RESULT.md:188`-`safety-poc/research/media/v1/P116_R30F_PACKAGED_HELPER_BOUNDED_LIVE_RESULT.md:191`) and states the mechanism as HA not re-importing already-loaded custom-component Python modules (`safety-poc/research/media/v1/P116_R30F_PACKAGED_HELPER_BOUNDED_LIVE_RESULT.md:267`-`safety-poc/research/media/v1/P116_R30F_PACKAGED_HELPER_BOUNDED_LIVE_RESULT.md:273`). R30G then required a full HA restart to prove loaded-code identity (`safety-poc/research/media/v1/P116_R30G_RESTART_ACTIVATED_BOUNDED_LIVE_RESULT.md:80`-`safety-poc/research/media/v1/P116_R30G_RESTART_ACTIVATED_BOUNDED_LIVE_RESULT.md:107`). The entrance canary result summarizes the same R30F/R30G activation boundary and records `COMELIT_ACTIVATION=FAIL` without restart (`docs/mvp1-entrance-canary-result.md:177`-`docs/mvp1-entrance-canary-result.md:210`).
+Результат не является `FAIL_SYNTHETIC_TRIGGER`: synthetic trigger не был выполнен, Home Assistant webhook action не получил запрос, ring event не был создан, media не стартовал. Run stopped at PHASE 4 before invocation because the authorized operator verb `simulate_entrance_ring` is absent from the CT120 restricted surface and from the HA forced-command gateway. Integration-side entrypoint is now present in accepted main and was deployed before the single authorized restart, but no authorized transport could invoke it. This is an operator-side access-surface gap, not a defect in `custom_components/comelit`.
 
-## 3. Turn-1 analysis findings
+## 3. PHASE 1/2 - pre-deploy and deploy
 
-### A1. Synthetic/debug entrypoint existence
-
-Loaded integration revision: `ABSENT`. The orchestrator observed live `DEPLOYED_SHA=6bbfbc19ea04567e56fa3a9e3d470ca67b3b077c`, whose `custom_components/comelit` tree equals accepted `origin/main` tree `e4d70ad372cc92cf16d13eb8ebcc54932f437079`; this branch's entrypoint is not part of that accepted tree. The gateway also cannot read loaded Python objects, so loaded-module identity is not directly inspectable (`docs/mvp1-entrance-canary-result.md:326`).
-
-`origin/main`: `ABSENT`. The observed accepted component tree is `e4d70ad372cc92cf16d13eb8ebcc54932f437079`, matching the main-gate addendum's expected component tree (`docs/mvp1-entrance-canary-main-gate-addendum.md:17`-`docs/mvp1-entrance-canary-main-gate-addendum.md:25`, `docs/mvp1-entrance-canary-main-gate-addendum.md:39`-`docs/mvp1-entrance-canary-main-gate-addendum.md:42`). PR 161 remains unmerged, so the branch-only entrypoint below is not in accepted main.
-
-This branch: `EXISTS`. `ComelitRingRuntime.async_simulate_entrance_ring()` is present and creates only the synthetic entrance event (`custom_components/comelit/runtime.py:267`-`custom_components/comelit/runtime.py:284`). The local-only test-control webhook dispatches `simulate_entrance_ring` to that runtime method (`custom_components/comelit/test_control.py:73`-`custom_components/comelit/test_control.py:87`).
-
-### A2. Shared normalized handler
-
-Before corrective commit `a3e25a3`, the synthetic path duplicated the event id, last-ring state, `comelit_ring` fire, and media start sequence. After the corrective, both paths enter one handler: `ComelitRingRuntime._async_emit_ring_event`. The shared method generates missing `event_id` and `timestamp`, records `_last_ring_event`, fires `EVENT_RING`, and either starts media immediately for the synthetic fail-closed path or schedules the normal background media task for real rings (`custom_components/comelit/runtime.py:237`-`custom_components/comelit/runtime.py:265`).
-
-The synthetic caller builds the fixed entrance-only synthetic `CALL_INIT` event and calls `_async_emit_ring_event(..., require_media_start=True)` (`custom_components/comelit/runtime.py:267`-`custom_components/comelit/runtime.py:284`). The real CALL_INIT path parses the native ring batch with `parse_v4_safe_ring`, converts it to a normalized event, and calls the same `_async_emit_ring_event(event)` (`custom_components/comelit/runtime.py:744`-`custom_components/comelit/runtime.py:755`).
-
-### A3. Executability under `HA_RESTARTS=0`
-
-This canary cannot be executed under `HA_RESTARTS=0` in the current deployed/loaded state. The live deployed component tree is accepted main and does not include PR 161's branch-only synthetic action, while a config-entry reload is already proven insufficient to activate changed custom-component Python (`docs/mvp1-entrance-canary-result.md:149`-`docs/mvp1-entrance-canary-result.md:154`, `docs/mvp1-entrance-canary-result.md:177`-`docs/mvp1-entrance-canary-result.md:210`). The entrance canary contract says full HA restart is forbidden and activation requiring a full restart must stop as `BLOCKED_HA_RESTART_REQUIRED` (`docs/mvp1-entrance-canary-contract.md:108`-`docs/mvp1-entrance-canary-contract.md:115`).
-
-## 4. Offline corrective record
-
-Corrective commit:
+Fresh main gate:
 
 ```text
-CORRECTIVE_COMMIT=a3e25a364ab88b89a7822dff229126432f406b3e
-PARENT=12389e5aacdd2f3692d9f8e55952eb0da5e5d4dc
-PUSHED=true
-PR=161
+EXPECTED_MAIN_SHA=45854c7f0aa201fef0eb5207464e2fb9791c345d
+ACCEPTED_MAIN_SHA=45854c7f0aa201fef0eb5207464e2fb9791c345d
+MAIN_MOVED=false
+MAIN_MOVED_EXECUTABLE=false
+COMELIT_COMPONENT_TREE_ACCEPTED_MAIN=0a3629982862b17a420adea7044aac3551343472
 ```
 
-Изменение было минимальным и offline-only. Общая последовательность ring emission вынесена в `ComelitRingRuntime._async_emit_ring_event` (`custom_components/comelit/runtime.py:237`-`custom_components/comelit/runtime.py:265`). Synthetic caller теперь использует этот общий handler (`custom_components/comelit/runtime.py:277`-`custom_components/comelit/runtime.py:284`), а реальный CALL_INIT path вызывает тот же handler после нормализации native batch (`custom_components/comelit/runtime.py:747`-`custom_components/comelit/runtime.py:755`). Existing safety properties preserved: listener readiness check and media busy refusal remain before emission (`custom_components/comelit/runtime.py:267`-`custom_components/comelit/runtime.py:275`), synthetic payload remains entrance-only and `synthetic=True` (`custom_components/comelit/runtime.py:277`-`custom_components/comelit/runtime.py:282`), and no Door/Gate path is invoked. The trigger remains behind the local-only webhook with CT120 remote allowlist (`custom_components/comelit/test_control.py:12`-`custom_components/comelit/test_control.py:13`, `custom_components/comelit/test_control.py:117`-`custom_components/comelit/test_control.py:125`).
-
-R20 pin maintenance was intentional and scoped: `EXPECTED_RUNTIME_SHA256` was updated to the final `runtime.py` SHA `262218f04f3b9f75e43c538d153e2bdd8a8fb998dd392e7bc4ceedede024789c` (`safety-poc/tests/test_p116_r20_hls_http_boundary_diagnostics.py:27`-`safety-poc/tests/test_p116_r20_hls_http_boundary_diagnostics.py:29`). This follows the existing maintenance precedent for updating a runtime hash pin after an intentional scheduler addition (`docs/mvp-integration-v1-offline-build-result.md:97`-`docs/mvp-integration-v1-offline-build-result.md:102`).
-
-Behavioural tests were added so AST/source assertions are no longer the only proof. The tests assert that the synthetic method uses `_async_emit_ring_event`, preserves entrance/CALL_INIT/synthetic invariants, and does not include Door/SIGUSR1 code (`safety-poc/tests/test_mvp1_synthetic_ring_control.py:181`-`safety-poc/tests/test_mvp1_synthetic_ring_control.py:199`). They also monkeypatch the shared method and prove both the synthetic call and a parsed real CALL_INIT batch reach it (`safety-poc/tests/test_mvp1_synthetic_ring_control.py:234`-`safety-poc/tests/test_mvp1_synthetic_ring_control.py:272`), and prove synthetic emission refuses before media when the listener is not ready or the coordinator is already running (`safety-poc/tests/test_mvp1_synthetic_ring_control.py:274`-`safety-poc/tests/test_mvp1_synthetic_ring_control.py:307`).
+Pre-deploy read-only state:
 
 ```text
-FILES_CHANGED=custom_components/comelit/runtime.py:262218f04f3b9f75e43c538d153e2bdd8a8fb998dd392e7bc4ceedede024789c,safety-poc/tests/test_mvp1_synthetic_ring_control.py:331b9c3c2390b2e80efbb93301d560b559305c42668f34706a5edefa38496425,safety-poc/tests/test_p116_r20_hls_http_boundary_diagnostics.py:6c415df068166a00e0cfa9ba117bdf52072d7864250b78de0cd180dd85b2a7ce
-```
-
-CI after push:
-
-```text
-offline-safety=PASS (2 runs: push + pull_request)
-validate-hacs=PASS (2 runs)
-CodeRabbit=pass (review skipped)
-```
-
-Host-authoritative offline gates re-run by the orchestrator from `safety-poc/`:
-
-```text
-python3 scripts/static_safety_check.py
-  -> PASS (SOURCE_FILES_SCANNED=29)
-python3 -m py_compile scripts/*.py
-  -> PASS
-python3 -m compileall -q ../custom_components/comelit
-  -> PASS
-bash -n scripts/*.sh deploy/*.sh
-  -> PASS
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD/src python3 -m unittest tests.test_mvp1_synthetic_ring_control
-  -> Ran 7 tests / OK
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD/src python3 -m unittest discover -s tests
-  -> Ran 1563 tests / failures=1 / skipped=1
-  -> single failure: test_p116_provenance_binary_analysis...NATIVE_BINARY_MODE (755 != 775)
-  -> NOT_A_MVP1_SYNTHETIC_RING_REGRESSION, local filesystem mode artifact
-```
-
-Sandbox turn-1 full-suite observation is retained as a red observation, not deleted: `Ran 1563 tests / failures=1 / errors=2 / skipped=5`; the file-mode failure was `test_p116_provenance_binary_analysis...NATIVE_BINARY_MODE (755 != 775)`, and the two errors were `test_p116_r29i_*` UDP datagram sink subprocess failures caused by sandbox UDP/runtime behavior. Both are classified `NOT_A_MVP1_SYNTHETIC_RING_REGRESSION`.
-
-The host baseline on untouched `origin/main` was `Ran 1556 / failures=1 / skipped=1`; the branch delta is exactly the +7 focused tests of this synthetic canary.
-
-## 5. Read-only live observations
-
-No live action was performed. The orchestrator collected only read-only observations:
-
-```text
-HA_GATEWAY_STATUS_TIME=2026-09-18T10:15Z
 INTEGRATION_PRESENT=true
 INTEGRATION_VERSION=1.5.7
 DEPLOYED_SHA=6bbfbc19ea04567e56fa3a9e3d470ca67b3b077c
 GATEWAY_SCOPE=custom_components/comelit
 ARBITRARY_SHELL=DENIED
-HA_CORE_CHECK=PASS at 2026-09-18T10:29Z
-DEPLOYED_COMELIT_TREE=e4d70ad372cc92cf16d13eb8ebcc54932f437079
-ORIGIN_MAIN_COMELIT_TREE=e4d70ad372cc92cf16d13eb8ebcc54932f437079
+PRE_DEPLOY_CHECK=HA_CORE_CHECK=PASS
+PRE_DEPLOY_DOOR_ACTIONS=0
+PRE_DEPLOY_GATE_ACTIONS=0
+PRE_DEPLOY_RING_EVENTS=0
+PRE_DEPLOY_SNAPSHOT_EVENTS=0
+PRE_DEPLOY_RECORDING_COMPLETE_EVENTS=0
+PRE_DEPLOY_DOOR_OPERATION_EVENTS=0
 ```
 
-The log-follow capture window was `2026-09-18T10:15:20Z -> 2026-09-18T10:26Z`. Two `camera.comelit_entrance` recorder dumps were identical:
+Deploy payload and deployment result:
 
 ```text
-media_active=False
-media_phase=inactive
-remaining_seconds=0
-listener_paused=False
-video_packet_count=0
-audio_packet_count=0
-video_last_packet_age_seconds=None
-audio_last_packet_age_seconds=None
-hard_limit_seconds=600
-automatic_session_start=False
-video_recovery_shim_running=False
-ha_stream_created=False
-hls_provider_present=False
-state last_changed=2026-09-18T04:55:44Z
+ARCHIVE_PIPE_RC=0
+GZIP_TEST=PASS
+PAYLOAD_BYTES=6185206
+MEMBERS=55
+OUTSIDE_MEMBERS=0
+PAYLOAD_SHA256=b4be518ff291948b372b97dd9528321f3c369a35dbcbdc8e0186e4ab9e93f6ba
+TARGET_SHA=45854c7f0aa201fef0eb5207464e2fb9791c345d
+TARGET_COMPONENT_TREE=0a3629982862b17a420adea7044aac3551343472
+DEPLOYED_SHA=45854c7f0aa201fef0eb5207464e2fb9791c345d
+DEPLOY_SCOPE=/config/custom_components/comelit
+HA_RESTARTED=NO
+DEPLOY=PASS
+DEPLOY_VERB_RC=0
+POST_DEPLOY_CHECK=HA_CORE_CHECK=PASS
+POST_DEPLOY_STATUS_DEPLOYED_SHA=45854c7f0aa201fef0eb5207464e2fb9791c345d
 ```
 
-Negative probes in that window:
+Accepted-main file identity deployed to Home Assistant:
+
+```text
+custom_components/comelit/runtime.py=262218f04f3b9f75e43c538d153e2bdd8a8fb998dd392e7bc4ceedede024789c
+custom_components/comelit/ring_media.py=84c69d227201c9834e3eb03b9b170d9ff64817dc8cc4f291e540e5d49d56e257
+custom_components/comelit/test_control.py=b925cb6162c66b51c8c5321dfa563c8669f43e05cc3855a78248df95d2064dbd
+custom_components/comelit/const.py=1101bc30d3d18278d5c4337eb678b3661db0d546f4a866af95f5a4e4fdc8ab96
+custom_components/comelit/__init__.py=b2a93552483557f7fc327f4c29f234bc491601b6955dd4e40a71d3e63ebe16c6
+```
+
+The deployed `runtime.py` sha256 matches the R20 gate pin (`safety-poc/tests/test_p116_r20_hls_http_boundary_diagnostics.py:27`-`safety-poc/tests/test_p116_r20_hls_http_boundary_diagnostics.py:29`). `RECORDING_TARGET_SECONDS=20` and `SNAPSHOT_REFRESH_TARGET_SECONDS=1` remain the code constants (`custom_components/comelit/const.py:46`-`custom_components/comelit/const.py:47`), but no snapshot or recording phase was reached in this run.
+
+## 4. PHASE 3 - one authorized full Home Assistant restart
+
+```text
+RESTART_REQUEST_UTC=2026-09-18T10:40:12Z
+USER_APPROVAL_MARKER=USER_APPROVED
+HA_CORE_RESTART_REQUESTED=true
+POST_RESTART_CHECK=HA_CORE_CHECK=PASS
+POST_RESTART_STATUS_DEPLOYED_SHA=45854c7f0aa201fef0eb5207464e2fb9791c345d
+EXCEPTIONS_AFTER_RESTART=0
+HA_RESTARTS=1
+SECOND_RESTART=false
+HOST_REBOOT=0
+SUPERVISOR_REBOOT=0
+```
+
+Activation markers observed after restart:
+
+```text
+2026-09-18T10:40:52Z custom_components.comelit.runtime
+  Comelit ring listener READY for persistent 3300s cycle
+2026-09-18T10:40:56Z homeassistant.components.recorder.core
+  camera.comelit_entrance state_changed old_state=None new_state=idle
+```
+
+The READY string is emitted by the runtime when `V4_RING_LISTENER_READY=true` is read and `_listener_ready` is set (`custom_components/comelit/runtime.py:658`-`custom_components/comelit/runtime.py:662`). `LISTENER_LAST_ERROR=null` is derived for the fresh ready cycle: `async_start()` clears `_last_error` when starting a cycle (`custom_components/comelit/runtime.py:314`-`custom_components/comelit/runtime.py:324`), while completed-cycle errors would be set in `_async_run_once()` (`custom_components/comelit/runtime.py:529`-`custom_components/comelit/runtime.py:535`).
+
+```text
+COMELIT_LOADED_AFTER_RESTART=PASS
+LISTENER_RUNNING=true
+LISTENER_READY=true
+LISTENER_LAST_ERROR=null
+```
+
+The single authorized restart was consumed exactly once. No second restart, reload, host reboot, or Supervisor reboot was performed.
+
+## 5. PHASE 4 - trigger gate blocker
+
+The authorized operator verb was exactly `simulate_entrance_ring`. It was attempted once through the CT120 restricted SSH surface and refused before execution:
+
+```text
+COMMAND=ssh -i ~/.ssh/id_ed25519_ct120_comelit -o IdentitiesOnly=yes -o BatchMode=yes hermes-comelit@192.168.1.85 simulate_entrance_ring
+TRIGGER_REQUEST_UTC=2026-09-18T10:43:10Z
+RESPONSE=DENIED: command not allowed
+TRIGGER_VERB_RC=126
+SYNTHETIC_RING_COUNT=0
+```
+
+`exit 126` plus `DENIED: command not allowed` is the not-whitelisted forced-command behavior. The refusal happened before any Home Assistant webhook call, so it is not an executed trigger invocation.
+
+Read-only CT120 inventory showed the surface gap:
+
+```text
+/usr/local/sbin/hermes-comelit-dispatch
+  sha256=092ea7d29391840f4d3162e5df9f17270de08d328178c68187455036c8d9f6cf
+  HA-family cases:
+    comelit-ha-ring-test-start -> comelit-ha-ring-runtime start
+    comelit-ha-ring-test-status -> comelit-ha-ring-runtime status
+    comelit-ha-ring-test-stop -> comelit-ha-ring-runtime stop
+
+/usr/local/sbin/comelit-ha-ring-runtime
+  sha256=06a291181d363d7c8c6358cd16f14ce6a61385f8e6bacae35c5c4c66782b7804
+  URL=http://192.168.1.108:8123/api/webhook/comelit-ha-ring-test-control-v1
+  ACTION_ALLOWLIST=start|status|stop
+
+/usr/local/sbin/hermes-comelit-dispatch.pre-p13-observed-v1
+  sha256=e4bb63d7939a67344eedbfaf9f01a8a0a9e1578a74665e4b84f169466eb62e63
+  cases=door-poc-status,door-poc-test
+
+HA_GATEWAY_PROBE=ssh comelit-ha simulate_entrance_ring -> COMELIT_HA_GATEWAY=DENY
+```
+
+Interpretation: the integration-side entrypoint exists in deployed accepted main, and the restart activation markers prove the accepted main integration restarted cleanly. However, no authorized transport can invoke `simulate_entrance_ring`: the CT120 dispatcher has no case for it, `comelit-ha-ring-runtime` rejects actions outside `start|status|stop`, and the HA forced-command gateway has no same-named verb or service-call path.
+
+The inventory was collected read-only through the CT120 root SSH route `comelit-ct120`, not through the restricted route, because the restricted route can only execute whitelisted verbs and cannot list or read wrapper files. The inventory used `ls`, `sha256sum`, and `cat` only. Nothing was modified, started, stopped, reloaded, or restarted on CT120 or Home Assistant.
+
+No workaround transport was used. Raw root curl to the local-only webhook, gateway bypass, bearer token, Home Assistant service call, and `hass.bus.fire` would all bypass the documented restricted wrapper boundary.
+
+## 6. Negative evidence over the full capture
+
+The run stopped before trigger execution. Over the capture:
 
 ```text
 comelit_ring=0
@@ -147,105 +192,91 @@ comelit_snapshot_updated=0
 comelit_recording_complete=0
 comelit_door_operation=0
 "media session ACTIVE"=0
-media_native_binary_sha256_mismatch=0
-"listener READY"=0
-"Comelit ring listener stopped"=0
 "Synthetic"=0
-custom_components.comelit logger lines in window=0
+media_native_binary_sha256_mismatch=0
 ```
 
-The previous canary recorder sample had `video_packet_count=1750`, `audio_packet_count=1750`, and `video_last_packet_age_seconds=34516.5` at `2026-09-17T21:20:07Z`; the current 0/0/None sample means the `camera.comelit_entrance` object has been recreated since then. This is a derived observation only. The gateway exposes no way to read loaded Python objects, and config-entry reload recreates objects just as a full restart does, so restart versus reload is not directly distinguishable:
+No media phase was reached. Therefore this result intentionally reports no snapshot artifact, no recording artifact, no retained file, no probed container, and no duration fact.
 
-```text
-LOADED_REVISION_IDENTITY=UNPROVEN
-```
-
-Runtime trigger surface actually available for a future live round: local-only webhook `comelit-ha-ring-test-control-v1`, remote-allowlisted to CT120 at `192.168.1.85`, reached through the CT120 restricted-SSH wrapper family. Current CT120 whitelist exposes start/stop-style wrapper verbs but no operator-named verb for the new `simulate_entrance_ring` webhook action. Hermes has no HA service-call path, no arbitrary shell, and no bearer token.
-
-## 6. Pre-live gate table
+## 7. Gate table
 
 | Gate | Value | Evidence label | Evidence |
 | --- | --- | --- | --- |
-| `DEPLOYED_SHA_MATCH` | PASS for accepted main tree, not branch | `PROVEN_OBSERVED` | `DEPLOYED_SHA=6bbfbc19ea04567e56fa3a9e3d470ca67b3b077c`; deployed component tree equals accepted main tree `e4d70ad372cc92cf16d13eb8ebcc54932f437079`. The main-gate addendum defines the expected component tree for accepted main (`docs/mvp1-entrance-canary-main-gate-addendum.md:17`-`docs/mvp1-entrance-canary-main-gate-addendum.md:25`). |
-| `HA_CORE_CHECK` | PASS | `PROVEN_OBSERVED` | Orchestrator read-only `check` at `2026-09-18T10:29Z`. |
-| `COMELIT_ACTIVATION` | FAIL for PR 161 entrypoint | `DERIVED` | Deployed accepted main lacks PR 161 entrypoint; reload cannot re-import changed custom-component Python; full restart forbidden (`docs/mvp1-entrance-canary-result.md:177`-`docs/mvp1-entrance-canary-result.md:210`). |
-| `ENTRYPOINT_PRESENT_IN_ACCEPTED_MAIN` | false | `PROVEN_OBSERVED` | Accepted main component tree equals deployed main tree and PR 161 remains unmerged; branch-only entrypoint is at `custom_components/comelit/runtime.py:267`-`custom_components/comelit/runtime.py:284`. |
-| `ENTRYPOINT_PRESENT_IN_LOADED_CODE` | false | `DERIVED` | Loaded code object identity is not directly readable, but deployed/live tree is accepted main and no authorized full restart activated PR 161. Gateway cannot read loaded Python objects (`docs/mvp1-entrance-canary-result.md:326`). |
-| `ENTRYPOINT_TRIGGER_REACHABLE` | false for live round | `PROVEN_OBSERVED` | Webhook action exists in branch code (`custom_components/comelit/test_control.py:73`-`custom_components/comelit/test_control.py:87`), but CT120 currently has no wrapper verb for `simulate_entrance_ring`; no live trigger was authorized or available. |
-| `HA_RESTARTS` | 0 | `PROVEN_OBSERVED` | This run performed zero restarts; synthetic canary boundary requires `HA_RESTARTS=0` (`docs/mvp1-synthetic-ring-canary.md:61`-`docs/mvp1-synthetic-ring-canary.md:70`). |
-| `LISTENER_RUNNING` | NOT_REACHED | `NOT_REACHED` | No deploy, reload, restart, start, or ring trigger was performed; logs had no listener-cycle restart. |
-| `LISTENER_READY` | NOT_REACHED | `NOT_REACHED` | No listener start or synthetic action was attempted; negative probe `"listener READY"=0`. |
-| `LISTENER_LAST_ERROR` | NOT_REACHED | `NOT_REACHED` | No listener status/debug object was read and no cycle was started; gateway cannot read loaded Python objects. |
-| `MEDIA_ACTIVE` | false | `PROVEN_OBSERVED` | Read-only recorder dumps had `media_active=False`, `media_phase=inactive`, and packet counts 0/0. |
-| `RING_MEDIA_LIFECYCLE_ACTIVE` | false | `PROVEN_OBSERVED` | Read-only dumps had no active media; negative probes had `comelit_ring=0`, `comelit_snapshot_updated=0`, and `comelit_recording_complete=0`. |
-| `DOOR_ACTIONS` | 0 | `PROVEN_OBSERVED` | No Door action was authorized or executed; negative probe `comelit_door_operation=0`. Door action limits are zero for synthetic canary (`docs/mvp1-synthetic-ring-canary.md:61`-`docs/mvp1-synthetic-ring-canary.md:70`). |
-| `GATE_ACTIONS` | 0 | `PROVEN_OBSERVED` | No Gate action was authorized or executed; synthetic canary boundary requires `GATE_ACTIONS=0` (`docs/mvp1-synthetic-ring-canary.md:61`-`docs/mvp1-synthetic-ring-canary.md:70`). |
-| `RECORDING_TARGET_SECONDS` | 20 | `PROVEN_OBSERVED` | Constant exists in code (`custom_components/comelit/const.py:47`) and is in the MVP contract (`docs/mvp-integration-v1-contract.md:253`). No recording was reached in this run. |
-| `SNAPSHOT_REFRESH_TARGET_SECONDS` | 1 | `PROVEN_OBSERVED` | Constant exists in code (`custom_components/comelit/const.py:46`) and is in the MVP contract (`docs/mvp-integration-v1-contract.md:249`). No snapshot loop was reached in this run. |
+| `ACCEPTED_MAIN_SHA` | `45854c7f0aa201fef0eb5207464e2fb9791c345d` | `PROVEN_OBSERVED` | Fresh main gate matched expected SHA and PR 161 merge commit. |
+| `MAIN_MOVED` | `false` | `PROVEN_OBSERVED` | Accepted main equals expected main. |
+| `MAIN_MOVED_EXECUTABLE` | `false` | `PROVEN_OBSERVED` | Accepted `custom_components/comelit` tree was recorded as `0a3629982862b17a420adea7044aac3551343472`. |
+| `DEPLOYED_SHA_MATCH` | `PASS` | `PROVEN_OBSERVED` | Post-deploy and post-restart status both reported `DEPLOYED_SHA=45854c7f0aa201fef0eb5207464e2fb9791c345d`. |
+| `HA_CORE_CHECK` | `PASS` | `PROVEN_OBSERVED` | Pre-deploy, post-deploy, and post-restart checks passed. |
+| `PAYLOAD_SCOPE` | `PASS` | `PROVEN_OBSERVED` | `OUTSIDE_MEMBERS=0`, `MEMBERS=55`, `DEPLOY_SCOPE=/config/custom_components/comelit`. |
+| `HA_RESTARTS` | `1` | `PROVEN_OBSERVED` | Exactly one authorized restart requested at `2026-09-18T10:40:12Z`; no second restart. |
+| `COMELIT_LOADED_AFTER_RESTART` | `PASS` | `DERIVED` | Accepted main was deployed, HA restart completed, listener READY logged at `2026-09-18T10:40:52Z`, and no setup exceptions appeared. |
+| `LISTENER_RUNNING` | `true` | `PROVEN_OBSERVED` | Post-restart listener READY marker was logged. |
+| `LISTENER_READY` | `true` | `PROVEN_OBSERVED` | Runtime logged `Comelit ring listener READY for persistent 3300s cycle` at `2026-09-18T10:40:52Z`; code emits this after setting `_listener_ready` (`custom_components/comelit/runtime.py:658`-`custom_components/comelit/runtime.py:662`). |
+| `LISTENER_LAST_ERROR` | `null` | `DERIVED` | Fresh cycle clears `_last_error` on `async_start()`; no completed-cycle error after the ready marker was observed (`custom_components/comelit/runtime.py:314`-`custom_components/comelit/runtime.py:324`, `custom_components/comelit/runtime.py:529`-`custom_components/comelit/runtime.py:535`). |
+| `SYNTHETIC_ENTRYPOINT_PRESENT_IN_ACCEPTED_MAIN` | `true` | `PROVEN_OBSERVED` | Runtime and test-control code contain the entrypoint/action (`custom_components/comelit/runtime.py:267`-`custom_components/comelit/runtime.py:285`, `custom_components/comelit/test_control.py:73`-`custom_components/comelit/test_control.py:87`). |
+| `SYNTHETIC_ENTRYPOINT_LOADED` | `FAIL` | `UNPROVEN` | Deployed accepted main plus restart markers prove activation context, but functional loaded-module proof would require invoking the entrypoint; the authorized trigger surface refused before execution. |
+| `ENTRYPOINT_TRIGGER_REACHABLE` | `false` | `PROVEN_OBSERVED` | CT120 restricted dispatcher lacks a `simulate_entrance_ring` case; wrapper allowlist is only `start|status|stop`; HA gateway same-name probe returned DENY. |
+| `SYNTHETIC_RING_COUNT` | `0` | `PROVEN_OBSERVED` | One named-verb attempt was refused with rc 126 before execution. |
+| `RING_EVENT_COUNT` | `0` | `PROVEN_OBSERVED` | Negative capture: `comelit_ring=0`. |
+| `MEDIA_SESSION_COUNT` | `0` | `NOT_REACHED` | Trigger surface unavailable; no ring event reached Home Assistant. |
+| `SNAPSHOT_EVENT_COUNT` | `0` | `NOT_REACHED` | Trigger surface unavailable; no media lifecycle began. |
+| `RECORDING_COUNT` | `0` | `NOT_REACHED` | Trigger surface unavailable; no media lifecycle began. |
+| `RECORDING_TARGET_SECONDS` | `20` | `PROVEN_OBSERVED` | Constant in code (`custom_components/comelit/const.py:47`) and deployment file identity recorded. |
+| `MEDIA_TEARDOWN` | `NOT_REACHED` | `NOT_REACHED` | Trigger surface unavailable; no media session was started. |
+| `LISTENER_READY_AFTER_MEDIA` | `NOT_REACHED` | `NOT_REACHED` | Trigger surface unavailable; no media phase ran. |
+| `DOOR_ACTIONS` | `0` | `PROVEN_OBSERVED` | Boundary requires zero Door actions and capture had `comelit_door_operation=0`. |
+| `GATE_ACTIONS` | `0` | `PROVEN_OBSERVED` | Boundary requires zero Gate actions. |
+| `AUTOMATIC_RETRY` | `false` | `PROVEN_OBSERVED` | No retry was attempted; contract stops failed phases without retry (`docs/mvp1-entrance-canary-contract.md:248`-`docs/mvp1-entrance-canary-contract.md:265`). |
+| `SECOND_MEDIA_SESSION` | `false` | `PROVEN_OBSERVED` | Trigger surface unavailable; no first media session began. |
+| `R30H_E_EXECUTED` | `false` | `PROVEN_OBSERVED` | No R30H-E path was authorized or observed. |
 
-Every `NOT_REACHED` above is deliberate: the run stopped at pre-live gate because accepted main lacks the entrypoint and activation would require a forbidden full HA restart.
-
-## 7. Deliberate zeros
+## 8. Deliberate zeros and counters
 
 ```text
-DEPLOYS=0
-```
-
-Reason: deploying branch PR 161 would violate the accepted-main live rule; deploying accepted main would not contain the synthetic entrypoint.
-
-```text
+DEPLOYS=1
+HA_RESTARTS=1
 COMELIT_RELOADS=0
-```
-
-Reason: project-local R30F/R30G evidence proves config-entry reload does not re-import changed custom-component Python, so reload could not activate the branch entrypoint (`safety-poc/research/media/v1/P116_R30F_PACKAGED_HELPER_BOUNDED_LIVE_RESULT.md:188`-`safety-poc/research/media/v1/P116_R30F_PACKAGED_HELPER_BOUNDED_LIVE_RESULT.md:191`).
-
-```text
-RING_TRIGGERS=0
-```
-
-Reason: loaded/accepted code has no branch synthetic entrypoint, and CT120 has no operator-named wrapper verb for `simulate_entrance_ring`.
-
-```text
+HOST_REBOOT=0
+SUPERVISOR_REBOOT=0
+SYNTHETIC_TRIGGERS=0
 MEDIA_SESSIONS=0
 SNAPSHOTS=0
 RECORDINGS=0
-```
-
-Reason: no ring trigger was executed. The expected media lifecycle starts only after the synthetic `comelit_ring` (`docs/mvp1-synthetic-ring-canary.md:35`-`docs/mvp1-synthetic-ring-canary.md:46`), which was not reached.
-
-```text
 DOOR_ACTIONS=0
 GATE_ACTIONS=0
+AUTOMATIC_RETRY=false
+SECOND_MEDIA_SESSION=false
+R30H_E_EXECUTED=false
+SECOND_TRIGGER_ATTEMPT=false
+SECOND_RESTART=false
 ```
 
-Reason: synthetic canary explicitly keeps Door/Gate at zero (`docs/mvp1-synthetic-ring-canary.md:61`-`docs/mvp1-synthetic-ring-canary.md:70`), and no live phase was entered.
+`COMELIT_RELOADS=0` because the owner authorized a full HA restart for activation; no reload was needed or performed. `SYNTHETIC_TRIGGERS=0` because the single named trigger attempt was refused by the restricted command surface before execution. All media/snapshot/recording zeros are deliberate `NOT_REACHED` values with the same reason: trigger surface unavailable. Door and Gate stayed zero by contract and by observation.
+
+## 9. Limitations and safety notes
+
+No media phase was reached. This document contains no snapshot artifact, recording artifact, retained JPEG/MP4 proof, probed video stream proof, or duration measurement. The constants `SNAPSHOT_REFRESH_TARGET_SECONDS=1` and `RECORDING_TARGET_SECONDS=20` are code/deploy facts only, not live artifact observations (`custom_components/comelit/const.py:46`-`custom_components/comelit/const.py:47`).
+
+`SYNTHETIC_ENTRYPOINT_LOADED=FAIL` is a functional proof statement, not a source-code absence statement: the entrypoint is present in the deployed and restart-activated accepted main, with identity proven on disk and by restart markers, but its presence in the loaded module set was not functionally proven because no authorized transport could invoke it.
+
+No secrets, credentials, bearer tokens, raw media bytes, or private payloads were recorded. The CT120 wrapper inventory was read-only and only lists script names, hashes, dispatcher cases, and the webhook URL already embedded in the wrapper.
+
+## 10. Exact next step
+
+The owner must name or extend the CT120 restricted surface for the `simulate_entrance_ring` test-control action. That means adding an allowed dispatcher case for the operator-named verb and extending `comelit-ha-ring-runtime` action whitelist beyond `start|status|stop` to include `simulate_entrance_ring`, or providing an equivalent explicitly authorized restricted trigger surface.
+
+After that, authorize one bounded trigger round. Because the accepted main was already deployed and activated by the single restart in this run, the future trigger round does not need another deploy, reload, or restart unless the owner changes the deployed code or Home Assistant state before the round.
+
+## 11. Final scalar block
 
 ```text
-HA_RESTARTS=0
-```
-
-Reason: full HA restart is forbidden by the canary boundary (`docs/mvp1-synthetic-ring-canary.md:69`-`docs/mvp1-synthetic-ring-canary.md:73`) and by the entrance contract activation stop rule (`docs/mvp1-entrance-canary-contract.md:108`-`docs/mvp1-entrance-canary-contract.md:115`).
-
-## 8. Limitations and uncertain evidence
-
-Loaded-module identity is unprovable through the forced-command gateway. The gateway exposes status/check/log/deploy/rollback/restart-style operations only; it cannot inspect `sys.modules` or loaded Python object identity. The previous entrance-canary result already states this limitation and why fail-closed remains required (`docs/mvp1-entrance-canary-result.md:326`).
-
-No snapshot, recording, JPEG, MP4, container duration, video stream, audio stream, retained media path, or media teardown fact was produced by this run. A run that reached no media phase must not report any media-artifact fact. The offline implementation documents expected media behavior and tests with fakes (`docs/mvp-integration-v1-offline-build-result.md:23`-`docs/mvp-integration-v1-offline-build-result.md:38`, `docs/mvp-integration-v1-offline-build-result.md:68`-`docs/mvp-integration-v1-offline-build-result.md:83`), but those are not live artifact observations for this run.
-
-## 9. Required next step before live
-
-Before live can be attempted:
-
-1. Merge PR 161 so the synthetic entrypoint is part of accepted `origin/main`.
-2. Deploy `custom_components/comelit/**` from the merged accepted main.
-3. Obtain a new explicit authorization for one full Home Assistant restart, because config-entry reload cannot activate changed custom-component Python.
-4. Obtain an operator-named CT120 wrapper verb, or equivalent explicitly authorized trigger surface, for the `simulate_entrance_ring` webhook action.
-5. Re-baseline a new bounded canary before any synthetic ring, media session, snapshot, recording, Door, or Gate action.
-
-## 10. Final scalar block
-
-```text
-=== COMELIT MVP1 SYNTHETIC RING CANARY ===
+ACCEPTED_MAIN_SHA=45854c7f0aa201fef0eb5207464e2fb9791c345d
+DEPLOYED_SHA=45854c7f0aa201fef0eb5207464e2fb9791c345d
+HA_CORE_CHECK=PASS
+HA_RESTARTS=1
+COMELIT_LOADED_AFTER_RESTART=PASS
+LISTENER_READY_BEFORE_TRIGGER=PASS
+SYNTHETIC_ENTRYPOINT_LOADED=FAIL
 SYNTHETIC_RING_COUNT=0
 RING_EVENT_COUNT=0
 RING_EVENT_ID=NONE
@@ -255,6 +286,7 @@ SNAPSHOT_EVENT_COUNT=0
 SNAPSHOT_SEQUENCE_FIRST=NONE
 SNAPSHOT_SEQUENCE_LAST=NONE
 SNAPSHOT_SEQUENCE_MONOTONIC=NOT_REACHED
+SNAPSHOT_AVERAGE_INTERVAL_SECONDS=NONE
 FINAL_SNAPSHOT_RETAINED=NOT_REACHED
 RECORDING_COUNT=0
 RECORDING_TARGET_SECONDS=20
@@ -268,25 +300,8 @@ GATE_ACTIONS=0
 AUTOMATIC_RETRY=false
 SECOND_MEDIA_SESSION=false
 R30H_E_EXECUTED=false
-RESULT=BLOCKED_PRELIVE_GATE_UNMERGED_AND_HA_RESTART_REQUIRED
-=== END COMELIT MVP1 SYNTHETIC RING CANARY ===
-```
-
-```text
-ACCEPTED_MAIN_SHA=ea504d51a0095507722d749f6365e66035630fa6
-EXPECTED_COMELIT_COMPONENT_TREE_SHA=e4d70ad372cc92cf16d13eb8ebcc54932f437079
-CURRENT_COMELIT_COMPONENT_TREE_SHA=e4d70ad372cc92cf16d13eb8ebcc54932f437079
-COMELIT_COMPONENT_TREE_MATCH=true
-DEPLOYED_SHA=6bbfbc19ea04567e56fa3a9e3d470ca67b3b077c
-CORRECTIVE_COMMIT=a3e25a364ab88b89a7822dff229126432f406b3e
-CORRECTIVE_PR=161
-HA_RESTARTS=0
-COMELIT_RELOADS=0
-DEPLOYS=0
-SYNTHETIC_TRIGGERS=0
-DOOR_ACTIONS=0
-GATE_ACTIONS=0
-AUTOMATIC_RETRY=false
-SECOND_MEDIA_SESSION=false
-R30H_E_EXECUTED=false
+RESULT=BLOCKED_PRELIVE_GATE
+RESULT_BRANCH=docs/mvp1-synthetic-ring-canary-result
+RESULT_REMOTE_HEAD=<orchestrator-published>
+RESULT_PR=none
 ```
