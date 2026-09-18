@@ -30,9 +30,13 @@ automation:
         value_template: >-
           {{ trigger.event.data.door == 'entrance'
              and trigger.event.data.event_id | default('') | string | length > 0 }}
+      - condition: template
+        value_template: >-
+          {{ states('input_text.comelit_ring_telegram_notify_entity')
+             not in ['', 'unknown', 'unavailable'] }}
 
     variables:
-      telegram_notify_entity: notify.telegram_bot_6207024040_202060054
+      telegram_notify_entity: "{{ states('input_text.comelit_ring_telegram_notify_entity') }}"
       event_id: "{{ trigger.event.data.event_id }}"
       door: "{{ trigger.event.data.door }}"
       open_callback_data: "{{ 'comelit|open|' ~ event_id }}"
@@ -73,7 +77,8 @@ automation:
             🔔 Звонок в подъезд
             Кадр {{ snapshot_sequence }}
           inline_keyboard:
-            - "🚪 Открыть дверь:{{ open_callback_data }}, 🙈 Игнорировать:{{ ignore_callback_data }}"
+            - - ["🚪 Открыть дверь", "{{ open_callback_data }}"]
+              - ["🙈 Игнорировать", "{{ ignore_callback_data }}"]
         response_variable: telegram_send
 
       - variables:
@@ -95,7 +100,7 @@ automation:
               value_template: "{{ terminal_outcome == '' }}"
             - condition: template
               value_template: >-
-                {{ (as_timestamp(now()) - as_timestamp(started_at)) < 40 }}
+                {{ (as_timestamp(now()) - as_timestamp(started_at)) < 60 }}
           sequence:
             - wait_for_trigger:
                 - trigger: event
@@ -133,7 +138,8 @@ automation:
                           🔔 Звонок в подъезд
                           Кадр {{ snapshot_sequence }}
                         inline_keyboard:
-                          - "🚪 Открыть дверь:{{ open_callback_data }}, 🙈 Игнорировать:{{ ignore_callback_data }}"
+                          - - ["🚪 Открыть дверь", "{{ open_callback_data }}"]
+                            - ["🙈 Игнорировать", "{{ ignore_callback_data }}"]
 
                 # Recording finished. Keep the photo/buttons alive but also
                 # send the retained MP4 as a reply; this validates that HA can
@@ -160,7 +166,8 @@ automation:
                           Кадр {{ snapshot_sequence }}
                           Запись: {{ recording_state }}
                         inline_keyboard:
-                          - "🚪 Открыть дверь:{{ open_callback_data }}, 🙈 Игнорировать:{{ ignore_callback_data }}"
+                          - - ["🚪 Открыть дверь", "{{ open_callback_data }}"]
+                            - ["🙈 Игнорировать", "{{ ignore_callback_data }}"]
                     - choose:
                         - conditions:
                             - condition: template
