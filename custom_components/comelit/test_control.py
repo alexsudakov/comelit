@@ -6,7 +6,7 @@ from homeassistant.components import webhook
 from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN
-from .runtime import ComelitRingRuntime
+from .runtime import ComelitRingRuntime, ComelitRingRuntimeError
 from .supervisor import ComelitRuntimeSupervisor
 
 WEBHOOK_ID = "comelit-ha-ring-test-control-v1"
@@ -68,6 +68,22 @@ async def _handle(
         result = _status_payload(runtime, supervisor)
         result["ok"] = True
         result["action"] = "status"
+        return json_response(result)
+
+    if action == "simulate_entrance_ring":
+        try:
+            event = await runtime.async_simulate_entrance_ring()
+        except ComelitRingRuntimeError as exc:
+            result = _status_payload(runtime, supervisor)
+            result["ok"] = False
+            result["action"] = "simulate_entrance_ring"
+            result["error"] = str(exc)
+            return json_response(result, status=409)
+        result = _status_payload(runtime, supervisor)
+        result["ok"] = True
+        result["action"] = "simulate_entrance_ring"
+        result["event_id"] = event.get("event_id")
+        result["synthetic"] = True
         return json_response(result)
 
     if action == "stop":
