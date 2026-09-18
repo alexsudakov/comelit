@@ -32,7 +32,7 @@ automation:
              and trigger.event.data.event_id | default('') | string | length > 0 }}
 
     variables:
-      telegram_notify_entity: notify.home_channel
+      telegram_notify_entity: notify.telegram_bot_6207024040_202060054
       event_id: "{{ trigger.event.data.event_id }}"
       door: "{{ trigger.event.data.door }}"
       open_callback_data: "{{ 'comelit|open|' ~ event_id }}"
