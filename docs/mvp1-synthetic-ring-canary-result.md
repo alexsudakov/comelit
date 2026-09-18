@@ -4,304 +4,444 @@
 
 ```text
 TASK_ID=COMELIT-MVP1-SYNTHETIC-RING-CANARY
-MODE=BOUNDED_LIVE_CANARY_WITH_ONE_AUTHORIZED_HA_RESTART
+MODE=BOUNDED_SYNTHETIC_TRIGGER_LIVE_RUN
 DATE_UTC=2026-09-18
-EXPECTED_MAIN_SHA=45854c7f0aa201fef0eb5207464e2fb9791c345d
-ACCEPTED_MAIN_SHA=45854c7f0aa201fef0eb5207464e2fb9791c345d
-ACCEPTED_MAIN_COMMIT=45854c7 Merge pull request #161 from alexsudakov/feat/mvp1-synthetic-ring-canary
-MAIN_MOVED=false
-MAIN_MOVED_EXECUTABLE=false
-COMELIT_COMPONENT_TREE_ACCEPTED_MAIN=0a3629982862b17a420adea7044aac3551343472
-PR=161
+DEPLOYED_SHA=45854c7f0aa201fef0eb5207464e2fb9791c345d
+RESULT=FAIL_SNAPSHOT
 ```
 
-Этот документ заменяет pre-live stop документы turn 2/3. После merge PR 161 владелец отдельно разрешил один bounded live canary с ровно одним full Home Assistant restart. Exercised authorization:
+Этот документ заменяет предыдущий trigger-surface result. В этом запуске wrapper gap был минимально исправлен на CT120, один synthetic trigger был выполнен через restricted route, ring event был создан, ровно одна media session была начата и затем завершилась. Canary остановлен после единственного разрешенного trigger round; повторный trigger запрещен.
+
+## 2. Authorization and hard limits
 
 ```text
-DEPLOY_MAX=1
-HA_RESTART_MAX=1
-SYNTHETIC_RING_MAX=1
+CT120_WRAPPER_MUTATION_FILES_MAX=2
+SYNTHETIC_TRIGGER_MAX=1
 MEDIA_SESSION_MAX=1
 RECORDING_MAX=1
 RECORDING_TARGET_SECONDS=20
+DEPLOY=0
+HA_RELOADS=0
+HA_RESTARTS=0
+HOST_REBOOTS=0
+SUPERVISOR_REBOOTS=0
 DOOR_ACTIONS=0
 GATE_ACTIONS=0
 AUTOMATIC_RETRY=false
+SECOND_TRIGGER=false
 SECOND_MEDIA_SESSION=false
 R30H_E_EXECUTED=false
-HOST_REBOOT=0
-SUPERVISOR_REBOOT=0
-NO_PHYSICAL_RING_REQUIRED=true
 ```
 
-Repository context: the branch/accepted-main code contains the integration-side synthetic runtime entrypoint and shared ring handler. `ComelitRingRuntime.async_simulate_entrance_ring()` constructs only an entrance `CALL_INIT` event with `synthetic=True` and calls `ComelitRingRuntime._async_emit_ring_event(..., require_media_start=True)` (`custom_components/comelit/runtime.py:237`-`custom_components/comelit/runtime.py:285`). The test-control webhook exposes the `simulate_entrance_ring` action inside Home Assistant and is local-only with the existing webhook id and CT120 allowlist (`custom_components/comelit/test_control.py:12`-`custom_components/comelit/test_control.py:13`, `custom_components/comelit/test_control.py:73`-`custom_components/comelit/test_control.py:87`, `custom_components/comelit/test_control.py:117`-`custom_components/comelit/test_control.py:125`). The canary limit stays one trigger, one media session, no Door/Gate, no retry, and no R30H-E behavior (`docs/mvp1-synthetic-ring-canary.md:57`-`docs/mvp1-synthetic-ring-canary.md:73`).
-
-## 2. Result class
+Accepted main was already deployed and activated by the previous run:
 
 ```text
-RESULT_CLASS=BLOCKED_PRELIVE_GATE
-```
-
-Результат не является `FAIL_SYNTHETIC_TRIGGER`: synthetic trigger не был выполнен, Home Assistant webhook action не получил запрос, ring event не был создан, media не стартовал. Run stopped at PHASE 4 before invocation because the authorized operator verb `simulate_entrance_ring` is absent from the CT120 restricted surface and from the HA forced-command gateway. Integration-side entrypoint is now present in accepted main and was deployed before the single authorized restart, but no authorized transport could invoke it. This is an operator-side access-surface gap, not a defect in `custom_components/comelit`.
-
-## 3. PHASE 1/2 - pre-deploy and deploy
-
-Fresh main gate:
-
-```text
-EXPECTED_MAIN_SHA=45854c7f0aa201fef0eb5207464e2fb9791c345d
-ACCEPTED_MAIN_SHA=45854c7f0aa201fef0eb5207464e2fb9791c345d
-MAIN_MOVED=false
-MAIN_MOVED_EXECUTABLE=false
-COMELIT_COMPONENT_TREE_ACCEPTED_MAIN=0a3629982862b17a420adea7044aac3551343472
-```
-
-Pre-deploy read-only state:
-
-```text
-INTEGRATION_PRESENT=true
-INTEGRATION_VERSION=1.5.7
-DEPLOYED_SHA=6bbfbc19ea04567e56fa3a9e3d470ca67b3b077c
-GATEWAY_SCOPE=custom_components/comelit
-ARBITRARY_SHELL=DENIED
-PRE_DEPLOY_CHECK=HA_CORE_CHECK=PASS
-PRE_DEPLOY_DOOR_ACTIONS=0
-PRE_DEPLOY_GATE_ACTIONS=0
-PRE_DEPLOY_RING_EVENTS=0
-PRE_DEPLOY_SNAPSHOT_EVENTS=0
-PRE_DEPLOY_RECORDING_COMPLETE_EVENTS=0
-PRE_DEPLOY_DOOR_OPERATION_EVENTS=0
-```
-
-Deploy payload and deployment result:
-
-```text
-ARCHIVE_PIPE_RC=0
-GZIP_TEST=PASS
-PAYLOAD_BYTES=6185206
-MEMBERS=55
-OUTSIDE_MEMBERS=0
-PAYLOAD_SHA256=b4be518ff291948b372b97dd9528321f3c369a35dbcbdc8e0186e4ab9e93f6ba
-TARGET_SHA=45854c7f0aa201fef0eb5207464e2fb9791c345d
-TARGET_COMPONENT_TREE=0a3629982862b17a420adea7044aac3551343472
 DEPLOYED_SHA=45854c7f0aa201fef0eb5207464e2fb9791c345d
-DEPLOY_SCOPE=/config/custom_components/comelit
-HA_RESTARTED=NO
-DEPLOY=PASS
-DEPLOY_VERB_RC=0
-POST_DEPLOY_CHECK=HA_CORE_CHECK=PASS
-POST_DEPLOY_STATUS_DEPLOYED_SHA=45854c7f0aa201fef0eb5207464e2fb9791c345d
 ```
 
-Accepted-main file identity deployed to Home Assistant:
+The integration-side synthetic path creates an entrance-only synthetic `CALL_INIT` event and enters the shared `_async_emit_ring_event` handler (`custom_components/comelit/runtime.py:237`-`custom_components/comelit/runtime.py:285`). Constants remain `SNAPSHOT_REFRESH_TARGET_SECONDS=1` and `RECORDING_TARGET_SECONDS=20` (`custom_components/comelit/const.py:46`-`custom_components/comelit/const.py:47`).
+
+## 3. Result class
 
 ```text
-custom_components/comelit/runtime.py=262218f04f3b9f75e43c538d153e2bdd8a8fb998dd392e7bc4ceedede024789c
-custom_components/comelit/ring_media.py=84c69d227201c9834e3eb03b9b170d9ff64817dc8cc4f291e540e5d49d56e257
-custom_components/comelit/test_control.py=b925cb6162c66b51c8c5321dfa563c8669f43e05cc3855a78248df95d2064dbd
-custom_components/comelit/const.py=1101bc30d3d18278d5c4337eb678b3661db0d546f4a866af95f5a4e4fdc8ab96
-custom_components/comelit/__init__.py=b2a93552483557f7fc327f4c29f234bc491601b6955dd4e40a71d3e63ebe16c6
+RESULT_CLASS=FAIL_SNAPSHOT
 ```
 
-The deployed `runtime.py` sha256 matches the R20 gate pin (`safety-poc/tests/test_p116_r20_hls_http_boundary_diagnostics.py:27`-`safety-poc/tests/test_p116_r20_hls_http_boundary_diagnostics.py:29`). `RECORDING_TARGET_SECONDS=20` and `SNAPSHOT_REFRESH_TARGET_SECONDS=1` remain the code constants (`custom_components/comelit/const.py:46`-`custom_components/comelit/const.py:47`), but no snapshot or recording phase was reached in this run.
+Trigger succeeded: `SYNTHETIC_TRIGGER_COUNT=1`, `SYNTHETIC_RING_COUNT=1`, `RING_EVENT_COUNT=1`, event id was present, and the event was `source=synthetic_test`, `door=entrance`, `kind=CALL_INIT`, `direction=DEVICE_TO_CLIENT`. Exactly one media session became ACTIVE and the listener returned READY after teardown.
 
-## 4. PHASE 3 - one authorized full Home Assistant restart
+The canary still fails the snapshot gate. The observed upstream media session delivered zero video RTP packets, no video forwarding marker appeared, and the session lifetime was about 0.18 s. With no video packets and no HLS provider in the read-only samples, the snapshot lifecycle had no observed decodable frame source, and the 20 s recording target could not be proven met. Snapshot and recording artifact/state fields are therefore `UNPROVEN` with `PENDING_OPERATOR_RELAY`, while the run classification is `FAIL_SNAPSHOT` on the observed zero-video evidence.
+
+## 4. PHASE A - wrapper preflight
+
+Read-only CT120 preflight:
 
 ```text
-RESTART_REQUEST_UTC=2026-09-18T10:40:12Z
-USER_APPROVAL_MARKER=USER_APPROVED
-HA_CORE_RESTART_REQUESTED=true
-POST_RESTART_CHECK=HA_CORE_CHECK=PASS
-POST_RESTART_STATUS_DEPLOYED_SHA=45854c7f0aa201fef0eb5207464e2fb9791c345d
-EXCEPTIONS_AFTER_RESTART=0
-HA_RESTARTS=1
-SECOND_RESTART=false
-HOST_REBOOT=0
-SUPERVISOR_REBOOT=0
+/usr/local/sbin/hermes-comelit-dispatch owner=root:root mode=755
+sha256_before=092ea7d29391840f4d3162e5df9f17270de08d328178c68187455036c8d9f6cf
+HA-family cases before=comelit-ha-ring-test-start|comelit-ha-ring-test-status|comelit-ha-ring-test-stop
+fallthrough=*) exec "$BACKUP"
+
+/usr/local/sbin/comelit-ha-ring-runtime owner=root:root mode=755
+sha256_before=06a291181d363d7c8c6358cd16f14ce6a61385f8e6bacae35c5c4c66782b7804
+action whitelist before=start|status|stop
+
+DISPATCH_SYNTAX=PASS
+RUNTIME_SYNTAX=PASS
+BLOCKER_REPRODUCED=true
+ROLLBACK_MATERIAL=/tmp/mvp1-synth/orig/ on orchestration host
 ```
 
-Activation markers observed after restart:
+The blocker was reproduced before mutation: no simulate verb existed, and the runtime wrapper rejected every action outside `start|status|stop`.
+
+## 5. PHASE B - minimal CT120 wrapper mutation
+
+Only the two authorized operator-owned CT120 files were modified:
 
 ```text
-2026-09-18T10:40:52Z custom_components.comelit.runtime
-  Comelit ring listener READY for persistent 3300s cycle
-2026-09-18T10:40:56Z homeassistant.components.recorder.core
-  camera.comelit_entrance state_changed old_state=None new_state=idle
+RUNTIME_EDIT_STATE=applied
+DISPATCH_EDIT_STATE=applied
+PATCH_APPLY=PASS
+runtime_sha256_after=37938f4ce76abeb268f92e34a388bf03dee6d8f808a62d487d32c29e4009c65c
+dispatch_sha256_after=5c082fe54e67d78cb8c9443753663e7592940f0e5850193c6888bbb405146dd7
+owner=root:root
+mode=755
+RUNTIME_SYNTAX=PASS
+DISPATCH_SYNTAX=PASS
 ```
 
-The READY string is emitted by the runtime when `V4_RING_LISTENER_READY=true` is read and `_listener_ready` is set (`custom_components/comelit/runtime.py:658`-`custom_components/comelit/runtime.py:662`). `LISTENER_LAST_ERROR=null` is derived for the fresh ready cycle: `async_start()` clears `_last_error` when starting a cycle (`custom_components/comelit/runtime.py:314`-`custom_components/comelit/runtime.py:324`), while completed-cycle errors would be set in `_async_run_once()` (`custom_components/comelit/runtime.py:529`-`custom_components/comelit/runtime.py:535`).
+Exact runtime diff:
+
+```diff
+-    start|status|stop) ;;
++    start|status|stop|simulate_entrance_ring) ;;
+```
+
+Exact dispatch diff, inserted before the `*)` fallthrough:
+
+```diff
++    comelit-ha-ring-test-simulate-entrance-ring)
++        exec "$HA_RUNTIME" simulate_entrance_ring
++        ;;
++
+```
+
+Validation matrix:
 
 ```text
-COMELIT_LOADED_AFTER_RESTART=PASS
+V1 comelit-ha-ring-test-status:
+  OK=true ACTION=status RUNNING=true LISTENER_READY=true LAST_ERROR= RING_OBSERVED=false
+  P13_EXECUTED=false P14_EXECUTED=false PHYSICAL_DOOR_ACTION=false
+  RESULT=read-only path intact
+
+V2 bare simulate_entrance_ring:
+  DENIED: command not allowed
+  RESULT=arbitrary verbs still refused
+
+V3 /usr/local/sbin/comelit-ha-ring-runtime bogus_action:
+  ERROR=BAD_ACTION rc=2
+  RESULT=unknown runtime action still rejected before curl/no HTTP request
+
+V4 wiring:
+  dispatch:109 exec "$HA_RUNTIME" simulate_entrance_ring
+  runtime:9 start|status|stop|simulate_entrance_ring
+  RESULT=wiring proven without executing trigger
+```
+
+`start` and `stop` were not executed because they have listener side effects; their unchanged case blocks were validated by reading the wrapper.
+
+## 6. PHASE C - pre-trigger gates
+
+No deploy, reload, or restart was performed in this phase:
+
+```text
+DEPLOYED_SHA=45854c7f0aa201fef0eb5207464e2fb9791c345d
+HA_CORE_CHECK=PASS
+COMELIT_LOADED=true
 LISTENER_RUNNING=true
 LISTENER_READY=true
 LISTENER_LAST_ERROR=null
+SYNTHETIC_TRIGGER_COUNT=0
+MEDIA_SESSION_COUNT=0
+DOOR_ACTIONS=0
+GATE_ACTIONS=0
 ```
 
-The single authorized restart was consumed exactly once. No second restart, reload, host reboot, or Supervisor reboot was performed.
-
-## 5. PHASE 4 - trigger gate blocker
-
-The authorized operator verb was exactly `simulate_entrance_ring`. It was attempted once through the CT120 restricted SSH surface and refused before execution:
+The entrance camera status was inactive before the trigger:
 
 ```text
-COMMAND=ssh -i ~/.ssh/id_ed25519_ct120_comelit -o IdentitiesOnly=yes -o BatchMode=yes hermes-comelit@192.168.1.85 simulate_entrance_ring
-TRIGGER_REQUEST_UTC=2026-09-18T10:43:10Z
-RESPONSE=DENIED: command not allowed
-TRIGGER_VERB_RC=126
-SYNTHETIC_RING_COUNT=0
+media_active=False
+media_phase=inactive
+remaining_seconds=0
+listener_paused=False
+video_packet_count=0
 ```
 
-`exit 126` plus `DENIED: command not allowed` is the not-whitelisted forced-command behavior. The refusal happened before any Home Assistant webhook call, so it is not an executed trigger invocation.
+## 7. PHASE D - single synthetic trigger
 
-Read-only CT120 inventory showed the surface gap:
+The one authorized trigger was invoked exactly once through the restricted route:
 
 ```text
-/usr/local/sbin/hermes-comelit-dispatch
-  sha256=092ea7d29391840f4d3162e5df9f17270de08d328178c68187455036c8d9f6cf
-  HA-family cases:
-    comelit-ha-ring-test-start -> comelit-ha-ring-runtime start
-    comelit-ha-ring-test-status -> comelit-ha-ring-runtime status
-    comelit-ha-ring-test-stop -> comelit-ha-ring-runtime stop
-
-/usr/local/sbin/comelit-ha-ring-runtime
-  sha256=06a291181d363d7c8c6358cd16f14ce6a61385f8e6bacae35c5c4c66782b7804
-  URL=http://192.168.1.108:8123/api/webhook/comelit-ha-ring-test-control-v1
-  ACTION_ALLOWLIST=start|status|stop
-
-/usr/local/sbin/hermes-comelit-dispatch.pre-p13-observed-v1
-  sha256=e4bb63d7939a67344eedbfaf9f01a8a0a9e1578a74665e4b84f169466eb62e63
-  cases=door-poc-status,door-poc-test
-
-HA_GATEWAY_PROBE=ssh comelit-ha simulate_entrance_ring -> COMELIT_HA_GATEWAY=DENY
+COMMAND=ssh -i ~/.ssh/id_ed25519_ct120_comelit -o IdentitiesOnly=yes -o BatchMode=yes hermes-comelit@192.168.1.85 comelit-ha-ring-test-simulate-entrance-ring
+TRIGGER_REQUEST_UTC=2026-09-18T11:02:53Z
+TRIGGER_VERB_RC=0
+OK=true
+ACTION=simulate_entrance_ring
+RUNNING=true
+LISTENER_READY=true
+RING_OBSERVED=true
+PRESS_PANEL_NOW=true
+RING_DOOR=entrance
+RING_SOURCE=synthetic_test
+RING_KIND=CALL_INIT
+RING_DIRECTION=DEVICE_TO_CLIENT
+LAST_ERROR=
+P13_EXECUTED=false
+P14_EXECUTED=false
+PHYSICAL_DOOR_ACTION=false
 ```
 
-Interpretation: the integration-side entrypoint exists in deployed accepted main, and the restart activation markers prove the accepted main integration restarted cleanly. However, no authorized transport can invoke `simulate_entrance_ring`: the CT120 dispatcher has no case for it, `comelit-ha-ring-runtime` rejects actions outside `start|status|stop`, and the HA forced-command gateway has no same-named verb or service-call path.
-
-The inventory was collected read-only through the CT120 root SSH route `comelit-ct120`, not through the restricted route, because the restricted route can only execute whitelisted verbs and cannot list or read wrapper files. The inventory used `ls`, `sha256sum`, and `cat` only. Nothing was modified, started, stopped, reloaded, or restarted on CT120 or Home Assistant.
-
-No workaround transport was used. Raw root curl to the local-only webhook, gateway bypass, bearer token, Home Assistant service call, and `hass.bus.fire` would all bypass the documented restricted wrapper boundary.
-
-## 6. Negative evidence over the full capture
-
-The run stopped before trigger execution. Over the capture:
+Derived result:
 
 ```text
-comelit_ring=0
-comelit_snapshot_updated=0
-comelit_recording_complete=0
-comelit_door_operation=0
-"media session ACTIVE"=0
-"Synthetic"=0
+SYNTHETIC_TRIGGER_COUNT=1
+SYNTHETIC_RING_COUNT=1
+RING_EVENT_COUNT=1
+RING_EVENT_ID=863ec5c5-8111-4ff4-8308-6d30ce6609eb
+RING_SYNTHETIC=true
+DOOR_ACTIONS=0
+GATE_ACTIONS=0
+```
+
+## 8. PHASE E/F - media, snapshot, and recording evidence
+
+Timeline, UTC:
+
+```text
+2026-09-18T11:02:53Z custom_components.comelit.runtime WARNING
+  Synthetic Comelit entrance ring emitted for bounded test:
+  event_id=863ec5c5-8111-4ff4-8308-6d30ce6609eb
+
+2026-09-18T11:03:05Z custom_components.comelit.media_transport INFO
+  Comelit entrance media session ACTIVE
+
+2026-09-18T11:03:05Z custom_components.comelit.media_transport INFO
+  Comelit entrance media transport completed
+
+2026-09-18T11:03:11Z custom_components.comelit.runtime INFO
+  Comelit ring listener READY for persistent 3300s cycle
+```
+
+Media transport completion markers:
+
+```text
+P78_RTPC_SIGNALING_RESULT=PASS
+P80_MEDIA_ACTIVE=true
+P80_AUDIO_RTP_FORWARDING=PASS
+P80_VIDEO_RTP_PORT=17899
+P80_AUDIO_RTP_PORT=17808
+P80_MEDIA_AUTO_CLOSE_3000MS=false
+P80_MEDIA_LIFETIME_OWNER=<redacted>
+P80_DEVICE_0002_GATES=PASS
+P80_DEVICE_000A_GATES=PASS
+P78_RTPC_GATES=PASS
+P80_PREACTIVE_MEDIA_DEMUX=PASS
+ICE_HOLDER_STOP=true
+PSEUDOTCP_GRACEFUL_CLOSE_COMPLETE=true
+PSEUDOTCP_GRACEFUL_CLOSE_TIMEOUT=false
+PSEUDOTCP_NOTIFY_PACKET_CLASS=EXPECTED_TERMINAL_SHUTDOWN
+P116_VIDEO_COUNT=0
+P116_VIDEO_PT_SET=NONE
+P116_VIDEO_SPS_COUNT=0
+P116_VIDEO_PPS_COUNT=0
+P116_VIDEO_MARKER_COUNT=0
+P116_VIDEO_SSRC_COUNT=0
+P116_AUDIO_COUNT=5
+P116_AUDIO_FIRST_SEQ=27859
+P116_AUDIO_LAST_SEQ=27863
+P116_AUDIO_FIRST_MONOTONIC_MS=1084094123
+P116_AUDIO_LAST_MONOTONIC_MS=1084094196
+P116_AUDIO_PT_SET=8
 media_native_binary_sha256_mismatch=0
 ```
 
-No media phase was reached. Therefore this result intentionally reports no snapshot artifact, no recording artifact, no retained file, no probed container, and no duration fact.
+Derived media facts from these markers:
 
-## 7. Gate table
+```text
+MEDIA_SESSION_COUNT=1
+MEDIA_SESSION_LIFETIME_SECONDS_APPROX=0.18
+VIDEO_RTP_PACKETS=0
+AUDIO_RTP_PACKETS=5
+AUDIO_RTP_SPAN_MS_APPROX=73
+P80_VIDEO_RTP_FORWARDING_MARKER=ABSENT
+SECOND_MEDIA_SESSION=false
+```
+
+Camera recorder samples in order:
+
+```text
+2026-09-18T11:03:05.667Z media_active=True media_phase=active listener_paused=True remaining_seconds=600 video_recovery_shim_running=True video_packet_count=0 audio_packet_count=0 hls_provider_present=False
+2026-09-18T11:03:05.675Z media_active=False media_phase=stopping listener_paused=True remaining_seconds=0 video_recovery_shim_running=True video_packet_count=0 audio_packet_count=0 hls_provider_present=False
+2026-09-18T11:03:05.686Z media_active=False media_phase=stopping listener_paused=True hls_provider_present=False
+2026-09-18T11:03:05.851Z media_active=False media_phase=stopping listener_paused=True video_packet_count=0 audio_packet_count=1 hls_provider_present=False
+```
+
+Required interpretation:
+
+- One and only one media session was observed.
+- The media session ended in about 0.18 s.
+- Video RTP count was zero.
+- Audio RTP count was five packets spanning about 73 ms.
+- No `P80_VIDEO_RTP_FORWARDING` marker appeared.
+- `hls_provider_present=False` for every sample, so HA Stream did not expose an HLS provider in the read-only samples.
+- No `Comelit ring media lifecycle failed`, no `Comelit snapshot loop failed`, no native-binary mismatch, and no Comelit WARNING/ERROR other than the synthetic-ring log pair were observed.
+
+Snapshot and recording artifacts are not directly observable from the restricted read-only channel. The ring media code logs failure paths such as missing HA Stream recording API, snapshot loop failure, media lifecycle failure, release failure, and cleanup failure (`custom_components/comelit/ring_media.py:217`-`custom_components/comelit/ring_media.py:220`, `custom_components/comelit/ring_media.py:392`-`custom_components/comelit/ring_media.py:408`, `custom_components/comelit/ring_media.py:424`-`custom_components/comelit/ring_media.py:434`), but no success-path log line exposes snapshot sequence, retained file hash, recording state, or probed recording duration. `comelit_snapshot_updated` and `comelit_recording_complete` are HA bus events with no entity mirror exposed by the restricted gateway. Therefore:
+
+```text
+SNAPSHOT_EVENT_COUNT=UNPROVEN
+FINAL_SNAPSHOT_RETAINED=UNPROVEN
+RECORDING_STATE=UNPROVEN
+RECORDING_PROBED_DURATION_SECONDS=NONE
+RECORDING_VIDEO_STREAM_PRESENT=UNPROVEN
+UNPROVEN_REASON=PENDING_OPERATOR_RELAY
+```
+
+The single trigger was already consumed, so these cannot be re-measured by another trigger in this run.
+
+## 9. PHASE G - teardown and listener restore
+
+Post-trigger status observations:
+
+```text
+2026-09-18T11:04:39Z RUNNING=true LISTENER_READY=true LAST_ERROR=
+2026-09-18T11:04:51Z RUNNING=true LISTENER_READY=true LAST_ERROR=
+```
+
+The listener READY line after teardown was observed at `2026-09-18T11:03:11Z`. The first last-in-window camera sample was at the teardown instant: `media_active=False`, `media_phase=stopping`, `listener_paused=True`.
+
+The continuing read-only capture then observed a clean post-teardown idle sample:
+
+```text
+2026-09-18T11:05:43Z camera.comelit_entrance:
+media_active=False
+media_phase=inactive
+listener_paused=False
+video_packet_count=0
+audio_packet_count=0
+hls_provider_shim_present=False
+video_recovery_shim_running=False
+remaining_seconds=0
+```
+
+This clean idle sample proves `MEDIA_TEARDOWN=PASS` and `LISTENER_READY_AFTER_MEDIA=PASS` in addition to the two status observations and the post-teardown `listener READY` line.
+
+`RING_OBSERVED=false` in both later status observations is expected after supervisor starts a new listener cycle: `ComelitRingRuntime.async_start()` clears `_last_ring_event` and `_last_error` (`custom_components/comelit/runtime.py:314`-`custom_components/comelit/runtime.py:324`). The ring was observed as true inside the trigger response at `2026-09-18T11:02:53Z`.
+
+```text
+MEDIA_TEARDOWN=PASS
+LISTENER_READY_AFTER_MEDIA=PASS
+DOOR_ACTIONS=0
+GATE_ACTIONS=0
+```
+
+## 10. Gate table
 
 | Gate | Value | Evidence label | Evidence |
 | --- | --- | --- | --- |
-| `ACCEPTED_MAIN_SHA` | `45854c7f0aa201fef0eb5207464e2fb9791c345d` | `PROVEN_OBSERVED` | Fresh main gate matched expected SHA and PR 161 merge commit. |
-| `MAIN_MOVED` | `false` | `PROVEN_OBSERVED` | Accepted main equals expected main. |
-| `MAIN_MOVED_EXECUTABLE` | `false` | `PROVEN_OBSERVED` | Accepted `custom_components/comelit` tree was recorded as `0a3629982862b17a420adea7044aac3551343472`. |
-| `DEPLOYED_SHA_MATCH` | `PASS` | `PROVEN_OBSERVED` | Post-deploy and post-restart status both reported `DEPLOYED_SHA=45854c7f0aa201fef0eb5207464e2fb9791c345d`. |
-| `HA_CORE_CHECK` | `PASS` | `PROVEN_OBSERVED` | Pre-deploy, post-deploy, and post-restart checks passed. |
-| `PAYLOAD_SCOPE` | `PASS` | `PROVEN_OBSERVED` | `OUTSIDE_MEMBERS=0`, `MEMBERS=55`, `DEPLOY_SCOPE=/config/custom_components/comelit`. |
-| `HA_RESTARTS` | `1` | `PROVEN_OBSERVED` | Exactly one authorized restart requested at `2026-09-18T10:40:12Z`; no second restart. |
-| `COMELIT_LOADED_AFTER_RESTART` | `PASS` | `DERIVED` | Accepted main was deployed, HA restart completed, listener READY logged at `2026-09-18T10:40:52Z`, and no setup exceptions appeared. |
-| `LISTENER_RUNNING` | `true` | `PROVEN_OBSERVED` | Post-restart listener READY marker was logged. |
-| `LISTENER_READY` | `true` | `PROVEN_OBSERVED` | Runtime logged `Comelit ring listener READY for persistent 3300s cycle` at `2026-09-18T10:40:52Z`; code emits this after setting `_listener_ready` (`custom_components/comelit/runtime.py:658`-`custom_components/comelit/runtime.py:662`). |
-| `LISTENER_LAST_ERROR` | `null` | `DERIVED` | Fresh cycle clears `_last_error` on `async_start()`; no completed-cycle error after the ready marker was observed (`custom_components/comelit/runtime.py:314`-`custom_components/comelit/runtime.py:324`, `custom_components/comelit/runtime.py:529`-`custom_components/comelit/runtime.py:535`). |
-| `SYNTHETIC_ENTRYPOINT_PRESENT_IN_ACCEPTED_MAIN` | `true` | `PROVEN_OBSERVED` | Runtime and test-control code contain the entrypoint/action (`custom_components/comelit/runtime.py:267`-`custom_components/comelit/runtime.py:285`, `custom_components/comelit/test_control.py:73`-`custom_components/comelit/test_control.py:87`). |
-| `SYNTHETIC_ENTRYPOINT_LOADED` | `FAIL` | `UNPROVEN` | Deployed accepted main plus restart markers prove activation context, but functional loaded-module proof would require invoking the entrypoint; the authorized trigger surface refused before execution. |
-| `ENTRYPOINT_TRIGGER_REACHABLE` | `false` | `PROVEN_OBSERVED` | CT120 restricted dispatcher lacks a `simulate_entrance_ring` case; wrapper allowlist is only `start|status|stop`; HA gateway same-name probe returned DENY. |
-| `SYNTHETIC_RING_COUNT` | `0` | `PROVEN_OBSERVED` | One named-verb attempt was refused with rc 126 before execution. |
-| `RING_EVENT_COUNT` | `0` | `PROVEN_OBSERVED` | Negative capture: `comelit_ring=0`. |
-| `MEDIA_SESSION_COUNT` | `0` | `NOT_REACHED` | Trigger surface unavailable; no ring event reached Home Assistant. |
-| `SNAPSHOT_EVENT_COUNT` | `0` | `NOT_REACHED` | Trigger surface unavailable; no media lifecycle began. |
-| `RECORDING_COUNT` | `0` | `NOT_REACHED` | Trigger surface unavailable; no media lifecycle began. |
-| `RECORDING_TARGET_SECONDS` | `20` | `PROVEN_OBSERVED` | Constant in code (`custom_components/comelit/const.py:47`) and deployment file identity recorded. |
-| `MEDIA_TEARDOWN` | `NOT_REACHED` | `NOT_REACHED` | Trigger surface unavailable; no media session was started. |
-| `LISTENER_READY_AFTER_MEDIA` | `NOT_REACHED` | `NOT_REACHED` | Trigger surface unavailable; no media phase ran. |
-| `DOOR_ACTIONS` | `0` | `PROVEN_OBSERVED` | Boundary requires zero Door actions and capture had `comelit_door_operation=0`. |
-| `GATE_ACTIONS` | `0` | `PROVEN_OBSERVED` | Boundary requires zero Gate actions. |
-| `AUTOMATIC_RETRY` | `false` | `PROVEN_OBSERVED` | No retry was attempted; contract stops failed phases without retry (`docs/mvp1-entrance-canary-contract.md:248`-`docs/mvp1-entrance-canary-contract.md:265`). |
-| `SECOND_MEDIA_SESSION` | `false` | `PROVEN_OBSERVED` | Trigger surface unavailable; no first media session began. |
-| `R30H_E_EXECUTED` | `false` | `PROVEN_OBSERVED` | No R30H-E path was authorized or observed. |
+| `CT120_RUNTIME_WRAPPER_CHANGED` | true | `PROVEN_OBSERVED` | Runtime whitelist changed exactly one line to add `simulate_entrance_ring`; sha256 after `37938f4ce76abeb268f92e34a388bf03dee6d8f808a62d487d32c29e4009c65c`. |
+| `CT120_DISPATCH_WRAPPER_CHANGED` | true | `PROVEN_OBSERVED` | Dispatcher added exactly one case for `comelit-ha-ring-test-simulate-entrance-ring`; sha256 after `5c082fe54e67d78cb8c9443753663e7592940f0e5850193c6888bbb405146dd7`. |
+| `CT120_WRAPPER_VALIDATION` | PASS | `PROVEN_OBSERVED` | status worked, unknown restricted verb denied, bogus runtime action rejected before curl, wiring proven without trigger. |
+| `DEPLOYED_SHA` | `45854c7f0aa201fef0eb5207464e2fb9791c345d` | `PROVEN_OBSERVED` | Pre-trigger gate observed already activated deployment. |
+| `DEPLOY_COUNT` | 0 | `PROVEN_OBSERVED` | No deploy authorized or performed in this phase. |
+| `HA_RELOADS` | 0 | `PROVEN_OBSERVED` | No reload authorized or performed. |
+| `HA_RESTARTS` | 0 | `PROVEN_OBSERVED` | No restart authorized or performed in this phase. |
+| `LISTENER_READY_BEFORE_TRIGGER` | PASS | `PROVEN_OBSERVED` | Pre-trigger status had listener running and ready. |
+| `SYNTHETIC_TRIGGER_COUNT` | 1 | `PROVEN_OBSERVED` | Single restricted-route invocation returned rc 0. |
+| `SYNTHETIC_RING_COUNT` | 1 | `PROVEN_OBSERVED` | Trigger response showed `RING_OBSERVED=true`; runtime emitted synthetic ring log. |
+| `RING_EVENT_COUNT` | 1 | `PROVEN_OBSERVED` | One synthetic event id observed. |
+| `RING_SYNTHETIC` | true | `DERIVED` | Runtime synthetic path sets `synthetic=True` and source `synthetic_test` (`custom_components/comelit/runtime.py:277`-`custom_components/comelit/runtime.py:285`); response had `RING_SOURCE=synthetic_test`. |
+| `MEDIA_SESSION_COUNT` | 1 | `PROVEN_OBSERVED` | One `Comelit entrance media session ACTIVE` line and no second session marker. |
+| `SNAPSHOT_EVENT_COUNT` | UNPROVEN | `UNPROVEN` | Bus event count is not exposed by restricted gateway; relay pending. |
+| `SNAPSHOT_SEQUENCE_MONOTONIC` | NOT_REACHED | `NOT_REACHED` | Snapshot sequence values were not observable; no relay yet. |
+| `FINAL_SNAPSHOT_RETAINED` | UNPROVEN | `UNPROVEN` | Retained artifact not readable through restricted channel; relay pending. |
+| `RECORDING_COUNT` | 1 | `DERIVED` | One ring media lifecycle was started, but recording terminal event payload is not visible through restricted channel. |
+| `RECORDING_TARGET_SECONDS` | 20 | `PROVEN_OBSERVED` | Authorization and code constant (`custom_components/comelit/const.py:47`). |
+| `RECORDING_STATE` | UNPROVEN | `UNPROVEN` | Recording completion payload and artifact are not visible through restricted channel; relay pending. |
+| `RECORDING_VIDEO_STREAM_PRESENT` | UNPROVEN | `UNPROVEN` | Must be probed from retained artifact; relay pending. |
+| `ZERO_VIDEO_RTP` | true | `PROVEN_OBSERVED` | Transport marker `P116_VIDEO_COUNT=0`; no video forwarding marker. |
+| `MEDIA_TEARDOWN` | PASS | `PROVEN_OBSERVED` | Transport completed, listener READY returned, later clean idle camera sample observed. |
+| `LISTENER_READY_AFTER_MEDIA` | PASS | `PROVEN_OBSERVED` | READY line at `2026-09-18T11:03:11Z`, later status observations, and clean idle sample at `2026-09-18T11:05:43Z`. |
+| `DOOR_ACTIONS` | 0 | `PROVEN_OBSERVED` | Trigger response `PHYSICAL_DOOR_ACTION=false`; no Door event/action authorized. |
+| `GATE_ACTIONS` | 0 | `PROVEN_OBSERVED` | No Gate action authorized or observed. |
+| `AUTOMATIC_RETRY` | false | `PROVEN_OBSERVED` | No retry performed. |
+| `SECOND_TRIGGER` | false | `PROVEN_OBSERVED` | Single trigger consumed the authorization. |
+| `SECOND_MEDIA_SESSION` | false | `PROVEN_OBSERVED` | No second media marker. |
+| `R30H_E_EXECUTED` | false | `PROVEN_OBSERVED` | No R30H-E path executed. |
 
-## 8. Deliberate zeros and counters
+## 11. Deliberate zeros
 
 ```text
-DEPLOYS=1
-HA_RESTARTS=1
-COMELIT_RELOADS=0
-HOST_REBOOT=0
-SUPERVISOR_REBOOT=0
-SYNTHETIC_TRIGGERS=0
-MEDIA_SESSIONS=0
-SNAPSHOTS=0
-RECORDINGS=0
+DEPLOY_COUNT=0
+HA_RELOADS=0
+HA_RESTARTS=0
+HOST_REBOOTS=0
+SUPERVISOR_REBOOTS=0
 DOOR_ACTIONS=0
 GATE_ACTIONS=0
 AUTOMATIC_RETRY=false
+SECOND_TRIGGER=false
 SECOND_MEDIA_SESSION=false
 R30H_E_EXECUTED=false
-SECOND_TRIGGER_ATTEMPT=false
-SECOND_RESTART=false
 ```
 
-`COMELIT_RELOADS=0` because the owner authorized a full HA restart for activation; no reload was needed or performed. `SYNTHETIC_TRIGGERS=0` because the single named trigger attempt was refused by the restricted command surface before execution. All media/snapshot/recording zeros are deliberate `NOT_REACHED` values with the same reason: trigger surface unavailable. Door and Gate stayed zero by contract and by observation.
+These are deliberate zeros. Accepted main was already deployed and activated, so no deploy/reload/restart was authorized. Door and Gate actions were out of scope and remained zero. The one trigger was consumed; no second trigger or second media session was allowed.
 
-## 9. Limitations and safety notes
+## 12. Limitations
 
-No media phase was reached. This document contains no snapshot artifact, recording artifact, retained JPEG/MP4 proof, probed video stream proof, or duration measurement. The constants `SNAPSHOT_REFRESH_TARGET_SECONDS=1` and `RECORDING_TARGET_SECONDS=20` are code/deploy facts only, not live artifact observations (`custom_components/comelit/const.py:46`-`custom_components/comelit/const.py:47`).
+The restricted Home Assistant gateway exposes only `status`, `check`, `logs`, `logs-follow`, `deploy`, `rollback`, and `restart`. It does not expose HA bus event payloads, retained media directory listing, hashes, or media probing. Therefore snapshot sequence, final snapshot retention, recording state, probed duration, and recording video stream presence remain `UNPROVEN` until operator relay reads the event directory.
 
-`SYNTHETIC_ENTRYPOINT_LOADED=FAIL` is a functional proof statement, not a source-code absence statement: the entrypoint is present in the deployed and restart-activated accepted main, with identity proven on disk and by restart markers, but its presence in the loaded module set was not functionally proven because no authorized transport could invoke it.
+No raw media, credentials, bearer tokens, or private payloads are included in this report. Marker owner fields are redacted as `<redacted>`.
 
-No secrets, credentials, bearer tokens, raw media bytes, or private payloads were recorded. The CT120 wrapper inventory was read-only and only lists script names, hashes, dispatcher cases, and the webhook URL already embedded in the wrapper.
+## 13. Next steps
 
-## 10. Exact next step
-
-The owner must name or extend the CT120 restricted surface for the `simulate_entrance_ring` test-control action. That means adding an allowed dispatcher case for the operator-named verb and extending `comelit-ha-ring-runtime` action whitelist beyond `start|status|stop` to include `simulate_entrance_ring`, or providing an equivalent explicitly authorized restricted trigger surface.
-
-After that, authorize one bounded trigger round. Because the accepted main was already deployed and activated by the single restart in this run, the future trigger round does not need another deploy, reload, or restart unless the owner changes the deployed code or Home Assistant state before the round.
-
-## 11. Final scalar block
+Read-only operator relay for the event directory:
 
 ```text
-ACCEPTED_MAIN_SHA=45854c7f0aa201fef0eb5207464e2fb9791c345d
+EVENT_DIR=/media/comelit/rings/863ec5c5-8111-4ff4-8308-6d30ce6609eb/
+ls -l /media/comelit/rings/863ec5c5-8111-4ff4-8308-6d30ce6609eb/
+sha256sum /media/comelit/rings/863ec5c5-8111-4ff4-8308-6d30ce6609eb/latest.jpg /media/comelit/rings/863ec5c5-8111-4ff4-8308-6d30ce6609eb/recording.mp4
+ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 /media/comelit/rings/863ec5c5-8111-4ff4-8308-6d30ce6609eb/recording.mp4
+ffprobe -v error -select_streams v -show_entries stream=codec_type -of default=nw=1:nk=1 /media/comelit/rings/863ec5c5-8111-4ff4-8308-6d30ce6609eb/recording.mp4
+```
+
+Separate offline corrective candidate, not fixed here:
+
+```text
+CANDIDATE_DEFECT_NOT_PROVEN=HAStreamMediaProvider.async_record_mp4_OR_RingMediaCoordinator_may_close_media_session_before_video_arrives_when_local_SDP_has_no_video_yet
+```
+
+Motivation: the recorder/media lifecycle returned after about 0.18 s, before any video RTP arrived; `P116_VIDEO_COUNT=0`; no `P80_VIDEO_RTP_FORWARDING` marker appeared; `hls_provider_present=False` for every sample. This candidate is not proven because artifact relay is pending and no code was changed during the live canary.
+
+## 14. Final scalar block
+
+```text
+=== COMELIT MVP1 SYNTHETIC RING CANARY ===
+CT120_RUNTIME_WRAPPER_CHANGED=true
+CT120_DISPATCH_WRAPPER_CHANGED=true
+CT120_WRAPPER_VALIDATION=PASS
 DEPLOYED_SHA=45854c7f0aa201fef0eb5207464e2fb9791c345d
-HA_CORE_CHECK=PASS
-HA_RESTARTS=1
-COMELIT_LOADED_AFTER_RESTART=PASS
+DEPLOY_COUNT=0
+HA_RELOADS=0
+HA_RESTARTS=0
 LISTENER_READY_BEFORE_TRIGGER=PASS
-SYNTHETIC_ENTRYPOINT_LOADED=FAIL
-SYNTHETIC_RING_COUNT=0
-RING_EVENT_COUNT=0
-RING_EVENT_ID=NONE
-RING_SYNTHETIC=NOT_REACHED
-MEDIA_SESSION_COUNT=0
-SNAPSHOT_EVENT_COUNT=0
+SYNTHETIC_TRIGGER_COUNT=1
+SYNTHETIC_RING_COUNT=1
+RING_EVENT_COUNT=1
+RING_EVENT_ID=863ec5c5-8111-4ff4-8308-6d30ce6609eb
+RING_SYNTHETIC=true
+MEDIA_SESSION_COUNT=1
+SNAPSHOT_EVENT_COUNT=UNPROVEN
 SNAPSHOT_SEQUENCE_FIRST=NONE
 SNAPSHOT_SEQUENCE_LAST=NONE
 SNAPSHOT_SEQUENCE_MONOTONIC=NOT_REACHED
 SNAPSHOT_AVERAGE_INTERVAL_SECONDS=NONE
-FINAL_SNAPSHOT_RETAINED=NOT_REACHED
-RECORDING_COUNT=0
+FINAL_SNAPSHOT_RETAINED=UNPROVEN
+RECORDING_COUNT=1
 RECORDING_TARGET_SECONDS=20
-RECORDING_STATE=NOT_REACHED
+RECORDING_STATE=UNPROVEN
 RECORDING_PROBED_DURATION_SECONDS=NONE
-RECORDING_VIDEO_STREAM_PRESENT=NOT_REACHED
-MEDIA_TEARDOWN=NOT_REACHED
-LISTENER_READY_AFTER_MEDIA=NOT_REACHED
+RECORDING_VIDEO_STREAM_PRESENT=UNPROVEN
+MEDIA_TEARDOWN=PASS
+LISTENER_READY_AFTER_MEDIA=PASS
 DOOR_ACTIONS=0
 GATE_ACTIONS=0
 AUTOMATIC_RETRY=false
+SECOND_TRIGGER=false
 SECOND_MEDIA_SESSION=false
 R30H_E_EXECUTED=false
-RESULT=BLOCKED_PRELIVE_GATE
+RESULT=FAIL_SNAPSHOT
 RESULT_BRANCH=docs/mvp1-synthetic-ring-canary-result
 RESULT_REMOTE_HEAD=<orchestrator-published>
 RESULT_PR=none
+=== END COMELIT MVP1 SYNTHETIC RING CANARY ===
 ```
