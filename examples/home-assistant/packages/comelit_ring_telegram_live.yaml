@@ -124,7 +124,6 @@ automation:
                       continue_on_error: true
                       data:
                         entity_id: "{{ telegram_notify_entity }}"
-                        chat_id: "{{ telegram_chat_id }}"
                         message_id: "{{ telegram_message_id }}"
                         media_type: photo
                         file: "{{ snapshot_path }}"
@@ -152,7 +151,6 @@ automation:
                       continue_on_error: true
                       data:
                         entity_id: "{{ telegram_notify_entity }}"
-                        chat_id: "{{ telegram_chat_id }}"
                         message_id: "{{ telegram_message_id }}"
                         caption: >-
                           🔔 Звонок в подъезд
@@ -244,6 +242,5 @@ automation:
         continue_on_error: true
         data:
           entity_id: "{{ telegram_notify_entity }}"
-          chat_id: "{{ telegram_chat_id }}"
           message_id: "{{ telegram_message_id }}"
           inline_keyboard: []
