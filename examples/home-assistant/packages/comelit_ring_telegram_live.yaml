@@ -6,7 +6,7 @@
 # It does NOT start a second media session and does NOT call camera.snapshot.
 #
 # Telegram target for this deployment:
-#   notify.telegram_bot_6207024040_202060054
+#   notify.telegram_bot_6207024040_1001409356493
 #
 # /media must be available to Telegram Bot through allowlist_external_dirs.
 
@@ -31,7 +31,7 @@ automation:
              and trigger.event.data.event_id | default('') | string | length > 0 }}
 
     variables:
-      telegram_notify_entity: notify.telegram_bot_6207024040_202060054
+      telegram_notify_entity: notify.telegram_bot_6207024040_1001409356493
       event_id: "{{ trigger.event.data.event_id }}"
       door: "{{ trigger.event.data.door }}"
       open_callback_data: "{{ 'comelit|open|' ~ event_id }}"
