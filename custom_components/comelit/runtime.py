@@ -214,6 +214,9 @@ class ComelitRingRuntime:
             ),
             "door_last_operation_id": (self._last_door_result or {}).get("operation_id"),
             "door_last_state": (self._last_door_result or {}).get("state"),
+            "ring_media": (
+                self._ring_media.status() if self._ring_media is not None else None
+            ),
         }
 
     def set_ring_media_coordinator(
@@ -230,6 +233,60 @@ class ComelitRingRuntime:
             await coordinator.async_start_for_ring(event)
         except Exception:
             _LOGGER.exception("Failed to schedule Comelit ring media lifecycle")
+
+    async def _async_emit_ring_event(
+        self,
+        event: dict[str, object],
+        *,
+        require_media_start: bool = False,
+    ) -> dict[str, object]:
+        if "event_id" not in event:
+            event["event_id"] = str(uuid4())
+        if "timestamp" not in event:
+            event["timestamp"] = datetime.now(UTC).isoformat()
+
+        self._last_ring_event = dict(event)
+        self._hass.bus.async_fire(EVENT_RING, dict(event))
+
+        if require_media_start:
+            coordinator = self._ring_media
+            if coordinator is None:
+                raise ComelitRingRuntimeError("ring_media_unavailable")
+            started = await coordinator.async_start_for_ring(dict(event))
+            if not started:
+                raise ComelitRingRuntimeError("synthetic_ring_media_not_started")
+        else:
+            self._entry.async_create_background_task(
+                self._hass,
+                self._async_start_ring_media(dict(event)),
+                "comelit ring media scheduler",
+            )
+
+        return dict(event)
+
+    async def async_simulate_entrance_ring(self) -> dict[str, object]:
+        """Emit one synthetic entrance ring and start the normal media lifecycle."""
+        if not self.running or not self.listener_ready:
+            raise ComelitRingRuntimeError("listener_not_ready")
+        coordinator = self._ring_media
+        if coordinator is None:
+            raise ComelitRingRuntimeError("ring_media_unavailable")
+        if coordinator.running:
+            raise ComelitRingRuntimeError("ring_media_busy")
+
+        event: dict[str, object] = {
+            "door": "entrance",
+            "source": "synthetic_test",
+            "kind": "CALL_INIT",
+            "direction": "DEVICE_TO_CLIENT",
+            "synthetic": True,
+        }
+        event = await self._async_emit_ring_event(event, require_media_start=True)
+        _LOGGER.warning(
+            "Synthetic Comelit entrance ring emitted for bounded test: event_id=%s",
+            event["event_id"],
+        )
+        return dict(event)
 
     def _remember_native_marker(self, line: str) -> None:
         if "=" not in line:
@@ -695,15 +752,7 @@ class ComelitRingRuntime:
             if ring is None:
                 continue
             event = ring.as_dict()
-            event["event_id"] = str(uuid4())
-            event["timestamp"] = datetime.now(UTC).isoformat()
-            self._last_ring_event = dict(event)
-            self._hass.bus.async_fire(EVENT_RING, event)
-            self._entry.async_create_background_task(
-                self._hass,
-                self._async_start_ring_media(dict(event)),
-                "comelit ring media scheduler",
-            )
+            await self._async_emit_ring_event(event)
             _LOGGER.warning(
                 "Comelit ring event emitted: door=%s source=%s",
                 ring.door,
