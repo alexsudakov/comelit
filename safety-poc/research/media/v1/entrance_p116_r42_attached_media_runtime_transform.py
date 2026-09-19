@@ -318,12 +318,8 @@ def transform(r37_source: str) -> str:
     out = _replace_once(
         r37_source, _ENUM_ANCHOR, _ENUM_REPLACEMENT, "R42_TX_ENUM"
     )
-    out = _replace_once(
-        out,
-        _R37_WIRING_BEGIN,
-        _R37_WIRING_BEGIN_REPLACEMENT,
-        "R42_EARLY_FLUSH_DECL",
-    )
+    # Insert the R42 runtime before adding the extra early flush declaration:
+    # the R37 source contains one canonical p12_flush_tx declaration here.
     out = _replace_once(
         out,
         _FORWARD_ANCHOR,
@@ -332,6 +328,12 @@ def transform(r37_source: str) -> str:
         + "    guint16 channel_id,\n    P12TxKind kind);\n\n"
         + RUNTIME,
         "R42_RUNTIME",
+    )
+    out = _replace_once(
+        out,
+        _R37_WIRING_BEGIN,
+        _R37_WIRING_BEGIN_REPLACEMENT,
+        "R42_EARLY_FLUSH_DECL",
     )
     out = _replace_once(
         out, _TX_TAIL_ANCHOR, _TX_TAIL_REPLACEMENT, "R42_TX_COMPLETION"
