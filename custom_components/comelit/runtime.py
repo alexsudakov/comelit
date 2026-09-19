@@ -167,6 +167,7 @@ class ComelitRingRuntime:
         self._process: asyncio.subprocess.Process | None = None
         self._offer_ready = asyncio.Event()
         self._listener_ready = asyncio.Event()
+        self._attached_media_busy = asyncio.Event()
         self._attached_media_open = asyncio.Event()
         self._attached_media_closed = asyncio.Event()
         self._ring_lines: list[str] = []
@@ -192,6 +193,11 @@ class ComelitRingRuntime:
         return self._listener_ready.is_set()
 
     @property
+    def attached_media_busy(self) -> bool:
+        event = getattr(self, "_attached_media_busy", None)
+        return event is not None and event.is_set()
+
+    @property
     def attached_media_open(self) -> bool:
         event = getattr(self, "_attached_media_open", None)
         return event is not None and event.is_set()
@@ -209,6 +215,7 @@ class ComelitRingRuntime:
         return {
             "running": self.running,
             "listener_ready": self.listener_ready,
+            "attached_media_busy": self.attached_media_busy,
             "attached_media_open": self.attached_media_open,
             "ring_observed": self.ring_observed,
             "ring_door": event.get("door"),
@@ -293,10 +300,13 @@ class ComelitRingRuntime:
         """Emit one synthetic entrance ring and start the normal media lifecycle."""
         if not self.running or not self.listener_ready:
             raise ComelitRingRuntimeError("listener_not_ready")
-        coordinator = getattr(self, "_synthetic_ring_media", None) or self._ring_media
+        synthetic = getattr(self, "_synthetic_ring_media", None)
+        coordinator = synthetic or self._ring_media
         if coordinator is None:
             raise ComelitRingRuntimeError("ring_media_unavailable")
-        if coordinator.running:
+        if coordinator.running or (
+            self._ring_media is not None and self._ring_media.running
+        ):
             raise ComelitRingRuntimeError("ring_media_busy")
 
         event: dict[str, object] = {
@@ -342,6 +352,7 @@ class ComelitRingRuntime:
         self._stopping = False
         self._offer_ready.clear()
         self._listener_ready.clear()
+        self._attached_media_busy.clear()
         self._attached_media_open.clear()
         self._attached_media_closed.clear()
         self._ring_lines.clear()
@@ -462,6 +473,7 @@ class ComelitRingRuntime:
         self._task = None
         self._process = None
         self._listener_ready.clear()
+        self._attached_media_busy.clear()
         self._attached_media_open.clear()
         self._attached_media_closed.clear()
         await self._hass.async_add_executor_job(_remove_helper_secret)
@@ -634,6 +646,7 @@ class ComelitRingRuntime:
         finally:
             self._process = None
             self._listener_ready.clear()
+            self._attached_media_busy.clear()
             self._attached_media_open.clear()
             future = self._door_result_future
             if future is not None and not future.done():
@@ -751,13 +764,20 @@ class ComelitRingRuntime:
                 )
                 continue
 
+            if line == "R42_MEDIA_CHANNEL_ALLOCATED=true":
+                self._attached_media_busy.set()
+                _LOGGER.info("Comelit attached inbound media channel allocated")
+                continue
+
             if line == "R42_ATTACHED_MEDIA_ACTIVE=true":
+                self._attached_media_busy.set()
                 self._attached_media_closed.clear()
                 self._attached_media_open.set()
                 _LOGGER.info("Comelit attached inbound media ACTIVE")
                 continue
 
             if line == "R42_MEDIA_CHANNEL_CLOSED=true":
+                self._attached_media_busy.clear()
                 self._attached_media_open.clear()
                 self._attached_media_closed.set()
                 _LOGGER.info("Comelit attached inbound media CLOSED")
