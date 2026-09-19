@@ -327,7 +327,10 @@ def transform(r37_source: str) -> str:
     out = _replace_once(
         out,
         _FORWARD_ANCHOR,
-        _FORWARD_ANCHOR + "\n\n" + RUNTIME,
+        _FORWARD_ANCHOR
+        + "\n\nstatic gboolean\np12_queue_close_channel(\n"
+        + "    guint16 channel_id,\n    P12TxKind kind);\n\n"
+        + RUNTIME,
         "R42_RUNTIME",
     )
     out = _replace_once(
