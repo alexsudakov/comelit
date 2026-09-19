@@ -2,7 +2,7 @@
 
 FACTS
 
-R36 base is the exact R35 head `2073fae95dfe381f1533ee49279905d3df5bcdb8`. No R32, R33, R34, or R35 file was modified by this round. No file under `custom_components/**`, no existing `P116_*.md` document, and no existing test/transform/serializer file was read for modification or written to. This round proceeded in two turns. Turn 1 added this document and `safety-poc/tests/test_p116_r36_attached_media_trigger.py`, recovering the native OPEN-gate mechanism precisely (SECTION 1/2) but leaving the exact CTP wire opcode for the trigger event only DERIVED by pattern, not independently confirmed, and therefore left the trigger `UNPROVEN` and added no overlay. Turn 2 is a bounded corrective: the orchestrator independently reproduced every turn-1 citation (CONFIRMED) and supplied NEW evidence — an independent, executable public CTP client implementation already staged as `.r33-evidence/public-vip/viper/{ctp.py,call.py}` — that confirms the wire opcode and body layout turn 1 had only derived. SECTION 4 below re-rules on that evidence; SECTION 6 adds the overlay this closes: `safety-poc/research/media/v1/entrance_p116_r36_attached_media_trigger_transform.py`, `safety-poc/tests/native/p116_r36_attached_media_trigger_host_harness.c`, `safety-poc/research/media/v1/ct123_build_p116_r36_attached_media_trigger_candidate.sh`, and the extended `safety-poc/tests/test_p116_r36_attached_media_trigger.py`. R36 is an offline OFFLINE_ONLY research round throughout both turns: no listener was run against a live device, no packet was transmitted on the Comelit network, no Door/Gate action occurred, no physical or synthetic ring occurred, no Home Assistant reload/restart occurred, no new packet capture was made, and neither the R35 nor the R36 candidate binary was ever executed (`candidate_executed=false`, verified by `readelf`/`strings`/`sha256sum`/`cmp` only).
+R36 base is the exact R35 head `2073fae95dfe381f1533ee49279905d3df5bcdb8`. No R32, R33, R34, or R35 file was modified by this round. No file under `custom_components/**`, no existing `P116_*.md` document, and no existing test/transform/serializer file was read for modification or written to. This round proceeded in two turns. Turn 1 added this document and `safety-poc/tests/test_p116_r36_attached_media_trigger.py`, recovering the native OPEN-gate mechanism precisely (SECTION 1/2) but leaving the exact CTP wire opcode for the trigger event only DERIVED by pattern, not independently confirmed, and therefore left the trigger `UNPROVEN` and added no overlay. Turn 2 is a bounded corrective: the orchestrator independently reproduced every turn-1 citation (CONFIRMED) and supplied NEW evidence — an independent, executable public CTP client implementation already staged as `.r33-evidence/public-vip/viper/{ctp.py,call.py}` — that confirms the wire opcode and body layout turn 1 had only derived. SECTION 4 below re-rules on that evidence; SECTION 6 adds the overlay this closes: `safety-poc/research/media/v1/entrance_p116_r36_attached_media_trigger_transform.py`, `safety-poc/tests/native/p116_r36_attached_media_trigger_host_harness.c`, `safety-poc/research/media/v1/ct122_build_p116_r36_attached_media_trigger_candidate.sh`, and the extended `safety-poc/tests/test_p116_r36_attached_media_trigger.py`. R36 is an offline OFFLINE_ONLY research round throughout both turns: no listener was run against a live device, no packet was transmitted on the Comelit network, no Door/Gate action occurred, no physical or synthetic ring occurred, no Home Assistant reload/restart occurred, no new packet capture was made, and neither the R35 nor the R36 candidate binary was ever executed (`candidate_executed=false`, verified by `readelf`/`strings`/`sha256sum`/`cmp` only).
 
 EXECUTOR PROVENANCE
 
@@ -108,7 +108,7 @@ CHILD 6 now applies: SECTION 4 names a trigger point that is PROVEN on both axes
   | 9 | terminal call | `R36_SCENARIO_9_TERMINAL_CALL_REJECTED` | PASS — after `r35_teardown_call`, `r35_call_ready` fails, the guard rejects the frame outright |
 
   Plus `R36_CHECK_BIT3_CLEAR_DOES_NOT_TRIGGER=PASS` (the public sample's own observed word, `0x27`, correctly does not trigger — SECTION 4's residual question stays honestly visible in the test, not silently assumed away) and `R36_NETWORK_TX=0`/`R36_DOOR_ACTIONS=0`/`R36_GATE_ACTIONS=0`.
-- **`safety-poc/research/media/v1/ct123_build_p116_r36_attached_media_trigger_candidate.sh`** — extends the R35 build lane with a third pipeline stage (canonical → R35 overlay → R36 overlay), same Alpine 3.24.1 / musl / `--network none` / local APK closure recipe as `ct122`, run this round (raw gates in VERIFICATION below); build root `/home/hermes/comelit-r36-build-<timestamp>/`, outside the repository tree.
+- **`safety-poc/research/media/v1/ct122_build_p116_r36_attached_media_trigger_candidate.sh`** — extends the R35 build lane with a third pipeline stage (canonical → R35 overlay → R36 overlay), same Alpine 3.24.1 / musl / `--network none` / local APK closure recipe as `ct122`, run this round (raw gates in VERIFICATION below); build root `/home/hermes/comelit-r36-build-<timestamp>/`, outside the repository tree.
 - **`safety-poc/tests/test_p116_r36_attached_media_trigger.py`** — rewritten to test this overlay: transform reproducibility/idempotency, digest invariance of the canonical and R35 stages, the confirmed-opcode arithmetic pin, and every harness scenario above via subprocess-compiled markers, plus the fail-closed properties that still apply (R35's own file is untouched and still shows zero automatic callers; `r35_send_stop` still shows zero automatic callers anywhere in the R36 candidate).
 
 Bounded observability markers actually emitted (values only, never a call id, channel id, IP, token, SDP, or payload byte): `R36_CAPABILITIES_OBSERVED=true`, `R36_TRIGGER_RESULT=OPEN_SENT|REJECTED` (wiring); `CALL_BOUND_MEDIA_OPEN_SENT_COUNT`, `CALL_BOUND_MEDIA_STOP_SENT_COUNT` (harness). The remaining turn-1-contract markers (`ATTACHED_RTP_ARMED`, `VIDEO_RTP_COUNT`, etc.) describe live-only observability and are correctly not exercised offline this round; nothing in this overlay performs network I/O.
@@ -128,7 +128,7 @@ Bounded observability markers actually emitted (values only, never a call id, ch
 | One-STOP gate demonstrated offline | YES — harness scenarios 6-8, this round (mechanism only, not live trigger) |
 | Call/listener preservation model intact | Inherited from R35 (`MODELED`, not independently re-verified this round since no listener ran) |
 | No new ICE/cloud/PseudoTCP/registration | Unchanged: `NEW_ICE=0`, `NEW_CLOUD=0`, `NEW_PSEUDOTCP=0`, `NEW_REGISTRATION=0` |
-| Candidate builds reproducibly | YES — `ct123` this round, all gates PASS (VERIFICATION) |
+| Candidate builds reproducibly | YES — `ct122` this round, all gates PASS (VERIFICATION) |
 | Candidate NOT executed | Unchanged: `candidate_executed=false` |
 
 Two required conditions remain unmet (full OPEN field-sourcing, and a live-invocable bounded STOP). `IMPLEMENTATION_READY_FOR_BOUNDED_LIVE=false` — the trigger gap this round set out to close IS closed, but live readiness requires every row above, and it does not lower the bar to reach `true` prematurely.
@@ -145,7 +145,7 @@ PYTHONPATH=$PWD/src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_p11
 PYTHONPATH=$PWD/src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_p116_r33_offline_scalar_trace tests.test_p116_r32_call_bound_media_evidence -v
 PYTHONPATH=$PWD/src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
 python3 scripts/static_safety_check.py
-bash research/media/v1/ct123_build_p116_r36_attached_media_trigger_candidate.sh
+bash research/media/v1/ct122_build_p116_r36_attached_media_trigger_candidate.sh
 cd ..
 git status --short
 git diff --check
@@ -153,7 +153,7 @@ git diff --check
 
 Baseline (verified at this exact R35 head, before any R36 file existed): `Ran 1633 tests in 34.963s`, `FAILED (failures=1, skipped=1)`, the single failure being `test_p116_provenance_binary_analysis.P116ProvenanceBinaryAnalysisTests.test_committed_build_metadata_records_historical_non_runtime_mismatch` (`NATIVE_BINARY_MODE` metadata `755` vs worktree file mode `775`) — a pre-existing filesystem-mode/metadata artifact unrelated to R36, confirmed present with zero R36 files on disk.
 
-Raw gate block from the `ct123` build run above (turn 2):
+Raw gate block from the `ct122` build run above (turn 2):
 
 ```text
 CANONICAL_SOURCE_GATE=PASS
