@@ -14,6 +14,8 @@ TRANSFORM = MEDIA / "entrance_p116_r42_attached_media_runtime_transform.py"
 ATTACHED = ROOT.parent / "custom_components" / "comelit" / "attached_media.py"
 INIT = ROOT.parent / "custom_components" / "comelit" / "__init__.py"
 RUNTIME = ROOT.parent / "custom_components" / "comelit" / "runtime.py"
+BUILDER = MEDIA / "ct122_build_p116_r42_attached_media_candidate.sh"
+PROMOTER = MEDIA / "ct122_promote_p116_r42_attached_media_candidate.sh"
 
 sys.path.insert(0, str(MEDIA))
 
@@ -37,6 +39,8 @@ class P116R42AttachedInboundMediaRuntimeTests(unittest.TestCase):
         cls.attached_source = ATTACHED.read_text(encoding="utf-8")
         cls.init_source = INIT.read_text(encoding="utf-8")
         cls.runtime_source = RUNTIME.read_text(encoding="utf-8")
+        cls.builder_source = BUILDER.read_text(encoding="utf-8")
+        cls.promoter_source = PROMOTER.read_text(encoding="utf-8")
 
     def test_transform_composes_only_after_r37(self) -> None:
         self.assertIn("R42_ATTACHED_INBOUND_MEDIA_RUNTIME_BEGIN", self.r42_candidate)
@@ -135,6 +139,46 @@ class P116R42AttachedInboundMediaRuntimeTests(unittest.TestCase):
         self.assertNotIn("g_timeout_add", source)
         self.assertNotIn("for (", source)
         self.assertNotIn("while (", source)
+
+    def test_ambiguous_teardown_blocks_next_media_channel(self) -> None:
+        runtime = self.r42_candidate.split(
+            "/* R42_ATTACHED_INBOUND_MEDIA_RUNTIME_BEGIN */", 1
+        )[1].split("/* R42_ATTACHED_INBOUND_MEDIA_RUNTIME_END */", 1)[0]
+        self.assertIn("r42_media_channel_id != 0u", runtime)
+        self.assertIn("R42_STALE_MEDIA_CHANNEL_BLOCKED=true", runtime)
+        self.assertIn("r42_media_stage != R42_MEDIA_IDLE", runtime)
+        self.assertIn("r42_media_stage != R42_MEDIA_CLOSED", runtime)
+
+    def test_ct122_builder_requires_two_identical_offline_musl_builds(self) -> None:
+        source = self.builder_source
+        self.assertGreaterEqual(source.count("--network none"), 1)
+        self.assertIn("comelit-v4-r42-candidate-a", source)
+        self.assertIn("comelit-v4-r42-candidate-b", source)
+        self.assertIn('[[ "$BUILD_A_SHA" == "$BUILD_B_SHA" ]]', source)
+        self.assertIn('cmp -s "$BUILD_A" "$BUILD_B"', source)
+        self.assertIn("REPRODUCIBLE_BINARY_SHA_GATE=PASS", source)
+        self.assertIn("REPRODUCIBLE_BINARY_CMP_GATE=PASS", source)
+        self.assertIn("CANDIDATE_EXECUTED=false", source)
+        self.assertIn("COMELIT_NETWORK_REQUESTS=0", source)
+        self.assertNotIn("curl ", source)
+        self.assertNotIn("wget ", source)
+
+    def test_ct122_promotion_rechecks_source_binary_and_reproducible_peer(self) -> None:
+        source = self.promoter_source
+        for required in (
+            "EXPECTED_SOURCE_SHA256",
+            "EXPECTED_SHA256",
+            "REPRODUCIBLE_PEER",
+            'cmp -s "$CANDIDATE" "$REPRODUCIBLE_PEER"',
+            "R42_PROMOTION=PASS",
+            "P116_R42_BUILD_INFO.txt",
+            "candidate_executed=false",
+            "comelit_network_requests=0",
+            "ha_deploy_performed=false",
+        ):
+            self.assertIn(required, source)
+        self.assertIn("GIT_COMMIT_PERFORMED=false", source)
+        self.assertIn("GIT_PUSH_PERFORMED=false", source)
 
     def test_attached_python_bridge_never_pauses_listener_or_bootstraps_cloud(self) -> None:
         source = self.attached_source
