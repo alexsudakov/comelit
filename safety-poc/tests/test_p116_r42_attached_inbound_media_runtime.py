@@ -55,7 +55,9 @@ class P116R42AttachedInboundMediaRuntimeTests(unittest.TestCase):
         self.assertIn("R42_AUTOMATIC_RETRY=false", trigger)
 
     def test_r42_allocates_runtime_rtpc_channel_not_capture_literal(self) -> None:
-        source = self.transform_source
+        source = self.r42_candidate.split(
+            "/* R42_ATTACHED_INBOUND_MEDIA_RUNTIME_BEGIN */", 1
+        )[1].split("/* R42_ATTACHED_INBOUND_MEDIA_RUNTIME_END */", 1)[0]
         self.assertIn("v4_allocate_channel_id", source)
         self.assertIn('memcpy(body + 8, "RTPC", 4)', source)
         self.assertIn("body[14] = 1", source)
@@ -101,7 +103,9 @@ class P116R42AttachedInboundMediaRuntimeTests(unittest.TestCase):
         self.assertIn("R42_MEDIA_CHANNEL_CLOSED=true", candidate)
 
     def test_one_attempt_per_call_generation_and_no_retry_loop(self) -> None:
-        source = self.transform_source.lower()
+        source = self.r42_candidate.split(
+            "/* R42_ATTACHED_INBOUND_MEDIA_RUNTIME_BEGIN */", 1
+        )[1].split("/* R42_ATTACHED_INBOUND_MEDIA_RUNTIME_END */", 1)[0].lower()
         self.assertIn(
             "r42_attempted_call_generation == g_r35_session.call_generation",
             source,
