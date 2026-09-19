@@ -229,7 +229,10 @@ class ComelitAttachedRingMediaSession:
             else:
                 self._leases[reason] = count - 1
 
-            if self.active and not self._leases:
+            if not self._leases:
+                # Always tear down the local bridge when the last lease ends.
+                # The remote call may have already closed media on its own,
+                # which makes self.active false before HA releases its lease.
                 try:
                     await self._transport.async_stop()
                 except Exception as exc:
