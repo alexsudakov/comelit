@@ -43,8 +43,14 @@ class P80MediaExclusivityStaticContractTests(unittest.TestCase):
         self.assertIn("return not self._supervisor.media_paused", self.button)
 
     def test_direct_door_service_also_fails_closed(self) -> None:
-        self.assertIn("if supervisor.media_paused:", self.init)
-        self.assertIn("media session owns the exclusive Comelit connection", self.init)
+        self.assertIn(
+            "if supervisor.media_paused or supervisor.attached_media_busy:",
+            self.init,
+        )
+        self.assertIn(
+            "media lifecycle owns the Comelit connection",
+            self.init,
+        )
 
     def test_listener_sensor_exposes_media_pause(self) -> None:
         self.assertIn('"media_paused": status["media_paused"]', self.sensor)
