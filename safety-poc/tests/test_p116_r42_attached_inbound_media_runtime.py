@@ -141,6 +141,27 @@ class P116R42AttachedInboundMediaRuntimeTests(unittest.TestCase):
         ast.parse(self.init_source)
         ast.parse(self.runtime_source)
 
+    def test_manual_camera_is_blocked_while_attached_media_owns_listener(self) -> None:
+        media_session = (
+            ROOT.parent / "custom_components" / "comelit" / "media_session.py"
+        ).read_text(encoding="utf-8")
+        supervisor = (
+            ROOT.parent / "custom_components" / "comelit" / "supervisor.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'getattr(self._listener, "attached_media_busy", False)',
+            media_session,
+        )
+        self.assertIn(
+            'ComelitMediaSessionError("attached_inbound_media_busy")',
+            media_session,
+        )
+        self.assertIn("def attached_media_busy(self)", supervisor)
+        self.assertIn("return self._runtime.attached_media_busy", supervisor)
+        self.assertIn("R42_MEDIA_CHANNEL_ALLOCATED=true", self.runtime_source)
+        self.assertIn("self._attached_media_busy.set()", self.runtime_source)
+        self.assertIn("self._attached_media_busy.clear()", self.runtime_source)
+
     def test_runtime_exposes_bounded_sigusr2_attached_stop(self) -> None:
         tree = ast.parse(self.runtime_source)
         cls = next(
