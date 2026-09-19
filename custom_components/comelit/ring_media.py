@@ -50,7 +50,8 @@ from .const import (
     RECORDING_TARGET_SECONDS,
     SNAPSHOT_REFRESH_TARGET_SECONDS,
 )
-from .media_session import ComelitMediaSessionError, ComelitMediaSessionManager
+from .attached_media import ComelitAttachedMediaError
+from .media_session import ComelitMediaSessionError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -58,6 +59,20 @@ _SAFE_EVENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")
 _RING_MEDIA_REASON = "ring_media"
 _JPEG_SOI = b"\xff\xd8"
 _JPEG_EOI = b"\xff\xd9"
+
+
+class MediaSession(Protocol):
+    @property
+    def active(self) -> bool: ...
+
+    async def async_acquire(
+        self,
+        *,
+        panel: str,
+        reason: str,
+    ) -> dict[str, object]: ...
+
+    async def async_release(self, *, reason: str) -> dict[str, object]: ...
 
 
 class SnapshotProvider(Protocol):
@@ -135,7 +150,7 @@ class HAStreamMediaProvider:
     def __init__(
         self,
         hass: HomeAssistant,
-        manager: ComelitMediaSessionManager,
+        manager: MediaSession,
         transport: Any,
         *,
         camera_entity: str = ENTRANCE_CAMERA_ENTITY_ID,
@@ -245,7 +260,7 @@ class RingMediaCoordinator:
     def __init__(
         self,
         hass: HomeAssistant,
-        manager: ComelitMediaSessionManager,
+        manager: MediaSession,
         *,
         snapshot_provider: SnapshotProvider,
         recording_provider: RecordingProvider,
@@ -401,7 +416,7 @@ class RingMediaCoordinator:
                 raise
             except Exception:
                 _LOGGER.exception("Comelit snapshot loop failed")
-        except (ComelitMediaSessionError, ValueError):
+        except (ComelitMediaSessionError, ComelitAttachedMediaError, ValueError):
             recording_state = RECORDING_STATE_FAILED
             recording_failure_reason = "media_start_failed"
         except asyncio.CancelledError:
