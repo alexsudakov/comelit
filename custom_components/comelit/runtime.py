@@ -63,6 +63,7 @@ _NATIVE_MARKER_PREFIXES = (
     "SELECTED_PAIR_",
     "V4_",
     "P12_",
+    "R42_",
 )
 _NATIVE_MARKER_TAIL_LIMIT = 20
 
@@ -192,7 +193,8 @@ class ComelitRingRuntime:
 
     @property
     def attached_media_open(self) -> bool:
-        return self._attached_media_open.is_set()
+        event = getattr(self, "_attached_media_open", None)
+        return event is not None and event.is_set()
 
     @property
     def ring_observed(self) -> bool:
@@ -243,8 +245,9 @@ class ComelitRingRuntime:
         self,
         event: dict[str, object],
     ) -> RingMediaCoordinator | None:
-        if event.get("synthetic") is True and self._synthetic_ring_media is not None:
-            return self._synthetic_ring_media
+        synthetic = getattr(self, "_synthetic_ring_media", None)
+        if event.get("synthetic") is True and synthetic is not None:
+            return synthetic
         return self._ring_media
 
     async def _async_start_ring_media(self, event: dict[str, object]) -> None:
@@ -290,7 +293,7 @@ class ComelitRingRuntime:
         """Emit one synthetic entrance ring and start the normal media lifecycle."""
         if not self.running or not self.listener_ready:
             raise ComelitRingRuntimeError("listener_not_ready")
-        coordinator = self._synthetic_ring_media or self._ring_media
+        coordinator = getattr(self, "_synthetic_ring_media", None) or self._ring_media
         if coordinator is None:
             raise ComelitRingRuntimeError("ring_media_unavailable")
         if coordinator.running:
