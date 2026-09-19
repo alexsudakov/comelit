@@ -17,11 +17,12 @@ def sha256(path: Path) -> str:
 
 
 class P29HaosGracefulStopReleaseContract(unittest.TestCase):
-    def test_manifest_is_1_5_7(self):
+    def test_current_manifest_does_not_regress_below_p29_release(self):
         manifest = json.loads(
             (ROOT / "custom_components/comelit/manifest.json").read_text(encoding="utf-8")
         )
-        self.assertEqual(manifest["version"], "1.5.7")
+        version = tuple(int(part) for part in manifest["version"].split("."))
+        self.assertGreaterEqual(version, (1, 5, 7))
 
     def test_release_source_and_binary_hashes_are_frozen(self):
         source = ROOT / "safety-poc/research/door/v1_5_7/comelit-v4-persistent-ctpp-door.c"
