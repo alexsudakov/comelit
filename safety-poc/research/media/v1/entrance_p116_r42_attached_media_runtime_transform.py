@@ -51,6 +51,7 @@ typedef enum {
     R42_MEDIA_ACTIVE,
     R42_MEDIAREQ_STOP_TX,
     R42_MEDIA_CHANNEL_CLOSE_TX,
+    R42_MEDIA_CHANNEL_CLOSE_WAIT,
     R42_MEDIA_CLOSED,
     R42_MEDIA_FAILED
 } R42AttachedMediaStage;
@@ -226,7 +227,9 @@ _TX_TAIL_REPLACEMENT = r'''        case P12_TX_R42_MEDIA_CHANNEL_OPEN:
             break;
 
         case P12_TX_R42_MEDIA_CHANNEL_CLOSE:
-            r42_finish_media_channel_close();
+            r42_media_stage = R42_MEDIA_CHANNEL_CLOSE_WAIT;
+            printf("R42_MEDIA_CHANNEL_CLOSE_SENT=true\n");
+            fflush(stdout);
             break;
 
         default:
@@ -238,6 +241,25 @@ _TX_TAIL_REPLACEMENT = r'''        case P12_TX_R42_MEDIA_CHANNEL_OPEN:
 
 _TRIGGER_ANCHOR = """            /* R36_WIRING_TRIGGER_BEGIN */"""
 _TRIGGER_REPLACEMENT = r'''            /* R42_ATTACHED_TRIGGER_BEGIN */
+            if (r42_media_stage == R42_MEDIA_CHANNEL_CLOSE_WAIT) {
+                guint16 r42_response_channel = 0;
+                guint16 r42_response_word = 0xffff;
+                if (request_id == 0 &&
+                    p12_parse_control_response(
+                        body,
+                        body_len,
+                        4,
+                        r42_media_channel_id,
+                        FALSE,
+                        &r42_response_channel,
+                        &r42_response_word) &&
+                    r42_response_word == 0) {
+                    r42_finish_media_channel_close();
+                    p12_consume_post_ack(frame_len);
+                    continue;
+                }
+            }
+
             {
                 R35CtpEnvelopeView r42_view;
                 if (g_r35_session.writer &&
@@ -363,6 +385,8 @@ def transform(r37_source: str) -> str:
         "r35_send_open",
         "r35_enable_rtp",
         "p12_queue_close_channel",
+        "p12_parse_control_response",
+        "R42_MEDIA_CHANNEL_CLOSE_WAIT",
     )
     for needle in required:
         if needle not in r42:
