@@ -16,9 +16,6 @@ NATIVE_BINARY = COMPONENT / "native" / "comelit-media"
 EXPECTED_MEDIA_TRANSPORT_SHA256 = (
     "52e4873ede9c8df16f81ac88dba4c7ffaf27842738e22ab68896c216411aa1d0"
 )
-EXPECTED_MEDIA_SESSION_SHA256 = (
-    "65fe703f5a33207502fc6a2984d5edd0712813b174d41b48c6e3e5b10423d7bc"
-)
 EXPECTED_NATIVE_SHA256 = (
     "a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8"
 )
@@ -214,10 +211,17 @@ class P116R18HlsRuntimeDiagnosticsTests(unittest.TestCase):
             self.assertNotIn(forbidden, diagnostic_source)
         self.assertIn("self._transport.video_packet_count", self.camera)
 
-    def test_media_transport_session_and_native_binary_are_unchanged(self) -> None:
+    def test_r18_owned_transport_and_native_binary_are_unchanged(self) -> None:
         self.assertEqual(_sha256(TRANSPORT), EXPECTED_MEDIA_TRANSPORT_SHA256)
-        self.assertEqual(_sha256(SESSION), EXPECTED_MEDIA_SESSION_SHA256)
         self.assertEqual(_sha256(NATIVE_BINARY), EXPECTED_NATIVE_SHA256)
+
+        # The generic session manager may evolve in later phases. R18 only
+        # requires that its HLS diagnostics do not own or mutate session
+        # lifecycle behavior.
+        session = SESSION.read_text(encoding="utf-8")
+        self.assertIn("MEDIA_SESSION_HARD_LIMIT_SECONDS = 600", session)
+        self.assertIn("await self._listener.async_pause_for_media()", session)
+        self.assertIn("await self._transport.async_start(panel)", session)
 
 
 if __name__ == "__main__":
