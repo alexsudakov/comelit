@@ -32,7 +32,6 @@ CURSOR = load(CURSOR_PATH, "p116_r41_v4_cursor_test")
 def function_body(text: str, name: str) -> str:
     marker = f"def {name}("
     tail = text.split(marker, 1)[1]
-    # Good enough for static contract: next top-level def/class starts at column zero.
     match = re.search(r"\n(?:def|class) [A-Za-z_]", tail)
     return tail if match is None else tail[: match.start()]
 
@@ -123,13 +122,10 @@ class RunnerStaticContractTests(unittest.TestCase):
 
     def test_one_persistent_logcat_and_t_is_startup_only(self) -> None:
         body = function_body(self.text, "build_adb_logcat_command")
-        self.assertIn('"logcat"', body)
-        self.assertIn('"-T", "1"', body)
-        self.assertIn('"ComelitStatus:I"', body)
-        self.assertIn('"ViperSocketReaderRun:E"', body)
+        for token in ('"logcat"', '"-T", "1"', '"ComelitStatus:I"', '"ViperSocketReaderRun:E"'):
+            self.assertIn(token, body)
         self.assertNotIn('"clear"', body)
         self.assertNotIn("/proc/uptime", self.text)
-        # There is one Popen site inside PersistentSafeLogcat.start for adb.
         logcat_class = self.text.split("class PersistentSafeLogcat:", 1)[1].split(
             "@dataclasses.dataclass", 1
         )[0]
@@ -154,21 +150,25 @@ class RunnerStaticContractTests(unittest.TestCase):
         self.assertIn("if verdict.physical_ring_allowed", gate)
         self.assertNotIn("ring_budget_available=True", self.text)
 
-    def test_no_ring_actuation_or_media_action_surface(self) -> None:
+    def test_no_actuation_media_or_ring_invocation_surface(self) -> None:
+        # Result/accounting markers such as SYNTHETIC_RING_COUNT=0 are allowed.
+        # Reject actual invocation/API surfaces instead of matching marker prose.
         lowered = self.text.lower()
         for forbidden in (
             "comelit.open_door",
             "open_gate(",
-            "synthetic_ring",
+            "async_simulate_entrance_ring(",
+            "simulate-entrance-ring",
             "camera.turn_on",
             "media_session.async_acquire",
             "homeassistant.restart",
+            '"action":"ring"',
+            '"action": "ring"',
         ):
             self.assertNotIn(forbidden, lowered)
 
     def test_single_experimental_stop_site(self) -> None:
-        run = function_body(self.text, "run_attempt")
-        self.assertEqual(run.count('control.post("stop"'), 1)
+        self.assertEqual(function_body(self.text, "run_attempt").count('control.post("stop"'), 1)
 
     def test_one_normal_restore_start_and_one_failsafe_recovery_start(self) -> None:
         restore = function_body(self.text, "restore_listener_once")
@@ -197,27 +197,22 @@ class RunnerStaticContractTests(unittest.TestCase):
         env.pop("R41_APPROVAL", None)
         result = subprocess.run(
             [
-                sys.executable,
-                str(RUNNER_PATH),
-                "--control-url-file",
-                "/does/not/exist",
-                "--adb-serial",
-                "not-used",
-                "--attempt-id",
-                "offline-negative-test",
+                sys.executable, str(RUNNER_PATH),
+                "--control-url-file", "/does/not/exist",
+                "--adb-serial", "not-used",
+                "--attempt-id", "offline-negative-test",
             ],
-            cwd=ROOT,
-            env=env,
-            text=True,
-            capture_output=True,
-            check=False,
+            cwd=ROOT, env=env, text=True, capture_output=True, check=False,
         )
         self.assertEqual(result.returncode, 64, result.stderr)
-        self.assertIn("APPROVAL_GRANTED=false", result.stdout)
-        self.assertIn("ADB_LIVE_INVOCATIONS=0", result.stdout)
-        self.assertIn("LISTENER_PAUSE_COUNT=0", result.stdout)
-        self.assertIn("PHYSICAL_RING_COUNT=0", result.stdout)
-        self.assertIn("RESULT=BLOCKED_APPROVAL_REQUIRED", result.stdout)
+        for token in (
+            "APPROVAL_GRANTED=false",
+            "ADB_LIVE_INVOCATIONS=0",
+            "LISTENER_PAUSE_COUNT=0",
+            "PHYSICAL_RING_COUNT=0",
+            "RESULT=BLOCKED_APPROVAL_REQUIRED",
+        ):
+            self.assertIn(token, result.stdout)
 
 
 class PlanTests(unittest.TestCase):
