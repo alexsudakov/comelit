@@ -271,29 +271,29 @@ p12_flush_tx(void);
 
 _STOP_CALLS = (
     (
-        """    rc = r37_bounded_stop_request(&g_r35_session, &g_r37_telemetry, R35_FORM_TUNNEL);
+        r"""    rc = r37_bounded_stop_request(&g_r35_session, &g_r37_telemetry, R35_FORM_TUNNEL);
     printf("BOUNDED_STOP_REQUEST_RECEIVED=%u\n", g_r37_telemetry.bounded_stop_request_received_count);""",
-        """    rc = r37_bounded_stop_request(&g_r35_session, &g_r37_telemetry, R35_FORM_TUNNEL);
+        r"""    rc = r37_bounded_stop_request(&g_r35_session, &g_r37_telemetry, R35_FORM_TUNNEL);
     (void)p12_flush_tx();
     printf("BOUNDED_STOP_REQUEST_RECEIVED=%u\n", g_r37_telemetry.bounded_stop_request_received_count);""",
     ),
     (
-        """                        R35Result r37_rc = r37_handle_capability_cleared(
+        r"""                        R35Result r37_rc = r37_handle_capability_cleared(
                             &g_r35_session, &g_r37_telemetry, R35_FORM_TUNNEL);
 
                         printf("R37_CAPABILITY_CLEARED_OBSERVED=true\n");""",
-        """                        R35Result r37_rc = r37_handle_capability_cleared(
+        r"""                        R35Result r37_rc = r37_handle_capability_cleared(
                             &g_r35_session, &g_r37_telemetry, R35_FORM_TUNNEL);
                         (void)p12_flush_tx();
 
                         printf("R37_CAPABILITY_CLEARED_OBSERVED=true\n");""",
     ),
     (
-        """                        R35Result r37_rc = r37_handle_remote_release(
+        r"""                        R35Result r37_rc = r37_handle_remote_release(
                             &g_r35_session, &g_r37_telemetry, R35_FORM_TUNNEL);
 
                         printf("R37_REMOTE_RELEASE_OBSERVED=true\n");""",
-        """                        R35Result r37_rc = r37_handle_remote_release(
+        r"""                        R35Result r37_rc = r37_handle_remote_release(
                             &g_r35_session, &g_r37_telemetry, R35_FORM_TUNNEL);
                         (void)p12_flush_tx();
 
