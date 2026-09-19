@@ -68,10 +68,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         supervisor: ComelitRuntimeSupervisor | None = supervisors.get(entry_id)
         if supervisor is None:
             raise HomeAssistantError("Comelit runtime supervisor is unavailable")
-        if supervisor.media_paused:
+        if supervisor.media_paused or supervisor.attached_media_busy:
             raise HomeAssistantError(
-                "Comelit Door is temporarily unavailable while the intercom "
-                "media session owns the exclusive Comelit connection"
+                "Comelit Door is temporarily unavailable while an intercom "
+                "media lifecycle owns the Comelit connection"
             )
 
         event_id = call.data.get(ATTR_EVENT_ID)
