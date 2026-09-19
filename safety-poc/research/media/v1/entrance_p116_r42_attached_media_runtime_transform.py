@@ -393,8 +393,6 @@ def transform(r37_source: str) -> str:
         "r35_send_open",
         "r35_enable_rtp",
         "p12_queue_close_channel",
-        "p12_parse_control_response",
-        "R42_MEDIA_CHANNEL_CLOSE_WAIT",
     )
     for needle in required:
         if needle not in r42:
@@ -405,6 +403,16 @@ def transform(r37_source: str) -> str:
         raise RuntimeError("R42_R36_PLACEHOLDER_BYPASS_GATE=FAIL")
     if "r42_queue_media_channel_open" not in trigger:
         raise RuntimeError("R42_TRIGGER_CALL_GATE=FAIL")
+    for needle in (
+        "p12_parse_control_response",
+        "R42_MEDIA_CHANNEL_CLOSE_WAIT",
+        "r42_response_word == 0",
+        "r42_finish_media_channel_close()",
+    ):
+        if needle not in trigger:
+            raise RuntimeError(
+                f"R42_CLOSE_RESPONSE_GATE=FAIL needle={needle}"
+            )
 
     forbidden = (
         "SIGUSR1",
