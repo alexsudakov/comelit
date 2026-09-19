@@ -268,7 +268,6 @@ class Mvp1RingTelegramOfflineBuildTests(unittest.TestCase):
         self.assertIn("MEDIA_SESSION_HARD_LIMIT_SECONDS = 600", media_session)
         self.assertIn("await self._listener.async_pause_for_media()", media_session)
         self.assertIn("await self._transport.async_start(panel)", media_session)
-        self.assertIn("automatic", "automatic")
         self._gate("MEDIA_PROTOCOL_CODE_UNCHANGED=PASS")
         self._gate("R30H_E_CODE_UNCHANGED=PASS")
 
