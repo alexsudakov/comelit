@@ -50,7 +50,6 @@ from .const import (
     RECORDING_TARGET_SECONDS,
     SNAPSHOT_REFRESH_TARGET_SECONDS,
 )
-from .attached_media import ComelitAttachedMediaError
 from .media_session import ComelitMediaSessionError
 
 _LOGGER = logging.getLogger(__name__)
@@ -416,7 +415,7 @@ class RingMediaCoordinator:
                 raise
             except Exception:
                 _LOGGER.exception("Comelit snapshot loop failed")
-        except (ComelitMediaSessionError, ComelitAttachedMediaError, ValueError):
+        except (ComelitMediaSessionError, RuntimeError, ValueError):
             recording_state = RECORDING_STATE_FAILED
             recording_failure_reason = "media_start_failed"
         except asyncio.CancelledError:
