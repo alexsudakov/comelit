@@ -17,7 +17,6 @@ SESSION = COMPONENT / "media_session.py"
 BINARY = COMPONENT / "native" / "comelit-media"
 RECOVERY = COMPONENT / "h264_recovery.py"
 EXPECTED_NATIVE_SHA256 = "a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8"
-EXPECTED_MEDIA_SESSION_SHA256 = "65fe703f5a33207502fc6a2984d5edd0712813b174d41b48c6e3e5b10423d7bc"
 
 spec = importlib.util.spec_from_file_location("h264_recovery_lifecycle", RECOVERY)
 h264_recovery = importlib.util.module_from_spec(spec)
@@ -89,10 +88,18 @@ class P116R24RecoveryShimStaticLifecycleTests(unittest.TestCase):
         self.assertIn("shim.running", ready)
         self.assertIn("_MEDIA_LOCAL_SDP_FILE.is_file()", ready)
 
-    def test_native_binary_and_pinned_sha_are_untouched(self) -> None:
+    def test_r24_native_binary_and_recovery_owner_are_untouched(self) -> None:
         self.assertIn(EXPECTED_NATIVE_SHA256, self.transport)
-        self.assertEqual(hashlib.sha256(BINARY.read_bytes()).hexdigest(), EXPECTED_NATIVE_SHA256)
-        self.assertEqual(hashlib.sha256(SESSION.read_bytes()).hexdigest(), EXPECTED_MEDIA_SESSION_SHA256)
+        self.assertEqual(
+            hashlib.sha256(BINARY.read_bytes()).hexdigest(),
+            EXPECTED_NATIVE_SHA256,
+        )
+
+        # R24 owns the recovery shim and P115 transport, not the future
+        # attached-media arbitration policy in media_session.py.
+        session = SESSION.read_text(encoding="utf-8")
+        self.assertIn("await self._listener.async_pause_for_media()", session)
+        self.assertIn("await self._transport.async_start(panel)", session)
 
     def test_no_second_upstream_session_is_introduced(self) -> None:
         self.assertEqual(self.transport.count("async_negotiate_p2p("), 1)
