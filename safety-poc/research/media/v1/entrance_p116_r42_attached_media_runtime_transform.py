@@ -71,6 +71,14 @@ r42_queue_media_channel_open(void)
         r42_attempted_call_generation == g_r35_session.call_generation)
         return FALSE;
 
+    if (r42_media_channel_id != 0u ||
+        (r42_media_stage != R42_MEDIA_IDLE &&
+         r42_media_stage != R42_MEDIA_CLOSED)) {
+        printf("R42_STALE_MEDIA_CHANNEL_BLOCKED=true\n");
+        fflush(stdout);
+        return FALSE;
+    }
+
     r42_attempted_call_generation = g_r35_session.call_generation;
     seed = (guint16)(g_random_int() & 0x7fffu);
     channel_id = v4_allocate_channel_id(seed);
