@@ -73,6 +73,10 @@ class ComelitRuntimeSupervisor:
         return self._media_paused
 
     @property
+    def attached_media_busy(self) -> bool:
+        return self._runtime.attached_media_busy
+
+    @property
     def reconnect_count(self) -> int:
         return self._reconnect_count
 
@@ -87,6 +91,9 @@ class ComelitRuntimeSupervisor:
             "supervisor_running": self.running,
             "runtime_running": bool(runtime_status.get("running")),
             "listener_ready": bool(runtime_status.get("listener_ready")),
+            "attached_media_busy": bool(
+                runtime_status.get("attached_media_busy")
+            ),
             "media_paused": self._media_paused,
             "reconnect_count": self._reconnect_count,
             "last_ready": self._last_ready.isoformat() if self._last_ready else None,
