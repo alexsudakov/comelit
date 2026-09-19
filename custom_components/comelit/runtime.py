@@ -166,6 +166,8 @@ class ComelitRingRuntime:
         self._process: asyncio.subprocess.Process | None = None
         self._offer_ready = asyncio.Event()
         self._listener_ready = asyncio.Event()
+        self._attached_media_open = asyncio.Event()
+        self._attached_media_closed = asyncio.Event()
         self._ring_lines: list[str] = []
         self._last_ring_event: dict[str, str] | None = None
         self._last_error: str | None = None
@@ -178,6 +180,7 @@ class ComelitRingRuntime:
         self._last_native_exit_code: int | None = None
         self._last_native_failure_markers: list[str] = []
         self._ring_media: RingMediaCoordinator | None = None
+        self._synthetic_ring_media: RingMediaCoordinator | None = None
 
     @property
     def running(self) -> bool:
@@ -186,6 +189,10 @@ class ComelitRingRuntime:
     @property
     def listener_ready(self) -> bool:
         return self._listener_ready.is_set()
+
+    @property
+    def attached_media_open(self) -> bool:
+        return self._attached_media_open.is_set()
 
     @property
     def ring_observed(self) -> bool:
@@ -200,6 +207,7 @@ class ComelitRingRuntime:
         return {
             "running": self.running,
             "listener_ready": self.listener_ready,
+            "attached_media_open": self.attached_media_open,
             "ring_observed": self.ring_observed,
             "ring_door": event.get("door"),
             "ring_source": event.get("source"),
@@ -225,8 +233,22 @@ class ComelitRingRuntime:
     ) -> None:
         self._ring_media = coordinator
 
+    def set_synthetic_ring_media_coordinator(
+        self,
+        coordinator: RingMediaCoordinator | None,
+    ) -> None:
+        self._synthetic_ring_media = coordinator
+
+    def _ring_media_for_event(
+        self,
+        event: dict[str, object],
+    ) -> RingMediaCoordinator | None:
+        if event.get("synthetic") is True and self._synthetic_ring_media is not None:
+            return self._synthetic_ring_media
+        return self._ring_media
+
     async def _async_start_ring_media(self, event: dict[str, object]) -> None:
-        coordinator = self._ring_media
+        coordinator = self._ring_media_for_event(event)
         if coordinator is None:
             return
         try:
@@ -249,7 +271,7 @@ class ComelitRingRuntime:
         self._hass.bus.async_fire(EVENT_RING, dict(event))
 
         if require_media_start:
-            coordinator = self._ring_media
+            coordinator = self._ring_media_for_event(event)
             if coordinator is None:
                 raise ComelitRingRuntimeError("ring_media_unavailable")
             started = await coordinator.async_start_for_ring(dict(event))
@@ -268,7 +290,7 @@ class ComelitRingRuntime:
         """Emit one synthetic entrance ring and start the normal media lifecycle."""
         if not self.running or not self.listener_ready:
             raise ComelitRingRuntimeError("listener_not_ready")
-        coordinator = self._ring_media
+        coordinator = self._synthetic_ring_media or self._ring_media
         if coordinator is None:
             raise ComelitRingRuntimeError("ring_media_unavailable")
         if coordinator.running:
@@ -317,6 +339,8 @@ class ComelitRingRuntime:
         self._stopping = False
         self._offer_ready.clear()
         self._listener_ready.clear()
+        self._attached_media_open.clear()
+        self._attached_media_closed.clear()
         self._ring_lines.clear()
         self._native_marker_tail.clear()
         self._last_ring_event = None
@@ -351,6 +375,65 @@ class ComelitRingRuntime:
                 except asyncio.CancelledError:
                     pass
 
+    async def async_wait_attached_media_open(self, timeout: float = 15.0) -> bool:
+        if self.attached_media_open:
+            return True
+        task = self._task
+        if task is None or task.done():
+            return False
+
+        open_wait = asyncio.create_task(self._attached_media_open.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {open_wait, task},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            return open_wait in done and open_wait.result()
+        finally:
+            if not open_wait.done():
+                open_wait.cancel()
+                try:
+                    await open_wait
+                except asyncio.CancelledError:
+                    pass
+
+    async def async_stop_attached_media(self, timeout: float = 10.0) -> bool:
+        if not self.attached_media_open:
+            return True
+
+        process = self._process
+        task = self._task
+        if (
+            process is None
+            or process.returncode is not None
+            or task is None
+            or task.done()
+        ):
+            return False
+
+        self._attached_media_closed.clear()
+        try:
+            os.kill(process.pid, signal.SIGUSR2)
+        except ProcessLookupError:
+            return False
+
+        closed_wait = asyncio.create_task(self._attached_media_closed.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {closed_wait, task},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            return closed_wait in done and closed_wait.result()
+        finally:
+            if not closed_wait.done():
+                closed_wait.cancel()
+                try:
+                    await closed_wait
+                except asyncio.CancelledError:
+                    pass
+
     async def async_stop(self) -> None:
         self._stopping = True
         process = self._process
@@ -376,6 +459,8 @@ class ComelitRingRuntime:
         self._task = None
         self._process = None
         self._listener_ready.clear()
+        self._attached_media_open.clear()
+        self._attached_media_closed.clear()
         await self._hass.async_add_executor_job(_remove_helper_secret)
 
     def _finalize_door_operation(
@@ -546,6 +631,7 @@ class ComelitRingRuntime:
         finally:
             self._process = None
             self._listener_ready.clear()
+            self._attached_media_open.clear()
             future = self._door_result_future
             if future is not None and not future.done():
                 future.set_result("UNKNOWN_OUTCOME")
@@ -660,6 +746,18 @@ class ComelitRingRuntime:
                 _LOGGER.info(
                     "Comelit ring listener READY for persistent 3300s cycle"
                 )
+                continue
+
+            if line == "R42_ATTACHED_MEDIA_ACTIVE=true":
+                self._attached_media_closed.clear()
+                self._attached_media_open.set()
+                _LOGGER.info("Comelit attached inbound media ACTIVE")
+                continue
+
+            if line == "R42_MEDIA_CHANNEL_CLOSED=true":
+                self._attached_media_open.clear()
+                self._attached_media_closed.set()
+                _LOGGER.info("Comelit attached inbound media CLOSED")
                 continue
 
             if line.startswith("V4_DOOR_REJECT_STAGE="):
