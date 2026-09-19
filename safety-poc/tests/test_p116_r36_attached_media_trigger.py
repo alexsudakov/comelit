@@ -2,7 +2,7 @@
 """P116/R36 offline focused tests for the attached-media trigger closure.
 
 Offline only.  No sockets are opened, no packet is captured or transmitted,
-and the musl candidate binary built by ``ct123_build_p116_r36_attached_media_
+and the musl candidate binary built by ``ct122_build_p116_r36_attached_media_
 trigger_candidate.sh`` is never executed by this module.  The only
 executable artifact this module builds and runs is the host-compiled,
 dependency-free harness (``tests/native/p116_r36_attached_media_trigger_
