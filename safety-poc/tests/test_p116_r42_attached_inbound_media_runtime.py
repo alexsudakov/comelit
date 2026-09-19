@@ -93,13 +93,31 @@ class P116R42AttachedInboundMediaRuntimeTests(unittest.TestCase):
         self.assertIn("r35_enable_rtp", activation)
         self.assertIn("R42_ATTACHED_MEDIA_ACTIVE=true", activation)
 
-    def test_r42_stop_closes_same_runtime_channel(self) -> None:
+    def test_r42_stop_closes_same_runtime_channel_after_close_response(self) -> None:
         candidate = self.r42_candidate
         stop_case = candidate.split("case P12_TX_R35_MEDIA_STOP:", 1)[1].split(
             "case P12_TX_R42_MEDIA_CHANNEL_CLOSE:", 1
         )[0]
         self.assertIn("r42_queue_media_channel_close", stop_case)
-        self.assertIn("P12_TX_R42_MEDIA_CHANNEL_CLOSE", candidate)
+
+        close_tx_case = candidate.split(
+            "case P12_TX_R42_MEDIA_CHANNEL_CLOSE:", 1
+        )[1].split("default:", 1)[0]
+        self.assertIn(
+            "r42_media_stage = R42_MEDIA_CHANNEL_CLOSE_WAIT",
+            close_tx_case,
+        )
+        self.assertIn("R42_MEDIA_CHANNEL_CLOSE_SENT=true", close_tx_case)
+        self.assertNotIn("r42_finish_media_channel_close()", close_tx_case)
+
+        trigger = candidate.split(
+            "/* R42_ATTACHED_TRIGGER_BEGIN */", 1
+        )[1].split("/* R42_ATTACHED_TRIGGER_END */", 1)[0]
+        self.assertIn("R42_MEDIA_CHANNEL_CLOSE_WAIT", trigger)
+        self.assertIn("p12_parse_control_response", trigger)
+        self.assertIn("r42_media_channel_id", trigger)
+        self.assertIn("r42_response_word == 0", trigger)
+        self.assertIn("r42_finish_media_channel_close()", trigger)
         self.assertIn("R42_MEDIA_CHANNEL_CLOSED=true", candidate)
 
     def test_one_attempt_per_call_generation_and_no_retry_loop(self) -> None:
