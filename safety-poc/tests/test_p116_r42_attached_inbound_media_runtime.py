@@ -180,6 +180,16 @@ class P116R42AttachedInboundMediaRuntimeTests(unittest.TestCase):
         self.assertIn("self._attached_media_busy.set()", self.runtime_source)
         self.assertIn("self._attached_media_busy.clear()", self.runtime_source)
 
+    def test_door_service_is_blocked_during_attached_media(self) -> None:
+        self.assertIn(
+            "supervisor.media_paused or supervisor.attached_media_busy",
+            self.init_source,
+        )
+        self.assertIn(
+            "media lifecycle owns the Comelit connection",
+            self.init_source,
+        )
+
     def test_runtime_exposes_bounded_sigusr2_attached_stop(self) -> None:
         tree = ast.parse(self.runtime_source)
         cls = next(
