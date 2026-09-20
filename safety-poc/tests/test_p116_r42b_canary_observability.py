@@ -539,8 +539,6 @@ class CapabilitiesTriggerDiagnosticsUnitTests(unittest.TestCase):
         self.assertEqual(diag.snapshot()["trigger_reject_stage"], "NO_LIVE_CALL")
 
     def test_all_eleven_whitelisted_reject_stages_are_accepted(self) -> None:
-        diag = MediaCallDiagnostics()
-        diag.observe_line("R42_CALL_GENERATION=1")
         for stage in (
             "NONE",
             "NO_WRITER",
@@ -554,8 +552,11 @@ class CapabilitiesTriggerDiagnosticsUnitTests(unittest.TestCase):
             "QUEUE_REJECTED",
             "OPEN_SENT",
         ):
-            diag.observe_line(f"R42_TRIGGER_REJECT_STAGE={stage}")
-            self.assertEqual(diag.snapshot()["trigger_reject_stage"], stage)
+            with self.subTest(stage=stage):
+                diag = MediaCallDiagnostics()
+                diag.observe_line("R42_CALL_GENERATION=1")
+                diag.observe_line(f"R42_TRIGGER_REJECT_STAGE={stage}")
+                self.assertEqual(diag.snapshot()["trigger_reject_stage"], stage)
 
     def test_new_call_generation_wipes_stale_capabilities_evidence(self) -> None:
         diag = MediaCallDiagnostics()
@@ -593,6 +594,67 @@ class CapabilitiesTriggerDiagnosticsUnitTests(unittest.TestCase):
         diag.observe_line("R42_CAPABILITIES_CANDIDATE_COUNT=8")
         self.assertEqual(diag.snapshot()["capabilities_candidate_count"], 8)
         self.assertIsInstance(diag.snapshot()["capabilities_candidate_count"], int)
+
+    def test_stronger_capabilities_evidence_survives_later_noise(self) -> None:
+        diag = MediaCallDiagnostics()
+        diag.observe_line("R42_CALL_GENERATION=1")
+        diag.observe_line("R42_CAPABILITIES_CANDIDATE_SEEN=true")
+        diag.observe_line("R42_CAPABILITIES_PARSE_OK=true")
+        diag.observe_line("R42_CAPABILITIES_CALL_MATCH=true")
+        diag.observe_line("R42_CAPABILITIES_VIDEO_REQUESTED=true")
+        diag.observe_line("R42_CAPABILITIES_CANDIDATE_COUNT=3")
+        diag.observe_line("R42_TRIGGER_REJECT_STAGE=OPEN_SENT")
+
+        # Later unrelated traffic in the same call generation must not erase
+        # the deepest evidence already observed for the real candidate.
+        diag.observe_line("R42_CAPABILITIES_CANDIDATE_SEEN=false")
+        diag.observe_line("R42_CAPABILITIES_PARSE_OK=false")
+        diag.observe_line("R42_CAPABILITIES_CALL_MATCH=false")
+        diag.observe_line("R42_CAPABILITIES_VIDEO_REQUESTED=false")
+        diag.observe_line("R42_CAPABILITIES_CANDIDATE_COUNT=0")
+        diag.observe_line("R42_TRIGGER_REJECT_STAGE=OPCODE")
+
+        snapshot = diag.snapshot()
+        self.assertTrue(snapshot["capabilities_seen"])
+        self.assertTrue(snapshot["capabilities_parse_ok"])
+        self.assertTrue(snapshot["capabilities_call_match"])
+        self.assertTrue(snapshot["capabilities_video_requested"])
+        self.assertEqual(snapshot["capabilities_candidate_count"], 3)
+        self.assertEqual(snapshot["trigger_reject_stage"], "OPEN_SENT")
+
+    def test_candidate_count_never_regresses_within_generation(self) -> None:
+        diag = MediaCallDiagnostics()
+        diag.observe_line("R42_CALL_GENERATION=1")
+        for count in (1, 4, 2, 0, 3):
+            diag.observe_line(f"R42_CAPABILITIES_CANDIDATE_COUNT={count}")
+        self.assertEqual(diag.snapshot()["capabilities_candidate_count"], 4)
+
+    def test_terminal_trigger_result_implies_full_predicate_evidence(self) -> None:
+        # OPEN_SENT / QUEUE_REJECTED are emitted by the functional trigger
+        # after every CAPABILITIES predicate has already passed. Even if the
+        # candidate-detail log budget is exhausted, the terminal marker is
+        # sufficient bounded evidence for those predicates.
+        for stage in ("QUEUE_REJECTED", "OPEN_SENT"):
+            with self.subTest(stage=stage):
+                diag = MediaCallDiagnostics()
+                diag.observe_line("R42_CALL_GENERATION=1")
+                diag.observe_line(f"R42_TRIGGER_REJECT_STAGE={stage}")
+                snapshot = diag.snapshot()
+                self.assertTrue(snapshot["capabilities_seen"])
+                self.assertTrue(snapshot["capabilities_parse_ok"])
+                self.assertTrue(snapshot["capabilities_call_match"])
+                self.assertTrue(snapshot["capabilities_video_requested"])
+                self.assertEqual(snapshot["trigger_reject_stage"], stage)
+
+    def test_invalid_or_weaker_stage_does_not_erase_valid_deeper_stage(self) -> None:
+        diag = MediaCallDiagnostics()
+        diag.observe_line("R42_CALL_GENERATION=1")
+        diag.observe_line("R42_TRIGGER_REJECT_STAGE=VIDEO_BIT_CLEAR")
+        diag.observe_line("R42_TRIGGER_REJECT_STAGE=NOT_A_STAGE")
+        diag.observe_line("R42_TRIGGER_REJECT_STAGE=ENVELOPE")
+        self.assertEqual(
+            diag.snapshot()["trigger_reject_stage"], "VIDEO_BIT_CLEAR"
+        )
 
     def test_attach_failure_reason_accepts_only_whitelisted_values(self) -> None:
         diag = MediaCallDiagnostics()
