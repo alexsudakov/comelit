@@ -214,7 +214,17 @@ class ComelitAttachedRingMediaSession:
             self._last_error = None
             try:
                 await self._transport.async_start(panel)
+            except ComelitAttachedMediaError as exc:
+                # Preserve the transport's bounded machine-readable reason.
+                # Wrapping it as start_failed:<ExcType> destroys the exact
+                # failure class needed by call-generation diagnostics.
+                self._last_error = str(exc)
+                self._panel = None
+                self._leases.clear()
+                raise
             except Exception as exc:
+                # Unexpected exceptions remain type-only: do not surface raw
+                # exception text into status/diagnostics.
                 self._last_error = f"start_failed:{type(exc).__name__}"
                 self._panel = None
                 self._leases.clear()
