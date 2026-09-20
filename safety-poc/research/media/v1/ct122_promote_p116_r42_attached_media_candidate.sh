@@ -69,7 +69,7 @@ INFO_TMP="$(mktemp)"
 trap 'rm -f "$STRINGS_TMP" "$INFO_TMP"' EXIT
 
 strings -a "$CANDIDATE" > "$STRINGS_TMP"
-for marker in     'R42_MEDIA_CHANNEL_ALLOCATED=true'     'R42_MEDIAREQ26_OPEN_PROFILE=CAPTURE_VALIDATED'     'R42_ATTACHED_MEDIA_ACTIVE=true'     'R42_ATTACHED_MEDIA_STOP_SENT=true'     'R42_MEDIA_CHANNEL_CLOSE_SENT=true'     'R42_MEDIA_CHANNEL_CLOSED=true'     'R42_AUTOMATIC_RETRY=false'     'P80_VIDEO_RTP_FORWARDING=PASS'     'ENTRANCE_SIGNALING_DOOR_ACTION_SENT=false'
+for marker in     'V4_DOOR_EXISTING_CTPP_REUSED=true'     'V4_DOOR_OPERATION_WRITES_SENT=5'     'V4_DOOR_AUTOMATIC_RETRY_ALLOWED=false'     'V4_DOOR_PHYSICAL_EFFECT_ASSERTED=false'     'V4_RING_LISTENER_READY=true'     'R42_LISTENER_DOOR_SIGNAL_PRESERVED=true'     'R42_LISTENER_RTP_LIFETIME_RESET=true'     'R42_MEDIA_CHANNEL_ALLOCATED=true'     'R42_MEDIAREQ26_OPEN_PROFILE=CAPTURE_VALIDATED'     'R42_ATTACHED_MEDIA_ACTIVE=true'     'R42_ATTACHED_MEDIA_STOP_SENT=true'     'R42_MEDIA_CHANNEL_CLOSE_SENT=true'     'R42_MEDIA_CHANNEL_CLOSED=true'     'R42_AUTOMATIC_RETRY=false'     'P80_VIDEO_RTP_FORWARDING=PASS'
 do
     grep -Fq "$marker" "$STRINGS_TMP" || fail "MARKER_MISSING"
 done
@@ -91,7 +91,7 @@ PROMOTED_SHA256="$(sha256sum "$TARGET" | awk '{print $1}')"
 PROMOTED_BYTES="$(stat -c '%s' "$TARGET")"
 
 cat > "$INFO_TMP" <<EOF
-phase=P116_R42_ATTACHED_INBOUND_MEDIA
+phase=P116_R42B_LISTENER_ATTACHED_INBOUND_MEDIA
 repo_head_at_promotion=$REPO_HEAD
 generated_source_sha256=$ACTUAL_SOURCE_SHA256
 native_binary_sha256=$PROMOTED_SHA256
@@ -106,6 +106,10 @@ needed=$NEEDED
 capture_literal_used=false
 automatic_retry=false
 self_activation_used_for_physical_ring=false
+listener_lineage=frozen_v1_5_7_persistent_listener
+run_dir=/run/comelit-p2p
+door_sigusr1_preserved=true
+door_tick_preserved=true
 listener_pause_required_for_physical_ring=false
 candidate_executed=false
 comelit_network_requests=0
@@ -116,7 +120,7 @@ EOF
 
 install -m 0644 "$INFO_TMP" "$BUILD_INFO"
 
-echo '=== COMELIT P116 R42 LOCAL BINARY PROMOTION ==='
+echo '=== COMELIT P116 R42-B LISTENER BINARY PROMOTION ==='
 echo "REPO_HEAD=$REPO_HEAD"
 echo "TARGET=custom_components/comelit/native/comelit-v4"
 echo "BUILD_INFO=safety-poc/research/media/v1/P116_R42_BUILD_INFO.txt"
