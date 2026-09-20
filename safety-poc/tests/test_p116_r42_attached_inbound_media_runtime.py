@@ -49,6 +49,32 @@ class P116R42AttachedInboundMediaRuntimeTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             r42.transform(self.r42_candidate)
 
+    def test_allocator_forward_declaration_precedes_first_r42_call(self) -> None:
+        declaration = r42._ALLOCATOR_FORWARD_DECL
+        call = r42._ALLOCATOR_FIRST_R42_CALL
+        definition = r42._ALLOCATOR_DEFINITION
+        self.assertEqual(self.r42_candidate.count(declaration), 1)
+        self.assertLess(
+            self.r42_candidate.index(declaration),
+            self.r42_candidate.index(call),
+        )
+        self.assertGreater(
+            self.r42_candidate.index(definition),
+            self.r42_candidate.index(declaration),
+        )
+
+    def test_allocator_order_gate_rejects_missing_forward_declaration(self) -> None:
+        broken = self.r42_candidate.replace(
+            r42._ALLOCATOR_FORWARD_DECL + "\n\n",
+            "",
+            1,
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "R42_ALLOCATOR_FORWARD_DECL_GATE=FAIL",
+        ):
+            r42._gate_allocator_declaration_order(broken)
+
     def test_r42_intercepts_before_r36_placeholder(self) -> None:
         r42_index = self.r42_candidate.index("/* R42_ATTACHED_TRIGGER_BEGIN */")
         r36_index = self.r42_candidate.index("/* R36_WIRING_TRIGGER_BEGIN */")
@@ -160,6 +186,11 @@ class P116R42AttachedInboundMediaRuntimeTests(unittest.TestCase):
         self.assertIn("REPRODUCIBLE_BINARY_CMP_GATE=PASS", source)
         self.assertIn("CANDIDATE_EXECUTED=false", source)
         self.assertIn("COMELIT_NETWORK_REQUESTS=0", source)
+        self.assertIn(
+            "cc -O2 -g -Wall -Wextra -Wl,--as-needed",
+            source,
+        )
+        self.assertNotIn("-Werror", source)
         self.assertNotIn("curl ", source)
         self.assertNotIn("wget ", source)
 
