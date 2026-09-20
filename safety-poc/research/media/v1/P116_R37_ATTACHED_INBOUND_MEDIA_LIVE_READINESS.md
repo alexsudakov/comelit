@@ -2,6 +2,11 @@
 
 FACTS
 
+R48 supersedes the field ownership stated below for `CallFsm+824/+832`. Primary native constructor
+evidence now identifies `CallFsm+824` as `unitdata_t_TAG*` / `VipUnitImpl*` and `CallFsm+832` as
+`cfg_t*`. The local CAPABILITIES call-type byte is therefore read from `[[CallFsm+824] + 18]`, not
+from a `cfg_t*` at `CallFsm+824`.
+
 R37 base is the exact R36 head `afdab40f97f3e85ac7b7f54a8aad49cbd2d80750`. No R32, R33, R34, R35, or R36
 file was modified by this round. No file under `custom_components/**`, no existing `P116_*.md` document,
 and no existing test/transform/serializer file was read for modification or written to. Five new paths
