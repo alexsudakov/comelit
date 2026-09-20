@@ -881,15 +881,22 @@ class R42BCapabilitiesTriggerDiagnosticsSourceGateTests(unittest.TestCase):
             candidate.count("R42_CAPABILITIES_VIDEO_REQUESTED=%s"), 1
         )
         self.assertEqual(candidate.count("R42_CAPABILITIES_CANDIDATE_COUNT=%u"), 1)
-        # Once from the candidate-classification block (may resolve to
-        # NONE), once more from the real trigger-outcome site
-        # (OPEN_SENT/QUEUE_REJECTED).
-        self.assertEqual(candidate.count("R42_TRIGGER_REJECT_STAGE=%s"), 2)
+        # Once from the pre-candidate rejection block (its own
+        # once-per-stage-per-generation budget), once from the
+        # candidate-classification block (may resolve to NONE), once more from
+        # the real trigger-outcome site (OPEN_SENT/QUEUE_REJECTED).
+        self.assertEqual(candidate.count("R42_TRIGGER_REJECT_STAGE=%s"), 3)
 
     def test_reject_stage_enum_values_match_the_required_whitelist(self) -> None:
         region = self.candidate.split(
             "/* R42_CAPABILITIES_DIAGNOSTICS_BEGIN */", 1
         )[1].split("/* R42_CAPABILITIES_DIAGNOSTICS_END */", 1)[0]
+        state_region = self.candidate.split(
+            "/* R42_CAPABILITIES_DIAGNOSTICS_STATE_BEGIN */", 1
+        )[1].split("/* R42_CAPABILITIES_DIAGNOSTICS_STATE_END */", 1)[0]
+        # The pre-candidate stage names live in the pure helper region, the
+        # candidate stage names in the inline block; an observable stage must
+        # appear as a literal in one of them.
         for stage in (
             "NONE",
             "NO_WRITER",
@@ -901,7 +908,10 @@ class R42BCapabilitiesTriggerDiagnosticsSourceGateTests(unittest.TestCase):
             "CONNECTION_MISMATCH",
             "VIDEO_BIT_CLEAR",
         ):
-            self.assertIn(f'"{stage}"', region)
+            self.assertTrue(
+                f'"{stage}"' in region or f'"{stage}"' in state_region,
+                f"stage {stage} is not observable",
+            )
         self.assertIn('"OPEN_SENT"', self.candidate)
         self.assertIn('"QUEUE_REJECTED"', self.candidate)
 
@@ -909,14 +919,30 @@ class R42BCapabilitiesTriggerDiagnosticsSourceGateTests(unittest.TestCase):
         region = self.candidate.split(
             "/* R42_CAPABILITIES_DIAGNOSTICS_BEGIN */", 1
         )[1].split("/* R42_CAPABILITIES_DIAGNOSTICS_END */", 1)[0]
+        normalized = " ".join(region.split())
         self.assertIn("R42_DIAG_DETAIL_LINE_LIMIT", region)
         self.assertIn(
-            "r42_diag_detail_lines_printed < R42_DIAG_DETAIL_LINE_LIMIT", region
+            "r42_diag_detail_lines_printed < R42_DIAG_DETAIL_LINE_LIMIT",
+            normalized,
         )
         self.assertIn("#define R42_DIAG_DETAIL_LINE_LIMIT 8u", self.candidate)
         # The candidate counter keeps incrementing regardless of the detail
         # line cap.
         self.assertIn("r42_diag_candidate_count++;", region)
+        # Pre-candidate rejection stages are bounded by their own
+        # once-per-stage-per-generation mask rather than by this budget.
+        self.assertIn("r42_diag_pre_seen_mask", self.candidate)
+        normalized_pre = " ".join(
+            self.candidate.split(
+                "/* R42_CAPABILITIES_DIAGNOSTICS_BEGIN */", 1
+            )[1]
+            .split("/* R42_CAPABILITIES_DIAGNOSTICS_END */", 1)[0]
+            .split()
+        )
+        self.assertIn(
+            "r42_diag_pre_stage_should_emit( &r42_diag_pre_seen_mask, r42_diag_pre_bit)",
+            normalized_pre,
+        )
 
     def test_diagnostics_never_call_the_real_open_writer_or_retry(self) -> None:
         region = self.candidate.split(

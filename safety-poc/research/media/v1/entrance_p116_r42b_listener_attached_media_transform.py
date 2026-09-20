@@ -186,6 +186,69 @@ _CAPABILITIES_DIAG_STATE_REPLACEMENT = (
     "static unsigned r42_diag_candidate_count = 0;\n"
     "static unsigned r42_diag_detail_lines_printed = 0;\n"
     "#define R42_DIAG_DETAIL_LINE_LIMIT 8u\n"
+    "/*\n"
+    " * Pre-candidate rejection stages have their OWN bounded budget: each of\n"
+    " * NO_WRITER/ENVELOPE/FLAG/OPCODE is published at most ONCE per call\n"
+    " * generation, so a burst of unrelated frames cannot exhaust the\n"
+    " * candidate detail-line budget before a real CAPABILITIES frame arrives.\n"
+    " */\n"
+    "#define R42_DIAG_PRE_NO_WRITER (1u << 0)\n"
+    "#define R42_DIAG_PRE_ENVELOPE  (1u << 1)\n"
+    "#define R42_DIAG_PRE_FLAG      (1u << 2)\n"
+    "#define R42_DIAG_PRE_OPCODE    (1u << 3)\n"
+    "static unsigned r42_diag_pre_seen_mask = 0u;\n"
+    "\n"
+    "static unsigned\n"
+    "r42_diag_pre_stage_bit(\n"
+    "    int writer_present,\n"
+    "    int envelope_parsed,\n"
+    "    int data_flag,\n"
+    "    int capabilities_opcode)\n"
+    "{\n"
+    "    if (!writer_present) {\n"
+    "        return R42_DIAG_PRE_NO_WRITER;\n"
+    "    }\n"
+    "    if (!envelope_parsed) {\n"
+    "        return R42_DIAG_PRE_ENVELOPE;\n"
+    "    }\n"
+    "    if (!data_flag) {\n"
+    "        return R42_DIAG_PRE_FLAG;\n"
+    "    }\n"
+    "    if (!capabilities_opcode) {\n"
+    "        return R42_DIAG_PRE_OPCODE;\n"
+    "    }\n"
+    "    return 0u;\n"
+    "}\n"
+    "\n"
+    "static int\n"
+    "r42_diag_pre_stage_should_emit(unsigned *seen_mask, unsigned stage_bit)\n"
+    "{\n"
+    "    if (seen_mask == 0 || stage_bit == 0u) {\n"
+    "        return 0;\n"
+    "    }\n"
+    "    if ((*seen_mask & stage_bit) != 0u) {\n"
+    "        return 0;\n"
+    "    }\n"
+    "    *seen_mask |= stage_bit;\n"
+    "    return 1;\n"
+    "}\n"
+    "\n"
+    "static const char *\n"
+    "r42_diag_pre_stage_name(unsigned stage_bit)\n"
+    "{\n"
+    "    switch (stage_bit) {\n"
+    "    case R42_DIAG_PRE_NO_WRITER:\n"
+    '        return "NO_WRITER";\n'
+    "    case R42_DIAG_PRE_ENVELOPE:\n"
+    '        return "ENVELOPE";\n'
+    "    case R42_DIAG_PRE_FLAG:\n"
+    '        return "FLAG";\n'
+    "    case R42_DIAG_PRE_OPCODE:\n"
+    '        return "OPCODE";\n'
+    "    default:\n"
+    '        return "NONE";\n'
+    "    }\n"
+    "}\n"
     "/* R42_CAPABILITIES_DIAGNOSTICS_STATE_END */\n"
     + _CAPABILITIES_DIAG_STATE_ANCHOR
 )
@@ -201,75 +264,120 @@ _CAPABILITIES_DIAG_TRIGGER_BLOCK = (
     "                r42_diag_call_generation = g_r35_session.call_generation;\n"
     "                r42_diag_candidate_count = 0;\n"
     "                r42_diag_detail_lines_printed = 0;\n"
+    "                r42_diag_pre_seen_mask = 0u;\n"
     "            }\n"
     "\n"
     "            {\n"
-    '                const char *r42_diag_stage = "NONE";\n'
+    "                int r42_diag_writer_ok = g_r35_session.writer ? 1 : 0;\n"
+    "                int r42_diag_envelope_ok = 0;\n"
+    "                int r42_diag_data_flag = 0;\n"
+    "                int r42_diag_opcode_ok = 0;\n"
     "                int r42_diag_candidate_seen = 0;\n"
-    "                int r42_diag_parse_ok = 0;\n"
-    "                int r42_diag_call_match = 0;\n"
-    "                int r42_diag_video_requested = 0;\n"
+    "                int r42_diag_view_valid = 0;\n"
+    "                unsigned r42_diag_pre_bit = 0u;\n"
+    "                R35CtpEnvelopeView r42_diag_view;\n"
     "\n"
-    "                if (!g_r35_session.writer) {\n"
-    '                    r42_diag_stage = "NO_WRITER";\n'
-    "                } else {\n"
-    "                    R35CtpEnvelopeView r42_diag_view;\n"
-    "                    if (!r35_parse_ctp_envelope(body, body_len, &r42_diag_view)) {\n"
-    '                        r42_diag_stage = "ENVELOPE";\n'
-    "                    } else if (r42_diag_view.flags != R35_CTP_FLAG_DATA) {\n"
-    '                        r42_diag_stage = "FLAG";\n'
-    "                    } else if (r42_diag_view.inner_len < 2u ||\n"
-    "                               r35_read_be16(r42_diag_view.inner_body) != R36_OP_CAPABILITIES) {\n"
-    '                        r42_diag_stage = "OPCODE";\n'
-    "                    } else {\n"
-    "                        r42_diag_candidate_seen = 1;\n"
-    "                        r42_diag_parse_ok = 1;\n"
-    "                        r42_diag_candidate_count++;\n"
-    "                        if (r42_diag_view.inner_len < R36_CAP_BODY_MIN_LEN) {\n"
-    '                            r42_diag_stage = "LENGTH";\n'
-    "                        } else if (!r35_call_ready(&g_r35_session)) {\n"
-    '                            r42_diag_stage = "NO_LIVE_CALL";\n'
-    "                        } else {\n"
-    "                            unsigned r42_diag_local_connection =\n"
-    "                                (r42_diag_view.connection ^ 0x8000u) & 0xFFFFu;\n"
-    "                            r42_diag_call_match =\n"
-    "                                (r42_diag_local_connection ==\n"
-    "                                 g_r35_session.call_ctp_connection) ? 1 : 0;\n"
-    "                            if (!r42_diag_call_match) {\n"
-    '                                r42_diag_stage = "CONNECTION_MISMATCH";\n'
-    "                            } else {\n"
-    "                                r42_diag_video_requested =\n"
-    "                                    r36_capabilities_video_requested(&r42_diag_view) ? 1 : 0;\n"
-    "                                if (!r42_diag_video_requested) {\n"
-    '                                    r42_diag_stage = "VIDEO_BIT_CLEAR";\n'
-    "                                }\n"
-    "                            }\n"
+    "                if (r42_diag_writer_ok &&\n"
+    "                    r35_parse_ctp_envelope(\n"
+    "                        body, body_len, &r42_diag_view)) {\n"
+    "                    r42_diag_view_valid = 1;\n"
+    "                    r42_diag_envelope_ok = 1;\n"
+    "                    if (r42_diag_view.flags == R35_CTP_FLAG_DATA) {\n"
+    "                        r42_diag_data_flag = 1;\n"
+    "                        if (r42_diag_view.inner_len >= 2u &&\n"
+    "                            r35_read_be16(r42_diag_view.inner_body) ==\n"
+    "                                R36_OP_CAPABILITIES) {\n"
+    "                            r42_diag_opcode_ok = 1;\n"
     "                        }\n"
     "                    }\n"
     "                }\n"
     "\n"
-    "                if (r42_diag_candidate_seen &&\n"
-    "                    r42_diag_detail_lines_printed < R42_DIAG_DETAIL_LINE_LIMIT) {\n"
-    "                    r42_diag_detail_lines_printed++;\n"
-    '                    printf("R42_CAPABILITIES_CANDIDATE_SEEN=true\\n");\n'
-    "                    printf(\n"
-    '                        "R42_CAPABILITIES_PARSE_OK=%s\\n",\n'
-    '                        r42_diag_parse_ok ? "true" : "false"\n'
-    "                    );\n"
-    "                    printf(\n"
-    '                        "R42_CAPABILITIES_CALL_MATCH=%s\\n",\n'
-    '                        r42_diag_call_match ? "true" : "false"\n'
-    "                    );\n"
-    "                    printf(\n"
-    '                        "R42_CAPABILITIES_VIDEO_REQUESTED=%s\\n",\n'
-    '                        r42_diag_video_requested ? "true" : "false"\n'
-    "                    );\n"
-    '                    printf("R42_TRIGGER_REJECT_STAGE=%s\\n", r42_diag_stage);\n'
-    "                    printf(\n"
-    '                        "R42_CAPABILITIES_CANDIDATE_COUNT=%u\\n",\n'
-    "                        r42_diag_candidate_count\n"
-    "                    );\n"
-    "                    fflush(stdout);\n"
+    "                r42_diag_pre_bit = r42_diag_pre_stage_bit(\n"
+    "                    r42_diag_writer_ok,\n"
+    "                    r42_diag_envelope_ok,\n"
+    "                    r42_diag_data_flag,\n"
+    "                    r42_diag_opcode_ok);\n"
+    "\n"
+    "                if (r42_diag_pre_bit != 0u) {\n"
+    "                    /*\n"
+    "                     * Pre-candidate rejection: once per stage per\n"
+    "                     * generation, on its own budget, so unrelated\n"
+    "                     * traffic cannot hide a later real candidate.\n"
+    "                     */\n"
+    "                    if (r42_diag_pre_stage_should_emit(\n"
+    "                            &r42_diag_pre_seen_mask, r42_diag_pre_bit)) {\n"
+    '                        printf("R42_CAPABILITIES_CANDIDATE_SEEN=false\\n");\n'
+    "                        if (r42_diag_envelope_ok) {\n"
+    '                            printf("R42_CAPABILITIES_PARSE_OK=true\\n");\n'
+    "                        } else {\n"
+    '                            printf("R42_CAPABILITIES_PARSE_OK=false\\n");\n'
+    "                        }\n"
+    '                        printf("R42_CAPABILITIES_CALL_MATCH=false\\n");\n'
+    '                        printf("R42_CAPABILITIES_VIDEO_REQUESTED=false\\n");\n'
+    "                        printf(\n"
+    '                            "R42_TRIGGER_REJECT_STAGE=%s\\n",\n'
+    "                            r42_diag_pre_stage_name(r42_diag_pre_bit)\n"
+    "                        );\n"
+    '                        printf("R42_CAPABILITIES_CANDIDATE_COUNT=0\\n");\n'
+    "                        fflush(stdout);\n"
+    "                    }\n"
+    "                } else if (r42_diag_view_valid) {\n"
+    "                    int r42_diag_parse_ok = 1;\n"
+    "                    int r42_diag_call_match = 0;\n"
+    "                    int r42_diag_video_requested = 0;\n"
+    '                    const char *r42_diag_stage = "NONE";\n'
+    "\n"
+    "                    r42_diag_candidate_seen = 1;\n"
+    "                    r42_diag_candidate_count++;\n"
+    "                    if (r42_diag_view.inner_len < R36_CAP_BODY_MIN_LEN) {\n"
+    '                        r42_diag_stage = "LENGTH";\n'
+    "                    } else if (!r35_call_ready(&g_r35_session)) {\n"
+    '                        r42_diag_stage = "NO_LIVE_CALL";\n'
+    "                    } else {\n"
+    "                        unsigned r42_diag_local_connection =\n"
+    "                            (r42_diag_view.connection ^ 0x8000u) & 0xFFFFu;\n"
+    "                        r42_diag_call_match =\n"
+    "                            (r42_diag_local_connection ==\n"
+    "                             g_r35_session.call_ctp_connection) ? 1 : 0;\n"
+    "                        if (!r42_diag_call_match) {\n"
+    '                            r42_diag_stage = "CONNECTION_MISMATCH";\n'
+    "                        } else {\n"
+    "                            r42_diag_video_requested =\n"
+    "                                r36_capabilities_video_requested(\n"
+    "                                    &r42_diag_view) ? 1 : 0;\n"
+    "                            if (!r42_diag_video_requested) {\n"
+    '                                r42_diag_stage = "VIDEO_BIT_CLEAR";\n'
+    "                            }\n"
+    "                        }\n"
+    "                    }\n"
+    "\n"
+    "                    if (r42_diag_candidate_seen &&\n"
+    "                        r42_diag_detail_lines_printed <\n"
+    "                            R42_DIAG_DETAIL_LINE_LIMIT) {\n"
+    "                        r42_diag_detail_lines_printed++;\n"
+    '                        printf("R42_CAPABILITIES_CANDIDATE_SEEN=true\\n");\n'
+    "                        printf(\n"
+    '                            "R42_CAPABILITIES_PARSE_OK=%s\\n",\n'
+    '                            r42_diag_parse_ok ? "true" : "false"\n'
+    "                        );\n"
+    "                        printf(\n"
+    '                            "R42_CAPABILITIES_CALL_MATCH=%s\\n",\n'
+    '                            r42_diag_call_match ? "true" : "false"\n'
+    "                        );\n"
+    "                        printf(\n"
+    '                            "R42_CAPABILITIES_VIDEO_REQUESTED=%s\\n",\n'
+    '                            r42_diag_video_requested ? "true" : "false"\n'
+    "                        );\n"
+    "                        printf(\n"
+    '                            "R42_TRIGGER_REJECT_STAGE=%s\\n",\n'
+    "                            r42_diag_stage\n"
+    "                        );\n"
+    "                        printf(\n"
+    '                            "R42_CAPABILITIES_CANDIDATE_COUNT=%u\\n",\n'
+    "                            r42_diag_candidate_count\n"
+    "                        );\n"
+    "                        fflush(stdout);\n"
+    "                    }\n"
     "                }\n"
     "            }\n"
     "            /* R42_CAPABILITIES_DIAGNOSTICS_END */\n"
@@ -359,13 +467,30 @@ def add_capabilities_trigger_diagnostics(candidate: str) -> str:
         "R42_CAPABILITIES_VIDEO_REQUESTED=%s",
         "R42_TRIGGER_REJECT_STAGE=%s",
         "R42_CAPABILITIES_CANDIDATE_COUNT=%u",
+        # Pre-candidate rejection stages are published on their own
+        # once-per-generation budget; without these sites a frame that fails
+        # the envelope/flag/opcode checks stays invisible and the next canary
+        # cannot tell "no traffic at all" from "rejected this early".
+        "R42_CAPABILITIES_CANDIDATE_SEEN=false",
+        "R42_CAPABILITIES_PARSE_OK=true",
+        "R42_CAPABILITIES_PARSE_OK=false",
+        "R42_CAPABILITIES_CALL_MATCH=false",
+        "R42_CAPABILITIES_VIDEO_REQUESTED=false",
+        "R42_CAPABILITIES_CANDIDATE_COUNT=0",
+        "r42_diag_pre_stage_should_emit(",
+        "r42_diag_pre_stage_name(",
     ):
         if needle not in out:
             raise RuntimeError(
                 f"R42B_CAPABILITIES_DIAG_MARKER_GATE=FAIL needle={needle}"
             )
-    if out.count("R42_TRIGGER_REJECT_STAGE=%s") != 2:
+    # Once from the pre-candidate block, once from the candidate
+    # classification block, once more from the real trigger-outcome site
+    # (OPEN_SENT/QUEUE_REJECTED).
+    if out.count("R42_TRIGGER_REJECT_STAGE=%s") != 3:
         raise RuntimeError("R42B_CAPABILITIES_DIAG_REJECT_STAGE_SITE_GATE=FAIL")
+    if "R42_DIAG_PRE_MASK_ALL" in out:
+        raise RuntimeError("R42B_CAPABILITIES_DIAG_UNBOUNDED_MASK_GATE=FAIL")
 
     for capture_literal in ("0x0C4A", "0x4A5A", "0xCA5A"):
         if capture_literal in out:
