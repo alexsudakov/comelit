@@ -40,6 +40,62 @@ _R35_ARM_OLD = "    p80_media_forwarding_enabled = armed ? TRUE : FALSE;\n"
 _R35_ARM_NEW = "    r42_listener_rtp_arm(armed);\n"
 _DOOR_SIGNAL_INSTALL = "    signal(SIGUSR1, v4_door_signal_handler);\n"
 
+# CALL_INIT may share one PseudoTCP recv() payload with later call-bound
+# frames.  The frozen listener consumed CALL_INIT and then returned TRUE from
+# p12_process_post_uaut(), which leaves already-buffered trailing frames in
+# post_ack_capture until some future socket-readable event happens.  R42 needs
+# the later CAPABILITY_REPORT immediately, so after consuming CALL_INIT the
+# parser must continue draining the buffer it already owns.
+_CALL_INIT_DRAIN_ANCHOR = """                p12_consume_post_ack(
+                    frame_len
+                );
+
+
+                failed =
+                    FALSE;
+
+
+                /*
+                 * Persistent listener:
+                 * CALL_INIT observation must not terminate the
+                 * registered PseudoTCP/CTPP session.
+                 */
+                return TRUE;
+"""
+_CALL_INIT_DRAIN_REPLACEMENT = """                p12_consume_post_ack(
+                    frame_len
+                );
+
+
+                failed =
+                    FALSE;
+
+
+                /*
+                 * Persistent listener / attached-call drain:
+                 * CALL_INIT may be followed by another complete ViP frame in
+                 * the bytes already copied into post_ack_capture by the same
+                 * pseudo_tcp_socket_recv() call.  Continue this parser loop
+                 * now; returning would strand those bytes until unrelated
+                 * future socket activity arrives.
+                 */
+                continue;
+"""
+
+
+def fix_call_init_buffer_drain(candidate: str) -> str:
+    out = _replace_once(
+        candidate,
+        _CALL_INIT_DRAIN_ANCHOR,
+        _CALL_INIT_DRAIN_REPLACEMENT,
+        "R42B CALL_INIT buffered-frame drain",
+    )
+    if _CALL_INIT_DRAIN_ANCHOR in out:
+        raise RuntimeError("R42B_CALL_INIT_DRAIN_OLD_RETURN_GATE=FAIL")
+    if "Persistent listener / attached-call drain:" not in out:
+        raise RuntimeError("R42B_CALL_INIT_DRAIN_MARKER_GATE=FAIL")
+    return out
+
 # --- P116/R42-b canary observability: bounded scalar diagnostic markers ---
 #
 # None of these touch Door/Gate/self-activation/capture-literal control flow.
@@ -719,6 +775,7 @@ def _assert_final_listener_gates(candidate: str) -> None:
         "R42_CAPABILITIES_CANDIDATE_SEEN=true",
         "R42_TRIGGER_REJECT_STAGE=%s",
         "R42_CAPABILITIES_CANDIDATE_COUNT=%u",
+        "Persistent listener / attached-call drain:",
     )
     for needle in required:
         if needle not in candidate:
@@ -761,6 +818,7 @@ def transform(source: str) -> str:
     r36_source = r36.transform(r35_source)
     r37_source = add_listener_r37(r36_source)
     candidate = r42.transform(r37_source)
+    candidate = fix_call_init_buffer_drain(candidate)
     candidate = add_media_diagnostics_markers(candidate)
     candidate = add_capabilities_trigger_diagnostics(candidate)
     _assert_final_listener_gates(candidate)
