@@ -40,6 +40,132 @@ _R35_ARM_OLD = "    p80_media_forwarding_enabled = armed ? TRUE : FALSE;\n"
 _R35_ARM_NEW = "    r42_listener_rtp_arm(armed);\n"
 _DOOR_SIGNAL_INSTALL = "    signal(SIGUSR1, v4_door_signal_handler);\n"
 
+# --- P116/R42-b canary observability: bounded scalar diagnostic markers ---
+#
+# None of these touch Door/Gate/self-activation/capture-literal control flow.
+# Each new printf pairs a call-generation marker with one already-existing
+# channel-lifecycle event so the HA-side status JSON can bind every value to
+# the call generation it came from (see COMELIT-P116-R42B-CANARY-OBSERVABILITY-001).
+_CALL_GENERATION_CAPTURE_ANCHOR = (
+    '                    printf("R35_CALL_CTP_CAPTURED=true\\n");\n'
+)
+_CALL_GENERATION_CAPTURE_REPLACEMENT = (
+    _CALL_GENERATION_CAPTURE_ANCHOR
+    + '                    printf(\n'
+    + '                        "R42_CALL_GENERATION=%u\\n",\n'
+    + '                        g_r35_session.call_generation\n'
+    + '                    );\n'
+)
+
+_MEDIA_CHANNEL_ALLOCATED_ANCHOR = (
+    '    printf("R42_MEDIA_CHANNEL_ALLOCATED=true\\n");\n'
+    '    printf("R42_CAPTURE_CHANNEL_LITERAL_USED=false\\n");\n'
+    '    fflush(stdout);\n'
+)
+_MEDIA_CHANNEL_ALLOCATED_REPLACEMENT = (
+    '    printf("R42_MEDIA_CHANNEL_ALLOCATED=true\\n");\n'
+    '    printf("R42_CAPTURE_CHANNEL_LITERAL_USED=false\\n");\n'
+    '    printf("R42_CALL_GENERATION=%u\\n", g_r35_session.call_generation);\n'
+    '    printf("R42_MEDIA_CHANNEL_ID=%u\\n", (unsigned)r42_media_channel_id);\n'
+    '    fflush(stdout);\n'
+)
+
+_MEDIAREQ26_OPEN_ANCHOR = (
+    '    printf("R42_MEDIAREQ26_OPEN_PROFILE=CAPTURE_VALIDATED\\n");\n'
+    '    fflush(stdout);\n'
+)
+_MEDIAREQ26_OPEN_REPLACEMENT = (
+    '    printf("R42_MEDIAREQ26_OPEN_PROFILE=CAPTURE_VALIDATED\\n");\n'
+    '    printf("R42_CALL_GENERATION=%u\\n", g_r35_session.call_generation);\n'
+    '    printf(\n'
+    '        "R42_MEDIAREQ26_OPEN_CHANNEL=%u\\n",\n'
+    '        (unsigned)r42_media_channel_id\n'
+    '    );\n'
+    '    fflush(stdout);\n'
+)
+
+_MEDIA_STOP_SENT_ANCHOR = (
+    '                printf("R42_ATTACHED_MEDIA_STOP_SENT=true\\n");\n'
+    '                fflush(stdout);\n'
+)
+_MEDIA_STOP_SENT_REPLACEMENT = (
+    '                printf("R42_ATTACHED_MEDIA_STOP_SENT=true\\n");\n'
+    '                printf(\n'
+    '                    "R42_CALL_GENERATION=%u\\n",\n'
+    '                    g_r35_session.call_generation\n'
+    '                );\n'
+    '                printf(\n'
+    '                    "R42_MEDIA_STOP_CHANNEL=%u\\n",\n'
+    '                    (unsigned)r42_media_channel_id\n'
+    '                );\n'
+    '                fflush(stdout);\n'
+)
+
+_MEDIA_CHANNEL_CLOSED_ANCHOR = (
+    '    r42_media_stage = R42_MEDIA_CLOSED;\n'
+    '    r42_media_channel_id = 0u;\n'
+    '    printf("R42_MEDIA_CHANNEL_CLOSED=true\\n");\n'
+    '    fflush(stdout);\n'
+)
+_MEDIA_CHANNEL_CLOSED_REPLACEMENT = (
+    '    r42_media_stage = R42_MEDIA_CLOSED;\n'
+    '    r42_media_channel_id = 0u;\n'
+    '    printf("R42_CALL_GENERATION=%u\\n", g_r35_session.call_generation);\n'
+    '    printf("R42_MEDIA_CHANNEL_CLOSED=true\\n");\n'
+    '    fflush(stdout);\n'
+)
+
+
+def add_media_diagnostics_markers(candidate: str) -> str:
+    """Add bounded call-generation/channel scalar markers for HA observability.
+
+    Every value printed here already exists as a runtime variable
+    (``g_r35_session.call_generation``, ``r42_media_channel_id``); no new
+    control path, no capture literal, no raw payload bytes.
+    """
+    generation_markers_before = candidate.count("R42_CALL_GENERATION=%u")
+    out = _replace_once(
+        candidate,
+        _MEDIA_CHANNEL_ALLOCATED_ANCHOR,
+        _MEDIA_CHANNEL_ALLOCATED_REPLACEMENT,
+        "R42B canary media channel id marker",
+    )
+    out = _replace_once(
+        out,
+        _MEDIAREQ26_OPEN_ANCHOR,
+        _MEDIAREQ26_OPEN_REPLACEMENT,
+        "R42B canary mediareq26 open channel marker",
+    )
+    out = _replace_once(
+        out,
+        _MEDIA_STOP_SENT_ANCHOR,
+        _MEDIA_STOP_SENT_REPLACEMENT,
+        "R42B canary stop channel marker",
+    )
+    out = _replace_once(
+        out,
+        _MEDIA_CHANNEL_CLOSED_ANCHOR,
+        _MEDIA_CHANNEL_CLOSED_REPLACEMENT,
+        "R42B canary channel closed generation marker",
+    )
+
+    for needle in (
+        "R42_CALL_GENERATION=%u",
+        "R42_MEDIA_CHANNEL_ID=%u",
+        "R42_MEDIAREQ26_OPEN_CHANNEL=%u",
+        "R42_MEDIA_STOP_CHANNEL=%u",
+    ):
+        if needle not in out:
+            raise RuntimeError(f"R42B_CANARY_MARKER_GATE=FAIL needle={needle}")
+    if out.count("R42_CALL_GENERATION=%u") != generation_markers_before + 4:
+        raise RuntimeError("R42B_CANARY_GENERATION_BINDING_GATE=FAIL")
+    for capture_literal in ("0x0C4A", "0x4A5A", "0xCA5A"):
+        if capture_literal in out:
+            raise RuntimeError(
+                f"R42B_CANARY_CAPTURE_LITERAL_GATE=FAIL needle={capture_literal}"
+            )
+    return out
+
 _LISTENER_RTP_CONTROL = r'''
 /* R42_LISTENER_RTP_BRIDGE_BEGIN */
 static void
@@ -251,6 +377,10 @@ def _assert_final_listener_gates(candidate: str) -> None:
         'R42_MEDIA_CHANNEL_CLOSED=true',
         'P80_VIDEO_RTP_FORWARDING=PASS',
         "g_unix_signal_add(SIGUSR2",
+        "R42_CALL_GENERATION=%u",
+        "R42_MEDIA_CHANNEL_ID=%u",
+        "R42_MEDIAREQ26_OPEN_CHANNEL=%u",
+        "R42_MEDIA_STOP_CHANNEL=%u",
     )
     for needle in required:
         if needle not in candidate:
@@ -284,9 +414,16 @@ def transform(source: str) -> str:
         _R35_ARM_NEW,
         "R42 listener R35 arm hook",
     )
+    r35_source = _replace_once(
+        r35_source,
+        _CALL_GENERATION_CAPTURE_ANCHOR,
+        _CALL_GENERATION_CAPTURE_REPLACEMENT,
+        "R42B canary call generation capture marker",
+    )
     r36_source = r36.transform(r35_source)
     r37_source = add_listener_r37(r36_source)
     candidate = r42.transform(r37_source)
+    candidate = add_media_diagnostics_markers(candidate)
     _assert_final_listener_gates(candidate)
     return candidate
 

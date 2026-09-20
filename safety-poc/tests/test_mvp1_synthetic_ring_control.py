@@ -174,6 +174,7 @@ def _runtime_instance(module: types.ModuleType) -> object:
     runtime._native_marker_tail = []
     runtime._door_diagnostic = {}
     runtime._door_result_future = None
+    runtime._media_diagnostics = module.MediaCallDiagnostics()
     return runtime
 
 

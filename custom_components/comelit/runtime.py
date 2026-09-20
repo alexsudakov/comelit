@@ -19,6 +19,7 @@ from .cloud import (
     async_negotiate_p2p,
 )
 from .const import EVENT_DOOR_OPERATION, EVENT_RING
+from .media_diagnostics import MediaCallDiagnostics
 from .oauth import ComelitOAuthError, ComelitOAuthManager
 from .ring_event import RingObservationError, parse_v4_safe_ring
 from .sdp import ComelitSdpError, transform_offer
@@ -183,6 +184,7 @@ class ComelitRingRuntime:
         self._last_native_failure_markers: list[str] = []
         self._ring_media: RingMediaCoordinator | None = None
         self._synthetic_ring_media: RingMediaCoordinator | None = None
+        self._media_diagnostics = MediaCallDiagnostics()
 
     @property
     def running(self) -> bool:
@@ -234,6 +236,7 @@ class ComelitRingRuntime:
             "ring_media": (
                 self._ring_media.status() if self._ring_media is not None else None
             ),
+            "media_diagnostics": self._media_diagnostics.snapshot(),
         }
 
     def set_ring_media_coordinator(
@@ -359,6 +362,7 @@ class ComelitRingRuntime:
         self._native_marker_tail.clear()
         self._last_ring_event = None
         self._last_error = None
+        self._media_diagnostics.reset()
         self._task = self._entry.async_create_background_task(
             self._hass,
             self._async_run_once(),
@@ -752,6 +756,7 @@ class ComelitRingRuntime:
                 return
             line = raw.decode("utf-8", errors="replace").strip()
             self._remember_native_marker(line)
+            self._media_diagnostics.observe_line(line)
 
             if line == "ICE_GATHER=PASS":
                 self._offer_ready.set()
