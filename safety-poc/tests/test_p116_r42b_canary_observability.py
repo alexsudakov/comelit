@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 REPO = ROOT.parent
 RUNTIME = REPO / "custom_components" / "comelit" / "runtime.py"
 MEDIA_DIAGNOSTICS = REPO / "custom_components" / "comelit" / "media_diagnostics.py"
+RING_MEDIA = REPO / "custom_components" / "comelit" / "ring_media.py"
 MEDIA = ROOT / "research" / "media" / "v1"
 DOOR_SOURCE = ROOT / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-ctpp-door.c"
 BUILDER = MEDIA / "ct122_build_p116_r42_attached_media_candidate.sh"
@@ -48,6 +49,8 @@ def _load_media_diagnostics_module() -> types.ModuleType:
 MD = _load_media_diagnostics_module()
 MediaCallDiagnostics = MD.MediaCallDiagnostics
 MEDIA_DIAGNOSTICS_FIELDS = MD.MEDIA_DIAGNOSTICS_FIELDS
+CAPABILITIES_TRIGGER_FIELDS = MD.CAPABILITIES_TRIGGER_FIELDS
+ALL_DIAGNOSTICS_FIELDS = MEDIA_DIAGNOSTICS_FIELDS + CAPABILITIES_TRIGGER_FIELDS
 
 
 def _load_runtime_module() -> types.ModuleType:
@@ -188,8 +191,15 @@ class MediaCallDiagnosticsUnitTests(unittest.TestCase):
     ) -> None:
         diag = MediaCallDiagnostics()
         snapshot = diag.snapshot()
-        self.assertEqual(set(snapshot), set(MEDIA_DIAGNOSTICS_FIELDS))
+        # The original 16-field contract (COMELIT-P116-R42B-CANARY-
+        # OBSERVABILITY-001 round 1) must still be exactly 16 fields, all
+        # present, unrenamed.
         self.assertEqual(len(MEDIA_DIAGNOSTICS_FIELDS), 16)
+        self.assertTrue(set(MEDIA_DIAGNOSTICS_FIELDS).issubset(snapshot))
+        # Round 2 (failure forensic) adds 7 more fields, additively.
+        self.assertEqual(len(CAPABILITIES_TRIGGER_FIELDS), 7)
+        self.assertEqual(set(snapshot), set(ALL_DIAGNOSTICS_FIELDS))
+        self.assertEqual(len(ALL_DIAGNOSTICS_FIELDS), 23)
         self.assertIsNone(snapshot["call_generation"])
         self.assertIsNone(snapshot["media_channel"])
         self.assertIsNone(snapshot["channel_source"])
@@ -206,6 +216,13 @@ class MediaCallDiagnosticsUnitTests(unittest.TestCase):
         self.assertIsNone(snapshot["stop_channel"])
         self.assertFalse(snapshot["channel_closed"])
         self.assertFalse(snapshot["cleanup_complete"])
+        self.assertFalse(snapshot["capabilities_seen"])
+        self.assertFalse(snapshot["capabilities_parse_ok"])
+        self.assertFalse(snapshot["capabilities_call_match"])
+        self.assertFalse(snapshot["capabilities_video_requested"])
+        self.assertIsNone(snapshot["trigger_reject_stage"])
+        self.assertIsNone(snapshot["capabilities_candidate_count"])
+        self.assertIsNone(snapshot["attach_failure_reason"])
 
     def test_full_call_lifecycle_binds_every_field_to_the_call_generation(
         self,
@@ -453,6 +470,189 @@ class MediaCallDiagnosticsUnitTests(unittest.TestCase):
                 self.assertNotIn("passwd", value)
 
 
+class CapabilitiesTriggerDiagnosticsUnitTests(unittest.TestCase):
+    """Round 2 (failure forensic): CAPABILITIES-candidate classification."""
+
+    def test_full_candidate_match_reports_all_new_fields(self) -> None:
+        diag = MediaCallDiagnostics()
+        diag.observe_line("R42_CALL_GENERATION=1")
+        diag.observe_line("R42_CAPABILITIES_CANDIDATE_SEEN=true")
+        diag.observe_line("R42_CAPABILITIES_PARSE_OK=true")
+        diag.observe_line("R42_CAPABILITIES_CALL_MATCH=true")
+        diag.observe_line("R42_CAPABILITIES_VIDEO_REQUESTED=true")
+        diag.observe_line("R42_TRIGGER_REJECT_STAGE=NONE")
+        diag.observe_line("R42_CAPABILITIES_CANDIDATE_COUNT=1")
+        diag.observe_line("R42_TRIGGER_REJECT_STAGE=OPEN_SENT")
+
+        snapshot = diag.snapshot()
+        self.assertTrue(snapshot["capabilities_seen"])
+        self.assertTrue(snapshot["capabilities_parse_ok"])
+        self.assertTrue(snapshot["capabilities_call_match"])
+        self.assertTrue(snapshot["capabilities_video_requested"])
+        self.assertEqual(snapshot["trigger_reject_stage"], "OPEN_SENT")
+        self.assertEqual(snapshot["capabilities_candidate_count"], 1)
+
+    def test_video_bit_clear_rejection_reports_call_match_but_not_video(
+        self,
+    ) -> None:
+        diag = MediaCallDiagnostics()
+        diag.observe_line("R42_CALL_GENERATION=1")
+        diag.observe_line("R42_CAPABILITIES_CANDIDATE_SEEN=true")
+        diag.observe_line("R42_CAPABILITIES_PARSE_OK=true")
+        diag.observe_line("R42_CAPABILITIES_CALL_MATCH=true")
+        diag.observe_line("R42_CAPABILITIES_VIDEO_REQUESTED=false")
+        diag.observe_line("R42_TRIGGER_REJECT_STAGE=VIDEO_BIT_CLEAR")
+        diag.observe_line("R42_CAPABILITIES_CANDIDATE_COUNT=1")
+
+        snapshot = diag.snapshot()
+        self.assertTrue(snapshot["capabilities_seen"])
+        self.assertTrue(snapshot["capabilities_call_match"])
+        self.assertFalse(snapshot["capabilities_video_requested"])
+        self.assertEqual(snapshot["trigger_reject_stage"], "VIDEO_BIT_CLEAR")
+
+    def test_no_candidate_frame_at_all_leaves_fields_at_default(self) -> None:
+        diag = MediaCallDiagnostics()
+        diag.observe_line("R42_CALL_GENERATION=1")
+        snapshot = diag.snapshot()
+        self.assertFalse(snapshot["capabilities_seen"])
+        self.assertFalse(snapshot["capabilities_parse_ok"])
+        self.assertFalse(snapshot["capabilities_call_match"])
+        self.assertFalse(snapshot["capabilities_video_requested"])
+        self.assertIsNone(snapshot["trigger_reject_stage"])
+        self.assertIsNone(snapshot["capabilities_candidate_count"])
+
+    def test_trigger_reject_stage_whitelist_rejects_unknown_values(self) -> None:
+        diag = MediaCallDiagnostics()
+        diag.observe_line("R42_CALL_GENERATION=1")
+        for bogus in (
+            "MAYBE",
+            "none",  # wrong case
+            "NO_LIVE_CALL; rm -rf /",
+            "",
+            "QUEUE_REJECTED,OPEN_SENT",
+        ):
+            diag.observe_line(f"R42_TRIGGER_REJECT_STAGE={bogus}")
+            self.assertIsNone(diag.snapshot()["trigger_reject_stage"])
+
+        # A legitimate whitelist member still works after rejecting bogus ones.
+        diag.observe_line("R42_TRIGGER_REJECT_STAGE=NO_LIVE_CALL")
+        self.assertEqual(diag.snapshot()["trigger_reject_stage"], "NO_LIVE_CALL")
+
+    def test_all_eleven_whitelisted_reject_stages_are_accepted(self) -> None:
+        diag = MediaCallDiagnostics()
+        diag.observe_line("R42_CALL_GENERATION=1")
+        for stage in (
+            "NONE",
+            "NO_WRITER",
+            "ENVELOPE",
+            "FLAG",
+            "OPCODE",
+            "LENGTH",
+            "NO_LIVE_CALL",
+            "CONNECTION_MISMATCH",
+            "VIDEO_BIT_CLEAR",
+            "QUEUE_REJECTED",
+            "OPEN_SENT",
+        ):
+            diag.observe_line(f"R42_TRIGGER_REJECT_STAGE={stage}")
+            self.assertEqual(diag.snapshot()["trigger_reject_stage"], stage)
+
+    def test_new_call_generation_wipes_stale_capabilities_evidence(self) -> None:
+        diag = MediaCallDiagnostics()
+        diag.observe_line("R42_CALL_GENERATION=1")
+        diag.observe_line("R42_CAPABILITIES_CANDIDATE_SEEN=true")
+        diag.observe_line("R42_CAPABILITIES_CALL_MATCH=true")
+        diag.observe_line("R42_TRIGGER_REJECT_STAGE=VIDEO_BIT_CLEAR")
+        diag.observe_line("R42_CAPABILITIES_CANDIDATE_COUNT=3")
+        self.assertTrue(diag.snapshot()["capabilities_seen"])
+
+        diag.observe_line("R42_CALL_GENERATION=2")
+        snapshot = diag.snapshot()
+        self.assertEqual(snapshot["call_generation"], 2)
+        self.assertFalse(snapshot["capabilities_seen"])
+        self.assertFalse(snapshot["capabilities_call_match"])
+        self.assertIsNone(snapshot["trigger_reject_stage"])
+        self.assertIsNone(snapshot["capabilities_candidate_count"])
+
+    def test_capabilities_evidence_without_a_bound_generation_is_dropped(
+        self,
+    ) -> None:
+        diag = MediaCallDiagnostics()
+        diag.observe_line("R42_CAPABILITIES_CANDIDATE_SEEN=true")
+        diag.observe_line("R42_TRIGGER_REJECT_STAGE=NO_LIVE_CALL")
+        diag.observe_line("R42_CAPABILITIES_CANDIDATE_COUNT=1")
+        snapshot = diag.snapshot()
+        self.assertIsNone(snapshot["call_generation"])
+        self.assertFalse(snapshot["capabilities_seen"])
+        self.assertIsNone(snapshot["trigger_reject_stage"])
+        self.assertIsNone(snapshot["capabilities_candidate_count"])
+
+    def test_candidate_count_is_parsed_as_int_not_string(self) -> None:
+        diag = MediaCallDiagnostics()
+        diag.observe_line("R42_CALL_GENERATION=1")
+        diag.observe_line("R42_CAPABILITIES_CANDIDATE_COUNT=8")
+        self.assertEqual(diag.snapshot()["capabilities_candidate_count"], 8)
+        self.assertIsInstance(diag.snapshot()["capabilities_candidate_count"], int)
+
+    def test_attach_failure_reason_accepts_only_whitelisted_values(self) -> None:
+        diag = MediaCallDiagnostics()
+        diag.set_attach_failure_reason("attached_media_open_not_confirmed")
+        self.assertEqual(
+            diag.snapshot()["attach_failure_reason"],
+            "attached_media_open_not_confirmed",
+        )
+        diag.set_attach_failure_reason("some_unexpected_exception_message")
+        self.assertIsNone(diag.snapshot()["attach_failure_reason"])
+        diag.set_attach_failure_reason(None)
+        self.assertIsNone(diag.snapshot()["attach_failure_reason"])
+
+    def test_attach_failure_reason_is_not_populated_from_native_markers(
+        self,
+    ) -> None:
+        diag = MediaCallDiagnostics()
+        diag.observe_line("R42_CALL_GENERATION=1")
+        # A native marker line can never set attach_failure_reason, even if
+        # it happens to spell a whitelisted reason string as its value.
+        consumed = diag.observe_line(
+            "R42_ATTACH_FAILURE_REASON=attached_media_open_not_confirmed"
+        )
+        self.assertFalse(consumed)
+        self.assertIsNone(diag.snapshot()["attach_failure_reason"])
+
+    def test_attach_failure_reason_is_wiped_on_new_call_generation(self) -> None:
+        diag = MediaCallDiagnostics()
+        diag.observe_line("R42_CALL_GENERATION=1")
+        diag.set_attach_failure_reason("listener_not_ready")
+        self.assertEqual(
+            diag.snapshot()["attach_failure_reason"], "listener_not_ready"
+        )
+        diag.observe_line("R42_CALL_GENERATION=2")
+        self.assertIsNone(diag.snapshot()["attach_failure_reason"])
+
+    def test_all_twelve_whitelisted_attach_failure_reasons_are_accepted(
+        self,
+    ) -> None:
+        diag = MediaCallDiagnostics()
+        reasons = (
+            "attached_media_open_not_confirmed",
+            "listener_not_ready",
+            "media_start_not_confirmed",
+            "unsupported_attached_media_panel",
+            "media_session_state_mismatch",
+            "media_session_transition_busy",
+            "attached_inbound_media_busy",
+            "listener_pause_not_confirmed",
+            "unsupported_media_panel",
+            "invalid_media_reason",
+            "invalid_stop_reason",
+            "unknown",
+        )
+        self.assertEqual(len(reasons), 12)
+        for reason in reasons:
+            diag.set_attach_failure_reason(reason)
+            self.assertEqual(diag.snapshot()["attach_failure_reason"], reason)
+
+
 class RuntimeStatusMediaDiagnosticsTests(unittest.TestCase):
     """Integration tests through ComelitRingRuntime.status() / _async_read_output()."""
 
@@ -464,7 +664,7 @@ class RuntimeStatusMediaDiagnosticsTests(unittest.TestCase):
         status = runtime.status()
         self.assertIn("media_diagnostics", status)
         diagnostics = status["media_diagnostics"]
-        self.assertEqual(set(diagnostics), set(MEDIA_DIAGNOSTICS_FIELDS))
+        self.assertEqual(set(diagnostics), set(ALL_DIAGNOSTICS_FIELDS))
         # Existing fields must still be present and unrenamed.
         for key in (
             "attached_media_busy",
@@ -631,6 +831,210 @@ class R42BCanaryMarkerSourceGateTests(unittest.TestCase):
             r42b._assert_final_listener_gates(
                 self.candidate.replace("R42_MEDIA_CHANNEL_ID=%u", "", 1)
             )
+
+
+class R42BCapabilitiesTriggerDiagnosticsSourceGateTests(unittest.TestCase):
+    """Round 2 (failure forensic): the CAPABILITIES-candidate native overlay.
+
+    Verifies the new native diagnostics are bounded/read-only and that they
+    introduce NO functional/control-flow change: the real OPEN call site is
+    invoked exactly as many times as before, no retry/timeout is added, and
+    no capture literal appears.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.base_source = DOOR_SOURCE.read_text(encoding="utf-8")
+        # r42.transform()'s own output, i.e. the candidate BEFORE any R42-b
+        # canary-observability overlay, to get a "before" baseline for the
+        # r42_queue_media_channel_open( call-count invariant.
+        r35_candidate = r42b.r35.transform(r42b.add_listener_rtp_bridge(cls.base_source))
+        r35_candidate = r42b._replace_once(
+            r35_candidate,
+            r42b._R35_ARM_OLD,
+            r42b._R35_ARM_NEW,
+            "test fixture arm hook",
+        )
+        r36_candidate = r42b.r36.transform(r35_candidate)
+        r37_candidate = r42b.add_listener_r37(r36_candidate)
+        cls.pre_capabilities_diag_candidate = r42b.r42.transform(r37_candidate)
+        cls.candidate = r42b.transform(cls.base_source)
+
+    def test_open_call_count_is_unchanged_by_the_new_diagnostics(self) -> None:
+        before = self.pre_capabilities_diag_candidate.count(
+            "r42_queue_media_channel_open("
+        )
+        after = self.candidate.count("r42_queue_media_channel_open(")
+        self.assertEqual(before, after)
+        # Sanity: the real call site does exist exactly once (definition +
+        # the one call site inside the functional trigger).
+        self.assertGreaterEqual(before, 1)
+
+    def test_new_markers_present_with_expected_multiplicities(self) -> None:
+        candidate = self.candidate
+        self.assertEqual(
+            candidate.count("R42_CAPABILITIES_CANDIDATE_SEEN=true"), 1
+        )
+        self.assertEqual(candidate.count("R42_CAPABILITIES_PARSE_OK=%s"), 1)
+        self.assertEqual(candidate.count("R42_CAPABILITIES_CALL_MATCH=%s"), 1)
+        self.assertEqual(
+            candidate.count("R42_CAPABILITIES_VIDEO_REQUESTED=%s"), 1
+        )
+        self.assertEqual(candidate.count("R42_CAPABILITIES_CANDIDATE_COUNT=%u"), 1)
+        # Once from the candidate-classification block (may resolve to
+        # NONE), once more from the real trigger-outcome site
+        # (OPEN_SENT/QUEUE_REJECTED).
+        self.assertEqual(candidate.count("R42_TRIGGER_REJECT_STAGE=%s"), 2)
+
+    def test_reject_stage_enum_values_match_the_required_whitelist(self) -> None:
+        region = self.candidate.split(
+            "/* R42_CAPABILITIES_DIAGNOSTICS_BEGIN */", 1
+        )[1].split("/* R42_CAPABILITIES_DIAGNOSTICS_END */", 1)[0]
+        for stage in (
+            "NONE",
+            "NO_WRITER",
+            "ENVELOPE",
+            "FLAG",
+            "OPCODE",
+            "LENGTH",
+            "NO_LIVE_CALL",
+            "CONNECTION_MISMATCH",
+            "VIDEO_BIT_CLEAR",
+        ):
+            self.assertIn(f'"{stage}"', region)
+        self.assertIn('"OPEN_SENT"', self.candidate)
+        self.assertIn('"QUEUE_REJECTED"', self.candidate)
+
+    def test_detail_lines_are_bounded_to_eight_per_generation(self) -> None:
+        region = self.candidate.split(
+            "/* R42_CAPABILITIES_DIAGNOSTICS_BEGIN */", 1
+        )[1].split("/* R42_CAPABILITIES_DIAGNOSTICS_END */", 1)[0]
+        self.assertIn("R42_DIAG_DETAIL_LINE_LIMIT", region)
+        self.assertIn(
+            "r42_diag_detail_lines_printed < R42_DIAG_DETAIL_LINE_LIMIT", region
+        )
+        self.assertIn("#define R42_DIAG_DETAIL_LINE_LIMIT 8u", self.candidate)
+        # The candidate counter keeps incrementing regardless of the detail
+        # line cap.
+        self.assertIn("r42_diag_candidate_count++;", region)
+
+    def test_diagnostics_never_call_the_real_open_writer_or_retry(self) -> None:
+        region = self.candidate.split(
+            "/* R42_CAPABILITIES_DIAGNOSTICS_BEGIN */", 1
+        )[1].split("/* R42_CAPABILITIES_DIAGNOSTICS_END */", 1)[0]
+        self.assertNotIn("r42_queue_media_channel_open(", region)
+        self.assertNotIn("r35_send_open(", region)
+        self.assertNotIn("g_timeout_add", region)
+        self.assertNotIn("continue;", region)
+        self.assertNotIn("return", region)
+        self.assertNotIn("retry", region.lower())
+
+    def test_no_capture_literal_in_capabilities_diagnostics(self) -> None:
+        for capture_literal in ("0x0C4A", "0x4A5A", "0xCA5A"):
+            self.assertNotIn(capture_literal, self.candidate)
+
+    def test_transform_is_deterministic(self) -> None:
+        self.assertEqual(self.candidate, r42b.transform(self.base_source))
+
+    def test_add_capabilities_trigger_diagnostics_fails_closed_on_missing_anchor(
+        self,
+    ) -> None:
+        broken = self.candidate.replace(
+            "static R42AttachedMediaStage r42_media_stage = R42_MEDIA_IDLE;\n",
+            "",
+            1,
+        )
+        with self.assertRaises(RuntimeError):
+            r42b.add_capabilities_trigger_diagnostics(broken)
+
+    def test_final_listener_gate_requires_capabilities_markers(self) -> None:
+        with self.assertRaises(RuntimeError):
+            r42b._assert_final_listener_gates(
+                self.candidate.replace(
+                    "R42_CAPABILITIES_CANDIDATE_SEEN=true", "", 1
+                )
+            )
+
+
+class AttachFailureReasonWiringTests(unittest.TestCase):
+    """The transport attach-failure reason must reach ``media_diagnostics``.
+
+    Covers the second half of the DEV corrective: ``attach_failure_reason`` is
+    a Python-transport value, so its *wiring* (not only its sanitizer) is what
+    lets the next canary tell "the native side never confirmed the attached
+    media channel" apart from a shim, SDP or session failure - instead of
+    having to infer it from the elapsed time as this round had to.
+    """
+
+    def test_runtime_binds_the_coordinator_recorder_and_reports_it(self) -> None:
+        module = _load_runtime_module()
+        runtime = _status_ready_runtime_instance(module)
+
+        class FakeCoordinator:
+            def __init__(self) -> None:
+                self.recorder = None
+
+            def set_attach_failure_recorder(self, recorder: object) -> None:
+                self.recorder = recorder
+
+            def status(self) -> dict[str, object]:
+                return {}
+
+        coordinator = FakeCoordinator()
+        runtime.set_ring_media_coordinator(coordinator)
+        self.assertIsNotNone(coordinator.recorder)
+        # Nothing is fabricated before a real failure.
+        self.assertIsNone(
+            runtime.status()["media_diagnostics"]["attach_failure_reason"]
+        )
+
+        coordinator.recorder("attached_media_open_not_confirmed")
+        self.assertEqual(
+            runtime.status()["media_diagnostics"]["attach_failure_reason"],
+            "attached_media_open_not_confirmed",
+        )
+
+        # An unexpected exception-derived string is dropped, never stored.
+        coordinator.recorder("ComelitAttachedMediaError: raw detail")
+        self.assertIsNone(
+            runtime.status()["media_diagnostics"]["attach_failure_reason"]
+        )
+
+    def test_synthetic_coordinator_is_bound_and_hookless_objects_are_safe(
+        self,
+    ) -> None:
+        module = _load_runtime_module()
+        runtime = _status_ready_runtime_instance(module)
+
+        class FakeCoordinator:
+            def __init__(self) -> None:
+                self.recorder = None
+
+            def set_attach_failure_recorder(self, recorder: object) -> None:
+                self.recorder = recorder
+
+        synthetic = FakeCoordinator()
+        runtime.set_synthetic_ring_media_coordinator(synthetic)
+        self.assertIsNotNone(synthetic.recorder)
+
+        # A coordinator or test double without the hook must not break the
+        # existing setter contract.
+        runtime.set_ring_media_coordinator(object())
+        runtime.set_ring_media_coordinator(None)
+
+        synthetic.recorder("media_start_not_confirmed")
+        self.assertEqual(
+            runtime.status()["media_diagnostics"]["attach_failure_reason"],
+            "media_start_not_confirmed",
+        )
+
+    def test_ring_media_reports_the_reason_from_the_failure_branch(self) -> None:
+        source = RING_MEDIA.read_text(encoding="utf-8")
+        self.assertIn("def set_attach_failure_recorder(", source)
+        # Exactly one call site, inside the media-start failure branch, and
+        # the frozen failure contract itself stays unchanged.
+        self.assertEqual(source.count("recorder(str(exc))"), 1)
+        self.assertIn('recording_failure_reason = "media_start_failed"', source)
 
 
 if __name__ == "__main__":

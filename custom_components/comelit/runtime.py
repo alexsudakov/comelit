@@ -244,12 +244,28 @@ class ComelitRingRuntime:
         coordinator: RingMediaCoordinator | None,
     ) -> None:
         self._ring_media = coordinator
+        self._bind_attach_failure_recorder(coordinator)
 
     def set_synthetic_ring_media_coordinator(
         self,
         coordinator: RingMediaCoordinator | None,
     ) -> None:
         self._synthetic_ring_media = coordinator
+        self._bind_attach_failure_recorder(coordinator)
+
+    def _bind_attach_failure_recorder(
+        self,
+        coordinator: RingMediaCoordinator | None,
+    ) -> None:
+        """Bind the ring-media coordinator's attach-failure recorder.
+
+        Only the bounded diagnostics setter is handed over; the coordinator
+        keeps owning its own failure handling, and a coordinator object
+        without the hook (older build, test double) is left untouched.
+        """
+        binder = getattr(coordinator, "set_attach_failure_recorder", None)
+        if binder is not None:
+            binder(self._media_diagnostics.set_attach_failure_reason)
 
     def _ring_media_for_event(
         self,

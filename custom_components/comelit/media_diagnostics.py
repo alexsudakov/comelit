@@ -51,6 +51,62 @@ MEDIA_DIAGNOSTICS_FIELDS = (
     "cleanup_complete",
 )
 
+# COMELIT-P116-R42B-CANARY-OBSERVABILITY-001 round 2 (failure forensic):
+# bounded observability for the CAPABILITIES trigger candidate-frame
+# classification (R42_TRIGGER_REJECT_STAGE enum), plus the transport-level
+# attach failure reason. Additive to MEDIA_DIAGNOSTICS_FIELDS above; none of
+# the original 16 fields/semantics change.
+CAPABILITIES_TRIGGER_FIELDS = (
+    "capabilities_seen",
+    "capabilities_parse_ok",
+    "capabilities_call_match",
+    "capabilities_video_requested",
+    "trigger_reject_stage",
+    "capabilities_candidate_count",
+    "attach_failure_reason",
+)
+
+# R42_TRIGGER_REJECT_STAGE is a native-printed enum classifying exactly where
+# a CAPABILITIES-opcode candidate frame was rejected (or NONE/terminal
+# outcome). Values do not fit the generic true/false/PASS/FAIL/digits gate,
+# so they get their own whitelist; anything else is dropped, not stored.
+_TRIGGER_REJECT_STAGES = frozenset(
+    {
+        "NONE",
+        "NO_WRITER",
+        "ENVELOPE",
+        "FLAG",
+        "OPCODE",
+        "LENGTH",
+        "NO_LIVE_CALL",
+        "CONNECTION_MISMATCH",
+        "VIDEO_BIT_CLEAR",
+        "QUEUE_REJECTED",
+        "OPEN_SENT",
+    }
+)
+
+# attach_failure_reason is populated by the caller from existing Python
+# transport state (ComelitEntranceMediaTransport.last_error), never from a
+# native marker; whitelisted the same way so an unexpected exception-derived
+# string never reaches the status payload verbatim.
+_ATTACH_FAILURE_REASONS = frozenset(
+    {
+        "attached_media_open_not_confirmed",
+        "listener_not_ready",
+        "media_start_not_confirmed",
+        "unsupported_attached_media_panel",
+        "media_session_state_mismatch",
+        "media_session_transition_busy",
+        "attached_inbound_media_busy",
+        "listener_pause_not_confirmed",
+        "unsupported_media_panel",
+        "invalid_media_reason",
+        "invalid_stop_reason",
+        "unknown",
+    }
+)
+
 
 class MediaProgressDiagnostics:
     """Track bounded native RTP progress markers using a monotonic clock."""
@@ -136,6 +192,13 @@ class MediaCallDiagnostics:
     is the wall-clock time this integration *observed* the first RTP marker,
     not a value produced by the native runtime, and must never be confused
     with the native monotonic-ms clock used elsewhere on the wire.
+
+    The CAPABILITIES-trigger candidate fields (``capabilities_*``,
+    ``trigger_reject_stage``, ``capabilities_candidate_count``) only read
+    results already computed by the existing, unmodified R35/R36/R42
+    predicates -- they do not add a second decision surface.
+    ``attach_failure_reason`` is set explicitly by the caller from existing
+    Python transport state, never parsed from a native marker.
     """
 
     def __init__(self, *, clock: Callable[[], str] | None = None) -> None:
@@ -161,6 +224,13 @@ class MediaCallDiagnostics:
         self._stop_channel: int | None = None
         self._channel_closed = False
         self._rtp_disarmed = False
+        self._capabilities_seen = False
+        self._capabilities_parse_ok = False
+        self._capabilities_call_match = False
+        self._capabilities_video_requested = False
+        self._trigger_reject_stage: str | None = None
+        self._capabilities_candidate_count: int | None = None
+        self._attach_failure_reason: str | None = None
 
     def _arm_for_generation(self, generation: int) -> None:
         # A strictly newer generation always starts a fresh call; a
@@ -208,6 +278,15 @@ class MediaCallDiagnostics:
             )
             return True
 
+        # R42_TRIGGER_REJECT_STAGE is an uppercase enum word (e.g.
+        # "NO_LIVE_CALL"), which the generic true/false/PASS/FAIL/digits
+        # gate below does not model either.
+        if key == "R42_TRIGGER_REJECT_STAGE":
+            self._trigger_reject_stage = (
+                raw_value if raw_value in _TRIGGER_REJECT_STAGES else None
+            )
+            return True
+
         safe_value = (
             raw_value if _MEDIA_DIAGNOSTIC_VALUE_RE.fullmatch(raw_value) else None
         )
@@ -239,7 +318,30 @@ class MediaCallDiagnostics:
             count = self._safe_int(safe_value)
             if count is not None and count > 0:
                 self._h264_detected = True
+        elif key == "R42_CAPABILITIES_CANDIDATE_SEEN":
+            self._capabilities_seen = safe_value == "true"
+        elif key == "R42_CAPABILITIES_PARSE_OK":
+            self._capabilities_parse_ok = safe_value == "true"
+        elif key == "R42_CAPABILITIES_CALL_MATCH":
+            self._capabilities_call_match = safe_value == "true"
+        elif key == "R42_CAPABILITIES_VIDEO_REQUESTED":
+            self._capabilities_video_requested = safe_value == "true"
+        elif key == "R42_CAPABILITIES_CANDIDATE_COUNT":
+            self._capabilities_candidate_count = self._safe_int(safe_value)
         return True
+
+    def set_attach_failure_reason(self, reason: str | None) -> None:
+        """Record the transport-level attach failure reason for this call.
+
+        Populated by the caller from existing Python transport state (e.g.
+        ``ComelitEntranceMediaTransport.last_error``), never from a native
+        marker. Any value outside the known whitelist is dropped (``None``)
+        rather than stored verbatim, since ``last_error`` can also carry
+        unexpected exception-derived strings.
+        """
+        self._attach_failure_reason = (
+            reason if reason in _ATTACH_FAILURE_REASONS else None
+        )
 
     @staticmethod
     def _safe_int(value: str) -> int | None:
@@ -290,6 +392,13 @@ class MediaCallDiagnostics:
             "stop_channel": self._stop_channel,
             "channel_closed": self._channel_closed,
             "cleanup_complete": self._channel_closed and self._rtp_disarmed,
+            "capabilities_seen": self._capabilities_seen,
+            "capabilities_parse_ok": self._capabilities_parse_ok,
+            "capabilities_call_match": self._capabilities_call_match,
+            "capabilities_video_requested": self._capabilities_video_requested,
+            "trigger_reject_stage": self._trigger_reject_stage,
+            "capabilities_candidate_count": self._capabilities_candidate_count,
+            "attach_failure_reason": self._attach_failure_reason,
         }
 
 
@@ -303,6 +412,12 @@ _RECOGNIZED_MEDIA_DIAGNOSTIC_KEYS = frozenset(
         "P80_VIDEO_RTP_FORWARDING",
         "P80_VIDEO_RTP_PACKETS",
         "P116_VIDEO_PT_SET",
+        "R42_CAPABILITIES_CANDIDATE_SEEN",
+        "R42_CAPABILITIES_PARSE_OK",
+        "R42_CAPABILITIES_CALL_MATCH",
+        "R42_CAPABILITIES_VIDEO_REQUESTED",
+        "R42_CAPABILITIES_CANDIDATE_COUNT",
+        "R42_TRIGGER_REJECT_STAGE",
         *_H264_EVIDENCE_KEYS,
     }
 )

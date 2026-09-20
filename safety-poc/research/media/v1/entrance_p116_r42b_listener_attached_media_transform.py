@@ -166,6 +166,216 @@ def add_media_diagnostics_markers(candidate: str) -> str:
             )
     return out
 
+
+# --- P116/R42-b failure-forensic observability (DEV corrective round 2) ---
+#
+# Bounded, READ-ONLY diagnostics for the CAPABILITIES trigger candidate
+# frame. Every new marker only reads a result already computed by the
+# existing, unmodified R35/R36/R42 predicates
+# (r35_parse_ctp_envelope/r35_call_ready/r36_capabilities_video_requested) or
+# an existing local (r42_ok); this overlay adds no second OPEN/STOP writer,
+# no new decision that changes which branch runs, and no retry loop. See
+# COMELIT-P116-R42B-CANARY-OBSERVABILITY-001 (DEV corrective #2, failure
+# forensic round).
+_CAPABILITIES_DIAG_STATE_ANCHOR = (
+    "static R42AttachedMediaStage r42_media_stage = R42_MEDIA_IDLE;\n"
+)
+_CAPABILITIES_DIAG_STATE_REPLACEMENT = (
+    "/* R42_CAPABILITIES_DIAGNOSTICS_STATE_BEGIN */\n"
+    "static unsigned r42_diag_call_generation = 0;\n"
+    "static unsigned r42_diag_candidate_count = 0;\n"
+    "static unsigned r42_diag_detail_lines_printed = 0;\n"
+    "#define R42_DIAG_DETAIL_LINE_LIMIT 8u\n"
+    "/* R42_CAPABILITIES_DIAGNOSTICS_STATE_END */\n"
+    + _CAPABILITIES_DIAG_STATE_ANCHOR
+)
+
+_CAPABILITIES_DIAG_TRIGGER_ANCHOR = (
+    "            {\n"
+    "                R35CtpEnvelopeView r42_view;\n"
+    "                if (g_r35_session.writer &&\n"
+)
+_CAPABILITIES_DIAG_TRIGGER_BLOCK = (
+    "            /* R42_CAPABILITIES_DIAGNOSTICS_BEGIN */\n"
+    "            if (r42_diag_call_generation != g_r35_session.call_generation) {\n"
+    "                r42_diag_call_generation = g_r35_session.call_generation;\n"
+    "                r42_diag_candidate_count = 0;\n"
+    "                r42_diag_detail_lines_printed = 0;\n"
+    "            }\n"
+    "\n"
+    "            {\n"
+    '                const char *r42_diag_stage = "NONE";\n'
+    "                int r42_diag_candidate_seen = 0;\n"
+    "                int r42_diag_parse_ok = 0;\n"
+    "                int r42_diag_call_match = 0;\n"
+    "                int r42_diag_video_requested = 0;\n"
+    "\n"
+    "                if (!g_r35_session.writer) {\n"
+    '                    r42_diag_stage = "NO_WRITER";\n'
+    "                } else {\n"
+    "                    R35CtpEnvelopeView r42_diag_view;\n"
+    "                    if (!r35_parse_ctp_envelope(body, body_len, &r42_diag_view)) {\n"
+    '                        r42_diag_stage = "ENVELOPE";\n'
+    "                    } else if (r42_diag_view.flags != R35_CTP_FLAG_DATA) {\n"
+    '                        r42_diag_stage = "FLAG";\n'
+    "                    } else if (r42_diag_view.inner_len < 2u ||\n"
+    "                               r35_read_be16(r42_diag_view.inner_body) != R36_OP_CAPABILITIES) {\n"
+    '                        r42_diag_stage = "OPCODE";\n'
+    "                    } else {\n"
+    "                        r42_diag_candidate_seen = 1;\n"
+    "                        r42_diag_parse_ok = 1;\n"
+    "                        r42_diag_candidate_count++;\n"
+    "                        if (r42_diag_view.inner_len < R36_CAP_BODY_MIN_LEN) {\n"
+    '                            r42_diag_stage = "LENGTH";\n'
+    "                        } else if (!r35_call_ready(&g_r35_session)) {\n"
+    '                            r42_diag_stage = "NO_LIVE_CALL";\n'
+    "                        } else {\n"
+    "                            unsigned r42_diag_local_connection =\n"
+    "                                (r42_diag_view.connection ^ 0x8000u) & 0xFFFFu;\n"
+    "                            r42_diag_call_match =\n"
+    "                                (r42_diag_local_connection ==\n"
+    "                                 g_r35_session.call_ctp_connection) ? 1 : 0;\n"
+    "                            if (!r42_diag_call_match) {\n"
+    '                                r42_diag_stage = "CONNECTION_MISMATCH";\n'
+    "                            } else {\n"
+    "                                r42_diag_video_requested =\n"
+    "                                    r36_capabilities_video_requested(&r42_diag_view) ? 1 : 0;\n"
+    "                                if (!r42_diag_video_requested) {\n"
+    '                                    r42_diag_stage = "VIDEO_BIT_CLEAR";\n'
+    "                                }\n"
+    "                            }\n"
+    "                        }\n"
+    "                    }\n"
+    "                }\n"
+    "\n"
+    "                if (r42_diag_candidate_seen &&\n"
+    "                    r42_diag_detail_lines_printed < R42_DIAG_DETAIL_LINE_LIMIT) {\n"
+    "                    r42_diag_detail_lines_printed++;\n"
+    '                    printf("R42_CAPABILITIES_CANDIDATE_SEEN=true\\n");\n'
+    "                    printf(\n"
+    '                        "R42_CAPABILITIES_PARSE_OK=%s\\n",\n'
+    '                        r42_diag_parse_ok ? "true" : "false"\n'
+    "                    );\n"
+    "                    printf(\n"
+    '                        "R42_CAPABILITIES_CALL_MATCH=%s\\n",\n'
+    '                        r42_diag_call_match ? "true" : "false"\n'
+    "                    );\n"
+    "                    printf(\n"
+    '                        "R42_CAPABILITIES_VIDEO_REQUESTED=%s\\n",\n'
+    '                        r42_diag_video_requested ? "true" : "false"\n'
+    "                    );\n"
+    '                    printf("R42_TRIGGER_REJECT_STAGE=%s\\n", r42_diag_stage);\n'
+    "                    printf(\n"
+    '                        "R42_CAPABILITIES_CANDIDATE_COUNT=%u\\n",\n'
+    "                        r42_diag_candidate_count\n"
+    "                    );\n"
+    "                    fflush(stdout);\n"
+    "                }\n"
+    "            }\n"
+    "            /* R42_CAPABILITIES_DIAGNOSTICS_END */\n"
+    "\n"
+)
+_CAPABILITIES_DIAG_TRIGGER_REPLACEMENT = (
+    _CAPABILITIES_DIAG_TRIGGER_BLOCK + _CAPABILITIES_DIAG_TRIGGER_ANCHOR
+)
+
+_CAPABILITIES_DIAG_RESULT_ANCHOR = (
+    "                    gboolean r42_ok = r42_queue_media_channel_open();\n"
+    '                    printf("R42_ATTACHED_TRIGGER_MATCH=true\\n");\n'
+    "                    printf(\n"
+    '                        "R42_ATTACHED_TRIGGER_RESULT=%s\\n",\n'
+    '                        r42_ok ? "CHANNEL_OPEN_SENT" : "REJECTED"\n'
+    "                    );\n"
+    '                    printf("R42_AUTOMATIC_RETRY=false\\n");\n'
+    "                    fflush(stdout);\n"
+)
+_CAPABILITIES_DIAG_RESULT_REPLACEMENT = (
+    "                    gboolean r42_ok = r42_queue_media_channel_open();\n"
+    '                    printf("R42_ATTACHED_TRIGGER_MATCH=true\\n");\n'
+    "                    printf(\n"
+    '                        "R42_ATTACHED_TRIGGER_RESULT=%s\\n",\n'
+    '                        r42_ok ? "CHANNEL_OPEN_SENT" : "REJECTED"\n'
+    "                    );\n"
+    "                    printf(\n"
+    '                        "R42_TRIGGER_REJECT_STAGE=%s\\n",\n'
+    '                        r42_ok ? "OPEN_SENT" : "QUEUE_REJECTED"\n'
+    "                    );\n"
+    '                    printf("R42_AUTOMATIC_RETRY=false\\n");\n'
+    "                    fflush(stdout);\n"
+)
+
+
+def add_capabilities_trigger_diagnostics(candidate: str) -> str:
+    """Add bounded, read-only CAPABILITIES-candidate-frame observability.
+
+    Classifies every frame that structurally looks like a CAPABILITIES
+    candidate (parsed CTP envelope + FLAG_DATA + inner opcode 0x0003) into
+    exactly one ``R42_TRIGGER_REJECT_STAGE`` outcome, so the next canary can
+    distinguish "no candidate frame arrived" from "arrived but rejected at
+    envelope/flag/opcode/length/call-match/video-bit" from "matched and an
+    OPEN was attempted". Nothing here changes which branch the EXISTING,
+    unmodified functional trigger takes: the new code never calls
+    ``continue``/``return``, never queues a frame, and never invokes
+    ``r42_queue_media_channel_open`` (verified below by an unchanged call
+    count) -- it only re-evaluates the same read-only predicates the
+    existing trigger already calls, purely to classify and print.
+    """
+    queue_open_calls_before = candidate.count("r42_queue_media_channel_open(")
+
+    out = _replace_once(
+        candidate,
+        _CAPABILITIES_DIAG_STATE_ANCHOR,
+        _CAPABILITIES_DIAG_STATE_REPLACEMENT,
+        "R42B capabilities diagnostics state",
+    )
+    out = _replace_once(
+        out,
+        _CAPABILITIES_DIAG_TRIGGER_ANCHOR,
+        _CAPABILITIES_DIAG_TRIGGER_REPLACEMENT,
+        "R42B capabilities candidate diagnostics",
+    )
+    out = _replace_once(
+        out,
+        _CAPABILITIES_DIAG_RESULT_ANCHOR,
+        _CAPABILITIES_DIAG_RESULT_REPLACEMENT,
+        "R42B capabilities trigger outcome diagnostics",
+    )
+
+    if out.count("r42_queue_media_channel_open(") != queue_open_calls_before:
+        raise RuntimeError("R42B_CAPABILITIES_DIAG_NO_NEW_OPEN_CALL_GATE=FAIL")
+
+    diag_region = out.split(
+        "/* R42_CAPABILITIES_DIAGNOSTICS_BEGIN */", 1
+    )[1].split("/* R42_CAPABILITIES_DIAGNOSTICS_END */", 1)[0]
+    if "g_timeout_add" in diag_region or "retry" in diag_region.lower():
+        raise RuntimeError("R42B_CAPABILITIES_DIAG_NO_RETRY_GATE=FAIL")
+    if "continue;" in diag_region or "return" in diag_region:
+        raise RuntimeError("R42B_CAPABILITIES_DIAG_NO_CONTROL_FLOW_GATE=FAIL")
+
+    for needle in (
+        "R42_CAPABILITIES_CANDIDATE_SEEN=true",
+        "R42_CAPABILITIES_PARSE_OK=%s",
+        "R42_CAPABILITIES_CALL_MATCH=%s",
+        "R42_CAPABILITIES_VIDEO_REQUESTED=%s",
+        "R42_TRIGGER_REJECT_STAGE=%s",
+        "R42_CAPABILITIES_CANDIDATE_COUNT=%u",
+    ):
+        if needle not in out:
+            raise RuntimeError(
+                f"R42B_CAPABILITIES_DIAG_MARKER_GATE=FAIL needle={needle}"
+            )
+    if out.count("R42_TRIGGER_REJECT_STAGE=%s") != 2:
+        raise RuntimeError("R42B_CAPABILITIES_DIAG_REJECT_STAGE_SITE_GATE=FAIL")
+
+    for capture_literal in ("0x0C4A", "0x4A5A", "0xCA5A"):
+        if capture_literal in out:
+            raise RuntimeError(
+                f"R42B_CAPABILITIES_DIAG_CAPTURE_LITERAL_GATE=FAIL "
+                f"needle={capture_literal}"
+            )
+    return out
+
+
 _LISTENER_RTP_CONTROL = r'''
 /* R42_LISTENER_RTP_BRIDGE_BEGIN */
 static void
@@ -381,6 +591,9 @@ def _assert_final_listener_gates(candidate: str) -> None:
         "R42_MEDIA_CHANNEL_ID=%u",
         "R42_MEDIAREQ26_OPEN_CHANNEL=%u",
         "R42_MEDIA_STOP_CHANNEL=%u",
+        "R42_CAPABILITIES_CANDIDATE_SEEN=true",
+        "R42_TRIGGER_REJECT_STAGE=%s",
+        "R42_CAPABILITIES_CANDIDATE_COUNT=%u",
     )
     for needle in required:
         if needle not in candidate:
@@ -424,6 +637,7 @@ def transform(source: str) -> str:
     r37_source = add_listener_r37(r36_source)
     candidate = r42.transform(r37_source)
     candidate = add_media_diagnostics_markers(candidate)
+    candidate = add_capabilities_trigger_diagnostics(candidate)
     _assert_final_listener_gates(candidate)
     return candidate
 

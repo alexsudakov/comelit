@@ -295,6 +295,24 @@ class RingMediaCoordinator:
         self._last_snapshot_path: str | None = None
         self._recording_event_count = 0
         self._last_recording_result: dict[str, object] | None = None
+        self._attach_failure_recorder: Callable[[str | None], None] | None = None
+
+    def set_attach_failure_recorder(
+        self,
+        recorder: Callable[[str | None], None] | None,
+    ) -> None:
+        """Bind the bounded media-diagnostics attach-failure recorder.
+
+        The coordinator reports the transport-level failure reason (for
+        example ``attached_media_open_not_confirmed``) to the caller-owned
+        ``MediaCallDiagnostics``, so a later canary can tell "the native side
+        never confirmed the attached media channel" apart from a shim, SDP or
+        session failure without inferring it from elapsed time. The recorder
+        owns all sanitizing: an unexpected string is dropped there, never
+        stored verbatim. A coordinator without a bound recorder behaves
+        exactly as before.
+        """
+        self._attach_failure_recorder = recorder
 
     @property
     def active_event_id(self) -> str | None:
@@ -415,9 +433,14 @@ class RingMediaCoordinator:
                 raise
             except Exception:
                 _LOGGER.exception("Comelit snapshot loop failed")
-        except (ComelitMediaSessionError, RuntimeError, ValueError):
+        except (ComelitMediaSessionError, RuntimeError, ValueError) as exc:
             recording_state = RECORDING_STATE_FAILED
             recording_failure_reason = "media_start_failed"
+            recorder = getattr(self, "_attach_failure_recorder", None)
+            if recorder is not None:
+                # Sanitized by the recorder's own whitelist; the raw
+                # exception text is never published.
+                recorder(str(exc))
         except asyncio.CancelledError:
             stop_event.set()
             recording_state = RECORDING_STATE_TRUNCATED
