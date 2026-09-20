@@ -94,7 +94,7 @@ class P116R42AttachedInboundMediaRuntimeTests(unittest.TestCase):
 
     def test_call_init_drain_transform_is_explicit_and_fail_closed(self) -> None:
         base = DOOR_SOURCE.read_text(encoding="utf-8")
-        pre_fix = r42.r42.transform(
+        pre_fix = r42.transform(
             r42b.add_listener_r37(
                 r42b.r36.transform(
                     r42b._replace_once(
