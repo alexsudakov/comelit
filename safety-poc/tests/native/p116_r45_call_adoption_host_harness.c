@@ -150,6 +150,7 @@ int main(void)
     R35CtpEnvelopeView view;
     R35Result open_rc;
 
+    (void)R35_SECOND_OPEN_FORBIDDEN_STATES;
     reset_fakes();
     wire(&session);
     memset(&adoption, 0, sizeof(adoption));
