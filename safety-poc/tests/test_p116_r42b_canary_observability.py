@@ -28,6 +28,7 @@ REPO = ROOT.parent
 RUNTIME = REPO / "custom_components" / "comelit" / "runtime.py"
 MEDIA_DIAGNOSTICS = REPO / "custom_components" / "comelit" / "media_diagnostics.py"
 RING_MEDIA = REPO / "custom_components" / "comelit" / "ring_media.py"
+ATTACHED_MEDIA = REPO / "custom_components" / "comelit" / "attached_media.py"
 MEDIA = ROOT / "research" / "media" / "v1"
 DOOR_SOURCE = ROOT / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-ctpp-door.c"
 BUILDER = MEDIA / "ct122_build_p116_r42_attached_media_candidate.sh"
@@ -713,6 +714,30 @@ class CapabilitiesTriggerDiagnosticsUnitTests(unittest.TestCase):
         for reason in reasons:
             diag.set_attach_failure_reason(reason)
             self.assertEqual(diag.snapshot()["attach_failure_reason"], reason)
+
+
+class AttachedMediaFailureReasonPropagationTests(unittest.TestCase):
+    """The exact bounded transport failure reason must survive session wrapping."""
+
+    def test_attached_session_preserves_transport_failure_reason(self) -> None:
+        source = ATTACHED_MEDIA.read_text(encoding="utf-8")
+
+        # The transport already records the exact bounded reason from the
+        # underlying ComelitAttachedMediaError.
+        self.assertIn("self._last_error = str(exc)", source)
+
+        # The attached session must preserve that reason instead of replacing
+        # it with only the exception type (which the diagnostics whitelist
+        # correctly rejects as unbounded/non-contract data).
+        self.assertIn(
+            "self._last_error = self._transport.last_error or "
+            "f\"start_failed:{type(exc).__name__}\"",
+            source,
+        )
+        self.assertIn(
+            "raise ComelitAttachedMediaError(self._last_error) from exc",
+            source,
+        )
 
 
 class RuntimeStatusMediaDiagnosticsTests(unittest.TestCase):
