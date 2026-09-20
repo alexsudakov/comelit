@@ -42,6 +42,17 @@ _ENUM_REPLACEMENT = """    P12_TX_R35_MEDIA_OPEN,
 _FORWARD_ANCHOR = """static gboolean
 p12_flush_tx(void);"""
 
+_ALLOCATOR_FORWARD_DECL = """static guint16
+v4_allocate_channel_id(
+    guint16 start);"""
+
+_ALLOCATOR_DEFINITION = """static guint16
+v4_allocate_channel_id(
+    guint16 start)
+{"""
+
+_ALLOCATOR_FIRST_R42_CALL = "channel_id = v4_allocate_channel_id(seed);"
+
 RUNTIME = r'''
 /* R42_ATTACHED_INBOUND_MEDIA_RUNTIME_BEGIN */
 typedef enum {
@@ -339,6 +350,24 @@ def _replace_once(text: str, old: str, new: str, label: str) -> str:
     return text.replace(old, new, 1)
 
 
+def _gate_allocator_declaration_order(generated: str) -> None:
+    """Require an explicit allocator declaration before the first R42 call."""
+    if generated.count(_ALLOCATOR_FORWARD_DECL) != 1:
+        raise RuntimeError("R42_ALLOCATOR_FORWARD_DECL_GATE=FAIL")
+
+    try:
+        declaration_index = generated.index(_ALLOCATOR_FORWARD_DECL)
+        call_index = generated.index(_ALLOCATOR_FIRST_R42_CALL)
+        definition_index = generated.index(_ALLOCATOR_DEFINITION)
+    except ValueError as exc:
+        raise RuntimeError("R42_ALLOCATOR_ORDER_GATE=FAIL missing_symbol") from exc
+
+    if declaration_index >= call_index:
+        raise RuntimeError("R42_ALLOCATOR_ORDER_GATE=FAIL declaration_after_call")
+    if definition_index <= declaration_index:
+        raise RuntimeError("R42_ALLOCATOR_ORDER_GATE=FAIL definition_not_distinct")
+
+
 def transform(r37_source: str) -> str:
     if BEGIN in r37_source:
         raise RuntimeError("R42_REAPPLY_GATE=FAIL")
@@ -356,6 +385,8 @@ def transform(r37_source: str) -> str:
         _FORWARD_ANCHOR
         + "\n\nstatic gboolean\np12_queue_close_channel(\n"
         + "    guint16 channel_id,\n    P12TxKind kind);\n\n"
+        + _ALLOCATOR_FORWARD_DECL
+        + "\n\n"
         + RUNTIME,
         "R42_RUNTIME",
     )
@@ -377,6 +408,8 @@ def transform(r37_source: str) -> str:
     for marker in (BEGIN, END, TRIGGER_BEGIN, TRIGGER_END):
         if out.count(marker) != 1:
             raise RuntimeError(f"R42_MARKER_GATE=FAIL marker={marker}")
+
+    _gate_allocator_declaration_order(out)
 
     # Safety/evidence gates.
     r42 = out.split(BEGIN, 1)[1].split(END, 1)[0]
