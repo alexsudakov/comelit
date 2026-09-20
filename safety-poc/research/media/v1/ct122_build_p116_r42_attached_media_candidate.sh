@@ -39,6 +39,8 @@ BUILD_B="$RUN_ROOT/comelit-v4-r42b-candidate-b"
 META_A="$RUN_ROOT/build-a-meta.txt"
 META_B="$RUN_ROOT/build-b-meta.txt"
 STRINGS_A="$RUN_ROOT/build-a.strings"
+COMPILE_INPUT_NAME="r42b-build-input.c"
+COMPILE_INPUT="$RUN_ROOT/$COMPILE_INPUT_NAME"
 
 sha() { sha256sum "$1" | awk '{print $1}'; }
 
@@ -57,7 +59,7 @@ echo "BASE_SOURCE_SHA256=$BASE_SOURCE_SHA"
 [[ "$BASE_SOURCE_SHA" == "$EXPECTED_BASE_SOURCE_SHA" ]]
 echo 'BASE_SOURCE_SHA_GATE=PASS'
 
-rm -f     "$SOURCE_A" "$SOURCE_B"     "$BUILD_A" "$BUILD_B"     "$META_A" "$META_B" "$STRINGS_A"
+rm -f     "$SOURCE_A" "$SOURCE_B"     "$BUILD_A" "$BUILD_B"     "$META_A" "$META_B" "$STRINGS_A"     "$COMPILE_INPUT"
 
 generate_once() {
     local output=$1
@@ -117,9 +119,33 @@ build_once() {
     timeout 900 docker run --rm --network none         --security-opt apparmor=unconfined         -e SRC="$src_name"         -e OUT="$out_name"         -e META="$meta_name"         -v "$RUN_ROOT":/w         -v "$APK_CLOSURE":/pkgs:ro         "$ALPINE_IMAGE"         /bin/sh /w/build.sh
 }
 
-build_once     "$(basename "$SOURCE_A")"     "$(basename "$BUILD_A")"     "$(basename "$META_A")"
+# Both builds must compile the same source path inside the container
+# (/w/$COMPILE_INPUT_NAME) so the compiled filename baked into DWARF/BuildID
+# does not itself become a source of binary drift. Stage sequentially, one
+# build at a time, and fail closed if the staged copy doesn't match the
+# generated source it was staged from.
+stage_compile_input() {
+    local from=$1 expected_sha=$2
+    cp "$from" "$COMPILE_INPUT"
+    local staged_sha
+    staged_sha="$(sha "$COMPILE_INPUT")"
+    if [[ "$staged_sha" != "$expected_sha" ]]; then
+        echo "COMPILE_INPUT_STAGE_GATE=FAIL from=$from"
+        exit 1
+    fi
+    echo "$staged_sha"
+}
 
-build_once     "$(basename "$SOURCE_B")"     "$(basename "$BUILD_B")"     "$(basename "$META_B")"
+BUILD_A_COMPILE_INPUT_SHA256="$(stage_compile_input "$SOURCE_A" "$SOURCE_A_SHA")"
+echo "COMPILE_INPUT_NAME=$COMPILE_INPUT_NAME"
+echo "BUILD_A_COMPILE_INPUT_SHA256=$BUILD_A_COMPILE_INPUT_SHA256"
+build_once     "$COMPILE_INPUT_NAME"     "$(basename "$BUILD_A")"     "$(basename "$META_A")"
+
+BUILD_B_COMPILE_INPUT_SHA256="$(stage_compile_input "$SOURCE_B" "$SOURCE_B_SHA")"
+echo "BUILD_B_COMPILE_INPUT_SHA256=$BUILD_B_COMPILE_INPUT_SHA256"
+build_once     "$COMPILE_INPUT_NAME"     "$(basename "$BUILD_B")"     "$(basename "$META_B")"
+
+echo 'COMPILE_INPUT_STAGE_GATE=PASS'
 
 BUILD_A_SHA="$(sha "$BUILD_A")"
 BUILD_B_SHA="$(sha "$BUILD_B")"
@@ -166,9 +192,13 @@ echo "CANDIDATE_REPRODUCIBLE_PEER=$BUILD_B"
 echo "CANDIDATE_SHA256=$BUILD_A_SHA"
 echo "BUILD_A_SHA256=$BUILD_A_SHA"
 echo "BUILD_B_SHA256=$BUILD_B_SHA"
+echo "COMPILE_INPUT_NAME=$COMPILE_INPUT_NAME"
+echo "BUILD_A_COMPILE_INPUT_SHA256=$BUILD_A_COMPILE_INPUT_SHA256"
+echo "BUILD_B_COMPILE_INPUT_SHA256=$BUILD_B_COMPILE_INPUT_SHA256"
 echo "CANDIDATE_BYTES=$BUILD_BYTES"
 echo "INTERPRETER=$INTERPRETER_A"
 echo "NEEDED=$NEEDED_A"
+echo 'COMPILE_INPUT_STAGE_GATE=PASS'
 echo 'REPRODUCIBLE_SOURCE_SHA_GATE=PASS'
 echo 'REPRODUCIBLE_SOURCE_CMP_GATE=PASS'
 echo 'REPRODUCIBLE_BINARY_SHA_GATE=PASS'

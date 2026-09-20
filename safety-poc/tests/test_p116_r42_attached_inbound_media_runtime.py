@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+import re
 import sys
 import unittest
 
@@ -249,6 +250,41 @@ class P116R42AttachedInboundMediaRuntimeTests(unittest.TestCase):
         self.assertNotIn("-Werror", source)
         self.assertNotIn("curl ", source)
         self.assertNotIn("wget ", source)
+
+    def test_ct122_builder_compiles_both_builds_from_one_canonical_input_name(
+        self,
+    ) -> None:
+        source = self.builder_source
+        # Each build_once call site passes the source-name argument as
+        # either a bare "$VAR" reference or a "$(basename "$VAR")"
+        # substitution; capture whichever shape is actually used so the
+        # regression catches per-source filenames without hardcoding one
+        # implementation.
+        call_site_pattern = re.compile(
+            r'build_once\s+"(\$\w+|\$\(basename "\$\w+"\))"'
+        )
+        call_args = call_site_pattern.findall(source)
+        self.assertEqual(
+            len(call_args),
+            2,
+            "expected exactly two build_once invocations with a "
+            "source-name first argument",
+        )
+        build_a_arg, build_b_arg = call_args
+        self.assertEqual(
+            build_a_arg,
+            build_b_arg,
+            "both build_once invocations must compile from the same "
+            "canonical staged source name, otherwise the compiled "
+            "filename baked into DWARF/BuildID drifts between builds",
+        )
+        self.assertNotIn("SOURCE_A", build_a_arg)
+        self.assertNotIn("SOURCE_B", build_b_arg)
+
+        # The staged name must actually be handed to the container as SRC,
+        # which build_once forwards from its first positional argument.
+        self.assertIn('-e SRC="$src_name"', source)
+        self.assertIn("local src_name=$1", source)
 
     def test_ct122_promotion_rechecks_source_binary_and_reproducible_peer(self) -> None:
         source = self.promoter_source
