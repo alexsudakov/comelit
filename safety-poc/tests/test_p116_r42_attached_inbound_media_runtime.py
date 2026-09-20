@@ -75,6 +75,44 @@ class P116R42AttachedInboundMediaRuntimeTests(unittest.TestCase):
         base = DOOR_SOURCE.read_text(encoding="utf-8")
         self.assertEqual(self.r42b_candidate, r42b.transform(base))
 
+    def test_r42b_call_init_drains_already_buffered_followup_frames(self) -> None:
+        candidate = self.r42b_candidate
+        marker = '"V4_RING_KIND=CALL_INIT\\n"'
+        start = candidate.index(marker)
+        end = candidate.index("Other CTPP traffic:", start)
+        call_init_tail = candidate[start:end]
+
+        # p12_process_post_uaut() is a while(TRUE) parser over
+        # post_ack_capture.  After CALL_INIT consumes its frame it must keep
+        # draining bytes already copied by the same recv() call; returning
+        # here strands a coalesced CAPABILITY_REPORT until unrelated future
+        # socket activity happens.
+        self.assertIn("p12_consume_post_ack(", call_init_tail)
+        self.assertIn("Persistent listener / attached-call drain:", call_init_tail)
+        self.assertIn("continue;", call_init_tail)
+        self.assertNotIn("return TRUE;", call_init_tail)
+
+    def test_call_init_drain_transform_is_explicit_and_fail_closed(self) -> None:
+        base = DOOR_SOURCE.read_text(encoding="utf-8")
+        pre_fix = r42.r42.transform(
+            r42b.add_listener_r37(
+                r42b.r36.transform(
+                    r42b._replace_once(
+                        r42b.r35.transform(r42b.add_listener_rtp_bridge(base)),
+                        r42b._R35_ARM_OLD,
+                        r42b._R35_ARM_NEW,
+                        "test fixture arm hook",
+                    )
+                )
+            )
+        )
+        self.assertIn(r42b._CALL_INIT_DRAIN_ANCHOR, pre_fix)
+        fixed = r42b.fix_call_init_buffer_drain(pre_fix)
+        self.assertNotIn(r42b._CALL_INIT_DRAIN_ANCHOR, fixed)
+        self.assertIn("Persistent listener / attached-call drain:", fixed)
+        with self.assertRaises(RuntimeError):
+            r42b.fix_call_init_buffer_drain(fixed)
+
     def test_r42b_rebinds_r35_rtp_hook_to_listener_lifetime_reset(self) -> None:
         candidate = self.r42b_candidate
         self.assertEqual(candidate.count("r42_listener_rtp_arm(armed);"), 1)
