@@ -716,4 +716,3 @@ class CapabilitiesTriggerDiagnosticsUnitTests(unittest.TestCase):
 
 
 class RuntimeStatusMediaDiagnosticsTests(unittest.TestCase):
-undefined
