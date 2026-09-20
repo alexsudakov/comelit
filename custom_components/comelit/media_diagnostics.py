@@ -86,6 +86,24 @@ _TRIGGER_REJECT_STAGES = frozenset(
     }
 )
 
+# Deeper trigger evidence is monotonic within one call generation. Native
+# diagnostics deliberately continue observing later frames, including
+# unrelated traffic, so a late pre-candidate rejection must never erase a
+# previously proven real CAPABILITIES match or OPEN result from status().
+_TRIGGER_REJECT_STAGE_PRIORITY = {
+    "NO_WRITER": 10,
+    "ENVELOPE": 20,
+    "FLAG": 30,
+    "OPCODE": 40,
+    "LENGTH": 50,
+    "NO_LIVE_CALL": 60,
+    "CONNECTION_MISMATCH": 70,
+    "VIDEO_BIT_CLEAR": 80,
+    "NONE": 90,
+    "QUEUE_REJECTED": 100,
+    "OPEN_SENT": 110,
+}
+
 # attach_failure_reason is populated by the caller from existing Python
 # transport state (ComelitEntranceMediaTransport.last_error), never from a
 # native marker; whitelisted the same way so an unexpected exception-derived
@@ -282,9 +300,28 @@ class MediaCallDiagnostics:
         # "NO_LIVE_CALL"), which the generic true/false/PASS/FAIL/digits
         # gate below does not model either.
         if key == "R42_TRIGGER_REJECT_STAGE":
-            self._trigger_reject_stage = (
-                raw_value if raw_value in _TRIGGER_REJECT_STAGES else None
-            )
+            if raw_value not in _TRIGGER_REJECT_STAGES:
+                # Invalid diagnostic input is ignored fail-closed; it must not
+                # erase a previously proven valid stage for this generation.
+                return True
+
+            current = self._trigger_reject_stage
+            if (
+                current is None
+                or _TRIGGER_REJECT_STAGE_PRIORITY[raw_value]
+                >= _TRIGGER_REJECT_STAGE_PRIORITY[current]
+            ):
+                self._trigger_reject_stage = raw_value
+
+            # These terminal outcomes are emitted only by the existing
+            # functional trigger after parse/current-call/video predicates
+            # have all passed. They therefore imply the four booleans even
+            # when the bounded candidate-detail log budget was exhausted.
+            if raw_value in {"QUEUE_REJECTED", "OPEN_SENT"}:
+                self._capabilities_seen = True
+                self._capabilities_parse_ok = True
+                self._capabilities_call_match = True
+                self._capabilities_video_requested = True
             return True
 
         safe_value = (
@@ -319,15 +356,30 @@ class MediaCallDiagnostics:
             if count is not None and count > 0:
                 self._h264_detected = True
         elif key == "R42_CAPABILITIES_CANDIDATE_SEEN":
-            self._capabilities_seen = safe_value == "true"
+            self._capabilities_seen = (
+                self._capabilities_seen or safe_value == "true"
+            )
         elif key == "R42_CAPABILITIES_PARSE_OK":
-            self._capabilities_parse_ok = safe_value == "true"
+            self._capabilities_parse_ok = (
+                self._capabilities_parse_ok or safe_value == "true"
+            )
         elif key == "R42_CAPABILITIES_CALL_MATCH":
-            self._capabilities_call_match = safe_value == "true"
+            self._capabilities_call_match = (
+                self._capabilities_call_match or safe_value == "true"
+            )
         elif key == "R42_CAPABILITIES_VIDEO_REQUESTED":
-            self._capabilities_video_requested = safe_value == "true"
+            self._capabilities_video_requested = (
+                self._capabilities_video_requested or safe_value == "true"
+            )
         elif key == "R42_CAPABILITIES_CANDIDATE_COUNT":
-            self._capabilities_candidate_count = self._safe_int(safe_value)
+            count = self._safe_int(safe_value)
+            if count is not None:
+                if self._capabilities_candidate_count is None:
+                    self._capabilities_candidate_count = count
+                else:
+                    self._capabilities_candidate_count = max(
+                        self._capabilities_candidate_count, count
+                    )
         return True
 
     def set_attach_failure_reason(self, reason: str | None) -> None:
