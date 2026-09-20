@@ -16,6 +16,7 @@ from entrance_p116_r30_call_ctp_envelope_model import (  # noqa: E402
 )
 from entrance_p116_r44_inbound_peer_simulator import (  # noqa: E402
     CAP_VIDEO_REQUEST_BIT,
+    CallAdoptionWireProfile,
     EvidenceGap,
     FakeInboundPanel,
     LAB_CORROBORATION_PROFILE,
@@ -72,12 +73,31 @@ class P116R44OfflineInboundPeerSimulatorTests(unittest.TestCase):
         self.assertEqual(env.acknowledgement, self.panel.peer_acknowledgement)
 
     def test_strict_native_profile_fails_closed_while_exact_bytes_missing(self) -> None:
+        # P116/R43B: the strict profile is now complete from primary native
+        # evidence, so the fail-closed path is asserted on an empty profile to
+        # keep proving that all three contracts are mandatory.
+        empty = CallAdoptionWireProfile(
+            name="EMPTY",
+            primary_native=True,
+            ack_flags=None,
+            capabilities_body=None,
+            alerting_body=None,
+        )
         with self.assertRaises(EvidenceGap) as ctx:
-            STRICT_NATIVE_PROFILE.require_strict_ready()
+            empty.require_strict_ready()
         msg = str(ctx.exception)
         self.assertIn("FIRST_ACK_FLAGS", msg)
         self.assertIn("CSP_SEND_CAPAB_REPORT_EXACT_BODY", msg)
         self.assertIn("CSP_SEND_ALERTING_EXACT_BODY", msg)
+
+    def test_strict_native_profile_ready_from_primary_native_contracts(self) -> None:
+        STRICT_NATIVE_PROFILE.require_strict_ready()
+        self.assertTrue(STRICT_NATIVE_PROFILE.primary_native)
+        self.assertEqual(STRICT_NATIVE_PROFILE.ack_flags, 0x80)
+        self.assertEqual(STRICT_NATIVE_PROFILE.alerting_opcode, 0x000A)
+        self.assertEqual(STRICT_NATIVE_PROFILE.alerting_body_length, 3)
+        self.assertEqual(STRICT_NATIVE_PROFILE.capabilities_opcode, 0x0003)
+        self.assertEqual(STRICT_NATIVE_PROFILE.capabilities_body_length, 8)
 
     def test_lab_profile_cannot_be_mistaken_for_primary_native(self) -> None:
         self.assertFalse(LAB_CORROBORATION_PROFILE.primary_native)
@@ -201,7 +221,8 @@ class P116R44OfflineInboundPeerSimulatorTests(unittest.TestCase):
         text = report()
         self.assertIn("NETWORK_IO=false", text)
         self.assertIn("PHYSICAL_CALLS=0", text)
-        self.assertIn("STRICT_NATIVE_FAILS_CLOSED=true", text)
+        self.assertIn("STRICT_NATIVE_FAILS_CLOSED=false", text)
+        self.assertIn("STRICT_NATIVE_PROFILE_READY=true", text)
         self.assertIn("LAB_CONSTANTS_PROMOTABLE_TO_PRODUCTION=false", text)
 
 

@@ -196,6 +196,10 @@ CSP_SEND_ALERTING_EXACT_BODY=UNKNOWN
 
 Therefore STRICT_NATIVE fails closed.
 
+P116/R43B closed all three contracts from primary native evidence
+(`P116_R43B_NATIVE_CALL_ADOPTION_SERIALIZER_EXTRACTION.md`), so the strict
+profile is complete and LAB_CORROBORATION remains a separate mode.
+
 That prevents accidental production promotion of guessed/public example bytes.
 
 ### LAB_CORROBORATION
