@@ -24,6 +24,7 @@ import entrance_p116_r35_attached_media_native_transform as r35  # noqa: E402
 import entrance_p116_r36_attached_media_trigger_transform as r36  # noqa: E402
 import entrance_p116_r37_attached_media_live_readiness_transform as r37  # noqa: E402
 import entrance_p116_r42_attached_media_runtime_transform as r42  # noqa: E402
+import entrance_p116_r42b_listener_attached_media_transform as r42b  # noqa: E402
 
 
 class P116R42AttachedInboundMediaRuntimeTests(unittest.TestCase):
@@ -35,12 +36,54 @@ class P116R42AttachedInboundMediaRuntimeTests(unittest.TestCase):
         cls.r36_candidate = r36.transform(cls.r35_candidate)
         cls.r37_candidate = r37.transform(cls.r36_candidate)
         cls.r42_candidate = r42.transform(cls.r37_candidate)
+        cls.r42b_candidate = r42b.transform(base)
         cls.transform_source = TRANSFORM.read_text(encoding="utf-8")
         cls.attached_source = ATTACHED.read_text(encoding="utf-8")
         cls.init_source = INIT.read_text(encoding="utf-8")
         cls.runtime_source = RUNTIME.read_text(encoding="utf-8")
         cls.builder_source = BUILDER.read_text(encoding="utf-8")
         cls.promoter_source = PROMOTER.read_text(encoding="utf-8")
+
+    def test_r42b_composes_from_persistent_listener_and_preserves_door(self) -> None:
+        candidate = self.r42b_candidate
+        self.assertIn('#define RUN_DIR     "/run/comelit-p2p"', candidate)
+        self.assertIn("signal(SIGUSR1, v4_door_signal_handler);", candidate)
+        self.assertIn("v4_door_tick_cb", candidate)
+        for marker in (
+            "V4_DOOR_EXISTING_CTPP_REUSED=true",
+            "V4_DOOR_OPERATION_WRITES_SENT=5",
+            "V4_DOOR_AUTOMATIC_RETRY_ALLOWED=false",
+            "V4_DOOR_PHYSICAL_EFFECT_ASSERTED=false",
+            "V4_RING_LISTENER_READY=true",
+            "R42_LISTENER_DOOR_SIGNAL_PRESERVED=true",
+            "R42_LISTENER_RTP_LIFETIME_RESET=true",
+            "R42_ATTACHED_MEDIA_ACTIVE=true",
+            "R42_MEDIA_CHANNEL_CLOSED=true",
+        ):
+            self.assertIn(marker, candidate)
+        for forbidden in (
+            "/run/comelit-media",
+            "signal(SIGUSR1, SIG_IGN);",
+            "ENTRANCE_SIGNALING_DOOR_SIGNAL_INSTALLED=false",
+            "entrance_self_activation",
+            "P12_TX_ENTRANCE_SELF_ACTIVATION",
+        ):
+            self.assertNotIn(forbidden, candidate)
+
+    def test_r42b_generated_source_is_deterministic(self) -> None:
+        base = DOOR_SOURCE.read_text(encoding="utf-8")
+        self.assertEqual(self.r42b_candidate, r42b.transform(base))
+
+    def test_r42b_rebinds_r35_rtp_hook_to_listener_lifetime_reset(self) -> None:
+        candidate = self.r42b_candidate
+        self.assertEqual(candidate.count("r42_listener_rtp_arm(armed);"), 1)
+        self.assertNotIn(
+            "p80_media_forwarding_enabled = armed ? TRUE : FALSE;",
+            candidate,
+        )
+        self.assertIn("r42_listener_rtp_reset_lifetime", candidate)
+        self.assertIn("p80_video_profile_seen = FALSE", candidate)
+        self.assertIn("p80_audio_profile_seen = FALSE", candidate)
 
     def test_transform_composes_only_after_r37(self) -> None:
         self.assertIn("R42_ATTACHED_INBOUND_MEDIA_RUNTIME_BEGIN", self.r42_candidate)
@@ -178,12 +221,25 @@ class P116R42AttachedInboundMediaRuntimeTests(unittest.TestCase):
     def test_ct122_builder_requires_two_identical_offline_musl_builds(self) -> None:
         source = self.builder_source
         self.assertGreaterEqual(source.count("--network none"), 1)
-        self.assertIn("comelit-v4-r42-candidate-a", source)
-        self.assertIn("comelit-v4-r42-candidate-b", source)
+        self.assertIn("comelit-v4-r42b-candidate-a", source)
+        self.assertIn("comelit-v4-r42b-candidate-b", source)
         self.assertIn('[[ "$BUILD_A_SHA" == "$BUILD_B_SHA" ]]', source)
         self.assertIn('cmp -s "$BUILD_A" "$BUILD_B"', source)
         self.assertIn("REPRODUCIBLE_BINARY_SHA_GATE=PASS", source)
+        self.assertIn("REPRODUCIBLE_SOURCE_SHA_GATE=PASS", source)
+        self.assertIn("REPRODUCIBLE_SOURCE_CMP_GATE=PASS", source)
         self.assertIn("REPRODUCIBLE_BINARY_CMP_GATE=PASS", source)
+        self.assertIn("LISTENER_LINEAGE_GATE=PASS", source)
+        self.assertIn("DOOR_RUNTIME_SOURCE_GATE=PASS", source)
+        self.assertIn("DOOR_RUNTIME_BINARY_GATE=PASS", source)
+        self.assertIn(
+            "entrance_p116_r42b_listener_attached_media_transform.py",
+            source,
+        )
+        self.assertNotIn(
+            "entrance_p106_teardown_state_classification_transform.py",
+            source,
+        )
         self.assertIn("CANDIDATE_EXECUTED=false", source)
         self.assertIn("COMELIT_NETWORK_REQUESTS=0", source)
         self.assertIn(
@@ -210,6 +266,17 @@ class P116R42AttachedInboundMediaRuntimeTests(unittest.TestCase):
             self.assertIn(required, source)
         self.assertIn("GIT_COMMIT_PERFORMED=false", source)
         self.assertIn("GIT_PUSH_PERFORMED=false", source)
+        self.assertIn(
+            "phase=P116_R42B_LISTENER_ATTACHED_INBOUND_MEDIA",
+            source,
+        )
+        self.assertIn(
+            "listener_lineage=frozen_v1_5_7_persistent_listener",
+            source,
+        )
+        self.assertIn("door_sigusr1_preserved=true", source)
+        self.assertIn("door_tick_preserved=true", source)
+        self.assertIn("V4_DOOR_EXISTING_CTPP_REUSED=true", source)
 
     def test_attached_python_bridge_never_pauses_listener_or_bootstraps_cloud(self) -> None:
         source = self.attached_source
