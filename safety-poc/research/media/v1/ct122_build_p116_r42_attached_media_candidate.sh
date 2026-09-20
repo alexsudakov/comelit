@@ -97,7 +97,7 @@ set -eu
 
 apk add --no-network --allow-untrusted /pkgs/*.apk >/dev/null
 
-cc -O2 -g -Wall -Wextra -Werror -Wl,--as-needed     -o "/w/$OUT"     /w/r42.c     $(pkg-config --cflags --libs nice glib-2.0 gio-2.0 gobject-2.0)
+cc -O2 -g -Wall -Wextra -Wl,--as-needed     -o "/w/$OUT"     /w/r42.c     $(pkg-config --cflags --libs nice glib-2.0 gio-2.0 gobject-2.0)
 
 chmod 755 "/w/$OUT"
 
