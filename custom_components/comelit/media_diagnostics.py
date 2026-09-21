@@ -17,7 +17,7 @@ _GUINT64_MAX = (1 << 64) - 1
 # (bounded to its own last-20 window) and crowd out Door/ring evidence there.
 _MEDIA_DIAGNOSTIC_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
 _MEDIA_DIAGNOSTIC_VALUE_RE = re.compile(r"^(?:true|false|PASS|FAIL|[0-9]{1,20})$")
-_MEDIA_DIAGNOSTIC_PREFIXES = ("R42_", "P80_", "P116_")
+_MEDIA_DIAGNOSTIC_PREFIXES = ("R42_", "R54_", "P80_", "P116_")
 _H264_EVIDENCE_KEYS = (
     "P116_VIDEO_SPS_COUNT",
     "P116_VIDEO_PPS_COUNT",
@@ -64,6 +64,20 @@ CAPABILITIES_TRIGGER_FIELDS = (
     "trigger_reject_stage",
     "capabilities_candidate_count",
     "attach_failure_reason",
+)
+
+CALL_ADOPTION_FIELDS = (
+    "call_adoption_started",
+    "invite_ack_sent",
+    "local_capabilities_sent",
+    "local_capability_word",
+    "local_alerting_sent",
+    "waiting_peer_capabilities",
+    "peer_capabilities_seen",
+    "peer_capability_word",
+    "peer_video_requested",
+    "peer_data_ack_sent",
+    "call_adoption_failure_stage",
 )
 
 # R42_TRIGGER_REJECT_STAGE is a native-printed enum classifying exactly where
@@ -122,6 +136,21 @@ _ATTACH_FAILURE_REASONS = frozenset(
         "invalid_media_reason",
         "invalid_stop_reason",
         "unknown",
+    }
+)
+
+_CALL_ADOPTION_FAILURE_STAGES = frozenset(
+    {
+        "NONE",
+        "ACK_BUILD_FAILED",
+        "ACK_WRITE_FAILED",
+        "CAPABILITIES_BUILD_FAILED",
+        "CAPABILITIES_WRITE_FAILED",
+        "ALERTING_BUILD_FAILED",
+        "ALERTING_WRITE_FAILED",
+        "WAITING_PEER_CAPABILITIES",
+        "PEER_CAPABILITIES_REJECTED",
+        "MEDIA_TRIGGER_REJECTED",
     }
 )
 
@@ -249,6 +278,20 @@ class MediaCallDiagnostics:
         self._trigger_reject_stage: str | None = None
         self._capabilities_candidate_count: int | None = None
         self._attach_failure_reason: str | None = None
+        self._reset_call_adoption_fields()
+
+    def _reset_call_adoption_fields(self) -> None:
+        self._call_adoption_started = False
+        self._invite_ack_sent = False
+        self._local_capabilities_sent = False
+        self._local_capability_word: int | None = None
+        self._local_alerting_sent = False
+        self._waiting_peer_capabilities = False
+        self._peer_capabilities_seen = False
+        self._peer_capability_word: int | None = None
+        self._peer_video_requested = False
+        self._peer_data_ack_sent = False
+        self._call_adoption_failure_stage: str | None = None
 
     def _arm_for_generation(self, generation: int) -> None:
         # A strictly newer generation always starts a fresh call; a
@@ -257,6 +300,7 @@ class MediaCallDiagnostics:
         if self._call_generation is None or generation > self._call_generation:
             self.reset()
             self._call_generation = generation
+            self._reset_call_adoption_fields()
 
     def observe_line(self, line: str) -> bool:
         """Apply one native stdout line if it is a recognized bounded marker."""
@@ -324,6 +368,11 @@ class MediaCallDiagnostics:
                 self._capabilities_video_requested = True
             return True
 
+        if key == "R54_CALL_ADOPTION_FAILURE_STAGE":
+            if raw_value in _CALL_ADOPTION_FAILURE_STAGES:
+                self._call_adoption_failure_stage = raw_value
+            return True
+
         safe_value = (
             raw_value if _MEDIA_DIAGNOSTIC_VALUE_RE.fullmatch(raw_value) else None
         )
@@ -380,6 +429,40 @@ class MediaCallDiagnostics:
                     self._capabilities_candidate_count = max(
                         self._capabilities_candidate_count, count
                     )
+        elif key == "R54_CALL_ADOPTION_STARTED":
+            self._call_adoption_started = (
+                self._call_adoption_started or safe_value == "true"
+            )
+        elif key == "R54_INVITE_ACK_SENT":
+            self._invite_ack_sent = self._invite_ack_sent or safe_value == "true"
+        elif key == "R54_LOCAL_CAPABILITIES_SENT":
+            self._local_capabilities_sent = (
+                self._local_capabilities_sent or safe_value == "true"
+            )
+        elif key == "R54_LOCAL_CAPABILITY_WORD":
+            self._local_capability_word = self._safe_int(safe_value)
+        elif key == "R54_LOCAL_ALERTING_SENT":
+            self._local_alerting_sent = (
+                self._local_alerting_sent or safe_value == "true"
+            )
+        elif key == "R54_WAITING_PEER_CAPABILITIES":
+            self._waiting_peer_capabilities = (
+                self._waiting_peer_capabilities or safe_value == "true"
+            )
+        elif key == "R54_PEER_CAPABILITIES_SEEN":
+            self._peer_capabilities_seen = (
+                self._peer_capabilities_seen or safe_value == "true"
+            )
+        elif key == "R54_PEER_CAPABILITY_WORD":
+            self._peer_capability_word = self._safe_int(safe_value)
+        elif key == "R54_PEER_VIDEO_REQUESTED":
+            self._peer_video_requested = (
+                self._peer_video_requested or safe_value == "true"
+            )
+        elif key == "R54_PEER_DATA_ACK_SENT":
+            self._peer_data_ack_sent = (
+                self._peer_data_ack_sent or safe_value == "true"
+            )
         return True
 
     def set_attach_failure_reason(self, reason: str | None) -> None:
@@ -451,6 +534,17 @@ class MediaCallDiagnostics:
             "trigger_reject_stage": self._trigger_reject_stage,
             "capabilities_candidate_count": self._capabilities_candidate_count,
             "attach_failure_reason": self._attach_failure_reason,
+            "call_adoption_started": self._call_adoption_started,
+            "invite_ack_sent": self._invite_ack_sent,
+            "local_capabilities_sent": self._local_capabilities_sent,
+            "local_capability_word": self._local_capability_word,
+            "local_alerting_sent": self._local_alerting_sent,
+            "waiting_peer_capabilities": self._waiting_peer_capabilities,
+            "peer_capabilities_seen": self._peer_capabilities_seen,
+            "peer_capability_word": self._peer_capability_word,
+            "peer_video_requested": self._peer_video_requested,
+            "peer_data_ack_sent": self._peer_data_ack_sent,
+            "call_adoption_failure_stage": self._call_adoption_failure_stage,
         }
 
 
@@ -470,6 +564,17 @@ _RECOGNIZED_MEDIA_DIAGNOSTIC_KEYS = frozenset(
         "R42_CAPABILITIES_VIDEO_REQUESTED",
         "R42_CAPABILITIES_CANDIDATE_COUNT",
         "R42_TRIGGER_REJECT_STAGE",
+        "R54_CALL_ADOPTION_STARTED",
+        "R54_INVITE_ACK_SENT",
+        "R54_LOCAL_CAPABILITIES_SENT",
+        "R54_LOCAL_CAPABILITY_WORD",
+        "R54_LOCAL_ALERTING_SENT",
+        "R54_WAITING_PEER_CAPABILITIES",
+        "R54_PEER_CAPABILITIES_SEEN",
+        "R54_PEER_CAPABILITY_WORD",
+        "R54_PEER_VIDEO_REQUESTED",
+        "R54_PEER_DATA_ACK_SENT",
+        "R54_CALL_ADOPTION_FAILURE_STAGE",
         *_H264_EVIDENCE_KEYS,
     }
 )

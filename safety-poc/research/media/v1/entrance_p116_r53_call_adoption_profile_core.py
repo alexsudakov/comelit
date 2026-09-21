@@ -185,13 +185,25 @@ static int r53_peer_capability_word(
     return 1;
 }
 
-static int r53_handle_peer_capabilities(
+typedef int (*R53PeerCapabilitiesTrigger)(
+    R35AttachedMediaSession *session,
+    const R35CtpEnvelopeView *peer_view);
+
+static inline int r53_default_media_trigger(
+    R35AttachedMediaSession *session,
+    const R35CtpEnvelopeView *peer_view) {
+    return r36_trigger_open_from_capabilities(session, peer_view) == R35_OK
+        ? 1
+        : 0;
+}
+
+static int r53_handle_peer_capabilities_with_trigger(
     R35AttachedMediaSession *session,
     R53CallAdoptionProfileState *state,
-    const R35CtpEnvelopeView *peer_view) {
+    const R35CtpEnvelopeView *peer_view,
+    R53PeerCapabilitiesTrigger trigger_fn) {
     unsigned word = 0u;
-    R35Result rc;
-    if (!session || !state || !peer_view) return 0;
+    if (!session || !state || !peer_view || !trigger_fn) return 0;
     r53_sync_generation(state, session);
     if (state->diag.peer_capabilities_seen) {
         state->diag.call_adoption_failure_stage = R53_STAGE_MEDIA_TRIGGER_REJECTED;
@@ -220,14 +232,24 @@ static int r53_handle_peer_capabilities(
         state->diag.call_adoption_failure_stage = R53_STAGE_ACK_WRITE_FAILED;
         return 0;
     }
-    rc = r36_trigger_open_from_capabilities(session, peer_view);
-    if (rc != R35_OK) {
+    if (!trigger_fn(session, peer_view)) {
         state->diag.call_adoption_failure_stage = R53_STAGE_MEDIA_TRIGGER_REJECTED;
         return 0;
     }
     state->diag.waiting_peer_capabilities = 0;
     state->diag.call_adoption_failure_stage = R53_STAGE_NONE;
     return 1;
+}
+
+static inline int r53_handle_peer_capabilities(
+    R35AttachedMediaSession *session,
+    R53CallAdoptionProfileState *state,
+    const R35CtpEnvelopeView *peer_view) {
+    return r53_handle_peer_capabilities_with_trigger(
+        session,
+        state,
+        peer_view,
+        r53_default_media_trigger);
 }
 /* R53_CALL_ADOPTION_PROFILE_END */'''
 

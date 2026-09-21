@@ -16,7 +16,7 @@ asserts on what was actually printed:
 * a new call generation resets the pre-candidate seen set;
 * the block never touches a functional writer, timer or retry;
 * the HA-side parser accepts the explicit pre-candidate markers and keeps the
-  23-field schema bounded.
+  additive 34-field schema bounded.
 """
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ NATIVE = Path(__file__).resolve().parent / "native"
 HARNESS_HEAD = NATIVE / "p116_r42b_capabilities_diag_host_harness.c"
 HARNESS_SCENARIOS = NATIVE / "p116_r42b_capabilities_diag_scenarios.c"
 MEDIA_DIAGNOSTICS = REPO / "custom_components" / "comelit" / "media_diagnostics.py"
-EXPECTED_FIELD_COUNT = 23
+EXPECTED_FIELD_COUNT = 34
 
 _STATE_BEGIN = "/* R42_CAPABILITIES_DIAGNOSTICS_STATE_BEGIN */"
 _STATE_END = "/* R42_CAPABILITIES_DIAGNOSTICS_STATE_END */"
@@ -324,7 +324,8 @@ class CapabilitiesPreCandidateParserTests(unittest.TestCase):
     def test_schema_field_count_is_unchanged(self) -> None:
         self.assertEqual(
             len(self.module.MEDIA_DIAGNOSTICS_FIELDS)
-            + len(self.module.CAPABILITIES_TRIGGER_FIELDS),
+            + len(self.module.CAPABILITIES_TRIGGER_FIELDS)
+            + len(self.module.CALL_ADOPTION_FIELDS),
             EXPECTED_FIELD_COUNT,
         )
         self.assertEqual(

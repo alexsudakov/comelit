@@ -57,6 +57,9 @@ _NATIVE_MARKER_SAFE_VALUE_RE = re.compile(
     r"^(?:PASS|FAIL|true|false|READY|OPEN|CLOSED|UNKNOWN_OUTCOME|"
     r"REJECTED|REJECTED_NOT_READY|FAILED_SAFE|[0-9]{1,10})$"
 )
+_DIAGNOSTIC_MARKER_SAFE_VALUE_RE = re.compile(
+    r"^(?:PASS|FAIL|true|false|[0-9]{1,20})$"
+)
 _NATIVE_MARKER_PREFIXES = (
     "ICE_",
     "REMOTE_SDP_",
@@ -65,8 +68,49 @@ _NATIVE_MARKER_PREFIXES = (
     "V4_",
     "P12_",
     "R42_",
+    "R54_",
 )
 _NATIVE_MARKER_TAIL_LIMIT = 20
+_CALL_ADOPTION_FAILURE_STAGES = frozenset(
+    {
+        "NONE",
+        "ACK_BUILD_FAILED",
+        "ACK_WRITE_FAILED",
+        "CAPABILITIES_BUILD_FAILED",
+        "CAPABILITIES_WRITE_FAILED",
+        "ALERTING_BUILD_FAILED",
+        "ALERTING_WRITE_FAILED",
+        "WAITING_PEER_CAPABILITIES",
+        "PEER_CAPABILITIES_REJECTED",
+        "MEDIA_TRIGGER_REJECTED",
+    }
+)
+_CANARY_OBSERVABILITY_MARKERS = {
+    "R42_CALL_GENERATION": "CALL_INIT_SEEN",
+    "R54_CALL_ADOPTION_STARTED": "CALL_ADOPTION_STARTED",
+    "R54_INVITE_ACK_SENT": "INVITE_ACK_SENT",
+    "R54_LOCAL_CAPABILITIES_SENT": "LOCAL_CAPABILITIES_SENT",
+    "R54_LOCAL_CAPABILITY_WORD": "LOCAL_CAPABILITY_WORD",
+    "R54_LOCAL_ALERTING_SENT": "LOCAL_ALERTING_SENT",
+    "R54_WAITING_PEER_CAPABILITIES": "WAITING_PEER_CAPABILITIES",
+    "R54_PEER_CAPABILITIES_SEEN": "PEER_CAPABILITIES_SEEN",
+    "R54_PEER_CAPABILITY_WORD": "PEER_CAPABILITY_WORD",
+    "R54_PEER_VIDEO_REQUESTED": "PEER_VIDEO_REQUESTED",
+    "R54_PEER_DATA_ACK_SENT": "PEER_DATA_ACK_SENT",
+    "R54_CALL_ADOPTION_FAILURE_STAGE": "CALL_ADOPTION_FAILURE_STAGE",
+    "R42_MEDIAREQ26_OPEN_CHANNEL": "MEDIAREQ26_OPEN_SENT",
+    "P80_VIDEO_RTP_FORWARDING": "RTP_RECEIVED",
+    "R42_ATTACHED_MEDIA_STOP_SENT": "STOP_SENT",
+    "R42_LISTENER_RTP_FORWARDING_ARMED": "CLEANUP_COMPLETE",
+}
+_H264_CANARY_MARKERS = frozenset(
+    {
+        "P116_VIDEO_SPS_COUNT",
+        "P116_VIDEO_PPS_COUNT",
+        "P116_VIDEO_SINGLE_NAL_COUNT",
+        "P116_VIDEO_FUA_COUNT",
+    }
+)
 
 
 class ComelitRingRuntimeError(RuntimeError):
@@ -180,6 +224,8 @@ class ComelitRingRuntime:
         self._last_door_result: dict[str, object] | None = None
         self._door_diagnostic: dict[str, object] = {}
         self._native_marker_tail: list[str] = []
+        self._canary_log_generation: int | None = None
+        self._canary_log_seen: set[str] = set()
         self._last_native_exit_code: int | None = None
         self._last_native_failure_markers: list[str] = []
         self._ring_media: RingMediaCoordinator | None = None
@@ -361,6 +407,77 @@ class ComelitRingRuntime:
         if len(self._native_marker_tail) > _NATIVE_MARKER_TAIL_LIMIT:
             del self._native_marker_tail[:-_NATIVE_MARKER_TAIL_LIMIT]
 
+    def _safe_native_marker_value(self, key: str, value: str) -> str | None:
+        if _NATIVE_MARKER_SAFE_VALUE_RE.fullmatch(value):
+            return value
+        if _DIAGNOSTIC_MARKER_SAFE_VALUE_RE.fullmatch(value):
+            return value
+        if key == "R54_CALL_ADOPTION_FAILURE_STAGE":
+            if value in _CALL_ADOPTION_FAILURE_STAGES:
+                return value
+        return None
+
+    def _observe_canary_log_marker(self, line: str) -> None:
+        if "=" not in line:
+            return
+
+        key, value = line.split("=", 1)
+        if not _NATIVE_MARKER_KEY_RE.fullmatch(key):
+            return
+
+        safe_value = self._safe_native_marker_value(key, value)
+        if safe_value is None:
+            return
+
+        if key == "R42_CALL_GENERATION":
+            generation = int(safe_value)
+            if generation != getattr(self, "_canary_log_generation", None):
+                self._canary_log_generation = generation
+                self._canary_log_seen = set()
+
+        criterion = _CANARY_OBSERVABILITY_MARKERS.get(key)
+        if key in _H264_CANARY_MARKERS:
+            try:
+                if int(safe_value) <= 0:
+                    return
+            except ValueError:
+                return
+            criterion = "H264_DETECTED"
+        elif key in {
+            "R54_CALL_ADOPTION_STARTED",
+            "R54_INVITE_ACK_SENT",
+            "R54_LOCAL_CAPABILITIES_SENT",
+            "R54_LOCAL_ALERTING_SENT",
+            "R54_WAITING_PEER_CAPABILITIES",
+            "R54_PEER_CAPABILITIES_SEEN",
+            "R54_PEER_VIDEO_REQUESTED",
+            "R54_PEER_DATA_ACK_SENT",
+            "R42_ATTACHED_MEDIA_STOP_SENT",
+        } and safe_value != "true":
+            return
+        elif key == "P80_VIDEO_RTP_FORWARDING" and safe_value != "PASS":
+            return
+        elif key == "R42_LISTENER_RTP_FORWARDING_ARMED" and safe_value != "false":
+            return
+
+        if criterion is None:
+            return
+
+        seen = getattr(self, "_canary_log_seen", None)
+        if seen is None:
+            seen = set()
+            self._canary_log_seen = seen
+        if criterion in seen:
+            return
+        seen.add(criterion)
+
+        _LOGGER.info(
+            "Comelit canary evidence %s marker=%s value=%s",
+            criterion,
+            key,
+            safe_value,
+        )
+
     def _capture_native_failure(self, returncode: int) -> None:
         self._last_native_exit_code = returncode
         self._last_native_failure_markers = list(self._native_marker_tail)
@@ -376,6 +493,8 @@ class ComelitRingRuntime:
         self._attached_media_closed.clear()
         self._ring_lines.clear()
         self._native_marker_tail.clear()
+        self._canary_log_generation = None
+        self._canary_log_seen = set()
         self._last_ring_event = None
         self._last_error = None
         self._media_diagnostics.reset()
@@ -773,6 +892,7 @@ class ComelitRingRuntime:
             line = raw.decode("utf-8", errors="replace").strip()
             self._remember_native_marker(line)
             self._media_diagnostics.observe_line(line)
+            self._observe_canary_log_marker(line)
 
             if line == "ICE_GATHER=PASS":
                 self._offer_ready.set()
