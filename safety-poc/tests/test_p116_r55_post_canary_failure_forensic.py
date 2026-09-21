@@ -59,7 +59,9 @@ class P116R55PrematurePublicationCorrectiveTests(unittest.TestCase):
     def test_peer_only_ack_counter_exists_and_is_used(self) -> None:
         self.assertIn("unsigned peer_data_ack_count;", r45.CORE_REGION)
         self.assertIn("state->peer_data_ack_count += 1u;", r45.CORE_REGION)
-        self.assertIn("state->r45.peer_data_ack_count > 0u", self.r54_region)
+        self.assertIn("R54_PEER_DATA_ACK_ENQUEUED=%s", self.r54_region)
+        self.assertIn("R54_PEER_DATA_ACK_FLUSHED=%s", self.r54_region)
+        self.assertIn('g_r54_peer_data_ack_flushed ? "true" : "false"', self.r54_region)
         self.assertNotIn("state->r45.inbound_ack_count > 0u", self.r54_region)
 
     def test_generator_produces_corrected_region_text_deterministically(self) -> None:
@@ -67,7 +69,8 @@ class P116R55PrematurePublicationCorrectiveTests(unittest.TestCase):
         self.assertIn("R54_DIAGNOSTICS_PHASE=%s", self.generated_a)
         self.assertIn("R54_PEER_CAPABILITIES_SEEN=NOT_REACHED", self.generated_a)
         self.assertIn("R54_PEER_WAIT_ENDED_WITHOUT_CAPABILITIES=%s", self.generated_a)
-        self.assertIn("state->r45.peer_data_ack_count > 0u", self.generated_a)
+        self.assertIn("R54_PEER_DATA_ACK_ENQUEUED=%s", self.generated_a)
+        self.assertIn("R54_PEER_DATA_ACK_FLUSHED=%s", self.generated_a)
         self.assertIn("r54_publish_diagnostics(", self.generated_a)
 
     def test_peer_capabilities_seen_only_true_through_peer_validation_path(self) -> None:

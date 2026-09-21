@@ -37,7 +37,9 @@ def verify_region_sources() -> None:
         "R54_DIAGNOSTICS_GENERATION_END",
         "R54_PEER_CAPABILITIES_SEEN=NOT_REACHED",
         "R54_PEER_WAIT_ENDED_WITHOUT_CAPABILITIES=%s",
-        "state->r45.peer_data_ack_count > 0u",
+        "R54_PEER_DATA_ACK_ENQUEUED=%s",
+        "R54_PEER_DATA_ACK_FLUSHED=%s",
+        "g_r54_peer_data_ack_flushed ? \"true\" : \"false\"",
     )
     for needle in required_r54:
         if needle not in r54_region:

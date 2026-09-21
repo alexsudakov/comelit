@@ -46,6 +46,17 @@ EXPECTED_HARNESS_MARKERS = (
     "R54_MISSING_WRITER_FAIL_CLOSED",
 )
 
+EXPECTED_R56_HARNESS_MARKERS = (
+    "R56_BUSY_WAIT_SERIALIZED",
+    "R56_PARTIAL_WRITE_BLOCKS_NEXT_FRAME",
+    "R56_PEER_CAP_DURING_LOCAL_TX_STORED",
+    "R56_DUPLICATE_CALL_INIT_NO_REPLAY",
+    "R56_GENERATION_REPLACED_NO_CROSS_WRITE",
+    "R56_RELEASE_TWICE_NO_DOUBLE_ENQUEUE",
+    "R56_EARLY_RELEASE_SAFE",
+    "R56_QUEUE_BUSY_TIMEOUT_FAIL_CLOSED",
+)
+
 CANARY_CRITERIA = (
     ("CALL_INIT_SEEN", "R42_CALL_GENERATION=10", "Comelit canary evidence CALL_INIT_SEEN"),
     ("CALL_ADOPTION_STARTED", "R54_CALL_ADOPTION_STARTED=true", "Comelit canary evidence CALL_ADOPTION_STARTED"),
@@ -263,6 +274,11 @@ class P116R54CallAdoptionProductionCandidateTests(unittest.TestCase):
             tmp = Path(cls.tmp_obj.name)
             harness_template = HARNESS.read_text(encoding="utf-8")
             r54_region = _extract(cls.generated_a, r54.BEGIN, r54.END)
+            r54_tx_prelude = _extract(
+                cls.generated_a,
+                "/* R54_TX_ATTRIBUTION_BEGIN */",
+                "/* R54_TX_ATTRIBUTION_END */",
+            )
             combined = tmp / "r54_generated_region.c"
             combined.write_text(
                 "\n\n".join(
@@ -271,6 +287,7 @@ class P116R54CallAdoptionProductionCandidateTests(unittest.TestCase):
                         _extract(cls.generated_a, r36.TRIGGER_BEGIN_MARKER, r36.TRIGGER_END_MARKER),
                         _extract(cls.generated_a, r45.CORE_BEGIN_MARKER, r45.CORE_END_MARKER),
                         _extract(cls.generated_a, r53.CORE_BEGIN_MARKER, r53.CORE_END_MARKER),
+                        r54_tx_prelude,
                         harness_template.replace(
                             "/* R54_GENERATED_REGION_INSERT_HERE */",
                             r54_region,
@@ -338,7 +355,7 @@ class P116R54CallAdoptionProductionCandidateTests(unittest.TestCase):
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, generated)
-        self.assertIn("r53_start_after_call_capture(", generated)
+        self.assertNotIn("r53_start_after_call_capture", generated)
         self.assertIn("r45_accept_peer_data_and_ack(", generated)
         self.assertIn("r42_queue_media_channel_open()", generated)
 
@@ -350,10 +367,9 @@ class P116R54CallAdoptionProductionCandidateTests(unittest.TestCase):
             1,
         )
         self.assertEqual(generated.count("r42_queue_media_channel_open()"), 1)
-        self.assertNotIn("r36_is_capabilities_for_current_call(", r54_region)
-        self.assertNotIn("r53_peer_capability_word(", r54_region)
-        self.assertNotIn("r36_capabilities_video_requested(", r54_region)
-        self.assertNotIn("r45_accept_peer_data_and_ack(", r54_region)
+        self.assertIn("r54_store_pending_peer_capabilities(", r54_region)
+        self.assertIn("r45_accept_peer_data_and_ack(", r54_region)
+        self.assertNotIn("r53_handle_peer_capabilities_with_trigger(", r54_region)
 
     def test_profile_word_is_formula_not_capture_literal_or_native_claim(self) -> None:
         text = self.generated_a + "\n" + r54.report()
@@ -409,6 +425,15 @@ class P116R54CallAdoptionProductionCandidateTests(unittest.TestCase):
         self.assertEqual(self.markers.get("R54_NETWORK_TX"), "0")
         self.assertEqual(self.markers.get("R54_DOOR_ACTIONS"), "0")
         self.assertEqual(self.markers.get("R54_GATE_ACTIONS"), "0")
+
+    def test_r56_single_slot_race_matrix_harness(self) -> None:
+        self.require_harness()
+        self.assertEqual(self.harness_returncode, 0, self.harness_stdout)
+        for key in EXPECTED_R56_HARNESS_MARKERS:
+            with self.subTest(key=key):
+                self.assertEqual(self.markers.get(key), "PASS", self.harness_stdout)
+        self.assertEqual(self.markers.get("R56_ENQUEUE_WHILE_BUSY_OBSERVED"), "0")
+        self.assertEqual(self.markers.get("R56_SECOND_MEDIA_OPEN_OBSERVED"), "0")
 
     def test_diagnostics_contract_parses_r54_markers_and_resets_per_generation(self) -> None:
         md = _load_media_diagnostics()

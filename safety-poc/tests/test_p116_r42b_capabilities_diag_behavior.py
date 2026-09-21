@@ -38,7 +38,7 @@ NATIVE = Path(__file__).resolve().parent / "native"
 HARNESS_HEAD = NATIVE / "p116_r42b_capabilities_diag_host_harness.c"
 HARNESS_SCENARIOS = NATIVE / "p116_r42b_capabilities_diag_scenarios.c"
 MEDIA_DIAGNOSTICS = REPO / "custom_components" / "comelit" / "media_diagnostics.py"
-EXPECTED_FIELD_COUNT = 34
+EXPECTED_FIELD_COUNT = 36
 
 _STATE_BEGIN = "/* R42_CAPABILITIES_DIAGNOSTICS_STATE_BEGIN */"
 _STATE_END = "/* R42_CAPABILITIES_DIAGNOSTICS_STATE_END */"

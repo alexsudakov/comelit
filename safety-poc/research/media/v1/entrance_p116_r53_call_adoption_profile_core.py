@@ -35,7 +35,15 @@ typedef enum {
     R53_STAGE_ALERTING_WRITE_FAILED,
     R53_STAGE_WAITING_PEER_CAPABILITIES,
     R53_STAGE_PEER_CAPABILITIES_REJECTED,
-    R53_STAGE_MEDIA_TRIGGER_REJECTED
+    R53_STAGE_MEDIA_TRIGGER_REJECTED,
+    R53_STAGE_TX_INVITE_ACK_FAILED,
+    R53_STAGE_TX_LOCAL_CAPABILITIES_FAILED,
+    R53_STAGE_TX_LOCAL_ALERTING_FAILED,
+    R53_STAGE_TX_PEER_ACK_FAILED,
+    R53_STAGE_TX_MEDIA_TRIGGER_FAILED,
+    R53_STAGE_TX_WAIT_TIMEOUT,
+    R53_STAGE_TX_GENERATION_REPLACED,
+    R53_STAGE_TX_LISTENER_TEARDOWN
 } R53FailureStage;
 
 typedef struct {
@@ -66,10 +74,6 @@ static unsigned r53_helper_local_capability_profile(void) {
         | R53_HELPER_CAP_MSTREAM;
 }
 
-static int r53_helper_profile_is_expected(void) {
-    return r53_helper_local_capability_profile() == 0x27u ? 1 : 0;
-}
-
 static const char *r53_failure_stage_name(R53FailureStage stage) {
     switch (stage) {
     case R53_STAGE_NONE: return "NONE";
@@ -82,6 +86,14 @@ static const char *r53_failure_stage_name(R53FailureStage stage) {
     case R53_STAGE_WAITING_PEER_CAPABILITIES: return "WAITING_PEER_CAPABILITIES";
     case R53_STAGE_PEER_CAPABILITIES_REJECTED: return "PEER_CAPABILITIES_REJECTED";
     case R53_STAGE_MEDIA_TRIGGER_REJECTED: return "MEDIA_TRIGGER_REJECTED";
+    case R53_STAGE_TX_INVITE_ACK_FAILED: return "TX_INVITE_ACK_FAILED";
+    case R53_STAGE_TX_LOCAL_CAPABILITIES_FAILED: return "TX_LOCAL_CAPABILITIES_FAILED";
+    case R53_STAGE_TX_LOCAL_ALERTING_FAILED: return "TX_LOCAL_ALERTING_FAILED";
+    case R53_STAGE_TX_PEER_ACK_FAILED: return "TX_PEER_ACK_FAILED";
+    case R53_STAGE_TX_MEDIA_TRIGGER_FAILED: return "TX_MEDIA_TRIGGER_FAILED";
+    case R53_STAGE_TX_WAIT_TIMEOUT: return "TX_WAIT_TIMEOUT";
+    case R53_STAGE_TX_GENERATION_REPLACED: return "TX_GENERATION_REPLACED";
+    case R53_STAGE_TX_LISTENER_TEARDOWN: return "TX_LISTENER_TEARDOWN";
     }
     return "PEER_CAPABILITIES_REJECTED";
 }
@@ -108,68 +120,6 @@ static R45RuntimeFields r53_runtime_fields(void) {
     runtime.capability_word = r53_helper_local_capability_profile();
     runtime.alerting_argument = R53_HELPER_ALERTING_ARGUMENT;
     return runtime;
-}
-
-static int r53_start_after_call_capture(
-    R35AttachedMediaSession *session,
-    R53CallAdoptionProfileState *state,
-    const R35CtpEnvelopeView *invite_view) {
-    R45RuntimeFields runtime;
-    unsigned before;
-    if (!session || !state || !invite_view) return 0;
-    r53_sync_generation(state, session);
-    if (!r35_call_ready(session)) {
-        state->diag.call_adoption_failure_stage = R53_STAGE_ACK_BUILD_FAILED;
-        return 0;
-    }
-    if (state->diag.adoption_attempted &&
-        state->diag.generation == session->call_generation) {
-        state->diag.call_adoption_failure_stage = R53_STAGE_WAITING_PEER_CAPABILITIES;
-        return 0;
-    }
-    if (!r53_helper_profile_is_expected()) {
-        state->diag.call_adoption_failure_stage = R53_STAGE_CAPABILITIES_BUILD_FAILED;
-        return 0;
-    }
-
-    state->diag.adoption_attempted = 1;
-    state->diag.call_adoption_started = 1;
-    state->diag.connection = session->call_ctp_connection;
-    state->diag.call_adoption_failure_stage = R53_STAGE_NONE;
-
-    before = state->r45.local_signaling_write_count;
-    if (!r45_send_invite_ack(session, &state->r45, invite_view)) {
-        state->diag.call_adoption_failure_stage =
-            state->r45.local_signaling_write_count == before
-                ? R53_STAGE_ACK_WRITE_FAILED
-                : R53_STAGE_ACK_BUILD_FAILED;
-        return 0;
-    }
-    state->diag.invite_ack_sent = 1;
-
-    runtime = r53_runtime_fields();
-    before = state->r45.local_signaling_write_count;
-    if (!r45_send_local_capabilities(session, &state->r45, &runtime)) {
-        state->diag.call_adoption_failure_stage =
-            state->r45.local_signaling_write_count == before
-                ? R53_STAGE_CAPABILITIES_WRITE_FAILED
-                : R53_STAGE_CAPABILITIES_BUILD_FAILED;
-        return 0;
-    }
-    state->diag.local_capabilities_sent = 1;
-    state->diag.local_capability_word = runtime.capability_word;
-
-    before = state->r45.local_signaling_write_count;
-    if (!r45_send_local_alerting(session, &state->r45, &runtime)) {
-        state->diag.call_adoption_failure_stage =
-            state->r45.local_signaling_write_count == before
-                ? R53_STAGE_ALERTING_WRITE_FAILED
-                : R53_STAGE_ALERTING_BUILD_FAILED;
-        return 0;
-    }
-    state->diag.local_alerting_sent = 1;
-    state->diag.waiting_peer_capabilities = 1;
-    return 1;
 }
 
 static int r53_peer_capability_word(

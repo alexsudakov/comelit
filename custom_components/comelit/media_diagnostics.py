@@ -76,6 +76,8 @@ CALL_ADOPTION_FIELDS = (
     "peer_capabilities_seen",
     "peer_capability_word",
     "peer_video_requested",
+    "peer_data_ack_enqueued",
+    "peer_data_ack_flushed",
     "peer_data_ack_sent",
     "call_adoption_failure_stage",
 )
@@ -151,6 +153,14 @@ _CALL_ADOPTION_FAILURE_STAGES = frozenset(
         "WAITING_PEER_CAPABILITIES",
         "PEER_CAPABILITIES_REJECTED",
         "MEDIA_TRIGGER_REJECTED",
+        "TX_INVITE_ACK_FAILED",
+        "TX_LOCAL_CAPABILITIES_FAILED",
+        "TX_LOCAL_ALERTING_FAILED",
+        "TX_PEER_ACK_FAILED",
+        "TX_MEDIA_TRIGGER_FAILED",
+        "TX_WAIT_TIMEOUT",
+        "TX_GENERATION_REPLACED",
+        "TX_LISTENER_TEARDOWN",
     }
 )
 
@@ -290,6 +300,8 @@ class MediaCallDiagnostics:
         self._peer_capabilities_seen = False
         self._peer_capability_word: int | None = None
         self._peer_video_requested = False
+        self._peer_data_ack_enqueued = False
+        self._peer_data_ack_flushed = False
         self._peer_data_ack_sent = False
         self._call_adoption_failure_stage: str | None = None
 
@@ -459,6 +471,14 @@ class MediaCallDiagnostics:
             self._peer_video_requested = (
                 self._peer_video_requested or safe_value == "true"
             )
+        elif key == "R54_PEER_DATA_ACK_ENQUEUED":
+            self._peer_data_ack_enqueued = (
+                self._peer_data_ack_enqueued or safe_value == "true"
+            )
+        elif key == "R54_PEER_DATA_ACK_FLUSHED":
+            self._peer_data_ack_flushed = (
+                self._peer_data_ack_flushed or safe_value == "true"
+            )
         elif key == "R54_PEER_DATA_ACK_SENT":
             self._peer_data_ack_sent = (
                 self._peer_data_ack_sent or safe_value == "true"
@@ -543,6 +563,8 @@ class MediaCallDiagnostics:
             "peer_capabilities_seen": self._peer_capabilities_seen,
             "peer_capability_word": self._peer_capability_word,
             "peer_video_requested": self._peer_video_requested,
+            "peer_data_ack_enqueued": self._peer_data_ack_enqueued,
+            "peer_data_ack_flushed": self._peer_data_ack_flushed,
             "peer_data_ack_sent": self._peer_data_ack_sent,
             "call_adoption_failure_stage": self._call_adoption_failure_stage,
         }
@@ -573,8 +595,17 @@ _RECOGNIZED_MEDIA_DIAGNOSTIC_KEYS = frozenset(
         "R54_PEER_CAPABILITIES_SEEN",
         "R54_PEER_CAPABILITY_WORD",
         "R54_PEER_VIDEO_REQUESTED",
+        "R54_PEER_DATA_ACK_ENQUEUED",
+        "R54_PEER_DATA_ACK_FLUSHED",
         "R54_PEER_DATA_ACK_SENT",
         "R54_CALL_ADOPTION_FAILURE_STAGE",
+        "R54_TX_STATE",
+        "R54_TX_WAITING_FOR_SLOT",
+        "R54_TX_SUBJECT",
+        "R54_TX_ENQUEUED",
+        "R54_TX_FLUSHED",
+        "R54_TX_QUEUE_FAIL_SUBJECT",
+        "R54_TX_QUEUE_FAIL_REASON",
         *_H264_EVIDENCE_KEYS,
     }
 )

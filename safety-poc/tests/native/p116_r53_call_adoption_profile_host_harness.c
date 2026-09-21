@@ -161,6 +161,69 @@ static int r53h_alerting_match(const R35CtpEnvelopeView *view)
         && view->inner_body[2] == R53_HELPER_ALERTING_ARGUMENT;
 }
 
+static int r53h_emit_local_adoption_frames(
+    R35AttachedMediaSession *session,
+    R53CallAdoptionProfileState *state,
+    const R35CtpEnvelopeView *invite_view)
+{
+    R45RuntimeFields runtime;
+    unsigned before;
+    if (!session || !state || !invite_view) return 0;
+    r53_sync_generation(state, session);
+    if (!r35_call_ready(session)) {
+        state->diag.call_adoption_failure_stage = R53_STAGE_ACK_BUILD_FAILED;
+        return 0;
+    }
+    if (state->diag.adoption_attempted &&
+        state->diag.generation == session->call_generation) {
+        state->diag.call_adoption_failure_stage = R53_STAGE_WAITING_PEER_CAPABILITIES;
+        return 0;
+    }
+    if (r53_helper_local_capability_profile() != 0x27u) {
+        state->diag.call_adoption_failure_stage = R53_STAGE_CAPABILITIES_BUILD_FAILED;
+        return 0;
+    }
+
+    state->diag.adoption_attempted = 1;
+    state->diag.call_adoption_started = 1;
+    state->diag.connection = session->call_ctp_connection;
+    state->diag.call_adoption_failure_stage = R53_STAGE_NONE;
+
+    before = state->r45.local_signaling_write_count;
+    if (!r45_send_invite_ack(session, &state->r45, invite_view)) {
+        state->diag.call_adoption_failure_stage =
+            state->r45.local_signaling_write_count == before
+                ? R53_STAGE_ACK_WRITE_FAILED
+                : R53_STAGE_ACK_BUILD_FAILED;
+        return 0;
+    }
+    state->diag.invite_ack_sent = 1;
+
+    runtime = r53_runtime_fields();
+    before = state->r45.local_signaling_write_count;
+    if (!r45_send_local_capabilities(session, &state->r45, &runtime)) {
+        state->diag.call_adoption_failure_stage =
+            state->r45.local_signaling_write_count == before
+                ? R53_STAGE_CAPABILITIES_WRITE_FAILED
+                : R53_STAGE_CAPABILITIES_BUILD_FAILED;
+        return 0;
+    }
+    state->diag.local_capabilities_sent = 1;
+    state->diag.local_capability_word = runtime.capability_word;
+
+    before = state->r45.local_signaling_write_count;
+    if (!r45_send_local_alerting(session, &state->r45, &runtime)) {
+        state->diag.call_adoption_failure_stage =
+            state->r45.local_signaling_write_count == before
+                ? R53_STAGE_ALERTING_WRITE_FAILED
+                : R53_STAGE_ALERTING_BUILD_FAILED;
+        return 0;
+    }
+    state->diag.local_alerting_sent = 1;
+    state->diag.waiting_peer_capabilities = 1;
+    return 1;
+}
+
 static int r53h_run_positive(unsigned peer_word, const char *prefix)
 {
     int ok;
@@ -178,7 +241,7 @@ static int r53h_run_positive(unsigned peer_word, const char *prefix)
     r53h_build_call_init(invite, 0x5234u, 0xfeu, 0xffu);
     ok = r35_parse_ctp_envelope(invite, sizeof(invite), &invite_view)
         && r35_capture_call_ctp_id(&session, invite, sizeof(invite), 999u)
-        && r53_start_after_call_capture(&session, &adoption, &invite_view);
+        && r53h_emit_local_adoption_frames(&session, &adoption, &invite_view);
     if (!ok) return 0;
 
     ok = g_write_count == 3u
@@ -261,12 +324,12 @@ int main(void)
     r53h_build_call_init(invite, 0x5234u, 0x56u, 0x78u);
     ok = r35_parse_ctp_envelope(invite, sizeof(invite), &invite_view)
         && r35_capture_call_ctp_id(&session, invite, sizeof(invite), 999u)
-        && r53_start_after_call_capture(&session, &adoption, &invite_view);
+        && r53h_emit_local_adoption_frames(&session, &adoption, &invite_view);
     mark("R53_ORDER_CALL_INIT_ACK_CAP_ALERT", ok && g_write_count == 3u);
     if (!ok) overall = 0;
 
     before = g_write_count;
-    ok = !r53_start_after_call_capture(&session, &adoption, &invite_view)
+    ok = !r53h_emit_local_adoption_frames(&session, &adoption, &invite_view)
         && g_write_count == before
         && adoption.diag.call_adoption_failure_stage == R53_STAGE_WAITING_PEER_CAPABILITIES;
     mark("R53_DUPLICATE_CALL_INIT_SAME_GENERATION_NO_OPEN", ok);
@@ -355,7 +418,7 @@ int main(void)
     r53h_build_call_init(invite, 0x5234u, 0x10u, 0x20u);
     ok = r35_parse_ctp_envelope(invite, sizeof(invite), &invite_view)
         && r35_capture_call_ctp_id(&session, invite, sizeof(invite), 999u)
-        && r53_start_after_call_capture(&session, &adoption, &invite_view);
+        && r53h_emit_local_adoption_frames(&session, &adoption, &invite_view);
     r53h_build_peer_capabilities(peer_caps, 0x5234u, 0x11u, 0x22u, 0x00000000u);
     ok = ok
         && r35_parse_ctp_envelope(peer_caps, sizeof(peer_caps), &peer_view)
@@ -409,7 +472,7 @@ int main(void)
         r53h_build_call_init(invite, 0x5236u, 0x20u, 0x30u);
         ok = r35_parse_ctp_envelope(invite, sizeof(invite), &invite_view)
             && r35_capture_call_ctp_id(&no_writer, invite, sizeof(invite), 999u)
-            && !r53_start_after_call_capture(&no_writer, &no_writer_adoption, &invite_view)
+            && !r53h_emit_local_adoption_frames(&no_writer, &no_writer_adoption, &invite_view)
             && no_writer.open_count == 0u
             && no_writer_adoption.diag.call_adoption_failure_stage == R53_STAGE_ACK_WRITE_FAILED;
         mark("R53_ACK_WRITE_FAIL_CLOSED", ok);

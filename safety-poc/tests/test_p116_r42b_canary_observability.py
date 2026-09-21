@@ -201,10 +201,10 @@ class MediaCallDiagnosticsUnitTests(unittest.TestCase):
         self.assertTrue(set(MEDIA_DIAGNOSTICS_FIELDS).issubset(snapshot))
         # Round 2 (failure forensic) adds 7 more fields, additively.
         self.assertEqual(len(CAPABILITIES_TRIGGER_FIELDS), 7)
-        # R54 call-adoption observability adds 11 more fields, additively.
-        self.assertEqual(len(CALL_ADOPTION_FIELDS), 11)
+        # R54/R56 call-adoption observability adds 13 more fields, additively.
+        self.assertEqual(len(CALL_ADOPTION_FIELDS), 13)
         self.assertEqual(set(snapshot), set(ALL_DIAGNOSTICS_FIELDS))
-        self.assertEqual(len(ALL_DIAGNOSTICS_FIELDS), 34)
+        self.assertEqual(len(ALL_DIAGNOSTICS_FIELDS), 36)
         self.assertIsNone(snapshot["call_generation"])
         self.assertIsNone(snapshot["media_channel"])
         self.assertIsNone(snapshot["channel_source"])
