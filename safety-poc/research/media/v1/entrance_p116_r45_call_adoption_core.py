@@ -34,6 +34,7 @@ typedef struct {
     int local_capabilities_sent;
     int local_alerting_sent;
     unsigned inbound_ack_count;
+    unsigned peer_data_ack_count;
     unsigned local_signaling_write_count;
 } R45CallAdoptionState;
 
@@ -316,8 +317,12 @@ static int r45_accept_peer_data_and_ack(
     r45_sync_generation(state, session);
     if (!r45_call_adoption_complete(state, session)) return 0;
     if (view->flags != R35_CTP_FLAG_DATA) return 0;
-    return r45_emit_empty_ack_for_peer_frame(
-        session, state, view, "CALL_PEER_DATA_ACK");
+    if (!r45_emit_empty_ack_for_peer_frame(
+            session, state, view, "CALL_PEER_DATA_ACK")) {
+        return 0;
+    }
+    state->peer_data_ack_count += 1u;
+    return 1;
 }
 /* R45_CALL_ADOPTION_END */'''
 

@@ -92,7 +92,9 @@ _CALL_INIT_CAPTURE_REPLACEMENT = """                    printf("R35_CALL_CTP_CAP
                     r54_handle_call_init(body, body_len);
                 } else {
                     printf("R35_CALL_CTP_CAPTURED=false\\n");
-                    r54_publish_diagnostics(&g_r54_call_adoption);
+                    r54_publish_diagnostics(
+                        &g_r54_call_adoption,
+                        R54_DIAGNOSTICS_GENERATION_END);
                 }
                 fflush(stdout);
 """
@@ -104,26 +106,77 @@ _R42_TRIGGER_REPLACEMENT = """                    gboolean r42_ok = r54_handle_p
                     printf("R42_ATTACHED_TRIGGER_MATCH=true\\n");
 """
 
+_FINAL_STATUS_ANCHOR = """    printf(
+        "PSEUDOTCP_OPEN_FINAL=%s\\n",
+        pseudotcp_open ? "true" : "false"
+    );
+
+    fflush(stdout);
+"""
+_FINAL_STATUS_REPLACEMENT = """    printf(
+        "PSEUDOTCP_OPEN_FINAL=%s\\n",
+        pseudotcp_open ? "true" : "false"
+    );
+
+    r54_publish_diagnostics(
+        &g_r54_call_adoption,
+        R54_DIAGNOSTICS_GENERATION_END);
+
+    fflush(stdout);
+"""
+
 
 R54_REGION = r'''/* R54_CALL_ADOPTION_LISTENER_BEGIN */
 static R53CallAdoptionProfileState g_r54_call_adoption;
 
+typedef enum {
+    R54_DIAGNOSTICS_LOCAL_AFTER_TRIO = 0,
+    R54_DIAGNOSTICS_AFTER_PEER_CAPABILITIES,
+    R54_DIAGNOSTICS_GENERATION_END
+} R54DiagnosticsPhase;
+
+static const char *
+r54_diagnostics_phase_name(R54DiagnosticsPhase phase)
+{
+    switch (phase) {
+    case R54_DIAGNOSTICS_LOCAL_AFTER_TRIO: return "LOCAL_AFTER_TRIO";
+    case R54_DIAGNOSTICS_AFTER_PEER_CAPABILITIES: return "AFTER_PEER_CAPABILITIES";
+    case R54_DIAGNOSTICS_GENERATION_END: return "GENERATION_END";
+    }
+    return "GENERATION_END";
+}
+
 static void
-r54_publish_diagnostics(const R53CallAdoptionProfileState *state)
+r54_publish_diagnostics(
+    const R53CallAdoptionProfileState *state,
+    R54DiagnosticsPhase phase)
 {
     const R53Diagnostics *diag;
+    gboolean peer_phase_reached;
     if (!state) return;
     diag = &state->diag;
+    peer_phase_reached = phase != R54_DIAGNOSTICS_LOCAL_AFTER_TRIO;
+    printf("R54_DIAGNOSTICS_PHASE=%s\n", r54_diagnostics_phase_name(phase));
     printf("R54_CALL_ADOPTION_STARTED=%s\n", diag->call_adoption_started ? "true" : "false");
     printf("R54_INVITE_ACK_SENT=%s\n", diag->invite_ack_sent ? "true" : "false");
     printf("R54_LOCAL_CAPABILITIES_SENT=%s\n", diag->local_capabilities_sent ? "true" : "false");
     printf("R54_LOCAL_CAPABILITY_WORD=%u\n", diag->local_capability_word);
     printf("R54_LOCAL_ALERTING_SENT=%s\n", diag->local_alerting_sent ? "true" : "false");
     printf("R54_WAITING_PEER_CAPABILITIES=%s\n", diag->waiting_peer_capabilities ? "true" : "false");
-    printf("R54_PEER_CAPABILITIES_SEEN=%s\n", diag->peer_capabilities_seen ? "true" : "false");
-    printf("R54_PEER_CAPABILITY_WORD=%u\n", diag->peer_capability_word);
-    printf("R54_PEER_VIDEO_REQUESTED=%s\n", diag->peer_video_requested ? "true" : "false");
-    printf("R54_PEER_DATA_ACK_SENT=%s\n", state->r45.inbound_ack_count > 0u ? "true" : "false");
+    if (peer_phase_reached) {
+        printf("R54_PEER_CAPABILITIES_SEEN=%s\n", diag->peer_capabilities_seen ? "true" : "false");
+        printf("R54_PEER_CAPABILITY_WORD=%u\n", diag->peer_capability_word);
+        printf("R54_PEER_VIDEO_REQUESTED=%s\n", diag->peer_video_requested ? "true" : "false");
+    } else {
+        printf("R54_PEER_CAPABILITIES_SEEN=NOT_REACHED\n");
+        printf("R54_PEER_CAPABILITY_WORD=NOT_REACHED\n");
+        printf("R54_PEER_VIDEO_REQUESTED=NOT_REACHED\n");
+    }
+    printf("R54_PEER_DATA_ACK_SENT=%s\n", state->r45.peer_data_ack_count > 0u ? "true" : "false");
+    if (phase == R54_DIAGNOSTICS_GENERATION_END) {
+        printf("R54_PEER_WAIT_ENDED_WITHOUT_CAPABILITIES=%s\n",
+            diag->waiting_peer_capabilities && !diag->peer_capabilities_seen ? "true" : "false");
+    }
     printf("R54_CALL_ADOPTION_FAILURE_STAGE=%s\n", r53_failure_stage_name(diag->call_adoption_failure_stage));
     fflush(stdout);
 }
@@ -144,7 +197,9 @@ r54_handle_call_init(const guint8 *body, guint body_len)
             R53_STAGE_ACK_BUILD_FAILED;
     }
 
-    r54_publish_diagnostics(&g_r54_call_adoption);
+    r54_publish_diagnostics(
+        &g_r54_call_adoption,
+        R54_DIAGNOSTICS_LOCAL_AFTER_TRIO);
     return ok;
 }
 
@@ -166,7 +221,9 @@ r54_handle_peer_capabilities_for_r42(const R35CtpEnvelopeView *peer_view)
             &g_r54_call_adoption,
             peer_view,
             r54_trigger_r42_media_open) ? TRUE : FALSE;
-    r54_publish_diagnostics(&g_r54_call_adoption);
+    r54_publish_diagnostics(
+        &g_r54_call_adoption,
+        R54_DIAGNOSTICS_AFTER_PEER_CAPABILITIES);
     return ok;
 }
 /* R54_CALL_ADOPTION_LISTENER_END */
@@ -197,6 +254,7 @@ def _assert_gates(candidate: str) -> None:
         "r45_accept_peer_data_and_ack(",
         "r53_handle_peer_capabilities_with_trigger(",
         "r42_queue_media_channel_open()",
+        "R54_DIAGNOSTICS_PHASE=%s",
         "R54_CALL_ADOPTION_STARTED=%s",
         "R54_INVITE_ACK_SENT=%s",
         "R54_LOCAL_CAPABILITIES_SENT=%s",
@@ -206,6 +264,8 @@ def _assert_gates(candidate: str) -> None:
         "R54_PEER_CAPABILITIES_SEEN=%s",
         "R54_PEER_CAPABILITY_WORD=%u",
         "R54_PEER_VIDEO_REQUESTED=%s",
+        "R54_PEER_CAPABILITIES_SEEN=NOT_REACHED",
+        "R54_PEER_WAIT_ENDED_WITHOUT_CAPABILITIES=%s",
         "R54_PEER_DATA_ACK_SENT=%s",
         "R54_CALL_ADOPTION_FAILURE_STAGE=%s",
         "P12_TX_R54_INVITE_ACK",
@@ -223,6 +283,14 @@ def _assert_gates(candidate: str) -> None:
         raise RuntimeError("R54_SINGLE_PEER_CHAIN_OWNER_GATE=FAIL")
     if candidate.count("r42_queue_media_channel_open()") != 1:
         raise RuntimeError("R54_QUEUE_MEDIA_OPEN_CALL_SITE_GATE=FAIL")
+    if candidate.count("r54_publish_diagnostics(") < 5:
+        raise RuntimeError("R54_DIAGNOSTIC_PUBLICATION_SITE_GATE=FAIL")
+    if candidate.count("R54_DIAGNOSTICS_LOCAL_AFTER_TRIO") < 2:
+        raise RuntimeError("R54_LOCAL_PHASE_GATE=FAIL")
+    if candidate.count("R54_DIAGNOSTICS_AFTER_PEER_CAPABILITIES") < 2:
+        raise RuntimeError("R54_PEER_PHASE_GATE=FAIL")
+    if candidate.count("R54_DIAGNOSTICS_GENERATION_END") < 4:
+        raise RuntimeError("R54_GENERATION_END_PHASE_GATE=FAIL")
     listener_region = candidate.split(BEGIN, 1)[1].split(END, 1)[0]
     for duplicate_chain_needle in (
         "r36_is_capabilities_for_current_call(",
@@ -290,6 +358,12 @@ def transform(source: str) -> str:
         _R42_TRIGGER_ANCHOR,
         _R42_TRIGGER_REPLACEMENT,
         "R54 peer ACK before R42 media trigger",
+    )
+    candidate = _replace_once(
+        candidate,
+        _FINAL_STATUS_ANCHOR,
+        _FINAL_STATUS_REPLACEMENT,
+        "R54 final diagnostic publication",
     )
     _assert_gates(candidate)
     return candidate
