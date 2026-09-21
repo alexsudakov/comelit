@@ -69,8 +69,62 @@ _NATIVE_MARKER_PREFIXES = (
     "P12_",
     "R42_",
     "R54_",
+    "P116_",
 )
 _NATIVE_MARKER_TAIL_LIMIT = 20
+
+# R57: bounded vocabularies for the native P116NativeFailureId /
+# P116NativeFailurePhase enums (see
+# safety-poc/research/media/v1/entrance_p116_r57_native_failure_attribution_transform.py),
+# reused verbatim so these specific keys can survive sanitization without
+# opening a general free-text hole for the P116_ prefix.
+_P116_FAILURE_IDS = frozenset(
+    {
+        "NONE",
+        "STARTUP",
+        "ABSOLUTE_SESSION_TIMEOUT",
+        "P12_STEP_TIMEOUT",
+        "UAUT_OPEN_TIMEOUT",
+        "RECV_PARSE",
+        "PSEUDOTCP_RECV_TRANSPORT",
+        "PSEUDOTCP_WRITABLE_TRANSPORT",
+        "PSEUDOTCP_CLOSED",
+        "PSEUDOTCP_WRITE_PACKET",
+        "PSEUDOTCP_CLOCK_CLOSED",
+        "PSEUDOTCP_NOTIFY_PACKET",
+        "ICE_CONNECTIVITY",
+        "ICE_GATHER",
+        "SDP_FILE",
+        "DOOR_WRITE",
+        "DOOR_TIMER",
+        "P80_RTP_FORWARD",
+        "OTHER",
+    }
+)
+_P116_FAILURE_PHASES = frozenset(
+    {
+        "STARTUP",
+        "LISTENER_READY",
+        "CALL_ADOPTION_LOCAL",
+        "WAIT_PEER_CAPABILITIES",
+        "PEER_ACK",
+        "MEDIA_OPEN",
+        "MEDIA_ACTIVE",
+        "MEDIA_STOP",
+        "GENERATION_END",
+    }
+)
+# The only `kind` literal p116_emit_timeout_observability() is ever called
+# with (the R56 TX-wait timeout callback). Bounded, not a general enum.
+_P116_TIMEOUT_KINDS = frozenset({"R54_TX_WAIT_TIMEOUT"})
+# P116_TIMEOUT_PHASE prints p116_failure_phase_name(), the same enum as
+# P116_NATIVE_FAILURE_PHASE.
+_P116_MARKER_VOCABULARIES: dict[str, frozenset[str]] = {
+    "P116_NATIVE_FAILURE_ID": _P116_FAILURE_IDS,
+    "P116_NATIVE_FAILURE_PHASE": _P116_FAILURE_PHASES,
+    "P116_TIMEOUT_KIND": _P116_TIMEOUT_KINDS,
+    "P116_TIMEOUT_PHASE": _P116_FAILURE_PHASES,
+}
 _CALL_ADOPTION_FAILURE_STAGES = frozenset(
     {
         "NONE",
@@ -112,6 +166,12 @@ _CANARY_OBSERVABILITY_MARKERS = {
     "P80_VIDEO_RTP_FORWARDING": "RTP_RECEIVED",
     "R42_ATTACHED_MEDIA_STOP_SENT": "STOP_SENT",
     "R42_LISTENER_RTP_FORWARDING_ARMED": "CLEANUP_COMPLETE",
+    "P116_NATIVE_EXIT_CODE": "NATIVE_EXIT_CODE",
+    "P116_NATIVE_FAILURE_ID": "NATIVE_FAILURE_ID",
+    "P116_NATIVE_FAILURE_PHASE": "NATIVE_FAILURE_PHASE",
+    "P116_NATIVE_FAILURE_COUNT": "NATIVE_FAILURE_COUNT",
+    "P116_TIMEOUT_KIND": "TIMEOUT_KIND",
+    "P116_TIMEOUT_PHASE": "TIMEOUT_PHASE",
 }
 _H264_CANARY_MARKERS = frozenset(
     {
@@ -408,11 +468,15 @@ class ComelitRingRuntime:
         if not key.startswith(_NATIVE_MARKER_PREFIXES):
             return
 
-        safe_value = (
-            value
-            if _NATIVE_MARKER_SAFE_VALUE_RE.fullmatch(value)
-            else "<redacted>"
-        )
+        vocabulary = _P116_MARKER_VOCABULARIES.get(key)
+        if vocabulary is not None:
+            safe_value = value if value in vocabulary else "<redacted>"
+        else:
+            safe_value = (
+                value
+                if _NATIVE_MARKER_SAFE_VALUE_RE.fullmatch(value)
+                else "<redacted>"
+            )
         self._native_marker_tail.append(f"{key}={safe_value}")
         if len(self._native_marker_tail) > _NATIVE_MARKER_TAIL_LIMIT:
             del self._native_marker_tail[:-_NATIVE_MARKER_TAIL_LIMIT]
@@ -425,6 +489,9 @@ class ComelitRingRuntime:
         if key == "R54_CALL_ADOPTION_FAILURE_STAGE":
             if value in _CALL_ADOPTION_FAILURE_STAGES:
                 return value
+        vocabulary = _P116_MARKER_VOCABULARIES.get(key)
+        if vocabulary is not None and value in vocabulary:
+            return value
         return None
 
     def _observe_canary_log_marker(self, line: str) -> None:
