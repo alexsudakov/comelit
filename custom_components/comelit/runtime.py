@@ -67,6 +67,7 @@ _NATIVE_MARKER_PREFIXES = (
     "SELECTED_PAIR_",
     "V4_",
     "P12_",
+    "R37_",
     "R42_",
     "R54_",
     "R58_",
@@ -148,14 +149,59 @@ _R58_STOP_FAILURE_STAGES = frozenset(
     }
 )
 _R58_CLOSED_BOUNDARIES = frozenset({"LOCAL_DISPOSAL_AFTER_STOP_FLUSH"})
+_R37_PROTOCOL_STOP_RESULTS = frozenset({"STOP_SENT", "NO_OP"})
+_R37_BOUNDED_STOP_RESULTS = frozenset({"STOP_SENT", "REJECTED"})
+_R54_TX_STATES = frozenset(
+    {
+        "IDLE",
+        "NEED_INVITE_ACK",
+        "WAIT_INVITE_ACK_FLUSH",
+        "NEED_LOCAL_CAPABILITIES",
+        "WAIT_LOCAL_CAPABILITIES_FLUSH",
+        "NEED_LOCAL_ALERTING",
+        "WAIT_LOCAL_ALERTING_FLUSH",
+        "WAIT_PEER_CAPABILITIES",
+        "NEED_PEER_DATA_ACK",
+        "WAIT_PEER_DATA_ACK_FLUSH",
+        "MEDIA_TRIGGER_READY",
+        "TERMINAL_FAILURE",
+    }
+)
+_R54_TX_SUBJECTS = frozenset(
+    {
+        "NONE",
+        "INVITE_ACK",
+        "LOCAL_CAPABILITIES",
+        "LOCAL_ALERTING",
+        "PEER_DATA_ACK",
+        "MEDIA_OPEN",
+        "MEDIA_STOP",
+        "OTHER_EXISTING",
+    }
+)
+_POST_CALL_TRANSPORT_STATES = frozenset(
+    {
+        "NONE",
+        "MEDIA_CLOSED_CALL_OPEN",
+        "MEDIA_CLOSED_REMOTE_RELEASE",
+        "MEDIA_CLOSED_TEARDOWN_COMPLETE",
+        "TRANSPORT_CLOSED",
+        "UNKNOWN",
+    }
+)
 _P116_MARKER_VOCABULARIES: dict[str, frozenset[str]] = {
     "P116_NATIVE_FAILURE_ID": _P116_FAILURE_IDS,
     "P116_NATIVE_FAILURE_PHASE": _P116_FAILURE_PHASES,
     "P116_TIMEOUT_KIND": _P116_TIMEOUT_KINDS,
     "P116_TIMEOUT_PHASE": _P116_FAILURE_PHASES,
+    "R37_PROTOCOL_STOP_RESULT": _R37_PROTOCOL_STOP_RESULTS,
+    "R37_BOUNDED_STOP_RESULT": _R37_BOUNDED_STOP_RESULTS,
+    "R54_TX_STATE": _R54_TX_STATES,
+    "R54_TX_SUBJECT": _R54_TX_SUBJECTS,
     "R58_STOP_PHASE": _R58_STOP_PHASES,
     "R58_STOP_FAILURE_STAGE": _R58_STOP_FAILURE_STAGES,
     "R58_CLOSED_BOUNDARY": _R58_CLOSED_BOUNDARIES,
+    "POST_CALL_TRANSPORT_STATE": _POST_CALL_TRANSPORT_STATES,
 }
 _CALL_ADOPTION_FAILURE_STAGES = frozenset(
     {
@@ -204,10 +250,15 @@ _CANARY_OBSERVABILITY_MARKERS = {
     "P116_NATIVE_FAILURE_COUNT": "NATIVE_FAILURE_COUNT",
     "P116_TIMEOUT_KIND": "TIMEOUT_KIND",
     "P116_TIMEOUT_PHASE": "TIMEOUT_PHASE",
+    "R37_REMOTE_RELEASE_OBSERVED": "REMOTE_RELEASE_OBSERVED",
+    "R37_CAPABILITY_CLEARED_OBSERVED": "CAPABILITY_CLEARED_OBSERVED",
+    "R54_TX_STATE": "TX_STATE_AT_EXIT",
+    "R54_TX_SUBJECT": "TX_SUBJECT_AT_EXIT",
     "R58_STOP_CLOSED": "STOP_CLOSED",
     "R58_STOP_FAILED": "STOP_FAILED",
     "R42_MEDIA_CHANNEL_CLOSED": "CHANNEL_CLOSED",
     "R58_STOP_PHASE": "STOP_PHASE",
+    "POST_CALL_TRANSPORT_STATE": "POST_CALL_TRANSPORT_STATE",
 }
 _H264_CANARY_MARKERS = frozenset(
     {
@@ -332,6 +383,8 @@ class ComelitRingRuntime:
         self._native_marker_tail: list[str] = []
         self._canary_log_generation: int | None = None
         self._canary_log_seen: set[str] = set()
+        self._post_call_transport_flags: dict[str, bool] = {}
+        self._post_call_transport_emitted = False
         self._last_native_exit_code: int | None = None
         self._last_native_failure_markers: list[str] = []
         self._ring_media: RingMediaCoordinator | None = None
@@ -518,6 +571,9 @@ class ComelitRingRuntime:
             del self._native_marker_tail[:-_NATIVE_MARKER_TAIL_LIMIT]
 
     def _safe_native_marker_value(self, key: str, value: str) -> str | None:
+        vocabulary = _P116_MARKER_VOCABULARIES.get(key)
+        if vocabulary is not None:
+            return value if value in vocabulary else None
         if _NATIVE_MARKER_SAFE_VALUE_RE.fullmatch(value):
             return value
         if _DIAGNOSTIC_MARKER_SAFE_VALUE_RE.fullmatch(value):
@@ -525,9 +581,6 @@ class ComelitRingRuntime:
         if key == "R54_CALL_ADOPTION_FAILURE_STAGE":
             if value in _CALL_ADOPTION_FAILURE_STAGES:
                 return value
-        vocabulary = _P116_MARKER_VOCABULARIES.get(key)
-        if vocabulary is not None and value in vocabulary:
-            return value
         return None
 
     def _observe_canary_log_marker(self, line: str) -> None:
@@ -547,6 +600,8 @@ class ComelitRingRuntime:
             if generation != getattr(self, "_canary_log_generation", None):
                 self._canary_log_generation = generation
                 self._canary_log_seen = set()
+                self._post_call_transport_flags = {}
+                self._post_call_transport_emitted = False
 
         criterion = _CANARY_OBSERVABILITY_MARKERS.get(key)
         if key in _H264_CANARY_MARKERS:
@@ -571,6 +626,8 @@ class ComelitRingRuntime:
             "R58_STOP_CLOSED",
             "R58_STOP_FAILED",
             "R42_MEDIA_CHANNEL_CLOSED",
+            "R37_REMOTE_RELEASE_OBSERVED",
+            "R37_CAPABILITY_CLEARED_OBSERVED",
         } and safe_value != "true":
             return
         elif key == "P80_VIDEO_RTP_FORWARDING" and safe_value != "PASS":
@@ -601,6 +658,64 @@ class ComelitRingRuntime:
             safe_value,
         )
 
+    def _record_post_call_transport_marker(self, line: str) -> None:
+        if "=" not in line:
+            return
+        key, value = line.split("=", 1)
+        if not _NATIVE_MARKER_KEY_RE.fullmatch(key):
+            return
+
+        flags = getattr(self, "_post_call_transport_flags", None)
+        if flags is None:
+            flags = {}
+            self._post_call_transport_flags = flags
+
+        if key == "R42_MEDIA_CHANNEL_CLOSED" and value == "true":
+            flags["media_closed"] = True
+        elif key == "R58_STOP_CLOSED" and value == "true":
+            flags["stop_closed"] = True
+        elif key == "R37_REMOTE_RELEASE_OBSERVED" and value == "true":
+            flags["remote_release"] = True
+        elif key == "R37_CAPABILITY_CLEARED_OBSERVED" and value == "true":
+            flags["capability_cleared"] = True
+        elif key == "P116_NATIVE_FAILURE_ID" and value == "PSEUDOTCP_CLOSED":
+            flags["transport_closed"] = True
+
+    def _derive_post_call_transport_state(self) -> str:
+        """Derive only from HA-observed native markers.
+
+        NONE means this generation has no observed post-call media close.
+        With a media close, R37_REMOTE_RELEASE_OBSERVED proves the remote
+        RELEASE handler ran; R58_STOP_CLOSED then upgrades that to the
+        teardown-complete bucket. A PSEUDOTCP_CLOSED failure after media
+        close is transport-closed. A media close without those markers is
+        only HA-observed as media-closed/call-open. Conflicting capability
+        clear without remote release is UNKNOWN. No ids/payloads are emitted.
+        """
+        flags = getattr(self, "_post_call_transport_flags", {})
+        media_closed = flags.get("media_closed") is True
+        if not media_closed:
+            return "NONE"
+        if (
+            flags.get("capability_cleared") is True
+            and flags.get("remote_release") is not True
+        ):
+            return "UNKNOWN"
+        if flags.get("transport_closed") is True:
+            return "TRANSPORT_CLOSED"
+        if flags.get("remote_release") is True and flags.get("stop_closed") is True:
+            return "MEDIA_CLOSED_TEARDOWN_COMPLETE"
+        if flags.get("remote_release") is True:
+            return "MEDIA_CLOSED_REMOTE_RELEASE"
+        return "MEDIA_CLOSED_CALL_OPEN"
+
+    def _emit_post_call_transport_state_once(self) -> None:
+        if getattr(self, "_post_call_transport_emitted", False):
+            return
+        self._post_call_transport_emitted = True
+        state = self._derive_post_call_transport_state()
+        self._observe_canary_log_marker(f"POST_CALL_TRANSPORT_STATE={state}")
+
     def _capture_native_failure(self, returncode: int) -> None:
         self._last_native_exit_code = returncode
         self._last_native_failure_markers = list(self._native_marker_tail)
@@ -618,6 +733,8 @@ class ComelitRingRuntime:
         self._native_marker_tail.clear()
         self._canary_log_generation = None
         self._canary_log_seen = set()
+        self._post_call_transport_flags = {}
+        self._post_call_transport_emitted = False
         self._last_ring_event = None
         self._last_error = None
         self._media_diagnostics.reset()
@@ -1016,6 +1133,9 @@ class ComelitRingRuntime:
             self._remember_native_marker(line)
             self._media_diagnostics.observe_line(line)
             self._observe_canary_log_marker(line)
+            self._record_post_call_transport_marker(line)
+            if line.startswith("P116_NATIVE_FAILURE_COUNT="):
+                self._emit_post_call_transport_state_once()
 
             if line == "ICE_GATHER=PASS":
                 self._offer_ready.set()

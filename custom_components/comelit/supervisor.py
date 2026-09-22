@@ -221,6 +221,18 @@ class ComelitRuntimeSupervisor:
 
                 self._reconnect_count += 1
                 runtime_status = self._runtime.status()
+                last_error = runtime_status.get("last_error")
+                if (
+                    isinstance(last_error, str)
+                    and last_error.startswith(
+                        ("native_exit:", "native_exited_before_offer:")
+                    )
+                ):
+                    reconnect_reason = "NATIVE_FAILURE_EXIT"
+                elif last_error:
+                    reconnect_reason = "UNKNOWN"
+                else:
+                    reconnect_reason = "LISTENER_CYCLE_ENDED"
                 if runtime_status.get("last_error"):
                     self._set_state(LISTENER_STATE_ERROR)
                 else:
@@ -228,6 +240,8 @@ class ComelitRuntimeSupervisor:
                 # reconnect_count may change even when the visible state does not.
                 self._notify_status()
 
+                _LOGGER.warning("RECONNECT_ATTEMPT=%s", self._reconnect_count)
+                _LOGGER.warning("RECONNECT_REASON=%s", reconnect_reason)
                 _LOGGER.warning(
                     "Comelit listener cycle ended; reconnecting in %ss (count=%s)",
                     RECONNECT_DELAY_SECONDS,
