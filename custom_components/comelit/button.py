@@ -47,7 +47,7 @@ async def async_setup_entry(
 class ComelitEntranceDoorButton(ButtonEntity):
     """One-shot entrance Door command through the direct HA runtime."""
 
-    _attr_name = "Comelit — Подъезд"
+    _attr_name = "Comelit — Открыть подъезд"
     _attr_unique_id = MAIN_ENTRANCE_UNIQUE_ID
     _attr_icon = "mdi:door-open"
     _attr_should_poll = False
