@@ -1,0 +1,35 @@
+# P116/R59 sanitized evidence fixture — R58 cleanup canary post-call timeline.
+#
+# Source: the orchestrator's read-only logs-follow windows captured during the
+# R58 cleanup live canary (2026-09-22, HA local time). This file is a bounded,
+# sanitized transcription of the timestamps and marker labels only: no payloads,
+# no addresses, no CTP/connection ids, no tokens, no raw log frames.
+#
+# It exists so the R59 assertions run in CI, where the host-local evidence
+# directory (/home/hermes/r58-live) is not available.
+
+2026-09-22 21:13:13.125 INFO Comelit ring listener READY for persistent 3300s cycle
+2026-09-22 21:26:29.048 INFO Comelit attached inbound media channel allocated
+2026-09-22 21:26:29.048 INFO Comelit canary evidence MEDIAREQ26_OPEN_SENT marker=R42_MEDIAREQ26_OPEN_CHANNEL value=redacted
+2026-09-22 21:26:29.048 INFO Comelit attached inbound media ACTIVE
+2026-09-22 21:26:29.048 INFO Comelit canary evidence PEER_CAPABILITIES_SEEN marker=R54_PEER_CAPABILITIES_SEEN value=true
+2026-09-22 21:26:29.049 INFO Comelit canary evidence PEER_DATA_ACK_FLUSHED marker=R54_PEER_DATA_ACK_FLUSHED value=true
+2026-09-22 21:26:29.584 INFO Comelit canary evidence H264_DETECTED marker=P116_VIDEO_SPS_COUNT value=1
+2026-09-22 21:26:29.584 INFO Comelit canary evidence RTP_RECEIVED marker=P80_VIDEO_RTP_FORWARDING value=PASS
+2026-09-22 21:26:54.919 INFO Comelit canary evidence STOP_PHASE marker=R58_STOP_PHASE value=CLOSED
+2026-09-22 21:26:54.919 INFO Comelit canary evidence STOP_CLOSED marker=R58_STOP_CLOSED value=true
+2026-09-22 21:26:54.919 INFO Comelit canary evidence CHANNEL_CLOSED marker=R42_MEDIA_CHANNEL_CLOSED value=true
+2026-09-22 21:26:54.919 INFO Comelit attached inbound media CLOSED
+2026-09-22 21:26:54.919 INFO Comelit canary evidence CLEANUP_COMPLETE marker=R42_LISTENER_RTP_FORWARDING_ARMED value=false
+2026-09-22 21:26:54.925 INFO Comelit canary evidence NATIVE_EXIT_CODE marker=P116_NATIVE_EXIT_CODE value=6
+2026-09-22 21:26:54.925 INFO Comelit canary evidence NATIVE_FAILURE_ID marker=P116_NATIVE_FAILURE_ID value=PSEUDOTCP_NOTIFY_PACKET
+2026-09-22 21:26:54.925 INFO Comelit canary evidence NATIVE_FAILURE_PHASE marker=P116_NATIVE_FAILURE_PHASE value=LISTENER_READY
+2026-09-22 21:26:54.925 INFO Comelit canary evidence NATIVE_FAILURE_COUNT marker=P116_NATIVE_FAILURE_COUNT value=1
+2026-09-22 21:26:54.926 ERROR Comelit ring listener stopped: native_exit:6
+2026-09-22 21:26:55.543 WARNING Comelit listener cycle ended; reconnecting in 5s (count=1)
+2026-09-22 21:27:35.418 INFO Comelit canary evidence NATIVE_FAILURE_ID marker=P116_NATIVE_FAILURE_ID value=PSEUDOTCP_CLOSED
+2026-09-22 21:27:35.418 INFO Comelit canary evidence NATIVE_FAILURE_PHASE marker=P116_NATIVE_FAILURE_PHASE value=STARTUP
+2026-09-22 21:27:35.418 INFO Comelit canary evidence NATIVE_FAILURE_COUNT marker=P116_NATIVE_FAILURE_COUNT value=2
+2026-09-22 21:27:35.418 ERROR Comelit ring listener stopped: native_exit:6
+2026-09-22 21:27:35.573 WARNING Comelit listener cycle ended; reconnecting in 5s (count=2)
+2026-09-22 21:27:46.128 INFO Comelit ring listener READY for persistent 3300s cycle

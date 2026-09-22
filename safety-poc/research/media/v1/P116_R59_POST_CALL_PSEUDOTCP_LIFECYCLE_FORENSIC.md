@@ -110,4 +110,12 @@ Next live window decision markers: `R37_REMOTE_RELEASE_OBSERVED`, `R37_CAPABILIT
 
 `PROVEN_OFFLINE` R58 stop/cleanup criteria remain: `R58_STOP_PHASE`, `R58_STOP_CLOSED`, `R58_STOP_FAILED`, `R42_MEDIA_CHANNEL_CLOSED`; value-keyed dedup remains only for `R58_STOP_PHASE`.
 
+`safety-poc/research/media/v1/P116_R59_R58_CANARY_TIMELINE_EVIDENCE.txt` — санитизированная bounded-выжимка
+таймлайна канарейки R58 (только таймстемпы и имена маркеров/событий; без payload, адресов, CTP/connection id,
+токенов и сырых кадров лога). Она закоммичена как единственный источник истины для assertions раунда:
+исходный каталог живых окон (`/home/hermes/r58-live`) существует только на хосте оркестратора, и привязка
+теста к нему давала зелёный локальный прогон при красном CI — этот дефект был пойман и исправлен в том же
+раунде (первый push: `offline-safety=failure`, `AssertionError: missing marker timestamp: Comelit attached
+inbound media CLOSED`), проверка повторена симуляцией CI с недоступным каталогом живых окон.
+
 `PROVEN_OFFLINE` Sanitisation remains bounded. The generic safe-value regex was not widened. New enum values are per-key vocabularies only; out-of-vocabulary values stay `<redacted>`. No raw ids, payloads, addresses, Door/Gate action, live TX, rebuild, deploy, HA restart, physical ring, self-activation, or new capture was performed.

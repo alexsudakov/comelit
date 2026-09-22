@@ -20,6 +20,9 @@ RUNTIME = REPO / "custom_components" / "comelit" / "runtime.py"
 SUPERVISOR = REPO / "custom_components" / "comelit" / "supervisor.py"
 DOC = ROOT / "research" / "media" / "v1" / "P116_R59_POST_CALL_PSEUDOTCP_LIFECYCLE_FORENSIC.md"
 R58_LIVE = Path("/home/hermes/r58-live")
+EVIDENCE_FIXTURE = (
+    ROOT / "research" / "media" / "v1" / "P116_R59_R58_CANARY_TIMELINE_EVIDENCE.txt"
+)
 
 
 def _install_common_stubs() -> None:
@@ -428,10 +431,21 @@ class P116R59SupervisorReconnectHarnessTests(unittest.TestCase):
 
 
 def _evidence_text() -> str:
-    return "\n".join(
-        path.read_text(encoding="utf-8", errors="replace")
-        for path in sorted(R58_LIVE.glob("*.txt"))
-    )
+    """Read the committed, sanitized canary timeline fixture.
+
+    The live capture directory (``/home/hermes/r58-live``) exists only on the
+    orchestrator host, so asserting against it made the suite pass locally and
+    fail in CI. The repository fixture is the single source of truth; if the
+    live directory happens to be present it is only used as an extra
+    corroboration source, never as a requirement.
+    """
+    text = EVIDENCE_FIXTURE.read_text(encoding="utf-8")
+    if R58_LIVE.is_dir():
+        text += "\n" + "\n".join(
+            path.read_text(encoding="utf-8", errors="replace")
+            for path in sorted(R58_LIVE.glob("*.txt"))
+        )
+    return text
 
 
 def _timestamp_matches_ms(text: str, marker: str) -> list[int]:
