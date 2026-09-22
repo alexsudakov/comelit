@@ -69,6 +69,7 @@ _NATIVE_MARKER_PREFIXES = (
     "P12_",
     "R42_",
     "R54_",
+    "R58_",
     "P116_",
 )
 _NATIVE_MARKER_TAIL_LIMIT = 20
@@ -119,11 +120,42 @@ _P116_FAILURE_PHASES = frozenset(
 _P116_TIMEOUT_KINDS = frozenset({"R54_TX_WAIT_TIMEOUT"})
 # P116_TIMEOUT_PHASE prints p116_failure_phase_name(), the same enum as
 # P116_NATIVE_FAILURE_PHASE.
+_R58_STOP_PHASES = frozenset(
+    {
+        "NONE",
+        "REQUESTED",
+        "WAIT_TX_SLOT",
+        "ENQUEUED",
+        "FLUSHED",
+        "RTP_DISARMED",
+        "DISPOSED",
+        "CLOSED",
+        "REMOTE_RELEASE",
+        "FAILED",
+    }
+)
+_R58_STOP_FAILURE_STAGES = frozenset(
+    {
+        "NONE",
+        "SIGNAL",
+        "STALE_CALL",
+        "QUEUE",
+        "WRITE",
+        "FLUSH_TIMEOUT",
+        "DISPOSE",
+        "REMOTE_RACE",
+        "OTHER",
+    }
+)
+_R58_CLOSED_BOUNDARIES = frozenset({"LOCAL_DISPOSAL_AFTER_STOP_FLUSH"})
 _P116_MARKER_VOCABULARIES: dict[str, frozenset[str]] = {
     "P116_NATIVE_FAILURE_ID": _P116_FAILURE_IDS,
     "P116_NATIVE_FAILURE_PHASE": _P116_FAILURE_PHASES,
     "P116_TIMEOUT_KIND": _P116_TIMEOUT_KINDS,
     "P116_TIMEOUT_PHASE": _P116_FAILURE_PHASES,
+    "R58_STOP_PHASE": _R58_STOP_PHASES,
+    "R58_STOP_FAILURE_STAGE": _R58_STOP_FAILURE_STAGES,
+    "R58_CLOSED_BOUNDARY": _R58_CLOSED_BOUNDARIES,
 }
 _CALL_ADOPTION_FAILURE_STAGES = frozenset(
     {
@@ -172,6 +204,10 @@ _CANARY_OBSERVABILITY_MARKERS = {
     "P116_NATIVE_FAILURE_COUNT": "NATIVE_FAILURE_COUNT",
     "P116_TIMEOUT_KIND": "TIMEOUT_KIND",
     "P116_TIMEOUT_PHASE": "TIMEOUT_PHASE",
+    "R58_STOP_CLOSED": "STOP_CLOSED",
+    "R58_STOP_FAILED": "STOP_FAILED",
+    "R42_MEDIA_CHANNEL_CLOSED": "CHANNEL_CLOSED",
+    "R58_STOP_PHASE": "STOP_PHASE",
 }
 _H264_CANARY_MARKERS = frozenset(
     {
@@ -532,6 +568,9 @@ class ComelitRingRuntime:
             "R54_PEER_DATA_ACK_FLUSHED",
             "R54_PEER_DATA_ACK_SENT",
             "R42_ATTACHED_MEDIA_STOP_SENT",
+            "R58_STOP_CLOSED",
+            "R58_STOP_FAILED",
+            "R42_MEDIA_CHANNEL_CLOSED",
         } and safe_value != "true":
             return
         elif key == "P80_VIDEO_RTP_FORWARDING" and safe_value != "PASS":
@@ -546,9 +585,14 @@ class ComelitRingRuntime:
         if seen is None:
             seen = set()
             self._canary_log_seen = seen
-        if criterion in seen:
+        dedup_key = (
+            f"{criterion}={safe_value}"
+            if key == "R58_STOP_PHASE"
+            else criterion
+        )
+        if dedup_key in seen:
             return
-        seen.add(criterion)
+        seen.add(dedup_key)
 
         _LOGGER.info(
             "Comelit canary evidence %s marker=%s value=%s",

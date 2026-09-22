@@ -498,7 +498,9 @@ class P116R54CallAdoptionProductionCandidateTests(unittest.TestCase):
             with self.subTest(criterion=criterion):
                 self.assertIn(substring, output)
                 self.assertEqual(output.count(substring), 1)
-        self.assertEqual(len(cm.output), len(CANARY_CRITERIA))
+        # R58 adds a read-only canary criterion for the historical close
+        # marker while preserving the existing direct lifecycle log line.
+        self.assertEqual(len(cm.output), len(CANARY_CRITERIA) + 1)
         for forbidden in FORBIDDEN_LOG_SUBSTRINGS:
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, output)
