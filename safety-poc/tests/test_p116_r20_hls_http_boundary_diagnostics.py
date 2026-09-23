@@ -236,7 +236,7 @@ class P116R20HlsHttpBoundaryDiagnosticsTests(unittest.TestCase):
         )
         self.assertIn('"automatic_retry_allowed": False', button_source)
         self.assertIn('"physical_effect_asserted": False', button_source)
-        self.assertNotIn(
+        self.assertIn(
             "await self._runtime.async_open_door(DOOR_GATE)",
             button_source,
         )
@@ -256,7 +256,8 @@ class P116R20HlsHttpBoundaryDiagnosticsTests(unittest.TestCase):
             runtime_source,
             "async_open_door",
         )
-        self.assertIn('if door != "entrance"', door_source)
+        self.assertIn("if door not in SUPPORTED_DOORS", door_source)
+        self.assertIn("_write_door_target, door", door_source)
         self.assertIn("signal.SIGUSR1", door_source)
         self.assertIn('"automatic_retry_allowed": False', door_source)
         self.assertIn('"physical_effect_asserted": False', door_source)
