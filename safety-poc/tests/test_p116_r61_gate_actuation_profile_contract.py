@@ -170,11 +170,7 @@ class P116R61GateActuationProfileContractTest(unittest.TestCase):
 
     def test_gate_marker_is_derivation_backed_by_shipped_const_text(self) -> None:
         const_text = (ROOT / "custom_components/comelit/const.py").read_text(encoding="utf-8")
-        mutated = const_text.replace(
-            '"actuation_profile_validated": True,',
-            '"actuation_profile_validated": False,',
-            1,
-        )
+        mutated = forensics._flip_gate_actuation_validation(const_text)
 
         real = forensics.derive_gate_capability_from_const_text(const_text)
         changed = forensics.derive_gate_capability_from_const_text(mutated)
