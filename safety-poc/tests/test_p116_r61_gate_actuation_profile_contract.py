@@ -4,6 +4,7 @@ import importlib.util
 from dataclasses import replace
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 
 
@@ -37,6 +38,34 @@ def markers(lines: list[str]) -> dict[str, str]:
 
 
 class P116R61GateActuationProfileContractTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._original_input = forensics.INPUT
+        self._temp_input = tempfile.TemporaryDirectory()
+        input_root = Path(self._temp_input.name)
+        (input_root / "pcap").mkdir()
+        (input_root / "dex-strings").mkdir()
+        (input_root / "PROVENANCE.txt").write_text(
+            "synthetic repository-only R61 test fixture\n",
+            encoding="utf-8",
+        )
+        (input_root / "pcap" / "synthetic-evidence.pcap").write_bytes(
+            b"R61-SYNTHETIC\x00" + b"00000643" + b"\x00" + b"00000610"
+        )
+        (input_root / "dex-strings" / "synthetic.txt").write_text(
+            "opendoor-address-book\n"
+            "opendoor-actions\n"
+            "output-index\n"
+            "actuator\n"
+            "actuator-address-book\n"
+            "door\n",
+            encoding="utf-8",
+        )
+        forensics.INPUT = input_root
+
+    def tearDown(self) -> None:
+        forensics.INPUT = self._original_input
+        self._temp_input.cleanup()
+
     def test_entrance_profile_validates_and_generates_symbolic_frames(self) -> None:
         profile = contract.entrance_proven_profile()
         verdict = contract.validate_profile(profile)
