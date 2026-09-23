@@ -232,18 +232,23 @@ class Mvp1RingTelegramOfflineBuildTests(unittest.TestCase):
         self._gate("RING_EVENT_CONTRACT_UNCHANGED=PASS")
         self._gate("RING_SOURCE_MAPPING_UNCHANGED=PASS")
 
-    def test_gate_actuation_still_gated(self) -> None:
+    def test_gate_actuation_uses_validated_one_shot_profile(self) -> None:
         gate_button = source_segment(
             self.button_text,
             class_node(self.button_text, "ComelitGateDoorButton"),
         )
         self.assertIn('DOOR_GATE: {', self.const_text)
-        self.assertIn('"actuation_profile_validated": False', self.const_text)
-        self.assertIn("SUPPORTED_DOORS = (DOOR_ENTRANCE,)", self.const_text)
-        self.assertNotIn("- gate", self.services_text)
+        self.assertIn('"actuation_profile_validated": True', self.const_text)
+        self.assertIn(
+            "SUPPORTED_DOORS = (DOOR_ENTRANCE, DOOR_GATE)",
+            self.const_text,
+        )
+        self.assertIn("- gate", self.services_text)
         self.assertIn("raise HomeAssistantError", gate_button)
-        self.assertNotIn("async_open_door(DOOR_GATE", gate_button)
-        self._gate("GATE_ACTUATION_STILL_GATED=PASS")
+        self.assertIn("async_open_door(DOOR_GATE", gate_button)
+        self.assertIn('"automatic_retry_allowed": False', gate_button)
+        self.assertIn('"physical_effect_asserted": False', gate_button)
+        self._gate("GATE_ACTUATION_VALIDATED_ONE_SHOT=PASS")
 
     def test_media_and_r30h_code_unchanged_by_hash(self) -> None:
         expected = {
