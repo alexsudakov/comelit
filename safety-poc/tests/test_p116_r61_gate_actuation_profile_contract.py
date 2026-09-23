@@ -135,10 +135,10 @@ class P116R61GateActuationProfileContractTest(unittest.TestCase):
     def test_derived_markers_flip_on_corrupted_input(self) -> None:
         result = markers(forensics.flip_markers())
 
-        self.assertEqual("false", result["GATE_ACTUATION_PROFILE_VALIDATED_REAL"])
-        self.assertEqual("true", result["GATE_ACTUATION_PROFILE_VALIDATED_MUTATED"])
-        self.assertEqual("false", result["GATE_STANDARD_PRESS_ALLOWED_REAL"])
-        self.assertEqual("true", result["GATE_STANDARD_PRESS_ALLOWED_MUTATED"])
+        self.assertEqual("true", result["GATE_ACTUATION_PROFILE_VALIDATED_REAL"])
+        self.assertEqual("false", result["GATE_ACTUATION_PROFILE_VALIDATED_MUTATED"])
+        self.assertEqual("true", result["GATE_STANDARD_PRESS_ALLOWED_REAL"])
+        self.assertEqual("false", result["GATE_STANDARD_PRESS_ALLOWED_MUTATED"])
         self.assertEqual("6", result["DOOR_PROFILE_WRITE_COUNT_LEGACY_ORACLE_REAL"])
         self.assertEqual("CONFLICT", result["DOOR_PROFILE_WRITE_COUNT_LEGACY_ORACLE_MUTATED"])
         self.assertEqual("PASS", result["NATIVE_SOURCE_SHA256_FLIPS"])
@@ -151,7 +151,7 @@ class P116R61GateActuationProfileContractTest(unittest.TestCase):
         self.assertEqual("PASS", result["DOOR_PROFILE_WRITE_COUNT_LEGACY_ORACLE_FLIPS"])
         self.assertEqual("PASS", result["R61_SELF_CHECK"])
 
-    def test_analyzer_derives_gate_fail_closed_markers(self) -> None:
+    def test_analyzer_reflects_r63_gate_promotion_while_r61_artifact_stays_historical(self) -> None:
         result = markers(forensics.derive_markers())
 
         self.assertEqual("5", result["DOOR_PROFILE_WRITE_COUNT_NATIVE"])
@@ -162,27 +162,27 @@ class P116R61GateActuationProfileContractTest(unittest.TestCase):
         self.assertEqual("NATIVE_5_VS_LEGACY_ORACLE_6", result["DOOR_PROFILE_WRITE_COUNT_DIVERGENCE"])
         self.assertEqual("entrance", result["V4_DOOR_TARGET_MARKER"])
         self.assertEqual("00000610", result["V4_GATE"])
-        self.assertEqual("false", result["GATE_ACTUATION_PROFILE_VALIDATED"])
-        self.assertEqual("false", result["GATE_STANDARD_PRESS_ALLOWED"])
-        self.assertEqual("gate_actuation_profile_not_validated", result["GATE_BLOCKED_REASON"])
+        self.assertEqual("true", result["GATE_ACTUATION_PROFILE_VALIDATED"])
+        self.assertEqual("true", result["GATE_STANDARD_PRESS_ALLOWED"])
+        self.assertEqual("None", result["GATE_BLOCKED_REASON"])
         self.assertEqual("00000610", result["GATE_RING_SOURCE"])
         self.assertEqual("false", result["GATE_PROFILE_ARTIFACT_PRESENT"])
 
     def test_gate_marker_is_derivation_backed_by_shipped_const_text(self) -> None:
         const_text = (ROOT / "custom_components/comelit/const.py").read_text(encoding="utf-8")
         mutated = const_text.replace(
-            '"actuation_profile_validated": False,',
             '"actuation_profile_validated": True,',
+            '"actuation_profile_validated": False,',
             1,
         )
 
         real = forensics.derive_gate_capability_from_const_text(const_text)
         changed = forensics.derive_gate_capability_from_const_text(mutated)
 
-        self.assertFalse(real.actuation_profile_validated)
-        self.assertFalse(real.press_allowed)
-        self.assertTrue(changed.actuation_profile_validated)
-        self.assertTrue(changed.press_allowed)
+        self.assertTrue(real.actuation_profile_validated)
+        self.assertTrue(real.press_allowed)
+        self.assertFalse(changed.actuation_profile_validated)
+        self.assertFalse(changed.press_allowed)
 
     def test_legacy_oracle_count_marker_is_derivation_backed(self) -> None:
         source = (ROOT / "safety-poc/src/comelit_safety_poc/door_semantics.py").read_text(
@@ -210,14 +210,14 @@ class P116R61GateActuationProfileContractTest(unittest.TestCase):
         self.assertNotIn("'GATE_ACTUATION_PROFILE_VALIDATED=false'", source)
         self.assertNotIn("'GATE_STANDARD_PRESS_ALLOWED=false'", source)
 
-    def test_shipped_component_gate_stays_fail_closed(self) -> None:
+    def test_shipped_component_gate_is_promoted_by_r63(self) -> None:
         capability = const.resolve_door_capability(const.DOOR_GATE, media_paused=False)
 
         self.assertTrue(capability.configured)
         self.assertTrue(capability.ring_source_validated)
         self.assertEqual("00000610", capability.ring_source)
-        self.assertFalse(capability.actuation_profile_validated)
-        self.assertFalse(capability.press_allowed)
+        self.assertTrue(capability.actuation_profile_validated)
+        self.assertTrue(capability.press_allowed)
 
 
 if __name__ == "__main__":
