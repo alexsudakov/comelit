@@ -24,6 +24,7 @@ DOC = ROOT / "research" / "media" / "v1" / "P116_R60_POST_CALL_FAST_RECOVERY.md"
 FIXTURE = ROOT / "research" / "media" / "v1" / "P116_R59_R58_CANARY_TIMELINE_EVIDENCE.txt"
 LIBNICE_EVIDENCE = ROOT / "research" / "media" / "v1" / "P116_R60_LIBNICE_0_1_22_EVIDENCE.txt"
 NATIVE_BINARY = REPO / "custom_components" / "comelit" / "native" / "comelit-v4"
+R63_BUILD_INFO = MEDIA_V1 / "P116_R63_BUILD_INFO.txt"
 
 
 class R60A2WindowDecompositionTests(unittest.TestCase):
@@ -109,10 +110,29 @@ class R60A3A5PseudoTcpForensicTests(unittest.TestCase):
             fixture,
         )
         self.assertIn("upstream_file_bytes=80443", fixture)
-        expected_binary_sha = model.production_binary_sha_from_r58_provenance()
+        r58_binary_sha = model.production_binary_sha_from_r58_provenance()
+        self.assertEqual(
+            r58_binary_sha,
+            "40c8a2c19fe5e792c28082ee0b1f60732cd90b5ffaa1cdb05c82575361cef762",
+        )
+
+        # R60's libnice decision is provenance for the R58 binary lineage,
+        # not a permanent pin that forbids later validated native promotions.
+        # When a later build is shipped, its own repository build metadata
+        # becomes the current binary identity gate.
+        if R63_BUILD_INFO.is_file():
+            values = dict(
+                line.split("=", 1)
+                for line in R63_BUILD_INFO.read_text(encoding="utf-8").splitlines()
+                if "=" in line
+            )
+            expected_current_sha = values["native_binary_sha256"]
+        else:
+            expected_current_sha = r58_binary_sha
+
         self.assertEqual(
             hashlib.sha256(NATIVE_BINARY.read_bytes()).hexdigest(),
-            expected_binary_sha,
+            expected_current_sha,
         )
 
     def test_evidence_paths_are_ci_faithful_repo_local(self) -> None:
