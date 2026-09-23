@@ -181,7 +181,7 @@ class P14HomeAssistantContractTests(unittest.TestCase):
         self.assertIn("official Comelit application can connect again", doc)
         self.assertIn("must not stop or recreate the persistent Ring/Door listener", doc)
 
-    def test_gate_entity_is_exposed_but_actuation_remains_fail_closed(self):
+    def test_gate_entity_uses_validated_one_shot_profile(self):
         const = (ROOT / "custom_components/comelit/const.py").read_text()
         button = (ROOT / "custom_components/comelit/button.py").read_text()
         services = (ROOT / "custom_components/comelit/services.yaml").read_text()
@@ -189,20 +189,24 @@ class P14HomeAssistantContractTests(unittest.TestCase):
         self.assertIn(
             'MAIN_GATE_ENTITY_ID = "button.comelit_main_gate_open_door"', const
         )
-        self.assertIn("SUPPORTED_DOORS = (DOOR_ENTRANCE,)", const)
+        self.assertIn(
+            "SUPPORTED_DOORS = (DOOR_ENTRANCE, DOOR_GATE)", const
+        )
         self.assertIn("def resolve_door_capability(", const)
         self.assertIn("ComelitGateDoorButton", button)
         self.assertIn('_attr_name = "Comelit — Калитка"', button)
         self.assertNotIn("_attr_available =", button)
         self.assertIn("def available(self) -> bool:", button)
         self.assertIn("resolve_door_capability(", button)
-        self.assertIn('"actuation_profile_validated": False', const)
+        self.assertIn('"actuation_profile_validated": True', const)
         self.assertIn('"ring_source": "00000610"', const)
         self.assertIn('"ring_source": capability.ring_source', button)
-        self.assertNotIn(
+        self.assertIn(
             "await self._runtime.async_open_door(DOOR_GATE)", button
         )
-        self.assertNotIn("- gate", services)
+        self.assertIn('"automatic_retry_allowed": False', button)
+        self.assertIn('"physical_effect_asserted": False', button)
+        self.assertIn("- gate", services)
 
     def test_direct_service_uses_logical_door_and_internal_operation_id(self):
         text = (ROOT / "custom_components/comelit/__init__.py").read_text()
