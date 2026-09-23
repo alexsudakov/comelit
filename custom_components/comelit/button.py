@@ -98,6 +98,9 @@ class ComelitEntranceDoorButton(ButtonEntity):
             "last_existing_ctpp_reused": result.get(
                 "existing_ctpp_reused"
             ),
+            "last_one_shot_sequence_sent": result.get(
+                "one_shot_sequence_sent"
+            ),
             "last_ctpp_channel_id": result.get("ctpp_channel_id"),
             "last_reject_stage": result.get("reject_stage"),
             "last_reject_response_word": result.get("reject_response_word"),
@@ -124,13 +127,23 @@ class ComelitEntranceDoorButton(ButtonEntity):
         result = await self._runtime.async_open_door(DOOR_ENTRANCE)
         self._last_result = dict(result)
         self.async_write_ha_state()
-        if result.get("protocol_acked") is not True:
-            raise HomeAssistantError(
-                "Comelit Door has no proven protocol ACK; automatic retry is "
-                "forbidden. "
-                f"state={result.get('state')} "
-                f"protocol_acked={result.get('protocol_acked')}"
-            )
+        # A complete one-shot TX without a proven Door-specific ACK is an
+        # unconfirmed outcome, not a transport failure.  Do not claim the
+        # physical effect, but do not show a false HA error after all five
+        # validated Door writes crossed the local PseudoTCP TX boundary.
+        if (
+            result.get("protocol_acked") is True
+            or result.get("one_shot_sequence_sent") is True
+        ):
+            return
+
+        raise HomeAssistantError(
+            "Comelit Door command did not complete the validated one-shot "
+            "transmission; automatic retry is forbidden. "
+            f"state={result.get('state')} "
+            f"write_count={result.get('write_count')} "
+            f"protocol_acked={result.get('protocol_acked')}"
+        )
 
 
 class ComelitGateDoorButton(ButtonEntity):

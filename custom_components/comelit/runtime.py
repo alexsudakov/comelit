@@ -19,6 +19,7 @@ from .cloud import (
     async_negotiate_p2p,
 )
 from .const import EVENT_DOOR_OPERATION, EVENT_RING
+from .door_outcome import door_one_shot_sequence_sent
 from .media_diagnostics import MediaCallDiagnostics
 from .oauth import ComelitOAuthError, ComelitOAuthManager
 from .ring_event import RingObservationError, parse_v4_safe_ring
@@ -895,6 +896,8 @@ class ComelitRingRuntime:
                     "protocol_acked": False,
                     "write_count": None,
                     "door_specific_ack_proven": False,
+                    "existing_ctpp_reused": False,
+                    "one_shot_sequence_sent": False,
                     "automatic_retry_allowed": False,
                     "physical_effect_asserted": False,
                 }
@@ -909,6 +912,8 @@ class ComelitRingRuntime:
                     "protocol_acked": False,
                     "write_count": None,
                     "door_specific_ack_proven": False,
+                    "existing_ctpp_reused": False,
+                    "one_shot_sequence_sent": False,
                     "automatic_retry_allowed": False,
                     "physical_effect_asserted": False,
                 }
@@ -935,6 +940,8 @@ class ComelitRingRuntime:
                     "protocol_acked": False,
                     "write_count": None,
                     "door_specific_ack_proven": False,
+                    "existing_ctpp_reused": False,
+                    "one_shot_sequence_sent": False,
                     "automatic_retry_allowed": False,
                     "physical_effect_asserted": False,
                 }
@@ -952,6 +959,9 @@ class ComelitRingRuntime:
 
             door_specific_ack_proven = (
                 diagnostic.get("door_specific_ack_proven") is True
+            )
+            existing_ctpp_reused = (
+                diagnostic.get("existing_ctpp_reused") is True
             )
 
             write_count = diagnostic.get("write_count")
@@ -974,6 +984,12 @@ class ComelitRingRuntime:
                 ),
                 "write_count": write_count,
                 "door_specific_ack_proven": door_specific_ack_proven,
+                "existing_ctpp_reused": existing_ctpp_reused,
+                "one_shot_sequence_sent": door_one_shot_sequence_sent(
+                    state=state,
+                    write_count=write_count,
+                    existing_ctpp_reused=existing_ctpp_reused,
+                ),
                 "automatic_retry_allowed": False,
                 "physical_effect_asserted": False,
             }
@@ -984,6 +1000,12 @@ class ComelitRingRuntime:
             result["write_count"] = write_count
             result["door_specific_ack_proven"] = (
                 door_specific_ack_proven
+            )
+            result["existing_ctpp_reused"] = existing_ctpp_reused
+            result["one_shot_sequence_sent"] = door_one_shot_sequence_sent(
+                state=state,
+                write_count=write_count,
+                existing_ctpp_reused=existing_ctpp_reused,
             )
 
             # A raw ACKED state is never enough by itself.

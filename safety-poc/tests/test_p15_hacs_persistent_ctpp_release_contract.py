@@ -79,6 +79,7 @@ class P15HacsPersistentCtppReleaseContract(unittest.TestCase):
             '"last_write_count"',
             '"last_door_specific_ack_proven"',
             '"last_existing_ctpp_reused"',
+            '"last_one_shot_sequence_sent"',
             '"last_ctpp_channel_id"',
         ):
             self.assertIn(marker, source)
@@ -130,17 +131,29 @@ class P15HacsPersistentCtppReleaseContract(unittest.TestCase):
         self.assertLess(write_pos, protocol_pos)
         self.assertLess(ack_flag_pos, protocol_pos)
 
-    def test_button_requires_proven_protocol_ack(self):
+    def test_button_accepts_complete_unconfirmed_one_shot_without_false_error(self):
         source = (
             ROOT / "custom_components/comelit/button.py"
         ).read_text(encoding="utf-8")
 
         self.assertIn(
-            'if result.get("protocol_acked") is not True:',
+            'result.get("protocol_acked") is True',
+            source,
+        )
+        self.assertIn(
+            'result.get("one_shot_sequence_sent") is True',
             source,
         )
         self.assertNotIn(
-            'if result.get("state") != "ACKED":',
+            'if result.get("protocol_acked") is not True:',
+            source,
+        )
+        self.assertIn(
+            '"physical_effect_asserted": False',
+            source,
+        )
+        self.assertIn(
+            '"automatic_retry_allowed": False',
             source,
         )
 
