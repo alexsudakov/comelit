@@ -117,10 +117,12 @@ class P116HaStreamRtpBridgeTests(unittest.TestCase):
             self.assertNotIn(forbidden, self.camera)
             self.assertNotIn(forbidden, self.switch)
 
-    def test_t7_hard_limit_and_door_gate_paths_are_unchanged(self) -> None:
+    def test_t7_hard_limit_and_r63_gate_path_remains_bounded(self) -> None:
         self.assertIn("MEDIA_SESSION_HARD_LIMIT_SECONDS = 600", self.session)
-        self.assertNotIn("gate", self.services.lower())
-        self.assertNotIn("async_open_door(DOOR_GATE", self.button)
+        self.assertIn("- gate", self.services.lower())
+        self.assertIn("async_open_door(DOOR_GATE", self.button)
+        self.assertIn('"automatic_retry_allowed": False', self.button)
+        self.assertIn('"physical_effect_asserted": False', self.button)
         self.assertIn('ENTRANCE_CAMERA_ENTITY_ID = "camera.comelit_entrance"', (COMPONENT / "const.py").read_text(encoding="utf-8"))
 
     def test_t8_native_binary_pin_matches_installed_artifact_and_transform_invariants_remain(self) -> None:
