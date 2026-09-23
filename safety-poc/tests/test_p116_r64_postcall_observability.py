@@ -62,17 +62,28 @@ class P116R64PostCallObservabilityTests(unittest.TestCase):
         )
 
     def test_post_call_snapshot_is_after_authoritative_r58_close(self) -> None:
-        closed = self.generated_a.index('printf("R58_STOP_CLOSED=true\\n");')
-        channel_closed = self.generated_a.index(
-            'printf("R42_MEDIA_CHANNEL_CLOSED=true\\n");',
+        close_function = self.generated_a.split(
+            "static void\nr58_stop_publish_closed(void)", 1
+        )[1].split("/* R58_STOP_CLEANUP_END */", 1)[0]
+        closed = close_function.index('printf("R58_STOP_CLOSED=true\\n");')
+        channel_close_call = close_function.index(
+            "r42_finish_media_channel_close();",
             closed,
         )
-        snapshot_call = self.generated_a.index(
+        snapshot_call = close_function.index(
             "r64_publish_post_call_snapshot();",
-            channel_closed,
+            channel_close_call,
         )
-        self.assertLess(closed, channel_closed)
-        self.assertLess(channel_closed, snapshot_call)
+        self.assertLess(closed, channel_close_call)
+        self.assertLess(channel_close_call, snapshot_call)
+
+        r42_close_function = self.generated_a.split(
+            "static void\nr42_finish_media_channel_close(void)", 1
+        )[1].split("}", 1)[0]
+        self.assertIn(
+            'printf("R42_MEDIA_CHANNEL_CLOSED=true\\n");',
+            r42_close_function,
+        )
         for marker in (
             "R64_POST_CALL_REMOTE_RELEASE_OBSERVED=%s",
             "R64_POST_CALL_CAPABILITY_CLEARED_OBSERVED=%s",
