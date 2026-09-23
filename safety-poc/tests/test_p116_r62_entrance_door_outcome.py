@@ -78,6 +78,15 @@ class P116R62EntranceDoorOutcomeTests(unittest.TestCase):
             )
         )
 
+    def test_malformed_state_fails_closed(self) -> None:
+        self.assertFalse(
+            door_outcome.door_one_shot_sequence_sent(
+                state={"unexpected": "mapping"},
+                write_count=5,
+                existing_ctpp_reused=True,
+            )
+        )
+
     def test_classifier_never_claims_physical_effect_or_protocol_ack(self) -> None:
         source = MODULE_PATH.read_text(encoding="utf-8")
         self.assertNotIn("physical_effect_asserted = True", source)
