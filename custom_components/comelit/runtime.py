@@ -18,7 +18,13 @@ from .cloud import (
     ComelitCloudHttpError,
     async_negotiate_p2p,
 )
-from .const import EVENT_DOOR_OPERATION, EVENT_RING
+from .const import (
+    DOOR_ENTRANCE,
+    DOOR_GATE,
+    EVENT_DOOR_OPERATION,
+    EVENT_RING,
+    SUPPORTED_DOORS,
+)
 from .door_outcome import door_one_shot_sequence_sent
 from .media_diagnostics import MediaCallDiagnostics
 from .oauth import ComelitOAuthError, ComelitOAuthManager
@@ -36,6 +42,7 @@ _RUN_DIR = Path("/run/comelit-p2p")
 _OFFER_FILE = _RUN_DIR / "offer.sdp"
 _REMOTE_FILE = _RUN_DIR / "remote.sdp"
 _STOP_FILE = _RUN_DIR / "stop"
+_DOOR_TARGET_FILE = _RUN_DIR / "door-target"
 
 _DOOR_STATES = {
     "ACKED",
@@ -326,6 +333,32 @@ def _write_remote(remote: str) -> None:
 def _touch_stop() -> None:
     _RUN_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     _STOP_FILE.touch(mode=0o600, exist_ok=True)
+
+
+def _write_door_target(door: str) -> None:
+    if door not in {DOOR_ENTRANCE, DOOR_GATE}:
+        raise ComelitRingRuntimeError("unsupported_door")
+
+    _RUN_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp = _DOOR_TARGET_FILE.with_suffix(".tmp")
+    old_umask = os.umask(0o077)
+    try:
+        tmp.write_text(f"{door}\n", encoding="ascii")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, _DOOR_TARGET_FILE)
+    finally:
+        os.umask(old_umask)
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _remove_door_target() -> None:
+    try:
+        _DOOR_TARGET_FILE.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def _native_gate() -> None:
@@ -856,6 +889,7 @@ class ComelitRingRuntime:
         self._attached_media_busy.clear()
         self._attached_media_open.clear()
         self._attached_media_closed.clear()
+        await self._hass.async_add_executor_job(_remove_door_target)
         await self._hass.async_add_executor_job(_remove_helper_secret)
 
     def _finalize_door_operation(
@@ -881,7 +915,7 @@ class ComelitRingRuntime:
         event_id: str | None = None,
     ) -> dict[str, object]:
         """Execute exactly one direct Door attempt on the persistent session."""
-        if door != "entrance":
+        if door not in SUPPORTED_DOORS:
             raise ComelitRingRuntimeError("unsupported_door")
 
         async with self._door_lock:
@@ -929,9 +963,15 @@ class ComelitRingRuntime:
             # Generate the operation id immediately before the irreversible
             # one-shot boundary. It is HA-local and is never caller supplied.
             operation_id = f"comelit-ha-{uuid4()}"
+
+            # R63 binds the requested target to the existing SIGUSR1 one-shot
+            # boundary through a root-only, exact-vocabulary control file.
+            # Native consumes and unlinks it before any CTPP Door write.
+            await self._hass.async_add_executor_job(_write_door_target, door)
             try:
                 os.kill(process.pid, signal.SIGUSR1)
             except ProcessLookupError:
+                await self._hass.async_add_executor_job(_remove_door_target)
                 self._door_result_future = None
                 result = {
                     "operation_id": operation_id,
@@ -954,6 +994,7 @@ class ComelitRingRuntime:
             finally:
                 if self._door_result_future is future:
                     self._door_result_future = None
+                await self._hass.async_add_executor_job(_remove_door_target)
 
             diagnostic = dict(self._door_diagnostic)
 
