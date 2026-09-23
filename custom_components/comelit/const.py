@@ -70,8 +70,8 @@ RING_INTERACTION_OUTCOMES = (
 )
 
 # Only targets with a separately proven actuation profile may be accepted by
-# the public Door service. Gate ring identity is proven, gate actuation is not.
-SUPPORTED_DOORS = (DOOR_ENTRANCE,)
+# the public Door service.
+SUPPORTED_DOORS = (DOOR_ENTRANCE, DOOR_GATE)
 
 
 class DoorCapability(NamedTuple):
@@ -96,7 +96,9 @@ _DOOR_TOPOLOGY_CAPABILITIES: dict[str, dict[str, object]] = {
     DOOR_GATE: {
         "configured": True,
         "ring_source_validated": True,
-        "actuation_profile_validated": False,
+        # R63: 00000610 is independently proven as the Gate connection peer;
+        # action=peer/output-index=1 comes from the captured configuration.
+        "actuation_profile_validated": True,
         "ring_source": "00000610",
     },
 }
