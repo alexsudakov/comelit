@@ -121,6 +121,37 @@
 | `actuator` | 3 / 243 | package/class names indicate actuator UI surface, not a profile |
 | `door` | 3 / 553 | package/class names indicate door/open-door UI surface, not a profile |
 
+
+## Read-only UCFG / address-book relay closure
+
+Дата: 2026-09-23. Режим: `READ_ONLY_EVIDENCE_RELAY_VIA_CAPTURE`. Этот шаг не выполнял Comelit network TX, Door/Gate action, ring, self-activation, media session, deploy/restart или repository-side executable correction. `LIVE_ACTIONS=0`, `PRODUCTION_MUTATIONS=0`.
+
+`PROVEN_OFFLINE` Canonical P12 UCFG pin восстановим из уже существующего frozen `self_activation.pcap` без доступа к root-only CT120 artifact path. Из capture извлечён byte-identical JSON object длиной 971 bytes at offsets `39457..40428`; его SHA256 равен canonical pin `d31dca0fa13a57d3cbc600510149b3ad2a29c43e20949190ec62b44321d310b7`. Frozen capture identity: `self_activation.pcap` SHA256 `f15bb1922f55237bfaeb570bd288f7023e0196c05e878dfdaa76ad165bbc044a`.
+
+`PROVEN_OFFLINE` Извлечённый pinned UCFG object имеет `message=get-configuration`, `message-type=response`, `response-code=200`. Его `vip` section содержит apartment identity fields `apt-address`, `apt-config`, `apt-subaddress`, `enabled`, `logical-subaddress`; address books в этом pinned object отсутствуют. Это соответствует P12 request scope: UCFG pin доказывает apartment identity, а address-book metadata приходит отдельным response.
+
+`PROVEN_OFFLINE` Отдельный address-book block в том же frozen capture распарсен как complete array structures. Наблюдаемые значения идентичны во всех трёх staged pcaps, где этот block присутствует:
+
+- `opendoor-address-book`: 0 entries.
+- `actuator-address-book`: 0 entries.
+- `opendoor-actions`: 1 entry: `action=peer`, `output-index=1`, `apt-address=""`; source schema fields are `{id, action, apt-address, output-index}`.
+- `entrance-address-book`: two ring-directory entries with `apt-address=00000643` and `apt-address=00000610`; this is ring/directory evidence, not actuation-profile evidence.
+- `NON_PEER_OR_SECOND_ENTRY_PRESENT=false`.
+
+`PROVEN_STATIC` Official-app parser mapping used for the bounded scalar extraction is anchored in staged source:
+`.r28-evidence/official-app/dex7/sources/com/comelit/bigapp/model/command/UserCfgCmd.java` parses `opendoor-address-book` as `name/apt-address/output-index` and `opendoor-actions` as `action/apt-address/output-index`, skipping disabled entries; `dex9/sources/com/comelitgroup/shared/model/command/CommandConstant.java:46-71` names the relevant address-book/action keys.
+
+`PROVEN_OFFLINE` There is no `number` field in these UCFG/address-book records. The legacy P13 preparation path supplies the peer number from runtime input rather than UCFG. This field was therefore not inferred.
+
+`PROVEN_OFFLINE` Existing R61 contract, evaluated in-memory on these extracted configuration facts for `gate`, remains fail-closed: `GATE_PROFILE_VALIDATED=false`, `CAN_EMIT=false`, `EMISSION_REFUSED`. Transfer of the entrance profile to gate is rejected as `door_identity_provenance_mismatch`.
+
+`PROVEN_OFFLINE` The configuration evidence closes the earlier “maybe UCFG contains a Gate profile” uncertainty negatively: there is no Gate entry in either actuation address book, no second/non-peer open-door action, and `00000610` appears only in `entrance-address-book`. Therefore `GATE_NOT_IN_OPENDOOR_CONFIG=true` and `GATE_PROFILE_CAN_BE_DERIVED_FROM_CONFIG=false`.
+
+This does **not** validate a Gate actuation profile and does not change the fail-closed runtime contract. The only remaining evidence route capable of proving a Gate actuation profile is a separately approved passive capture of one owner-initiated Gate action in the official app. Until such evidence exists, `GATE_ACTUATION_PROFILE_VALIDATED=false` and `GATE_STANDARD_PRESS_ALLOWED=false`.
+
+Security note: the raw capture also contains sensitive camera credentials. Their values were not emitted into this record. Raw pcaps remain external/gitignored research artifacts and must not be staged into Git.
+
+
 ## Machine values
 
 ```
@@ -159,6 +190,16 @@ GATE_STANDARD_PRESS_ALLOWED_FLIPS=PASS
 DOOR_PROFILE_WRITE_COUNT_LEGACY_ORACLE_FLIPS=PASS
 R61_SELF_CHECK=PASS
 GATE_PROFILE_MISSING_REASON=NO_GATE_COMMAND_SEQUENCE_CHANNEL_SELECTOR_ACK_SAFETY_NO_RETRY_PROOF
+P12_UCFG_PIN_RECOVERABLE_FROM_SELF_ACTIVATION_CAPTURE=true
+P12_UCFG_SHA256_GATE=PASS
+OPENDOOR_ADDRESS_BOOK_ENTRY_COUNT=0
+OPENDOOR_ACTION_ENTRY_COUNT=1
+OPENDOOR_ACTION_0_ACTION=peer
+OPENDOOR_ACTION_0_OUTPUT_INDEX=1
+ACTUATOR_ADDRESS_BOOK_ENTRY_COUNT=0
+NON_PEER_OR_SECOND_ENTRY_PRESENT=false
+GATE_NOT_IN_OPENDOOR_CONFIG=true
+GATE_PROFILE_CAN_BE_DERIVED_FROM_CONFIG=false
 NEXT_REQUIRED_STEP=PASSIVE_CAPTURE
 RAW_PAYLOAD_BYTES_COMMITTED=false
 LIVE_ACTIONS=0
