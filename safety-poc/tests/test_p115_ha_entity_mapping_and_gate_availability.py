@@ -112,8 +112,9 @@ class P115HaEntityMappingAndGateAvailabilityTests(unittest.TestCase):
         self.assertTrue(capability.available)
         self.assertTrue(capability.configured)
         self.assertTrue(capability.ring_source_validated)
-        self.assertFalse(capability.actuation_profile_validated)
-        self.assertFalse(capability.press_allowed)
+        self.assertTrue(capability.actuation_profile_validated)
+        self.assertTrue(capability.press_allowed)
+        self.assertIsNone(capability.blocked_reason)
         self.assertEqual(capability.ring_source, "00000610")
 
     def test_resolver_negative_case_media_exclusivity(self) -> None:
@@ -145,7 +146,7 @@ class P115HaEntityMappingAndGateAvailabilityTests(unittest.TestCase):
         self.assertEqual(capability.blocked_reason, "door_target_not_configured")
         self.assertIsNone(capability.ring_source)
 
-    def test_gate_press_path_remains_fail_closed(self) -> None:
+    def test_gate_press_path_uses_validated_one_shot_runtime(self) -> None:
         gate = class_source(self.button_text, "ComelitGateDoorButton")
         tree = ast.parse(gate)
         press = next(
@@ -154,9 +155,14 @@ class P115HaEntityMappingAndGateAvailabilityTests(unittest.TestCase):
             if isinstance(node, ast.AsyncFunctionDef) and node.name == "async_press"
         )
         self.assertTrue(any(isinstance(node, ast.Raise) for node in ast.walk(press)))
-        self.assertNotIn("async_open_door(DOOR_GATE)", self.button_text)
-        self.assertEqual(self.const.SUPPORTED_DOORS, (self.const.DOOR_ENTRANCE,))
-        self.assertNotIn("- gate", self.services_text)
+        self.assertIn("async_open_door(DOOR_GATE)", self.button_text)
+        self.assertEqual(
+            self.const.SUPPORTED_DOORS,
+            (self.const.DOOR_ENTRANCE, self.const.DOOR_GATE),
+        )
+        self.assertIn("- gate", self.services_text)
+        self.assertIn('"automatic_retry_allowed": False', gate)
+        self.assertIn('"physical_effect_asserted": False', gate)
 
     def test_media_hard_limit_is_centralised(self) -> None:
         self.assertIn("def hard_limit_seconds(self) -> float:", self.session_text)

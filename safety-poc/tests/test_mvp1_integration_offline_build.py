@@ -874,10 +874,11 @@ class MVP1IntegrationRingMediaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(const.ENTRANCE_CAMERA_ENTITY_ID, "camera.comelit_entrance")
         self.assertEqual(const.ENTRANCE_MEDIA_SWITCH_ENTITY_ID, "switch.comelit_entrance_camera")
         self.assertIn(const.DOOR_ENTRANCE, const.SUPPORTED_DOORS)
-        self.assertNotIn(const.DOOR_GATE, const.SUPPORTED_DOORS)
+        self.assertIn(const.DOOR_GATE, const.SUPPORTED_DOORS)
         gate = const.resolve_door_capability(const.DOOR_GATE, media_paused=False)
-        self.assertFalse(gate.actuation_profile_validated)
-        self.assertFalse(gate.press_allowed)
+        self.assertTrue(gate.actuation_profile_validated)
+        self.assertTrue(gate.press_allowed)
+        self.assertFalse(gate.blocked_reason)
 
 
 if __name__ == "__main__":

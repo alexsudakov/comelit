@@ -50,7 +50,13 @@ def function_source(source: str, name: str) -> str:
 def derive_one_shot_marker(case: dict[str, object]) -> dict[str, str]:
     """Pure offline model of the entrance Door one-shot safety envelope."""
     if case.get("gate") is True:
-        return {"GATE_FAIL_CLOSED_CONTRACT": "PASS" if case.get("runtime_call") is not True else "FAIL"}
+        ok = (
+            case.get("runtime_call") is True
+            and case.get("target_written") is True
+            and case.get("sigusr1_count") == 1
+            and case.get("automatic_retry_allowed") is False
+        )
+        return {"GATE_ONE_SHOT_CONTRACT": "PASS" if ok else "FAIL"}
     if case.get("duplicate_caller") is True or case.get("operation_in_progress") is True:
         return {"DOOR_SAFETY_CONTRACT": "PASS" if case.get("sigusr1_count") == 1 else "FAIL"}
     if case.get("listener_ready") is not True or case.get("media_active") is True:
@@ -97,14 +103,15 @@ class P116R60DoorGateEntityMappingTests(unittest.TestCase):
         self.assertIn("self.entity_id = MAIN_ENTRANCE_ENTITY_ID", entrance)
         self.assertIn("_attr_unique_id = MAIN_ENTRANCE_UNIQUE_ID", entrance)
 
-    def test_gate_button_name_and_entity_identity_remain_fail_closed(self) -> None:
+    def test_gate_button_name_and_entity_identity_use_validated_runtime(self) -> None:
         gate = class_source(self.button_text, "ComelitGateDoorButton")
         self.assertIn('_attr_name = "Comelit — Калитка"', gate)
         self.assertRegex(gate, r"Калитка|Ворота")
         self.assertIn("self.entity_id = MAIN_GATE_ENTITY_ID", gate)
         self.assertIn("_attr_unique_id = MAIN_GATE_UNIQUE_ID", gate)
         self.assertIn("raise HomeAssistantError", gate)
-        self.assertNotIn("async_open_door(DOOR_GATE)", gate)
+        self.assertIn("async_open_door(DOOR_GATE)", gate)
+        self.assertIn('result.get("one_shot_sequence_sent") is True', gate)
 
     def test_one_add_entities_call_and_ids_unchanged(self) -> None:
         self.assertEqual(self.button_text.count("async_add_entities("), 1)
@@ -123,11 +130,14 @@ class P116R60DoorGateEntityMappingTests(unittest.TestCase):
         self.assertTrue(gate.available)
         self.assertTrue(gate.ring_source_validated)
         self.assertEqual(gate.ring_source, "00000610")
-        self.assertFalse(gate.actuation_profile_validated)
-        self.assertFalse(gate.press_allowed)
-        self.assertEqual(gate.blocked_reason, "gate_actuation_profile_not_validated")
-        self.assertEqual(self.const.SUPPORTED_DOORS, (self.const.DOOR_ENTRANCE,))
-        self.assertNotIn("- gate", self.services_text)
+        self.assertTrue(gate.actuation_profile_validated)
+        self.assertTrue(gate.press_allowed)
+        self.assertIsNone(gate.blocked_reason)
+        self.assertEqual(
+            self.const.SUPPORTED_DOORS,
+            (self.const.DOOR_ENTRANCE, self.const.DOOR_GATE),
+        )
+        self.assertIn("- gate", self.services_text)
 
 
 class P116R60DoorRuntimeStaticContractTests(unittest.TestCase):
@@ -179,7 +189,13 @@ class P116R60DoorGateOfflineHarnessTests(unittest.TestCase):
             "malformed_response": {"listener_ready": True, "malformed_response": True, "state": "UNKNOWN_OUTCOME"},
             "unknown_outcome": {"listener_ready": True, "timeout": True, "state": "UNKNOWN_OUTCOME"},
             "duplicate_caller": {"duplicate_caller": True, "sigusr1_count": 1},
-            "gate_fail_closed": {"gate": True, "runtime_call": False},
+            "gate_validated_one_shot": {
+                "gate": True,
+                "runtime_call": True,
+                "target_written": True,
+                "sigusr1_count": 1,
+                "automatic_retry_allowed": False,
+            },
         }
         for name, case in cases.items():
             with self.subTest(name=name):
@@ -193,7 +209,13 @@ class P116R60DoorGateOfflineHarnessTests(unittest.TestCase):
             {"listener_ready": True, "state": "REJECTED", "protocol_acked": True, "automatic_retry_allowed": False},
             {"listener_ready": True, "malformed_response": True, "state": "ACKED"},
             {"duplicate_caller": True, "sigusr1_count": 2},
-            {"gate": True, "runtime_call": True},
+            {
+                "gate": True,
+                "runtime_call": True,
+                "target_written": False,
+                "sigusr1_count": 1,
+                "automatic_retry_allowed": False,
+            },
         ]
         for case in flips:
             with self.subTest(case=case):
@@ -203,13 +225,25 @@ class P116R60DoorGateOfflineHarnessTests(unittest.TestCase):
     def test_harness_markers_are_derived_not_literals(self) -> None:
         source = Path(__file__).read_text(encoding="utf-8")
         door_literal = '"' + "DOOR_SAFETY_CONTRACT" + "=" + "PASS" + '"'
-        gate_literal = '"' + "GATE_FAIL_CLOSED_CONTRACT" + "=" + "PASS" + '"'
+        gate_literal = '"' + "GATE_ONE_SHOT_CONTRACT" + "=" + "PASS" + '"'
         self.assertNotIn(door_literal, source)
         self.assertNotIn(gate_literal, source)
-        good = derive_one_shot_marker({"gate": True, "runtime_call": False})
-        bad = derive_one_shot_marker({"gate": True, "runtime_call": True})
-        self.assertEqual(good["GATE_FAIL_CLOSED_CONTRACT"], "PASS")
-        self.assertEqual(bad["GATE_FAIL_CLOSED_CONTRACT"], "FAIL")
+        good = derive_one_shot_marker({
+            "gate": True,
+            "runtime_call": True,
+            "target_written": True,
+            "sigusr1_count": 1,
+            "automatic_retry_allowed": False,
+        })
+        bad = derive_one_shot_marker({
+            "gate": True,
+            "runtime_call": True,
+            "target_written": False,
+            "sigusr1_count": 1,
+            "automatic_retry_allowed": False,
+        })
+        self.assertEqual(good["GATE_ONE_SHOT_CONTRACT"], "PASS")
+        self.assertEqual(bad["GATE_ONE_SHOT_CONTRACT"], "FAIL")
 
 
 if __name__ == "__main__":

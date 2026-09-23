@@ -147,7 +147,7 @@ class ComelitEntranceDoorButton(ButtonEntity):
 
 
 class ComelitGateDoorButton(ButtonEntity):
-    """Gate entity exposed fail-closed until actuation is independently proven."""
+    """One-shot Gate command through the validated peer/TAP runtime profile."""
 
     _attr_name = "Comelit — Калитка"
     _attr_unique_id = MAIN_GATE_UNIQUE_ID
@@ -162,6 +162,7 @@ class ComelitGateDoorButton(ButtonEntity):
         self._runtime = runtime
         self._supervisor = supervisor
         self.entity_id = MAIN_GATE_ENTITY_ID
+        self._last_result: dict[str, object] | None = None
 
     @property
     def available(self) -> bool:
@@ -172,6 +173,7 @@ class ComelitGateDoorButton(ButtonEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        result = self._last_result or {}
         capability = resolve_door_capability(
             DOOR_GATE,
             media_paused=self._supervisor.media_paused,
@@ -179,6 +181,7 @@ class ComelitGateDoorButton(ButtonEntity):
         return {
             "door": DOOR_GATE,
             "standard_press_allowed": capability.press_allowed,
+            "blocked_by_media_session": self._supervisor.media_paused,
             "one_shot_operation_required": True,
             "automatic_retry_allowed": False,
             "physical_effect_asserted": False,
@@ -188,12 +191,55 @@ class ComelitGateDoorButton(ButtonEntity):
             "ring_source_validated": capability.ring_source_validated,
             "ring_source": capability.ring_source,
             "blocked_reason": capability.blocked_reason,
+            "last_operation_id": result.get("operation_id"),
+            "last_protocol_state": result.get("state"),
+            "last_protocol_acked": result.get("protocol_acked"),
+            "last_write_count": result.get("write_count"),
+            "last_door_specific_ack_proven": result.get(
+                "door_specific_ack_proven"
+            ),
+            "last_existing_ctpp_reused": result.get("existing_ctpp_reused"),
+            "last_one_shot_sequence_sent": result.get(
+                "one_shot_sequence_sent"
+            ),
+            "last_ctpp_channel_id": result.get("ctpp_channel_id"),
+            "last_reject_stage": result.get("reject_stage"),
+            "last_reject_response_word": result.get("reject_response_word"),
         }
 
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            self._supervisor.async_add_status_listener(self._handle_status_update)
+        )
+
+    def _handle_status_update(self) -> None:
+        self.async_write_ha_state()
+
     async def async_press(self) -> None:
-        # Deliberately no runtime call: a ring source identity does not prove
-        # the Door actuation profile for that target.
+        if self._supervisor.media_paused:
+            raise HomeAssistantError(
+                "Comelit Gate is temporarily unavailable while the intercom "
+                "media session owns the exclusive Comelit connection"
+            )
+
+        result = await self._runtime.async_open_door(DOOR_GATE)
+        self._last_result = dict(result)
+        self.async_write_ha_state()
+
+        # Same conservative outcome contract as Entrance: a fully transmitted
+        # one-shot is not a transport failure, but it is never promoted to a
+        # physical-effect assertion without a target-specific protocol ACK.
+        if (
+            result.get("protocol_acked") is True
+            or result.get("one_shot_sequence_sent") is True
+        ):
+            return
+
         raise HomeAssistantError(
-            "Comelit gate actuation is unavailable until its one-shot profile "
-            "is independently validated"
+            "Comelit Gate command did not complete the validated one-shot "
+            "transmission; automatic retry is forbidden. "
+            f"state={result.get('state')} "
+            f"write_count={result.get('write_count')} "
+            f"protocol_acked={result.get('protocol_acked')}"
         )

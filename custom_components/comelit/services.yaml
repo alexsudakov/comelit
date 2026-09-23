@@ -10,6 +10,7 @@ open_door:
         select:
           options:
             - entrance
+            - gate
     event_id:
       name: Event ID
       required: false
@@ -34,6 +35,7 @@ emit_ring_interaction:
         select:
           options:
             - entrance
+            - gate
     outcome:
       name: Outcome
       required: true
