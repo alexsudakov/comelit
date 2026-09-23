@@ -480,6 +480,14 @@ class ComelitRingRuntime:
 
     def status(self) -> dict[str, object]:
         event = self._last_ring_event or {}
+        r64_post_call_snapshot = getattr(self, "_r64_post_call_snapshot", {})
+        r64_terminal_snapshot = getattr(self, "_r64_terminal_snapshot", {})
+        r64_closed_before_open = getattr(
+            self, "_r64_pseudotcp_closed_before_open", False
+        )
+        r64_closed_after_open = getattr(
+            self, "_r64_pseudotcp_closed_after_open", False
+        )
         return {
             "running": self.running,
             "listener_ready": self.listener_ready,
@@ -499,10 +507,10 @@ class ComelitRingRuntime:
             ),
             "post_call_observability": {
                 "transport_state": self._derive_post_call_transport_state(),
-                "snapshot": dict(self._r64_post_call_snapshot),
-                "terminal_snapshot": dict(self._r64_terminal_snapshot),
-                "pseudotcp_closed_before_open": self._r64_pseudotcp_closed_before_open,
-                "pseudotcp_closed_after_open": self._r64_pseudotcp_closed_after_open,
+                "snapshot": dict(r64_post_call_snapshot),
+                "terminal_snapshot": dict(r64_terminal_snapshot),
+                "pseudotcp_closed_before_open": r64_closed_before_open,
+                "pseudotcp_closed_after_open": r64_closed_after_open,
             },
             "door_last_operation_id": (self._last_door_result or {}).get("operation_id"),
             "door_last_state": (self._last_door_result or {}).get("state"),
