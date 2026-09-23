@@ -25,6 +25,7 @@ FIXTURE = ROOT / "research" / "media" / "v1" / "P116_R59_R58_CANARY_TIMELINE_EVI
 LIBNICE_EVIDENCE = ROOT / "research" / "media" / "v1" / "P116_R60_LIBNICE_0_1_22_EVIDENCE.txt"
 NATIVE_BINARY = REPO / "custom_components" / "comelit" / "native" / "comelit-v4"
 R63_BUILD_INFO = MEDIA_V1 / "P116_R63_BUILD_INFO.txt"
+R64_BUILD_INFO = MEDIA_V1 / "P116_R64_BUILD_INFO.txt"
 
 
 class R60A2WindowDecompositionTests(unittest.TestCase):
@@ -120,10 +121,17 @@ class R60A3A5PseudoTcpForensicTests(unittest.TestCase):
         # not a permanent pin that forbids later validated native promotions.
         # When a later build is shipped, its own repository build metadata
         # becomes the current binary identity gate.
-        if R63_BUILD_INFO.is_file():
+        current_build_info = (
+            R64_BUILD_INFO
+            if R64_BUILD_INFO.is_file()
+            else R63_BUILD_INFO
+            if R63_BUILD_INFO.is_file()
+            else None
+        )
+        if current_build_info is not None:
             values = dict(
                 line.split("=", 1)
-                for line in R63_BUILD_INFO.read_text(encoding="utf-8").splitlines()
+                for line in current_build_info.read_text(encoding="utf-8").splitlines()
                 if "=" in line
             )
             expected_current_sha = values["native_binary_sha256"]
