@@ -1,0 +1,120 @@
+name: R64 native build
+
+on:
+  push:
+    branches:
+      - fix/p116-r64-postcall-observability
+    paths:
+      - .github/workflows/r64-native-build.yml
+      - safety-poc/research/media/v1/entrance_p116_r64_postcall_observability_transform.py
+      - safety-poc/research/media/v1/entrance_p116_r63_gate_peer_tap_actuation_transform.py
+      - safety-poc/research/media/v1/entrance_p116_r58_attached_media_stop_cleanup_corrective.py
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate R64 source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p .r64-build
+          PYTHONDONTWRITEBYTECODE=1           PYTHONPATH=safety-poc/research/media/v1           python3 safety-poc/research/media/v1/entrance_p116_r64_postcall_observability_transform.py             --source safety-poc/research/door/v1_5_7/comelit-v4-persistent-ctpp-door.c             --output .r64-build/comelit-r64.c
+          sha256sum .r64-build/comelit-r64.c
+
+      - name: Build reproducible Alpine musl binaries
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          IMAGE='alpine:3.24.1'
+          for variant in a b; do
+            docker run --rm               -v "$GITHUB_WORKSPACE:/repo"               -w /repo               "$IMAGE"               /bin/sh -eu -c "
+                apk add --no-cache build-base pkgconf glib-dev libnice-dev binutils file >/dev/null
+                cc -O2 -g -Wall -Wextra -Wl,--as-needed                   -o /repo/.r64-build/comelit-v4-$variant                   /repo/.r64-build/comelit-r64.c                   $(pkg-config --cflags --libs nice glib-2.0 gio-2.0 gobject-2.0)
+                chmod 755 /repo/.r64-build/comelit-v4-$variant
+              "
+          done
+          sha256sum .r64-build/comelit-v4-a .r64-build/comelit-v4-b
+          cmp .r64-build/comelit-v4-a .r64-build/comelit-v4-b
+
+      - name: Verify native ABI and observability markers
+        id: verify
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          BIN=.r64-build/comelit-v4-a
+          SRC=.r64-build/comelit-r64.c
+          EXPECTED_INTERPRETER='/lib/ld-musl-x86_64.so.1'
+          EXPECTED_NEEDED='libc.musl-x86_64.so.1,libglib-2.0.so.0,libgobject-2.0.so.0,libnice.so.10'
+
+          INTERPRETER="$(readelf -l "$BIN" | sed -n 's@.*Requesting program interpreter: \(.*\)]@\1@p')"
+          NEEDED="$(readelf -d "$BIN" | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' | sort | paste -sd, -)"
+          test "$INTERPRETER" = "$EXPECTED_INTERPRETER"
+          test "$NEEDED" = "$EXPECTED_NEEDED"
+
+          for marker in             'R64_POST_CALL_SNAPSHOT=true'             'R64_POST_CALL_TX_STATE=%s'             'R64_POST_CALL_TX_SUBJECT=%s'             'R64_POST_CALL_PSEUDOTCP_OPEN=%s'             'R64_TERMINAL_SNAPSHOT=true'             'R64_TERMINAL_TX_STATE=%s'             'R64_TERMINAL_TX_SUBJECT=%s'             'PSEUDOTCP_CLOSED_BEFORE_OPEN=true'             'PSEUDOTCP_CLOSED_AFTER_OPEN=true'             'V4_DOOR_TARGET_VALID=false'             '00000610'             '00000643'
+          do
+            strings -a "$BIN" | grep -Fq "$marker"
+          done
+
+          SOURCE_SHA="$(sha256sum "$SRC" | awk '{print $1}')"
+          BINARY_SHA="$(sha256sum "$BIN" | awk '{print $1}')"
+          BINARY_SIZE="$(stat -c '%s' "$BIN")"
+          {
+            echo "source_sha=$SOURCE_SHA"
+            echo "binary_sha=$BINARY_SHA"
+            echo "binary_size=$BINARY_SIZE"
+            echo "interpreter=$INTERPRETER"
+            echo "needed=$NEEDED"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Promote binary and build metadata to branch
+        env:
+          SOURCE_SHA: ${{ steps.verify.outputs.source_sha }}
+          BINARY_SHA: ${{ steps.verify.outputs.binary_sha }}
+          BINARY_SIZE: ${{ steps.verify.outputs.binary_size }}
+          INTERPRETER: ${{ steps.verify.outputs.interpreter }}
+          NEEDED: ${{ steps.verify.outputs.needed }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          install -m 755 .r64-build/comelit-v4-a custom_components/comelit/native/comelit-v4
+          cat > safety-poc/research/media/v1/P116_R64_BUILD_INFO.txt <<EOF
+          phase=P116_R64_POSTCALL_OBSERVABILITY
+          source_sha256=$SOURCE_SHA
+          native_binary_sha256=$BINARY_SHA
+          native_binary_size=$BINARY_SIZE
+          native_binary_mode=755
+          interpreter=$INTERPRETER
+          needed=$NEEDED
+          reproducible_binary_cmp_gate=PASS
+          musl_interpreter_gate=PASS
+          no_glibc_dependency=PASS
+          no_new_runtime_dependency=PASS
+          protocol_behavior_changed=false
+          reconnect_policy_changed=false
+          automatic_retry_added=false
+          door_semantics_changed=false
+          gate_semantics_changed=false
+          candidate_executed=false
+          production_deploy_performed=false
+          EOF
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add custom_components/comelit/native/comelit-v4             safety-poc/research/media/v1/P116_R64_BUILD_INFO.txt
+          if git diff --cached --quiet; then
+            echo 'No native promotion delta'
+            exit 0
+          fi
+          git commit -m 'build(p116-r64): promote observability native binary'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
