@@ -444,11 +444,18 @@ def flip_markers() -> list[str]:
     corrupt_native = _values(derive_markers(corrupt_native=True))
     corrupt_pcap = _values(derive_markers(corrupt_pcap=True))
     const_text = CONST.read_text(encoding="utf-8")
-    mutated_const_text = const_text.replace(
-        '"actuation_profile_validated": False,',
-        '"actuation_profile_validated": True,',
-        1,
-    )
+    if '"actuation_profile_validated": True,' in const_text:
+        mutated_const_text = const_text.replace(
+            '"actuation_profile_validated": True,',
+            '"actuation_profile_validated": False,',
+            1,
+        )
+    else:
+        mutated_const_text = const_text.replace(
+            '"actuation_profile_validated": False,',
+            '"actuation_profile_validated": True,',
+            1,
+        )
     real_gate = derive_gate_capability_from_const_text(const_text)
     mutated_gate = derive_gate_capability_from_const_text(mutated_const_text)
     door_semantics_text = DOOR_SEMANTICS.read_text(encoding="utf-8")
@@ -469,14 +476,11 @@ def flip_markers() -> list[str]:
         "DOOR_BODY_1_SHA256_FLIPS": real["DOOR_BODY_1_SHA256"] != corrupt_native["DOOR_BODY_1_SHA256"],
         "V4_DOOR_TARGET_MARKER_FLIPS": real["V4_DOOR_TARGET_MARKER"] != corrupt_native["V4_DOOR_TARGET_MARKER"],
         "GATE_ACTUATION_PROFILE_VALIDATED_FLIPS": (
-            real_gate.actuation_profile_validated != mutated_gate.actuation_profile_validated
-            and real_gate.actuation_profile_validated is False
-            and mutated_gate.actuation_profile_validated is True
+            real_gate.actuation_profile_validated
+            != mutated_gate.actuation_profile_validated
         ),
         "GATE_STANDARD_PRESS_ALLOWED_FLIPS": (
             real_gate.press_allowed != mutated_gate.press_allowed
-            and real_gate.press_allowed is False
-            and mutated_gate.press_allowed is True
         ),
         "DOOR_PROFILE_WRITE_COUNT_LEGACY_ORACLE_FLIPS": real_legacy != mutated_legacy,
     }
