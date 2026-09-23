@@ -21,9 +21,6 @@ EXPECTED_MEDIA_TRANSPORT_SHA256 = (
 EXPECTED_NATIVE_SHA256 = (
     "a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8"
 )
-EXPECTED_BUTTON_SHA256 = (
-    "ca67905c60e7877a7f2b63d27f162c4651a3393f989cba65fd4d4660955236ad"
-)
 EXPECTED_RUNTIME_SHA256 = (
     "262218f04f3b9f75e43c538d153e2bdd8a8fb998dd392e7bc4ceedede024789c"
 )
@@ -227,8 +224,26 @@ class P116R20HlsHttpBoundaryDiagnosticsTests(unittest.TestCase):
     def test_native_helper_is_unchanged(self) -> None:
         self.assertEqual(_sha256(NATIVE_BINARY), EXPECTED_NATIVE_SHA256)
 
-    def test_door_and_gate_surfaces_are_untouched(self) -> None:
-        self.assertEqual(_sha256(BUTTON), EXPECTED_BUTTON_SHA256)
+    def test_door_and_gate_safety_surfaces_remain_bounded(self) -> None:
+        # R20 must not freeze the whole button.py forever: later Door UX
+        # correctives are allowed as long as the actuation boundaries remain
+        # unchanged.  Keep the historical media-safety intent semantically.
+        button_source = BUTTON.read_text(encoding="utf-8")
+        button_tree = ast.parse(button_source)
+        self.assertIn(
+            "await self._runtime.async_open_door(DOOR_ENTRANCE)",
+            button_source,
+        )
+        self.assertIn('"automatic_retry_allowed": False', button_source)
+        self.assertIn('"physical_effect_asserted": False', button_source)
+        self.assertNotIn(
+            "await self._runtime.async_open_door(DOOR_GATE)",
+            button_source,
+        )
+        self.assertTrue(any(
+            isinstance(node, ast.Raise)
+            for node in ast.walk(button_tree)
+        ))
 
         # Later media phases are allowed to extend runtime.py. Pinning the
         # whole runtime file here made this historical R20 test reject any
