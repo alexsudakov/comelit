@@ -79,6 +79,7 @@ _NATIVE_MARKER_PREFIXES = (
     "R42_",
     "R54_",
     "R58_",
+    "R64_",
     "P116_",
 )
 _NATIVE_MARKER_TAIL_LIMIT = 20
@@ -206,6 +207,10 @@ _P116_MARKER_VOCABULARIES: dict[str, frozenset[str]] = {
     "R37_BOUNDED_STOP_RESULT": _R37_BOUNDED_STOP_RESULTS,
     "R54_TX_STATE": _R54_TX_STATES,
     "R54_TX_SUBJECT": _R54_TX_SUBJECTS,
+    "R64_POST_CALL_TX_STATE": _R54_TX_STATES,
+    "R64_TERMINAL_TX_STATE": _R54_TX_STATES,
+    "R64_POST_CALL_TX_SUBJECT": _R54_TX_SUBJECTS,
+    "R64_TERMINAL_TX_SUBJECT": _R54_TX_SUBJECTS,
     "R58_STOP_PHASE": _R58_STOP_PHASES,
     "R58_STOP_FAILURE_STAGE": _R58_STOP_FAILURE_STAGES,
     "R58_CLOSED_BOUNDARY": _R58_CLOSED_BOUNDARIES,
@@ -267,6 +272,24 @@ _CANARY_OBSERVABILITY_MARKERS = {
     "R42_MEDIA_CHANNEL_CLOSED": "CHANNEL_CLOSED",
     "R58_STOP_PHASE": "STOP_PHASE",
     "POST_CALL_TRANSPORT_STATE": "POST_CALL_TRANSPORT_STATE",
+    "PSEUDOTCP_CLOSED_BEFORE_OPEN": "PSEUDOTCP_CLOSED_BEFORE_OPEN",
+    "PSEUDOTCP_CLOSED_AFTER_OPEN": "PSEUDOTCP_CLOSED_AFTER_OPEN",
+    "R64_POST_CALL_REMOTE_RELEASE_OBSERVED": "POST_CALL_REMOTE_RELEASE_OBSERVED",
+    "R64_POST_CALL_CAPABILITY_CLEARED_OBSERVED": "POST_CALL_CAPABILITY_CLEARED_OBSERVED",
+    "R64_POST_CALL_TX_STATE": "POST_CALL_TX_STATE",
+    "R64_POST_CALL_TX_SUBJECT": "POST_CALL_TX_SUBJECT",
+    "R64_POST_CALL_TX_PENDING": "POST_CALL_TX_PENDING",
+    "R64_POST_CALL_CALL_READY": "POST_CALL_CALL_READY",
+    "R64_POST_CALL_PSEUDOTCP_OPEN": "POST_CALL_PSEUDOTCP_OPEN",
+    "R64_POST_CALL_SNAPSHOT": "POST_CALL_SNAPSHOT",
+    "R64_TERMINAL_REMOTE_RELEASE_OBSERVED": "TERMINAL_REMOTE_RELEASE_OBSERVED",
+    "R64_TERMINAL_CAPABILITY_CLEARED_OBSERVED": "TERMINAL_CAPABILITY_CLEARED_OBSERVED",
+    "R64_TERMINAL_TX_STATE": "TERMINAL_TX_STATE",
+    "R64_TERMINAL_TX_SUBJECT": "TERMINAL_TX_SUBJECT",
+    "R64_TERMINAL_TX_PENDING": "TERMINAL_TX_PENDING",
+    "R64_TERMINAL_CALL_READY": "TERMINAL_CALL_READY",
+    "R64_TERMINAL_PSEUDOTCP_OPEN": "TERMINAL_PSEUDOTCP_OPEN",
+    "R64_TERMINAL_SNAPSHOT": "TERMINAL_SNAPSHOT",
 }
 _H264_CANARY_MARKERS = frozenset(
     {
@@ -419,6 +442,10 @@ class ComelitRingRuntime:
         self._canary_log_seen: set[str] = set()
         self._post_call_transport_flags: dict[str, bool] = {}
         self._post_call_transport_emitted = False
+        self._r64_post_call_snapshot: dict[str, object] = {}
+        self._r64_terminal_snapshot: dict[str, object] = {}
+        self._r64_pseudotcp_closed_before_open = False
+        self._r64_pseudotcp_closed_after_open = False
         self._last_native_exit_code: int | None = None
         self._last_native_failure_markers: list[str] = []
         self._ring_media: RingMediaCoordinator | None = None
@@ -453,6 +480,14 @@ class ComelitRingRuntime:
 
     def status(self) -> dict[str, object]:
         event = self._last_ring_event or {}
+        r64_post_call_snapshot = getattr(self, "_r64_post_call_snapshot", {})
+        r64_terminal_snapshot = getattr(self, "_r64_terminal_snapshot", {})
+        r64_closed_before_open = getattr(
+            self, "_r64_pseudotcp_closed_before_open", False
+        )
+        r64_closed_after_open = getattr(
+            self, "_r64_pseudotcp_closed_after_open", False
+        )
         return {
             "running": self.running,
             "listener_ready": self.listener_ready,
@@ -470,6 +505,13 @@ class ComelitRingRuntime:
             "last_native_failure_markers": list(
                 self._last_native_failure_markers
             ),
+            "post_call_observability": {
+                "transport_state": self._derive_post_call_transport_state(),
+                "snapshot": dict(r64_post_call_snapshot),
+                "terminal_snapshot": dict(r64_terminal_snapshot),
+                "pseudotcp_closed_before_open": r64_closed_before_open,
+                "pseudotcp_closed_after_open": r64_closed_after_open,
+            },
             "door_last_operation_id": (self._last_door_result or {}).get("operation_id"),
             "door_last_state": (self._last_door_result or {}).get("state"),
             "ring_media": (
@@ -636,6 +678,10 @@ class ComelitRingRuntime:
                 self._canary_log_seen = set()
                 self._post_call_transport_flags = {}
                 self._post_call_transport_emitted = False
+                self._r64_post_call_snapshot = {}
+                self._r64_terminal_snapshot = {}
+                self._r64_pseudotcp_closed_before_open = False
+                self._r64_pseudotcp_closed_after_open = False
 
         criterion = _CANARY_OBSERVABILITY_MARKERS.get(key)
         if key in _H264_CANARY_MARKERS:
@@ -692,6 +738,39 @@ class ComelitRingRuntime:
             safe_value,
         )
 
+    def _record_r64_snapshot_marker(self, line: str) -> None:
+        """Retain only bounded R64 snapshot scalars for read-only status."""
+        if "=" not in line:
+            return
+        key, value = line.split("=", 1)
+        safe_value = self._safe_native_marker_value(key, value)
+        if safe_value is None:
+            return
+
+        if key == "PSEUDOTCP_CLOSED_BEFORE_OPEN" and safe_value == "true":
+            self._r64_pseudotcp_closed_before_open = True
+            return
+        if key == "PSEUDOTCP_CLOSED_AFTER_OPEN" and safe_value == "true":
+            self._r64_pseudotcp_closed_after_open = True
+            return
+
+        if key.startswith("R64_POST_CALL_"):
+            target = self._r64_post_call_snapshot
+            field = key.removeprefix("R64_POST_CALL_").lower()
+        elif key.startswith("R64_TERMINAL_"):
+            target = self._r64_terminal_snapshot
+            field = key.removeprefix("R64_TERMINAL_").lower()
+        else:
+            return
+
+        if safe_value == "true":
+            normalized: object = True
+        elif safe_value == "false":
+            normalized = False
+        else:
+            normalized = safe_value
+        target[field] = normalized
+
     def _record_post_call_transport_marker(self, line: str) -> None:
         if "=" not in line:
             return
@@ -712,8 +791,19 @@ class ComelitRingRuntime:
             flags["remote_release"] = True
         elif key == "R37_CAPABILITY_CLEARED_OBSERVED" and value == "true":
             flags["capability_cleared"] = True
-        elif key == "P116_NATIVE_FAILURE_ID" and value == "PSEUDOTCP_CLOSED":
+        elif key in {
+            "P116_NATIVE_FAILURE_ID",
+        } and value == "PSEUDOTCP_CLOSED":
             flags["transport_closed"] = True
+        elif key in {
+            "PSEUDOTCP_CLOSED_BEFORE_OPEN",
+            "PSEUDOTCP_CLOSED_AFTER_OPEN",
+        } and value == "true":
+            flags["transport_closed"] = True
+        elif key == "R64_POST_CALL_REMOTE_RELEASE_OBSERVED":
+            flags["remote_release"] = value == "true"
+        elif key == "R64_POST_CALL_CAPABILITY_CLEARED_OBSERVED":
+            flags["capability_cleared"] = value == "true"
 
     def _derive_post_call_transport_state(self) -> str:
         """Derive only from HA-observed native markers.
@@ -769,6 +859,10 @@ class ComelitRingRuntime:
         self._canary_log_seen = set()
         self._post_call_transport_flags = {}
         self._post_call_transport_emitted = False
+        self._r64_post_call_snapshot = {}
+        self._r64_terminal_snapshot = {}
+        self._r64_pseudotcp_closed_before_open = False
+        self._r64_pseudotcp_closed_after_open = False
         self._last_ring_event = None
         self._last_error = None
         self._media_diagnostics.reset()
@@ -1196,8 +1290,12 @@ class ComelitRingRuntime:
             self._remember_native_marker(line)
             self._media_diagnostics.observe_line(line)
             self._observe_canary_log_marker(line)
+            self._record_r64_snapshot_marker(line)
             self._record_post_call_transport_marker(line)
-            if line.startswith("P116_NATIVE_FAILURE_COUNT="):
+            if (
+                line == "R64_POST_CALL_SNAPSHOT=true"
+                or line.startswith("P116_NATIVE_FAILURE_COUNT=")
+            ):
                 self._emit_post_call_transport_state_once()
 
             if line == "ICE_GATHER=PASS":
