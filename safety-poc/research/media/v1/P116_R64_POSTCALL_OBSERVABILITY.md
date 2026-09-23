@@ -97,6 +97,28 @@ R64 does not add or change:
 
 The existing R63 Gate profile and R58 media cleanup remain in the source chain.
 
+
+## Offline build result
+
+The promoted R64 native helper was generated and built twice from the same
+canonical source in Alpine 3.24.1. Both musl binaries were byte-identical.
+
+```
+R64_GENERATED_SOURCE_SHA256=91cec435b9b2af23e21556d52e5c39b969b6668794d24b35e7374785cc1a0230
+R64_NATIVE_BINARY_SHA256=ec8b73865b8ca4b5b6eef5b49bbd1d2accff85c178a772ac5f2f5e47caf27e2c
+R64_NATIVE_BINARY_SIZE=310880
+MUSL_INTERPRETER_GATE=PASS
+NO_GLIBC_DEPENDENCY=PASS
+NO_NEW_RUNTIME_DEPENDENCY=PASS
+REPRODUCIBLE_BINARY_CMP_GATE=PASS
+PROTOCOL_BEHAVIOR_CHANGED=false
+RECONNECT_POLICY_CHANGED=false
+AUTOMATIC_RETRY_ADDED=false
+DOOR_SEMANTICS_CHANGED=false
+GATE_SEMANTICS_CHANGED=false
+PRODUCTION_DEPLOY_PERFORMED=false
+```
+
 ## Intended next live evidence
 
 After normal HACS/HAOS installation, no deliberate failure reproduction is
