@@ -73,6 +73,10 @@ class ComelitRuntimeSupervisor:
         return self._media_paused
 
     @property
+    def attached_media_busy(self) -> bool:
+        return self._runtime.attached_media_busy
+
+    @property
     def reconnect_count(self) -> int:
         return self._reconnect_count
 
@@ -87,6 +91,9 @@ class ComelitRuntimeSupervisor:
             "supervisor_running": self.running,
             "runtime_running": bool(runtime_status.get("running")),
             "listener_ready": bool(runtime_status.get("listener_ready")),
+            "attached_media_busy": bool(
+                runtime_status.get("attached_media_busy")
+            ),
             "media_paused": self._media_paused,
             "reconnect_count": self._reconnect_count,
             "last_ready": self._last_ready.isoformat() if self._last_ready else None,
@@ -214,6 +221,18 @@ class ComelitRuntimeSupervisor:
 
                 self._reconnect_count += 1
                 runtime_status = self._runtime.status()
+                last_error = runtime_status.get("last_error")
+                if (
+                    isinstance(last_error, str)
+                    and last_error.startswith(
+                        ("native_exit:", "native_exited_before_offer:")
+                    )
+                ):
+                    reconnect_reason = "NATIVE_FAILURE_EXIT"
+                elif last_error:
+                    reconnect_reason = "UNKNOWN"
+                else:
+                    reconnect_reason = "LISTENER_CYCLE_ENDED"
                 if runtime_status.get("last_error"):
                     self._set_state(LISTENER_STATE_ERROR)
                 else:
@@ -221,6 +240,8 @@ class ComelitRuntimeSupervisor:
                 # reconnect_count may change even when the visible state does not.
                 self._notify_status()
 
+                _LOGGER.warning("RECONNECT_ATTEMPT=%s", self._reconnect_count)
+                _LOGGER.warning("RECONNECT_REASON=%s", reconnect_reason)
                 _LOGGER.warning(
                     "Comelit listener cycle ended; reconnecting in %ss (count=%s)",
                     RECONNECT_DELAY_SECONDS,

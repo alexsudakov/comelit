@@ -248,7 +248,6 @@ class Mvp1RingTelegramOfflineBuildTests(unittest.TestCase):
     def test_media_and_r30h_code_unchanged_by_hash(self) -> None:
         expected = {
             "custom_components/comelit/camera.py": "3bac789e303abba857b45cb794a55aa6a088c6a998507bf664459de4a60f96bd",
-            "custom_components/comelit/media_session.py": "65fe703f5a33207502fc6a2984d5edd0712813b174d41b48c6e3e5b10423d7bc",
             "custom_components/comelit/media_transport.py": "52e4873ede9c8df16f81ac88dba4c7ffaf27842738e22ab68896c216411aa1d0",
             "safety-poc/research/media/v1/entrance_p116_r27_repeat_001a_transform.py": "d35275b286c871e38a7dee131ea84e60ff5abad137304dfb95b687652e42d170",
             "safety-poc/research/media/v1/ct120_run_p116_r27_repeat_001a_live.sh": "eacf557b65e3e7167b4bbb09e2972c3475aaae1e1a78b72de0e3eef7dbe5d87c",
@@ -259,6 +258,16 @@ class Mvp1RingTelegramOfflineBuildTests(unittest.TestCase):
         }
         for relative, digest in expected.items():
             self.assertEqual(sha256(ROOT / relative), digest, relative)
+
+        # Later attached-inbound-media work is allowed to extend the generic
+        # media-session owner. Preserve this historical phase's real invariant:
+        # the R30H/media wire artifacts and the P115 transport remain frozen.
+        media_session = (
+            ROOT / "custom_components/comelit/media_session.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("MEDIA_SESSION_HARD_LIMIT_SECONDS = 600", media_session)
+        self.assertIn("await self._listener.async_pause_for_media()", media_session)
+        self.assertIn("await self._transport.async_start(panel)", media_session)
         self._gate("MEDIA_PROTOCOL_CODE_UNCHANGED=PASS")
         self._gate("R30H_E_CODE_UNCHANGED=PASS")
 

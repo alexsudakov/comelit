@@ -1,0 +1,80 @@
+# P116/R60 derived libnice 0.1.22 PseudoTCP evidence fixture
+#
+# PROVENANCE:
+#   upstream_url=https://raw.githubusercontent.com/libnice/libnice/0.1.22/agent/pseudotcp.c
+#   upstream_ref=0.1.22
+#   upstream_file_sha256=d0eb851f16bf546096f8edcc9fce3b3d32cdb4f035d3d35662d615dd28920dee
+#   upstream_file_bytes=80443
+#   retrieval_utc=2026-09-22T19:5xZ
+#   retrieval_actor=orchestrator
+#   full_upstream_file_committed=false
+#   fixture_type=bounded_derived_line_evidence
+#
+# This fixture deliberately commits only the exact line-numbered fragments
+# needed by the R60 offline model. The fetched upstream file remains outside
+# the repository in the orchestrator evidence bundle.
+
+SECTION DEF_RTO_AND_PACKET_CONSTANTS
+L162: #define HEADER_SIZE 24
+L169: #define DEF_RTO     1000 /* 1 seconds (RFC 6298 sect 2.1) */
+
+SECTION NOTIFY_PACKET_GUARDS_AND_BODY
+L1042: gboolean
+L1043: pseudo_tcp_socket_notify_packet(PseudoTcpSocket *self,
+L1044:     const gchar * buffer, guint32 len)
+L1048:   if (len > MAX_PACKET) {
+L1050:     self->priv->error = EMSGSIZE;
+L1051:     return FALSE;
+L1052:   } else if (len < HEADER_SIZE) {
+L1054:     self->priv->error = EINVAL;
+L1055:     return FALSE;
+L1061:   retval = parse (self, (guint8 *) buffer, HEADER_SIZE,
+L1062:       (guint8 *) buffer + HEADER_SIZE, len - HEADER_SIZE);
+L1065:   return retval;
+
+SECTION PARSE_HEADER_LENGTH_GUARD
+L1471: static gboolean
+L1472: parse (PseudoTcpSocket *self, const guint8 *_header_buf, gsize header_buf_len,
+L1485:   if (header_buf_len != 24)
+L1486:     return FALSE;
+L1506:   return process(self, &seg);
+
+SECTION PROCESS_FALSE_BRANCHES
+L1598:   if (seg->conv != priv->conv) {
+L1602:     DEBUG (PSEUDO_TCP_DEBUG_NORMAL, "wrong conversation");
+L1603:     return FALSE;
+L1610:   if (priv->state == PSEUDO_TCP_CLOSED ||
+L1611:       (pseudo_tcp_state_has_received_fin_ack (priv->state) && seg->len > 0)) {
+L1619:       closedown (self, 0, CLOSEDOWN_LOCAL);
+L1622:     return FALSE;
+L1626:   if (seg->flags & FLAG_RST) {
+L1628:     closedown (self, ECONNRESET, CLOSEDOWN_REMOTE);
+L1629:     return FALSE;
+L1634:   if (seg->flags & FLAG_CTL) {
+L1635:     if (seg->len == 0) {
+L1636:       DEBUG (PSEUDO_TCP_DEBUG_NORMAL, "Missing control code");
+L1637:       return FALSE;
+L1650:       DEBUG (PSEUDO_TCP_DEBUG_NORMAL, "Unknown control code: %u", seg->data[0]);
+L1651:       return FALSE;
+L1688:         DEBUG (PSEUDO_TCP_DEBUG_NORMAL, "Invalid RTT: %ld", rtt);
+L1689:         return FALSE;
+L1749:               "Error transmitting recovery retransmit segment. Closing down.");
+L1750:           closedown (self, transmit_status, CLOSEDOWN_LOCAL);
+L1751:           return FALSE;
+L1793:                 "Error transmitting recovery retransmit segment. Closing down.");
+L1795:             closedown (self, transmit_status, CLOSEDOWN_LOCAL);
+L1796:             return FALSE;
+L1838:     if (seg->flags & FLAG_FIN && seg->len != 0) {
+L1839:       DEBUG (PSEUDO_TCP_DEBUG_NORMAL, "FIN segment contained data; ignored");
+L1840:       return FALSE;
+L1902:       DEBUG (PSEUDO_TCP_DEBUG_NORMAL, "Invalid state %u when FIN received",
+L1904:       return FALSE;
+
+SECTION PRE_ESTABLISHED_RETRANSMIT_LIMIT
+L1005:       rto_limit = (priv->state < PSEUDO_TCP_ESTABLISHED) ? DEF_RTO : MAX_RTO;
+L1006:       priv->rx_rto = min(rto_limit, priv->rx_rto * 2);
+L2063: static gboolean
+L2064: transmit(PseudoTcpSocket *self, SSegment *segment, guint32 now)
+L2069:   if (segment->xmit >= ((priv->state == PSEUDO_TCP_ESTABLISHED) ? 15 : 30)) {
+L2070:     DEBUG (PSEUDO_TCP_DEBUG_NORMAL, "too many retransmits");
+L2071:     return ETIMEDOUT;

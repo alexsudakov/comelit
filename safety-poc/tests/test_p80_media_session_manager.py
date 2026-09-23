@@ -17,6 +17,7 @@ spec.loader.exec_module(media)
 class FakeListener:
     def __init__(self, events: list[str]) -> None:
         self._paused = False
+        self.attached_media_busy = False
         self.events = events
         self.fail_resume = False
 
@@ -82,6 +83,21 @@ class P80MediaSessionManagerTests(unittest.IsolatedAsyncioTestCase):
             task_factory=task_factory,
         )
         return manager, listener, transport, events
+
+    async def test_attached_inbound_media_blocks_on_demand_pause(self) -> None:
+        manager, listener, transport, events = self.make_manager()
+        listener.attached_media_busy = True
+
+        with self.assertRaisesRegex(
+            media.ComelitMediaSessionError,
+            "attached_inbound_media_busy",
+        ):
+            await manager.async_acquire(panel="entrance", reason="manual")
+
+        self.assertFalse(listener.media_paused)
+        self.assertFalse(transport.active)
+        self.assertEqual(manager.phase, media.MEDIA_PHASE_INACTIVE)
+        self.assertEqual(events, [])
 
     async def test_listener_is_paused_before_media_and_restored_after_stop(self) -> None:
         manager, listener, transport, events = self.make_manager()

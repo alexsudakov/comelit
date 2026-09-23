@@ -19,6 +19,7 @@ from .cloud import (
     async_negotiate_p2p,
 )
 from .const import EVENT_DOOR_OPERATION, EVENT_RING
+from .media_diagnostics import MediaCallDiagnostics
 from .oauth import ComelitOAuthError, ComelitOAuthManager
 from .ring_event import RingObservationError, parse_v4_safe_ring
 from .sdp import ComelitSdpError, transform_offer
@@ -56,6 +57,9 @@ _NATIVE_MARKER_SAFE_VALUE_RE = re.compile(
     r"^(?:PASS|FAIL|true|false|READY|OPEN|CLOSED|UNKNOWN_OUTCOME|"
     r"REJECTED|REJECTED_NOT_READY|FAILED_SAFE|[0-9]{1,10})$"
 )
+_DIAGNOSTIC_MARKER_SAFE_VALUE_RE = re.compile(
+    r"^(?:PASS|FAIL|true|false|[0-9]{1,20})$"
+)
 _NATIVE_MARKER_PREFIXES = (
     "ICE_",
     "REMOTE_SDP_",
@@ -63,8 +67,207 @@ _NATIVE_MARKER_PREFIXES = (
     "SELECTED_PAIR_",
     "V4_",
     "P12_",
+    "R37_",
+    "R42_",
+    "R54_",
+    "R58_",
+    "P116_",
 )
 _NATIVE_MARKER_TAIL_LIMIT = 20
+
+# R57: bounded vocabularies for the native P116NativeFailureId /
+# P116NativeFailurePhase enums (see
+# safety-poc/research/media/v1/entrance_p116_r57_native_failure_attribution_transform.py),
+# reused verbatim so these specific keys can survive sanitization without
+# opening a general free-text hole for the P116_ prefix.
+_P116_FAILURE_IDS = frozenset(
+    {
+        "NONE",
+        "STARTUP",
+        "ABSOLUTE_SESSION_TIMEOUT",
+        "P12_STEP_TIMEOUT",
+        "UAUT_OPEN_TIMEOUT",
+        "RECV_PARSE",
+        "PSEUDOTCP_RECV_TRANSPORT",
+        "PSEUDOTCP_WRITABLE_TRANSPORT",
+        "PSEUDOTCP_CLOSED",
+        "PSEUDOTCP_WRITE_PACKET",
+        "PSEUDOTCP_CLOCK_CLOSED",
+        "PSEUDOTCP_NOTIFY_PACKET",
+        "ICE_CONNECTIVITY",
+        "ICE_GATHER",
+        "SDP_FILE",
+        "DOOR_WRITE",
+        "DOOR_TIMER",
+        "P80_RTP_FORWARD",
+        "OTHER",
+    }
+)
+_P116_FAILURE_PHASES = frozenset(
+    {
+        "STARTUP",
+        "LISTENER_READY",
+        "CALL_ADOPTION_LOCAL",
+        "WAIT_PEER_CAPABILITIES",
+        "PEER_ACK",
+        "MEDIA_OPEN",
+        "MEDIA_ACTIVE",
+        "MEDIA_STOP",
+        "GENERATION_END",
+    }
+)
+# The only `kind` literal p116_emit_timeout_observability() is ever called
+# with (the R56 TX-wait timeout callback). Bounded, not a general enum.
+_P116_TIMEOUT_KINDS = frozenset({"R54_TX_WAIT_TIMEOUT"})
+# P116_TIMEOUT_PHASE prints p116_failure_phase_name(), the same enum as
+# P116_NATIVE_FAILURE_PHASE.
+_R58_STOP_PHASES = frozenset(
+    {
+        "NONE",
+        "REQUESTED",
+        "WAIT_TX_SLOT",
+        "ENQUEUED",
+        "FLUSHED",
+        "RTP_DISARMED",
+        "DISPOSED",
+        "CLOSED",
+        "REMOTE_RELEASE",
+        "FAILED",
+    }
+)
+_R58_STOP_FAILURE_STAGES = frozenset(
+    {
+        "NONE",
+        "SIGNAL",
+        "STALE_CALL",
+        "QUEUE",
+        "WRITE",
+        "FLUSH_TIMEOUT",
+        "DISPOSE",
+        "REMOTE_RACE",
+        "OTHER",
+    }
+)
+_R58_CLOSED_BOUNDARIES = frozenset({"LOCAL_DISPOSAL_AFTER_STOP_FLUSH"})
+_R37_PROTOCOL_STOP_RESULTS = frozenset({"STOP_SENT", "NO_OP"})
+_R37_BOUNDED_STOP_RESULTS = frozenset({"STOP_SENT", "REJECTED"})
+_R54_TX_STATES = frozenset(
+    {
+        "IDLE",
+        "NEED_INVITE_ACK",
+        "WAIT_INVITE_ACK_FLUSH",
+        "NEED_LOCAL_CAPABILITIES",
+        "WAIT_LOCAL_CAPABILITIES_FLUSH",
+        "NEED_LOCAL_ALERTING",
+        "WAIT_LOCAL_ALERTING_FLUSH",
+        "WAIT_PEER_CAPABILITIES",
+        "NEED_PEER_DATA_ACK",
+        "WAIT_PEER_DATA_ACK_FLUSH",
+        "MEDIA_TRIGGER_READY",
+        "TERMINAL_FAILURE",
+    }
+)
+_R54_TX_SUBJECTS = frozenset(
+    {
+        "NONE",
+        "INVITE_ACK",
+        "LOCAL_CAPABILITIES",
+        "LOCAL_ALERTING",
+        "PEER_DATA_ACK",
+        "MEDIA_OPEN",
+        "MEDIA_STOP",
+        "OTHER_EXISTING",
+    }
+)
+_POST_CALL_TRANSPORT_STATES = frozenset(
+    {
+        "NONE",
+        "MEDIA_CLOSED_CALL_OPEN",
+        "MEDIA_CLOSED_REMOTE_RELEASE",
+        "MEDIA_CLOSED_TEARDOWN_COMPLETE",
+        "TRANSPORT_CLOSED",
+        "UNKNOWN",
+    }
+)
+_P116_MARKER_VOCABULARIES: dict[str, frozenset[str]] = {
+    "P116_NATIVE_FAILURE_ID": _P116_FAILURE_IDS,
+    "P116_NATIVE_FAILURE_PHASE": _P116_FAILURE_PHASES,
+    "P116_TIMEOUT_KIND": _P116_TIMEOUT_KINDS,
+    "P116_TIMEOUT_PHASE": _P116_FAILURE_PHASES,
+    "R37_PROTOCOL_STOP_RESULT": _R37_PROTOCOL_STOP_RESULTS,
+    "R37_BOUNDED_STOP_RESULT": _R37_BOUNDED_STOP_RESULTS,
+    "R54_TX_STATE": _R54_TX_STATES,
+    "R54_TX_SUBJECT": _R54_TX_SUBJECTS,
+    "R58_STOP_PHASE": _R58_STOP_PHASES,
+    "R58_STOP_FAILURE_STAGE": _R58_STOP_FAILURE_STAGES,
+    "R58_CLOSED_BOUNDARY": _R58_CLOSED_BOUNDARIES,
+    "POST_CALL_TRANSPORT_STATE": _POST_CALL_TRANSPORT_STATES,
+}
+_CALL_ADOPTION_FAILURE_STAGES = frozenset(
+    {
+        "NONE",
+        "ACK_BUILD_FAILED",
+        "ACK_WRITE_FAILED",
+        "CAPABILITIES_BUILD_FAILED",
+        "CAPABILITIES_WRITE_FAILED",
+        "ALERTING_BUILD_FAILED",
+        "ALERTING_WRITE_FAILED",
+        "WAITING_PEER_CAPABILITIES",
+        "PEER_CAPABILITIES_REJECTED",
+        "MEDIA_TRIGGER_REJECTED",
+        "TX_INVITE_ACK_FAILED",
+        "TX_LOCAL_CAPABILITIES_FAILED",
+        "TX_LOCAL_ALERTING_FAILED",
+        "TX_PEER_ACK_FAILED",
+        "TX_MEDIA_TRIGGER_FAILED",
+        "TX_WAIT_TIMEOUT",
+        "TX_GENERATION_REPLACED",
+        "TX_LISTENER_TEARDOWN",
+    }
+)
+_CANARY_OBSERVABILITY_MARKERS = {
+    "R42_CALL_GENERATION": "CALL_INIT_SEEN",
+    "R54_CALL_ADOPTION_STARTED": "CALL_ADOPTION_STARTED",
+    "R54_INVITE_ACK_SENT": "INVITE_ACK_SENT",
+    "R54_LOCAL_CAPABILITIES_SENT": "LOCAL_CAPABILITIES_SENT",
+    "R54_LOCAL_CAPABILITY_WORD": "LOCAL_CAPABILITY_WORD",
+    "R54_LOCAL_ALERTING_SENT": "LOCAL_ALERTING_SENT",
+    "R54_WAITING_PEER_CAPABILITIES": "WAITING_PEER_CAPABILITIES",
+    "R54_PEER_CAPABILITIES_SEEN": "PEER_CAPABILITIES_SEEN",
+    "R54_PEER_CAPABILITY_WORD": "PEER_CAPABILITY_WORD",
+    "R54_PEER_VIDEO_REQUESTED": "PEER_VIDEO_REQUESTED",
+    "R54_PEER_DATA_ACK_ENQUEUED": "PEER_DATA_ACK_ENQUEUED",
+    "R54_PEER_DATA_ACK_FLUSHED": "PEER_DATA_ACK_FLUSHED",
+    "R54_PEER_DATA_ACK_SENT": "PEER_DATA_ACK_SENT",
+    "R54_CALL_ADOPTION_FAILURE_STAGE": "CALL_ADOPTION_FAILURE_STAGE",
+    "R42_MEDIAREQ26_OPEN_CHANNEL": "MEDIAREQ26_OPEN_SENT",
+    "P80_VIDEO_RTP_FORWARDING": "RTP_RECEIVED",
+    "R42_ATTACHED_MEDIA_STOP_SENT": "STOP_SENT",
+    "R42_LISTENER_RTP_FORWARDING_ARMED": "CLEANUP_COMPLETE",
+    "P116_NATIVE_EXIT_CODE": "NATIVE_EXIT_CODE",
+    "P116_NATIVE_FAILURE_ID": "NATIVE_FAILURE_ID",
+    "P116_NATIVE_FAILURE_PHASE": "NATIVE_FAILURE_PHASE",
+    "P116_NATIVE_FAILURE_COUNT": "NATIVE_FAILURE_COUNT",
+    "P116_TIMEOUT_KIND": "TIMEOUT_KIND",
+    "P116_TIMEOUT_PHASE": "TIMEOUT_PHASE",
+    "R37_REMOTE_RELEASE_OBSERVED": "REMOTE_RELEASE_OBSERVED",
+    "R37_CAPABILITY_CLEARED_OBSERVED": "CAPABILITY_CLEARED_OBSERVED",
+    "R54_TX_STATE": "TX_STATE_AT_EXIT",
+    "R54_TX_SUBJECT": "TX_SUBJECT_AT_EXIT",
+    "R58_STOP_CLOSED": "STOP_CLOSED",
+    "R58_STOP_FAILED": "STOP_FAILED",
+    "R42_MEDIA_CHANNEL_CLOSED": "CHANNEL_CLOSED",
+    "R58_STOP_PHASE": "STOP_PHASE",
+    "POST_CALL_TRANSPORT_STATE": "POST_CALL_TRANSPORT_STATE",
+}
+_H264_CANARY_MARKERS = frozenset(
+    {
+        "P116_VIDEO_SPS_COUNT",
+        "P116_VIDEO_PPS_COUNT",
+        "P116_VIDEO_SINGLE_NAL_COUNT",
+        "P116_VIDEO_FUA_COUNT",
+    }
+)
 
 
 class ComelitRingRuntimeError(RuntimeError):
@@ -166,6 +369,9 @@ class ComelitRingRuntime:
         self._process: asyncio.subprocess.Process | None = None
         self._offer_ready = asyncio.Event()
         self._listener_ready = asyncio.Event()
+        self._attached_media_busy = asyncio.Event()
+        self._attached_media_open = asyncio.Event()
+        self._attached_media_closed = asyncio.Event()
         self._ring_lines: list[str] = []
         self._last_ring_event: dict[str, str] | None = None
         self._last_error: str | None = None
@@ -175,9 +381,15 @@ class ComelitRingRuntime:
         self._last_door_result: dict[str, object] | None = None
         self._door_diagnostic: dict[str, object] = {}
         self._native_marker_tail: list[str] = []
+        self._canary_log_generation: int | None = None
+        self._canary_log_seen: set[str] = set()
+        self._post_call_transport_flags: dict[str, bool] = {}
+        self._post_call_transport_emitted = False
         self._last_native_exit_code: int | None = None
         self._last_native_failure_markers: list[str] = []
         self._ring_media: RingMediaCoordinator | None = None
+        self._synthetic_ring_media: RingMediaCoordinator | None = None
+        self._media_diagnostics = MediaCallDiagnostics()
 
     @property
     def running(self) -> bool:
@@ -186,6 +398,16 @@ class ComelitRingRuntime:
     @property
     def listener_ready(self) -> bool:
         return self._listener_ready.is_set()
+
+    @property
+    def attached_media_busy(self) -> bool:
+        event = getattr(self, "_attached_media_busy", None)
+        return event is not None and event.is_set()
+
+    @property
+    def attached_media_open(self) -> bool:
+        event = getattr(self, "_attached_media_open", None)
+        return event is not None and event.is_set()
 
     @property
     def ring_observed(self) -> bool:
@@ -200,6 +422,8 @@ class ComelitRingRuntime:
         return {
             "running": self.running,
             "listener_ready": self.listener_ready,
+            "attached_media_busy": self.attached_media_busy,
+            "attached_media_open": self.attached_media_open,
             "ring_observed": self.ring_observed,
             "ring_door": event.get("door"),
             "ring_source": event.get("source"),
@@ -217,6 +441,7 @@ class ComelitRingRuntime:
             "ring_media": (
                 self._ring_media.status() if self._ring_media is not None else None
             ),
+            "media_diagnostics": self._media_diagnostics.snapshot(),
         }
 
     def set_ring_media_coordinator(
@@ -224,9 +449,40 @@ class ComelitRingRuntime:
         coordinator: RingMediaCoordinator | None,
     ) -> None:
         self._ring_media = coordinator
+        self._bind_attach_failure_recorder(coordinator)
+
+    def set_synthetic_ring_media_coordinator(
+        self,
+        coordinator: RingMediaCoordinator | None,
+    ) -> None:
+        self._synthetic_ring_media = coordinator
+        self._bind_attach_failure_recorder(coordinator)
+
+    def _bind_attach_failure_recorder(
+        self,
+        coordinator: RingMediaCoordinator | None,
+    ) -> None:
+        """Bind the ring-media coordinator's attach-failure recorder.
+
+        Only the bounded diagnostics setter is handed over; the coordinator
+        keeps owning its own failure handling, and a coordinator object
+        without the hook (older build, test double) is left untouched.
+        """
+        binder = getattr(coordinator, "set_attach_failure_recorder", None)
+        if binder is not None:
+            binder(self._media_diagnostics.set_attach_failure_reason)
+
+    def _ring_media_for_event(
+        self,
+        event: dict[str, object],
+    ) -> RingMediaCoordinator | None:
+        synthetic = getattr(self, "_synthetic_ring_media", None)
+        if event.get("synthetic") is True and synthetic is not None:
+            return synthetic
+        return self._ring_media
 
     async def _async_start_ring_media(self, event: dict[str, object]) -> None:
-        coordinator = self._ring_media
+        coordinator = self._ring_media_for_event(event)
         if coordinator is None:
             return
         try:
@@ -249,7 +505,7 @@ class ComelitRingRuntime:
         self._hass.bus.async_fire(EVENT_RING, dict(event))
 
         if require_media_start:
-            coordinator = self._ring_media
+            coordinator = self._ring_media_for_event(event)
             if coordinator is None:
                 raise ComelitRingRuntimeError("ring_media_unavailable")
             started = await coordinator.async_start_for_ring(dict(event))
@@ -268,10 +524,13 @@ class ComelitRingRuntime:
         """Emit one synthetic entrance ring and start the normal media lifecycle."""
         if not self.running or not self.listener_ready:
             raise ComelitRingRuntimeError("listener_not_ready")
-        coordinator = self._ring_media
+        synthetic = getattr(self, "_synthetic_ring_media", None)
+        coordinator = synthetic or self._ring_media
         if coordinator is None:
             raise ComelitRingRuntimeError("ring_media_unavailable")
-        if coordinator.running:
+        if coordinator.running or (
+            self._ring_media is not None and self._ring_media.running
+        ):
             raise ComelitRingRuntimeError("ring_media_busy")
 
         event: dict[str, object] = {
@@ -298,14 +557,164 @@ class ComelitRingRuntime:
         if not key.startswith(_NATIVE_MARKER_PREFIXES):
             return
 
-        safe_value = (
-            value
-            if _NATIVE_MARKER_SAFE_VALUE_RE.fullmatch(value)
-            else "<redacted>"
-        )
+        vocabulary = _P116_MARKER_VOCABULARIES.get(key)
+        if vocabulary is not None:
+            safe_value = value if value in vocabulary else "<redacted>"
+        else:
+            safe_value = (
+                value
+                if _NATIVE_MARKER_SAFE_VALUE_RE.fullmatch(value)
+                else "<redacted>"
+            )
         self._native_marker_tail.append(f"{key}={safe_value}")
         if len(self._native_marker_tail) > _NATIVE_MARKER_TAIL_LIMIT:
             del self._native_marker_tail[:-_NATIVE_MARKER_TAIL_LIMIT]
+
+    def _safe_native_marker_value(self, key: str, value: str) -> str | None:
+        vocabulary = _P116_MARKER_VOCABULARIES.get(key)
+        if vocabulary is not None:
+            return value if value in vocabulary else None
+        if _NATIVE_MARKER_SAFE_VALUE_RE.fullmatch(value):
+            return value
+        if _DIAGNOSTIC_MARKER_SAFE_VALUE_RE.fullmatch(value):
+            return value
+        if key == "R54_CALL_ADOPTION_FAILURE_STAGE":
+            if value in _CALL_ADOPTION_FAILURE_STAGES:
+                return value
+        return None
+
+    def _observe_canary_log_marker(self, line: str) -> None:
+        if "=" not in line:
+            return
+
+        key, value = line.split("=", 1)
+        if not _NATIVE_MARKER_KEY_RE.fullmatch(key):
+            return
+
+        safe_value = self._safe_native_marker_value(key, value)
+        if safe_value is None:
+            return
+
+        if key == "R42_CALL_GENERATION":
+            generation = int(safe_value)
+            if generation != getattr(self, "_canary_log_generation", None):
+                self._canary_log_generation = generation
+                self._canary_log_seen = set()
+                self._post_call_transport_flags = {}
+                self._post_call_transport_emitted = False
+
+        criterion = _CANARY_OBSERVABILITY_MARKERS.get(key)
+        if key in _H264_CANARY_MARKERS:
+            try:
+                if int(safe_value) <= 0:
+                    return
+            except ValueError:
+                return
+            criterion = "H264_DETECTED"
+        elif key in {
+            "R54_CALL_ADOPTION_STARTED",
+            "R54_INVITE_ACK_SENT",
+            "R54_LOCAL_CAPABILITIES_SENT",
+            "R54_LOCAL_ALERTING_SENT",
+            "R54_WAITING_PEER_CAPABILITIES",
+            "R54_PEER_CAPABILITIES_SEEN",
+            "R54_PEER_VIDEO_REQUESTED",
+            "R54_PEER_DATA_ACK_ENQUEUED",
+            "R54_PEER_DATA_ACK_FLUSHED",
+            "R54_PEER_DATA_ACK_SENT",
+            "R42_ATTACHED_MEDIA_STOP_SENT",
+            "R58_STOP_CLOSED",
+            "R58_STOP_FAILED",
+            "R42_MEDIA_CHANNEL_CLOSED",
+            "R37_REMOTE_RELEASE_OBSERVED",
+            "R37_CAPABILITY_CLEARED_OBSERVED",
+        } and safe_value != "true":
+            return
+        elif key == "P80_VIDEO_RTP_FORWARDING" and safe_value != "PASS":
+            return
+        elif key == "R42_LISTENER_RTP_FORWARDING_ARMED" and safe_value != "false":
+            return
+
+        if criterion is None:
+            return
+
+        seen = getattr(self, "_canary_log_seen", None)
+        if seen is None:
+            seen = set()
+            self._canary_log_seen = seen
+        dedup_key = (
+            f"{criterion}={safe_value}"
+            if key == "R58_STOP_PHASE"
+            else criterion
+        )
+        if dedup_key in seen:
+            return
+        seen.add(dedup_key)
+
+        _LOGGER.info(
+            "Comelit canary evidence %s marker=%s value=%s",
+            criterion,
+            key,
+            safe_value,
+        )
+
+    def _record_post_call_transport_marker(self, line: str) -> None:
+        if "=" not in line:
+            return
+        key, value = line.split("=", 1)
+        if not _NATIVE_MARKER_KEY_RE.fullmatch(key):
+            return
+
+        flags = getattr(self, "_post_call_transport_flags", None)
+        if flags is None:
+            flags = {}
+            self._post_call_transport_flags = flags
+
+        if key == "R42_MEDIA_CHANNEL_CLOSED" and value == "true":
+            flags["media_closed"] = True
+        elif key == "R58_STOP_CLOSED" and value == "true":
+            flags["stop_closed"] = True
+        elif key == "R37_REMOTE_RELEASE_OBSERVED" and value == "true":
+            flags["remote_release"] = True
+        elif key == "R37_CAPABILITY_CLEARED_OBSERVED" and value == "true":
+            flags["capability_cleared"] = True
+        elif key == "P116_NATIVE_FAILURE_ID" and value == "PSEUDOTCP_CLOSED":
+            flags["transport_closed"] = True
+
+    def _derive_post_call_transport_state(self) -> str:
+        """Derive only from HA-observed native markers.
+
+        NONE means this generation has no observed post-call media close.
+        With a media close, R37_REMOTE_RELEASE_OBSERVED proves the remote
+        RELEASE handler ran; R58_STOP_CLOSED then upgrades that to the
+        teardown-complete bucket. A PSEUDOTCP_CLOSED failure after media
+        close is transport-closed. A media close without those markers is
+        only HA-observed as media-closed/call-open. Conflicting capability
+        clear without remote release is UNKNOWN. No ids/payloads are emitted.
+        """
+        flags = getattr(self, "_post_call_transport_flags", {})
+        media_closed = flags.get("media_closed") is True
+        if not media_closed:
+            return "NONE"
+        if (
+            flags.get("capability_cleared") is True
+            and flags.get("remote_release") is not True
+        ):
+            return "UNKNOWN"
+        if flags.get("transport_closed") is True:
+            return "TRANSPORT_CLOSED"
+        if flags.get("remote_release") is True and flags.get("stop_closed") is True:
+            return "MEDIA_CLOSED_TEARDOWN_COMPLETE"
+        if flags.get("remote_release") is True:
+            return "MEDIA_CLOSED_REMOTE_RELEASE"
+        return "MEDIA_CLOSED_CALL_OPEN"
+
+    def _emit_post_call_transport_state_once(self) -> None:
+        if getattr(self, "_post_call_transport_emitted", False):
+            return
+        self._post_call_transport_emitted = True
+        state = self._derive_post_call_transport_state()
+        self._observe_canary_log_marker(f"POST_CALL_TRANSPORT_STATE={state}")
 
     def _capture_native_failure(self, returncode: int) -> None:
         self._last_native_exit_code = returncode
@@ -317,10 +726,18 @@ class ComelitRingRuntime:
         self._stopping = False
         self._offer_ready.clear()
         self._listener_ready.clear()
+        self._attached_media_busy.clear()
+        self._attached_media_open.clear()
+        self._attached_media_closed.clear()
         self._ring_lines.clear()
         self._native_marker_tail.clear()
+        self._canary_log_generation = None
+        self._canary_log_seen = set()
+        self._post_call_transport_flags = {}
+        self._post_call_transport_emitted = False
         self._last_ring_event = None
         self._last_error = None
+        self._media_diagnostics.reset()
         self._task = self._entry.async_create_background_task(
             self._hass,
             self._async_run_once(),
@@ -351,6 +768,65 @@ class ComelitRingRuntime:
                 except asyncio.CancelledError:
                     pass
 
+    async def async_wait_attached_media_open(self, timeout: float = 15.0) -> bool:
+        if self.attached_media_open:
+            return True
+        task = self._task
+        if task is None or task.done():
+            return False
+
+        open_wait = asyncio.create_task(self._attached_media_open.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {open_wait, task},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            return open_wait in done and open_wait.result()
+        finally:
+            if not open_wait.done():
+                open_wait.cancel()
+                try:
+                    await open_wait
+                except asyncio.CancelledError:
+                    pass
+
+    async def async_stop_attached_media(self, timeout: float = 10.0) -> bool:
+        if not self.attached_media_open:
+            return True
+
+        process = self._process
+        task = self._task
+        if (
+            process is None
+            or process.returncode is not None
+            or task is None
+            or task.done()
+        ):
+            return False
+
+        self._attached_media_closed.clear()
+        try:
+            os.kill(process.pid, signal.SIGUSR2)
+        except ProcessLookupError:
+            return False
+
+        closed_wait = asyncio.create_task(self._attached_media_closed.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {closed_wait, task},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            return closed_wait in done and closed_wait.result()
+        finally:
+            if not closed_wait.done():
+                closed_wait.cancel()
+                try:
+                    await closed_wait
+                except asyncio.CancelledError:
+                    pass
+
     async def async_stop(self) -> None:
         self._stopping = True
         process = self._process
@@ -376,6 +852,9 @@ class ComelitRingRuntime:
         self._task = None
         self._process = None
         self._listener_ready.clear()
+        self._attached_media_busy.clear()
+        self._attached_media_open.clear()
+        self._attached_media_closed.clear()
         await self._hass.async_add_executor_job(_remove_helper_secret)
 
     def _finalize_door_operation(
@@ -546,6 +1025,8 @@ class ComelitRingRuntime:
         finally:
             self._process = None
             self._listener_ready.clear()
+            self._attached_media_busy.clear()
+            self._attached_media_open.clear()
             future = self._door_result_future
             if future is not None and not future.done():
                 future.set_result("UNKNOWN_OUTCOME")
@@ -650,6 +1131,11 @@ class ComelitRingRuntime:
                 return
             line = raw.decode("utf-8", errors="replace").strip()
             self._remember_native_marker(line)
+            self._media_diagnostics.observe_line(line)
+            self._observe_canary_log_marker(line)
+            self._record_post_call_transport_marker(line)
+            if line.startswith("P116_NATIVE_FAILURE_COUNT="):
+                self._emit_post_call_transport_state_once()
 
             if line == "ICE_GATHER=PASS":
                 self._offer_ready.set()
@@ -660,6 +1146,25 @@ class ComelitRingRuntime:
                 _LOGGER.info(
                     "Comelit ring listener READY for persistent 3300s cycle"
                 )
+                continue
+
+            if line == "R42_MEDIA_CHANNEL_ALLOCATED=true":
+                self._attached_media_busy.set()
+                _LOGGER.info("Comelit attached inbound media channel allocated")
+                continue
+
+            if line == "R42_ATTACHED_MEDIA_ACTIVE=true":
+                self._attached_media_busy.set()
+                self._attached_media_closed.clear()
+                self._attached_media_open.set()
+                _LOGGER.info("Comelit attached inbound media ACTIVE")
+                continue
+
+            if line == "R42_MEDIA_CHANNEL_CLOSED=true":
+                self._attached_media_busy.clear()
+                self._attached_media_open.clear()
+                self._attached_media_closed.set()
+                _LOGGER.info("Comelit attached inbound media CLOSED")
                 continue
 
             if line.startswith("V4_DOOR_REJECT_STAGE="):

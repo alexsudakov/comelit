@@ -11,6 +11,10 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
 
+from .attached_media import (
+    ComelitAttachedRingMediaSession,
+    ComelitAttachedRingMediaTransport,
+)
 from .client import ComelitBridgeClient
 from .const import (
     ATTR_DOOR,
@@ -23,10 +27,13 @@ from .const import (
     CONF_OAUTH_ACCESS_TOKEN,
     CONF_SHARED_SECRET,
     CONF_VIP_TOKEN,
+    DATA_ATTACHED_MEDIA_SESSIONS,
+    DATA_ATTACHED_MEDIA_TRANSPORTS,
     DATA_MEDIA_SESSIONS,
     DATA_MEDIA_TRANSPORTS,
     DATA_RING_MEDIA,
     DATA_RUNTIMES,
+    DATA_SYNTHETIC_RING_MEDIA,
     DATA_SUPERVISORS,
     DOMAIN,
     EVENT_RING_INTERACTION,
@@ -61,10 +68,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         supervisor: ComelitRuntimeSupervisor | None = supervisors.get(entry_id)
         if supervisor is None:
             raise HomeAssistantError("Comelit runtime supervisor is unavailable")
-        if supervisor.media_paused:
+        if supervisor.media_paused or supervisor.attached_media_busy:
             raise HomeAssistantError(
-                "Comelit Door is temporarily unavailable while the intercom "
-                "media session owns the exclusive Comelit connection"
+                "Comelit Door is temporarily unavailable while an intercom "
+                "media lifecycle owns the Comelit connection"
             )
 
         event_id = call.data.get(ATTR_EVENT_ID)
@@ -179,14 +186,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         media_sessions = domain_data.setdefault(DATA_MEDIA_SESSIONS, {})
         media_sessions[entry.entry_id] = media_manager
 
+        attached_transport = ComelitAttachedRingMediaTransport(runtime)
+        attached_transports = domain_data.setdefault(
+            DATA_ATTACHED_MEDIA_TRANSPORTS, {}
+        )
+        attached_transports[entry.entry_id] = attached_transport
+
+        attached_session = ComelitAttachedRingMediaSession(attached_transport)
+        attached_sessions = domain_data.setdefault(DATA_ATTACHED_MEDIA_SESSIONS, {})
+        attached_sessions[entry.entry_id] = attached_session
+
+        # Physical CALL_INIT events use the already-live persistent call
+        # transaction. No listener pause and no second cloud/P2P bootstrap.
         ring_media_provider = HAStreamMediaProvider(
             hass,
-            media_manager,
-            media_transport,
+            attached_session,
+            attached_transport,
         )
         ring_media = RingMediaCoordinator(
             hass,
-            media_manager,
+            attached_session,
             snapshot_provider=ring_media_provider,
             recording_provider=ring_media_provider,
             task_factory=lambda coro, name: entry.async_create_background_task(
@@ -196,6 +215,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         ring_media_lifecycles = domain_data.setdefault(DATA_RING_MEDIA, {})
         ring_media_lifecycles[entry.entry_id] = ring_media
         runtime.set_ring_media_coordinator(ring_media)
+
+        # Preserve the bounded local synthetic-ring canary on the already
+        # production-validated P115 self-activation lifecycle. Synthetic
+        # events do not contain a real inbound call transaction to attach to.
+        synthetic_ring_media_provider = HAStreamMediaProvider(
+            hass,
+            media_manager,
+            media_transport,
+        )
+        synthetic_ring_media = RingMediaCoordinator(
+            hass,
+            media_manager,
+            snapshot_provider=synthetic_ring_media_provider,
+            recording_provider=synthetic_ring_media_provider,
+            task_factory=lambda coro, name: entry.async_create_background_task(
+                hass, coro, name
+            ),
+        )
+        synthetic_lifecycles = domain_data.setdefault(
+            DATA_SYNTHETIC_RING_MEDIA, {}
+        )
+        synthetic_lifecycles[entry.entry_id] = synthetic_ring_media
+        runtime.set_synthetic_ring_media_coordinator(synthetic_ring_media)
 
         # Transitional validation endpoint remains available, but normal
         # operation no longer depends on CT120/Hermes: the supervisor starts
@@ -213,13 +255,19 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     supervisors = domain_data.get(DATA_SUPERVISORS, {})
     media_sessions = domain_data.get(DATA_MEDIA_SESSIONS, {})
     media_transports = domain_data.get(DATA_MEDIA_TRANSPORTS, {})
+    attached_sessions = domain_data.get(DATA_ATTACHED_MEDIA_SESSIONS, {})
+    attached_transports = domain_data.get(DATA_ATTACHED_MEDIA_TRANSPORTS, {})
     ring_media_lifecycles = domain_data.get(DATA_RING_MEDIA, {})
+    synthetic_lifecycles = domain_data.get(DATA_SYNTHETIC_RING_MEDIA, {})
 
     runtime = runtimes.pop(entry.entry_id, None)
     supervisor = supervisors.pop(entry.entry_id, None)
     media_manager = media_sessions.pop(entry.entry_id, None)
     media_transport = media_transports.pop(entry.entry_id, None)
+    attached_session = attached_sessions.pop(entry.entry_id, None)
+    attached_transports.pop(entry.entry_id, None)
     ring_media = ring_media_lifecycles.pop(entry.entry_id, None)
+    synthetic_ring_media = synthetic_lifecycles.pop(entry.entry_id, None)
 
     unloaded = True
     if runtime is not None:
@@ -231,6 +279,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         try:
             if ring_media is not None:
                 await ring_media.async_shutdown()
+            if synthetic_ring_media is not None:
+                await synthetic_ring_media.async_shutdown()
+            if attached_session is not None:
+                await attached_session.async_shutdown()
             if media_manager is not None:
                 await media_manager.async_shutdown()
             elif media_transport is not None:
@@ -259,6 +311,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             domain_data.pop(DATA_MEDIA_SESSIONS, None)
         if not media_transports:
             domain_data.pop(DATA_MEDIA_TRANSPORTS, None)
+        if not attached_sessions:
+            domain_data.pop(DATA_ATTACHED_MEDIA_SESSIONS, None)
+        if not attached_transports:
+            domain_data.pop(DATA_ATTACHED_MEDIA_TRANSPORTS, None)
         if not ring_media_lifecycles:
             domain_data.pop(DATA_RING_MEDIA, None)
+        if not synthetic_lifecycles:
+            domain_data.pop(DATA_SYNTHETIC_RING_MEDIA, None)
     return unloaded

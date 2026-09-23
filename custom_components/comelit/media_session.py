@@ -171,6 +171,9 @@ class ComelitMediaSessionManager:
             raise ComelitMediaSessionError("invalid_media_reason")
 
         async with self._lock:
+            if getattr(self._listener, "attached_media_busy", False):
+                raise ComelitMediaSessionError("attached_inbound_media_busy")
+
             if self._phase == MEDIA_PHASE_ACTIVE:
                 if self._panel != panel or not self._transport.active:
                     raise ComelitMediaSessionError("media_session_state_mismatch")
