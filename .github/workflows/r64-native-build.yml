@@ -39,7 +39,7 @@ jobs:
           for variant in a b; do
             docker run --rm               -v "$GITHUB_WORKSPACE:/repo"               -w /repo               "$IMAGE"               /bin/sh -eu -c "
                 apk add --no-cache build-base pkgconf glib-dev libnice-dev binutils file >/dev/null
-                cc -O2 -g -Wall -Wextra -Wl,--as-needed                   -o /repo/.r64-build/comelit-v4-$variant                   /repo/.r64-build/comelit-r64.c                   $(pkg-config --cflags --libs nice glib-2.0 gio-2.0 gobject-2.0)
+                cc -O2 -g -Wall -Wextra -Wl,--as-needed                   -o /repo/.r64-build/comelit-v4-$variant                   /repo/.r64-build/comelit-r64.c                   \$(pkg-config --cflags --libs nice glib-2.0 gio-2.0 gobject-2.0)
                 chmod 755 /repo/.r64-build/comelit-v4-$variant
               "
           done
