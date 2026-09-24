@@ -250,9 +250,11 @@ class Mvp1RingTelegramOfflineBuildTests(unittest.TestCase):
         self.assertIn('"physical_effect_asserted": False', gate_button)
         self._gate("GATE_ACTUATION_VALIDATED_ONE_SHOT=PASS")
 
-    def test_media_and_r30h_code_unchanged_by_hash(self) -> None:
+    def test_r30h_wire_and_media_transport_code_unchanged_by_hash(self) -> None:
+        # Camera/ring-media orchestration is intentionally changed by the
+        # camera-owned lifecycle work. Freeze only the protocol/native lineage
+        # that this UI/lifecycle change must not mutate.
         expected = {
-            "custom_components/comelit/camera.py": "3bac789e303abba857b45cb794a55aa6a088c6a998507bf664459de4a60f96bd",
             "custom_components/comelit/media_transport.py": "5fc79d135a34c48638e49bbc2d010cdd88b4a1c414b005d35de12030fb8df746",
             "safety-poc/research/media/v1/entrance_p116_r27_repeat_001a_transform.py": "9c4ebff3fe5c54b05bdb31d6bfd1ddbadd76efa72d5c6f1abdc8c8bd4d69160b",
             "safety-poc/research/media/v1/ct120_run_p116_r27_repeat_001a_live.sh": "d83db03d3e5004dec08cf562ac1eb5933711132a8eeecb994a8374a263e95750",
@@ -275,6 +277,7 @@ class Mvp1RingTelegramOfflineBuildTests(unittest.TestCase):
         self.assertIn("await self._transport.async_start(panel)", media_session)
         self._gate("MEDIA_PROTOCOL_CODE_UNCHANGED=PASS")
         self._gate("R30H_E_CODE_UNCHANGED=PASS")
+        self.assertIn('"automatic_session_start": True', (ROOT / "custom_components/comelit/camera.py").read_text(encoding="utf-8"))
 
     def test_telegram_orchestration_no_secrets(self) -> None:
         self.assertNotRegex(self.artifact_text, r"https?://")
