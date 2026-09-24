@@ -12,6 +12,7 @@ from .const import (
     DATA_MEDIA_SESSIONS,
     DATA_MEDIA_TRANSPORTS,
     DOMAIN,
+    ENTRANCE_CAMERA_ENTITY_ID,
     ENTRANCE_MEDIA_SWITCH_ENTITY_ID,
     ENTRANCE_MEDIA_SWITCH_UNIQUE_ID,
 )
@@ -36,12 +37,13 @@ async def async_setup_entry(
 
 
 class ComelitEntranceMediaSwitch(SwitchEntity):
-    """Explicit owner of the on-demand entrance intercom media session."""
+    """Deprecated explicit media-session switch retained for one release."""
 
     _attr_name = "Comelit — Подъезд"
     _attr_unique_id = ENTRANCE_MEDIA_SWITCH_UNIQUE_ID
     _attr_icon = "mdi:doorbell-video"
     _attr_should_poll = False
+    _attr_entity_registry_enabled_default = False
 
     def __init__(
         self,
@@ -74,6 +76,8 @@ class ComelitEntranceMediaSwitch(SwitchEntity):
             "hard_limit_seconds": self._manager.hard_limit_seconds,
             "automatic_retry_allowed": False,
             "door_action_available_during_media": False,
+            "deprecated": True,
+            "replacement_entity_id": ENTRANCE_CAMERA_ENTITY_ID,
         }
 
     async def async_added_to_hass(self) -> None:
