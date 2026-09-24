@@ -162,19 +162,34 @@ A snapshot must not leave the session open for the remainder of the 600-second w
 
 ## 8. Recording after ring
 
+Real inbound Ring media is attached to the existing persistent call transaction and
+has a different lifetime rule from separately bootstrapped on-demand camera media.
+
 ```text
-ring received by persistent listener
--> acquire recording lease
--> pause listener
--> start media
--> snapshot
--> record 60 seconds
--> release recording lease
--> stop media if no other lease remains
--> restore listener
+CALL_INIT
+-> acquire attached ring_media lease
+-> attach to the inbound call transaction
+-> create/reuse one HA Stream
+-> refresh latest snapshot
+-> record 20 seconds
+-> emit comelit_recording_complete
+-> DO NOT tear down merely because recording finished
+-> keep ring_media + shared HA Stream while the remote call remains open
+-> backend observes remote/native media close
+-> release ring_media
+-> clean local bridge/Stream after the last consumer leaves
 ```
 
-The 60-second recording remains subject to the same absolute 600-second limit.
+The recording target remains 20 seconds. Recording completion and call completion are
+independent events.
+
+For the real inbound Ring path, the remote/native channel close is authoritative for
+normal call lifetime. No local product timeout shorter than the remote call is applied.
+A separate **600-second defense-in-depth hard ceiling** remains. If no authoritative
+remote close is observed before that ceiling, the integration tears down safely.
+
+This rule does not apply to the synthetic-ring canary, which has no real inbound call
+transaction and therefore retains the bounded recording-owned test lifecycle.
 
 ## 9. Door behavior during media
 
