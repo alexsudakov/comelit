@@ -45,6 +45,7 @@ _STATE_NEW = """static gboolean p97_signaling_finished = FALSE;
 #define R27_MAX_REFRESH_COUNT 4u
 #define R27_REPEAT_ACK_TIMEOUT_SECONDS 5u
 #define R27_MAX_LIVE_OBSERVATION_SECONDS 115u
+#define R27_MAX_SINGLE_SESSION_SECONDS 120u
 #define R27_VIDEO_PAST_35S_SECONDS 35u
 #define R27_VIDEO_PAST_40S_SECONDS 40u
 #define R27_VIDEO_PAST_75S_SECONDS 75u
@@ -62,6 +63,7 @@ static gboolean r27_repeat_ambiguous = FALSE;
 static gboolean r27_third_001a_blocked = FALSE;
 static gboolean r27_refresh_fail_closed = FALSE;
 static gboolean r27_final_summary_printed = FALSE;
+static volatile sig_atomic_t r27_bound_signal_seen = 0;
 static long long r27_media_active_monotonic_ms = 0;
 static long long r27_repeat_sent_monotonic_ms = 0;
 static guint64 r27_video_packet_count_at_repeat = 0;
@@ -79,6 +81,7 @@ static gboolean r27_repeat_ack_timeout_cb(gpointer data);
 static gboolean r27_live_observation_timeout_cb(gpointer data);
 static gboolean r27_try_queue_repeat_001a(const char *reason);
 static gboolean r27_schedule_next_refresh(const char *reason);
+static void r27_bound_signal_handler(int signum);
 static gboolean r27_build_repeat_001a_body(void);
 static gboolean r27_repeat_body_diff_gate(void);
 static void r27_print_identity_markers(void);
@@ -353,6 +356,23 @@ r27_cancel_repeat_timers(void)
 {
     r27_repeat_timer_cancelled = TRUE;
     r27_repeat_timer_armed = FALSE;
+}
+
+static void
+r27_bound_signal_handler(int signum)
+{
+    r27_bound_signal_seen = signum;
+    printf("R27_WRAPPER_BOUND_HIT=true\n");
+    printf("R27_BOUND_SIGNAL=%d\n", signum);
+    printf("R27_HELPER_SUMMARY_PRINTED=true\n");
+    printf("R27_PARTIAL_MARKERS_PRESENT=true\n");
+    printf("R27_LAST_STAGE=BOUND_SIGNAL\n");
+    r27_cancel_repeat_timers();
+    r27_print_final_summary();
+    (void)pseudotcp_begin_graceful_stop("r27-bound-signal");
+    fflush(stdout);
+    if (loop)
+        g_main_loop_quit(loop);
 }
 
 static gboolean
@@ -685,6 +705,11 @@ r27_print_final_summary(void)
     printf("VIDEO_RTP_PAST_75S=%s\n", past75 ? "true" : "false");
     printf("VIDEO_RTP_LAST_SECONDS_FROM_INITIAL_START=%u\n", last_video_seconds);
     printf("MEDIA_ACTIVE_DURATION_SECONDS=%u\n", media_active_duration_seconds);
+    printf("MEDIA_SESSION_CAP_SECONDS=%u\n", R27_MAX_SINGLE_SESSION_SECONDS);
+    printf("MEDIA_ACTIVE_DURATION_WITHIN_CAP=%s\n",
+           media_active_duration_seconds <= R27_MAX_SINGLE_SESSION_SECONDS ? "true" : "false");
+    printf("R27_HELPER_SUMMARY_PRINTED=true\n");
+    printf("R27_PARTIAL_MARKERS_PRESENT=true\n");
     printf("VIDEO_PACKET_COUNTER_PROGRESSING=%s\n",
            video_packet_counter_progressing ? "true" : "false");
     printf("REFRESH_SENT_COUNT=%u\n", r27_repeat_001a_sent_count);
@@ -732,6 +757,35 @@ _MAIN_FINAL_NEW = """    r27_cancel_repeat_timers();
 }
 """
 
+_MAIN_ENTRY_OLD = """int
+main(void)
+{
+    if (g_mkdir_with_parents(
+"""
+
+_MAIN_ENTRY_NEW = """int
+main(void)
+{
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    printf("R27_STDOUT_LINE_BUFFERED=true\\n");
+    fflush(stdout);
+
+    if (g_mkdir_with_parents(
+"""
+
+_SIGNAL_INSTALL_OLD = """    printf("ICE_GATHER_START=PASS\\n");
+    fflush(stdout);
+"""
+
+_SIGNAL_INSTALL_NEW = """    printf("ICE_GATHER_START=PASS\\n");
+    fflush(stdout);
+    signal(SIGTERM, r27_bound_signal_handler);
+    signal(SIGINT, r27_bound_signal_handler);
+    printf("R27_BOUND_SIGNAL_HANDLER_INSTALLED=true\\n");
+    fflush(stdout);
+"""
+
 
 def _replace_once(source: str, old: str, new: str, label: str) -> str:
     count = source.count(old)
@@ -754,6 +808,8 @@ def transform(source: str, *, include_p116: bool = True) -> str:
         (_ACK_HOOK_OLD, _ACK_HOOK_NEW, "R27 ACK hook"),
         (_GRACEFUL_HELPER_ANCHOR, _GRACEFUL_HELPER_NEW, "R27 graceful stop helper"),
         (_HELPER_ANCHOR, _R27_HELPERS + _HELPER_ANCHOR, "R27 helpers"),
+        (_MAIN_ENTRY_OLD, _MAIN_ENTRY_NEW, "R27 main line buffering"),
+        (_SIGNAL_INSTALL_OLD, _SIGNAL_INSTALL_NEW, "R27 bound signal handler"),
         (_MAIN_FINAL_OLD, _MAIN_FINAL_NEW, "R27 final summary"),
     ):
         candidate = _replace_once(candidate, old, new, label)
@@ -767,7 +823,10 @@ def report() -> str:
             "R27_COMPOSES=P106_INCLUDE_P116",
             "R27_REPEAT_SEQUENCE_MODEL=LIVE_INITIAL_001A_SEQUENCE_PLUS_P97_DELTA",
             "CAPTURED_LITERAL_REUSE=false",
-            "R27_REPEAT_DELAY_SECONDS=20",
+            "R27_REPEAT_DELAY_SECONDS=25",
+            "REFRESH_CADENCE_SECONDS=25",
+            "CADENCE_SOURCE=LOCAL_LIVE_EVIDENCE",
+            "CADENCE_SAFETY_MARGIN_SECONDS=11",
             "R27_REPEAT_DELAY_IS_PROTOCOL_CONSTANT=false",
             "R27_REPEAT_DELAY_PROMOTED_TO_PRODUCTION=false",
             "R27_PRODUCTION_REFRESH=false",

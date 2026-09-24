@@ -16,8 +16,8 @@ ROOT = Path(__file__).resolve().parents[2]
 MEDIA = ROOT / "safety-poc" / "research" / "media" / "v1"
 SOURCE = ROOT / "safety-poc" / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-ctpp-door.c"
 TRANSFORM = MEDIA / "entrance_p116_r27_repeat_001a_transform.py"
-EXPECTED_GENERATED_SOURCE_SHA = "681ab1a6c81a5845e5a5db711c569eaef068829f7634a33355c04495ad06b96f"
-RUNNER_EXPECTED_SOURCE_SHA = "681ab1a6c81a5845e5a5db711c569eaef068829f7634a33355c04495ad06b96f"
+EXPECTED_GENERATED_SOURCE_SHA = "b04b973d98f4913ed0160e8cd6267c3cb0d5ddd2cfab3bf0d004aada6b8f60c4"
+RUNNER_EXPECTED_SOURCE_SHA = "b04b973d98f4913ed0160e8cd6267c3cb0d5ddd2cfab3bf0d004aada6b8f60c4"
 RUNNER_HISTORICAL_PRE_R30D_SOURCE_SHA = "62e0023521cef0e4178248beb78408f89752d108d9d009c388ff153d94195368"
 
 # This is an explicit source-local declaration-order gate for R27-added code in
@@ -108,6 +108,7 @@ def _compile_and_run_harness(candidate: str) -> str:
         r'''
         #include <stdarg.h>
         #include <stdint.h>
+        #include <signal.h>
         #include <stdio.h>
         #include <stdlib.h>
         #include <string.h>
@@ -134,6 +135,7 @@ def _compile_and_run_harness(candidate: str) -> str:
         #define R27_REFRESH_CADENCE_SECONDS 25u
         #define R27_CADENCE_SAFETY_MARGIN_SECONDS 11u
         #define R27_MAX_REFRESH_COUNT 4u
+        #define R27_MAX_SINGLE_SESSION_SECONDS 120u
         #define R27_VIDEO_PAST_35S_SECONDS 35u
         #define R27_VIDEO_PAST_40S_SECONDS 40u
         #define R27_VIDEO_PAST_75S_SECONDS 75u
@@ -170,6 +172,7 @@ def _compile_and_run_harness(candidate: str) -> str:
         static gboolean r27_third_001a_blocked;
         static gboolean r27_refresh_fail_closed;
         static gboolean r27_final_summary_printed;
+        static volatile sig_atomic_t r27_bound_signal_seen;
         static long long r27_media_active_monotonic_ms;
         static long long r27_repeat_sent_monotonic_ms;
         static guint64 r27_video_packet_count_at_repeat;
@@ -180,6 +183,7 @@ def _compile_and_run_harness(candidate: str) -> str:
         static gboolean r27_sequence_model_pass;
         static guint r27_self_activation_sent_count;
         static guint r27_helper_pid_at_media_start;
+        static void r27_print_final_summary(void);
 
         static gboolean ice_connected;
         static gboolean ice_ready;
@@ -303,6 +307,7 @@ def _compile_and_run_harness(candidate: str) -> str:
             r27_third_001a_blocked = FALSE;
             r27_refresh_fail_closed = FALSE;
             r27_final_summary_printed = FALSE;
+            r27_bound_signal_seen = 0;
             r27_media_active_monotonic_ms = 0;
             r27_repeat_sent_monotonic_ms = 0;
             r27_video_packet_count_at_repeat = 0;
@@ -577,6 +582,25 @@ def _compile_and_run_harness(candidate: str) -> str:
             return 0;
         }
 
+        static int test_bound_signal_prints_partial_summary_and_graceful_stop(void)
+        {
+            reset_state();
+            r27_media_active_monotonic_ms = 1000;
+            fake_now_ms = 3000;
+            p116_video_rtp.packet_count = 2u;
+            p116_video_rtp.first_monotonic_ms = 1100;
+            p116_video_rtp.last_monotonic_ms = 2000;
+            r27_bound_signal_handler(SIGTERM);
+            CHECK(r27_bound_signal_seen == SIGTERM);
+            CHECK(r27_final_summary_printed == TRUE);
+            CHECK(pseudotcp_graceful_stop_started == TRUE);
+            CHECK(strstr(output, "R27_WRAPPER_BOUND_HIT=true\n") != NULL);
+            CHECK(strstr(output, "R27_HELPER_SUMMARY_PRINTED=true\n") != NULL);
+            CHECK(strstr(output, "R27_PARTIAL_MARKERS_PRESENT=true\n") != NULL);
+            CHECK(strstr(output, "R27_LAST_STAGE=BOUND_SIGNAL\n") != NULL);
+            return 0;
+        }
+
         static int test_ack_timeout_absent_no_retry(void)
         {
             reset_state();
@@ -652,6 +676,7 @@ def _compile_and_run_harness(candidate: str) -> str:
             if (test_repeat_body_build_validate_and_diff_gate()) return 1;
             if (test_periodic_refresh_single_outstanding_after_structural_ack()) return 1;
             if (test_teardown_cancels_pending_refresh()) return 1;
+            if (test_bound_signal_prints_partial_summary_and_graceful_stop()) return 1;
             if (test_sequence_rollover_does_not_mutate_ack()) return 1;
             if (test_deterministic_repeat_build_flips_when_input_differs()) return 1;
             if (test_malformed_repeat_inputs_fail_closed()) return 1;
@@ -853,6 +878,16 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
         self.assertIn("r27_cancel_repeat_timers();", self.candidate)
         self.assertIn('pseudotcp_begin_graceful_stop("r27-observation-bound")', self.r27_helpers)
 
+    def test_bound_signal_flushes_partial_summary_and_graceful_stop(self) -> None:
+        self.assertIn("setvbuf(stdout, NULL, _IOLBF, 0);", self.candidate)
+        self.assertIn("signal(SIGTERM, r27_bound_signal_handler);", self.candidate)
+        self.assertIn("signal(SIGINT, r27_bound_signal_handler);", self.candidate)
+        self.assertIn("R27_WRAPPER_BOUND_HIT=true", self.r27_helpers)
+        self.assertIn("R27_HELPER_SUMMARY_PRINTED=true", self.r27_helpers)
+        self.assertIn("R27_PARTIAL_MARKERS_PRESENT=true", self.r27_helpers)
+        self.assertIn("R27_LAST_STAGE=BOUND_SIGNAL", self.r27_helpers)
+        self.assertIn('pseudotcp_begin_graceful_stop("r27-bound-signal")', self.r27_helpers)
+
     def test_malformed_or_ambiguous_state_does_not_send(self) -> None:
         for guard in (
             "v4_ctpp_channel_id == 0",
@@ -890,6 +925,10 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
             "VIDEO_RTP_PAST_75S=%s",
             "VIDEO_RTP_LAST_SECONDS_FROM_INITIAL_START=%u",
             "MEDIA_ACTIVE_DURATION_SECONDS=%u",
+            "MEDIA_SESSION_CAP_SECONDS=%u",
+            "MEDIA_ACTIVE_DURATION_WITHIN_CAP=%s",
+            "R27_HELPER_SUMMARY_PRINTED=true",
+            "R27_PARTIAL_MARKERS_PRESENT=true",
             "VIDEO_PACKET_COUNTER_PROGRESSING=%s",
         ):
             self.assertIn(marker, self.r27_segments)
@@ -901,8 +940,12 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
 
     def test_runner_timeout_fail_closed_and_teardown_markers(self) -> None:
         runner = (MEDIA / "ct120_run_p116_r27_repeat_001a_live.sh").read_text(encoding="utf-8")
-        self.assertIn("MAX_LIVE_OBSERVATION_SECONDS=115", runner)
-        self.assertIn("OUTER_TIMEOUT_SECONDS=120", runner)
+        self.assertIn("MAX_LIVE_OBSERVATION_SECONDS=$MEDIA_OBSERVATION_SECONDS", runner)
+        self.assertIn("MAX_SINGLE_SESSION_SECONDS=120", runner)
+        self.assertIn("MEDIA_OBSERVATION_SECONDS=115", runner)
+        self.assertIn("SETUP_MARGIN_SECONDS=60", runner)
+        self.assertIn("OUTER_TIMEOUT_SECONDS=$((SETUP_MARGIN_SECONDS + MEDIA_OBSERVATION_SECONDS))", runner)
+        self.assertIn("R27_BOUND_INVARIANT=PASS", runner)
         self.assertIn(f"EXPECTED_SOURCE_SHA={RUNNER_EXPECTED_SOURCE_SHA}", runner)
         self.assertEqual(RUNNER_EXPECTED_SOURCE_SHA, EXPECTED_GENERATED_SOURCE_SHA)
         self.assertNotEqual(RUNNER_HISTORICAL_PRE_R30D_SOURCE_SHA, EXPECTED_GENERATED_SOURCE_SHA)
@@ -918,6 +961,9 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
         for marker in (
             "VIDEO_RTP_PAST_75S=",
             "MEDIA_ACTIVE_DURATION_SECONDS=",
+            "MEDIA_ACTIVE_DURATION_WITHIN_CAP=",
+            "R27_HELPER_SUMMARY_PRINTED=",
+            "R27_PARTIAL_MARKERS_PRESENT=",
             "VIDEO_PACKET_COUNTER_PROGRESSING=",
             "SECOND_001A_ACK_CLASSIFICATION=",
             "REFRESH_SENT_COUNT=",
@@ -966,6 +1012,7 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
             "VIDEO_RTP_PAST_75S=",
             "VIDEO_PACKET_COUNTER_PROGRESSING=",
             "MEDIA_ACTIVE_DURATION_SECONDS=",
+            "MEDIA_ACTIVE_DURATION_WITHIN_CAP=",
             "MEDIA_TEARDOWN=",
             "LISTENER_RESTORED=",
             "LISTENER_READY_AFTER=",
@@ -975,6 +1022,123 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
         for marker in required:
             with self.subTest(marker=marker):
                 self.assertIn(marker, block)
+
+    def test_runner_bound_outlives_observation_plus_setup_margin(self) -> None:
+        runner = (MEDIA / "ct120_run_p116_r27_repeat_001a_live.sh").read_text(encoding="utf-8")
+        self.assertIn("MIN_SETUP_MARGIN_SECONDS=45", runner)
+        self.assertIn("SETUP_MARGIN_SECONDS=60", runner)
+        self.assertIn("MEDIA_OBSERVATION_SECONDS=115", runner)
+        self.assertIn("OUTER_TIMEOUT_SECONDS=$((SETUP_MARGIN_SECONDS + MEDIA_OBSERVATION_SECONDS))", runner)
+        self.assertIn(
+            "REQUIRED_MIN_WRAPPER_BOUND_SECONDS=$((MEDIA_OBSERVATION_SECONDS + MIN_SETUP_MARGIN_SECONDS))",
+            runner,
+        )
+        self.assertIn('[ "$MEDIA_OBSERVATION_SECONDS" -le "$MAX_SINGLE_SESSION_SECONDS" ]', runner)
+        self.assertNotIn("OUTER_TIMEOUT_SECONDS=120", runner)
+
+    def test_runner_bound_invariant_is_falsifiable(self) -> None:
+        # Extract the exact shipped invariant block (not a reimplementation) and
+        # prove it can both PASS with real constants and FAIL when
+        # SETUP_MARGIN_SECONDS is shrunk below MIN_SETUP_MARGIN_SECONDS.
+        runner = (MEDIA / "ct120_run_p116_r27_repeat_001a_live.sh").read_text(encoding="utf-8")
+        match = re.search(
+            r'REQUIRED_MIN_WRAPPER_BOUND_SECONDS=\$\(\(MEDIA_OBSERVATION_SECONDS \+ MIN_SETUP_MARGIN_SECONDS\)\)\n'
+            r'(?:.*\n)*?\s*fi\n',
+            runner,
+        )
+        self.assertIsNotNone(match, "could not locate R27_BOUND_INVARIANT block in runner")
+        invariant_block = match.group(0)
+        self.assertIn("R27_BOUND_INVARIANT=PASS", invariant_block)
+        self.assertIn("R27_BOUND_INVARIANT=FAIL", invariant_block)
+
+        def run_invariant(setup_margin: int, observation: int, min_margin: int, max_single: int) -> str:
+            script = (
+                f"MIN_SETUP_MARGIN_SECONDS={min_margin}\n"
+                f"SETUP_MARGIN_SECONDS={setup_margin}\n"
+                f"MEDIA_OBSERVATION_SECONDS={observation}\n"
+                f"MAX_SINGLE_SESSION_SECONDS={max_single}\n"
+                f"OUTER_TIMEOUT_SECONDS=$((SETUP_MARGIN_SECONDS + MEDIA_OBSERVATION_SECONDS))\n"
+                f"{invariant_block}"
+            )
+            completed = subprocess.run(
+                ["bash", "-c", script], text=True, capture_output=True, check=True
+            )
+            return completed.stdout.strip().splitlines()[-1]
+
+        self.assertEqual(
+            run_invariant(setup_margin=60, observation=115, min_margin=45, max_single=120),
+            "R27_BOUND_INVARIANT=PASS",
+        )
+        # The exact corrective edit: shrink SETUP_MARGIN_SECONDS below
+        # MIN_SETUP_MARGIN_SECONDS. The old tautological formulation could
+        # never fail this way because OUTER_TIMEOUT_SECONDS was defined as
+        # SETUP_MARGIN_SECONDS + MEDIA_OBSERVATION_SECONDS and compared against
+        # the same sum.
+        self.assertEqual(
+            run_invariant(setup_margin=30, observation=115, min_margin=45, max_single=120),
+            "R27_BOUND_INVARIANT=FAIL",
+        )
+        # Independently, MEDIA_OBSERVATION_SECONDS exceeding the session cap
+        # must also fail even when the setup margin is otherwise sufficient.
+        self.assertEqual(
+            run_invariant(setup_margin=60, observation=125, min_margin=45, max_single=120),
+            "R27_BOUND_INVARIANT=FAIL",
+        )
+
+    def test_runner_udp_sink_background_does_not_block_command_substitution(self) -> None:
+        runner = (MEDIA / "ct120_run_p116_r27_repeat_001a_live.sh").read_text(encoding="utf-8")
+        self.assertIn('>"${count_file}.log" 2>&1 <<\'PY\' &', runner)
+        self.assertIn('VIDEO_SINK_PID="$(start_udp_sink "$VIDEO_RTP_PORT" "$RUN_ROOT/video.count")"', runner)
+        self.assertIn('echo "R27_VIDEO_SINK_DATAGRAMS=$R27_VIDEO_SINK_DATAGRAMS"', runner)
+        self.assertIn('echo "R27_AUDIO_SINK_DATAGRAMS=$R27_AUDIO_SINK_DATAGRAMS"', runner)
+        self.assertIn("R27_CONTINUATION_EVIDENCE_SOURCE=HELPER_INTERNAL_COUNTER_ONLY", runner)
+        self.assertIn("R27_CONTINUATION_EVIDENCE_SOURCE=INDEPENDENT_UDP_SINK", runner)
+
+    def test_runner_udp_sink_is_an_independent_witness(self) -> None:
+        # Exercise the shipped start_udp_sink/stop_pid/sink_datagram_count
+        # functions end-to-end: with the child's stdout/stderr redirected to
+        # its own log file, the command substitution that captures the PID
+        # must return immediately, and the sink must actually count datagrams
+        # sent to its port rather than reporting a stale 0.
+        runner_path = MEDIA / "ct120_run_p116_r27_repeat_001a_live.sh"
+        runner = runner_path.read_text(encoding="utf-8")
+        func_match = re.search(
+            r"start_udp_sink\(\) \{.*?\n\}\n", runner, re.DOTALL
+        )
+        stop_match = re.search(r"stop_pid\(\) \{.*?\n\}\n", runner, re.DOTALL)
+        sink_count_match = re.search(
+            r"sink_datagram_count\(\) \{.*?\n\}\n", runner, re.DOTALL
+        )
+        self.assertIsNotNone(func_match)
+        self.assertIsNotNone(stop_match)
+        self.assertIsNotNone(sink_count_match)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            count_file = Path(tmp) / "video.count"
+            script = f"""
+set -u -o pipefail
+{func_match.group(0)}
+{stop_match.group(0)}
+{sink_count_match.group(0)}
+OUTER_TIMEOUT_SECONDS=10
+PORT=$(python3 -c 'import socket; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+SINK_PID="$(start_udp_sink "$PORT" "{count_file}")"
+sleep 0.5
+python3 -c "
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+for _ in range(3):
+    s.sendto(b'x', ('127.0.0.1', $PORT))
+"
+sleep 0.5
+stop_pid "$SINK_PID"
+sink_datagram_count "{count_file}"
+"""
+            completed = subprocess.run(
+                ["bash", "-c", script], text=True, capture_output=True, timeout=15
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stdout.strip(), "3")
 
     def test_runner_credential_gate_refuses_before_listener_stop(self) -> None:
         runner = (MEDIA / "ct120_run_p116_r27_repeat_001a_live.sh").read_text(encoding="utf-8")

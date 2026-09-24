@@ -16,11 +16,20 @@ BASE_WRAPPER_SHA256=a564535dff0cf10b1fe4766171f2960c52fb581f1c816cf81d2992c5c84e
 BUILDER_REL=safety-poc/research/media/v1/ct120_build_p80_haos_media_helper.sh
 TRANSFORM_REL=safety-poc/research/media/v1/entrance_p116_r27_repeat_001a_transform.py
 RUNNER_REL=safety-poc/research/media/v1/ct120_run_p116_r27_repeat_001a_live.sh
-EXPECTED_SOURCE_SHA=681ab1a6c81a5845e5a5db711c569eaef068829f7634a33355c04495ad06b96f
+EXPECTED_SOURCE_SHA=b04b973d98f4913ed0160e8cd6267c3cb0d5ddd2cfab3bf0d004aada6b8f60c4
 VIDEO_RTP_PORT=17899
 AUDIO_RTP_PORT=17808
-MAX_LIVE_OBSERVATION_SECONDS=115
-OUTER_TIMEOUT_SECONDS=120
+MAX_SINGLE_SESSION_SECONDS=120
+MEDIA_OBSERVATION_SECONDS=115
+# Minimum wall-clock time reserved for build/listener-stop/candidate-launch steps
+# that must complete before the observation window starts. This is an
+# independent requirement, not derived from SETUP_MARGIN_SECONDS below, so the
+# R27_BOUND_INVARIANT check in print_final_block can actually fail if someone
+# shrinks SETUP_MARGIN_SECONDS below what setup needs.
+MIN_SETUP_MARGIN_SECONDS=45
+SETUP_MARGIN_SECONDS=60
+MAX_LIVE_OBSERVATION_SECONDS=$MEDIA_OBSERVATION_SECONDS
+OUTER_TIMEOUT_SECONDS=$((SETUP_MARGIN_SECONDS + MEDIA_OBSERVATION_SECONDS))
 CREDENTIAL_MIN_TTL_SECONDS=900
 OAUTH_STATUS=/usr/local/sbin/comelit-oauth-status
 RUN_DIR=/run/comelit-media
@@ -129,7 +138,7 @@ status_stopped() {
 start_udp_sink() {
     local port="$1"
     local count_file="$2"
-    python3 - "$port" "$count_file" "$OUTER_TIMEOUT_SECONDS" <<'PY' &
+    python3 - "$port" "$count_file" "$OUTER_TIMEOUT_SECONDS" >"${count_file}.log" 2>&1 <<'PY' &
 from pathlib import Path
 import signal
 import socket
@@ -261,6 +270,15 @@ last_marker_gt() {
             fi
             ;;
     esac
+}
+
+sink_datagram_count() {
+    local count_file="$1"
+    if [ -f "$count_file" ]; then
+        tr -d '[:space:]' < "$count_file"
+    else
+        printf '%s' NOT_REACHED
+    fi
 }
 
 p80_video_rtp_progress_positive() {
@@ -457,6 +475,37 @@ print_final_block() {
     echo "CREDENTIAL_REFRESH_REQUIRED=$CREDENTIAL_REFRESH_REQUIRED"
     echo "R27_REPEAT_EXECUTED=$R27_REPEAT_EXECUTED"
     echo "GENERATED_SOURCE_SHA256=$(build_provenance_marker GENERATED_SOURCE_SHA256 NOT_REACHED)"
+    echo "SETUP_MARGIN_SECONDS=$SETUP_MARGIN_SECONDS"
+    echo "MEDIA_OBSERVATION_SECONDS=$MEDIA_OBSERVATION_SECONDS"
+    echo "WRAPPER_BOUND_SECONDS=$OUTER_TIMEOUT_SECONDS"
+    echo "MAX_SINGLE_SESSION_SECONDS=$MAX_SINGLE_SESSION_SECONDS"
+    echo "MIN_SETUP_MARGIN_SECONDS=$MIN_SETUP_MARGIN_SECONDS"
+    REQUIRED_MIN_WRAPPER_BOUND_SECONDS=$((MEDIA_OBSERVATION_SECONDS + MIN_SETUP_MARGIN_SECONDS))
+    echo "REQUIRED_MIN_WRAPPER_BOUND_SECONDS=$REQUIRED_MIN_WRAPPER_BOUND_SECONDS"
+    if [ "$OUTER_TIMEOUT_SECONDS" -ge "$REQUIRED_MIN_WRAPPER_BOUND_SECONDS" ] &&
+       [ "$MEDIA_OBSERVATION_SECONDS" -le "$MAX_SINGLE_SESSION_SECONDS" ]; then
+        echo "R27_BOUND_INVARIANT=PASS"
+    else
+        echo "R27_BOUND_INVARIANT=FAIL"
+    fi
+    if [ "$WRAPPER_RC" = 124 ] || [ "$WRAPPER_RC" = 137 ]; then
+        echo "R27_WRAPPER_BOUND_HIT=true"
+    else
+        echo "R27_WRAPPER_BOUND_HIT=$(last_marker R27_WRAPPER_BOUND_HIT false)"
+    fi
+    echo "R27_WRAPPER_BOUND_SECONDS=$OUTER_TIMEOUT_SECONDS"
+    echo "R27_HELPER_SUMMARY_PRINTED=$(last_marker R27_HELPER_SUMMARY_PRINTED false)"
+    echo "R27_PARTIAL_MARKERS_PRESENT=$(last_marker R27_PARTIAL_MARKERS_PRESENT false)"
+    echo "R27_LAST_STAGE=$(last_marker R27_LAST_STAGE NOT_REACHED)"
+    R27_VIDEO_SINK_DATAGRAMS="$(sink_datagram_count "$RUN_ROOT/video.count")"
+    R27_AUDIO_SINK_DATAGRAMS="$(sink_datagram_count "$RUN_ROOT/audio.count")"
+    echo "R27_VIDEO_SINK_DATAGRAMS=$R27_VIDEO_SINK_DATAGRAMS"
+    echo "R27_AUDIO_SINK_DATAGRAMS=$R27_AUDIO_SINK_DATAGRAMS"
+    case "$R27_VIDEO_SINK_DATAGRAMS" in
+        ''|*[!0-9]*) echo "R27_CONTINUATION_EVIDENCE_SOURCE=HELPER_INTERNAL_COUNTER_ONLY" ;;
+        0) echo "R27_CONTINUATION_EVIDENCE_SOURCE=HELPER_INTERNAL_COUNTER_ONLY_SINK_ZERO" ;;
+        *) echo "R27_CONTINUATION_EVIDENCE_SOURCE=INDEPENDENT_UDP_SINK" ;;
+    esac
     echo "R27_REPEAT_DELAY_SECONDS=25"
     echo "REFRESH_CADENCE_SECONDS=$(last_marker REFRESH_CADENCE_SECONDS 25)"
     echo "CADENCE_SOURCE=$(last_marker CADENCE_SOURCE LOCAL_LIVE_EVIDENCE)"
@@ -495,6 +544,7 @@ print_final_block() {
         echo "VIDEO_RTP_PAST_75S=$(last_marker VIDEO_RTP_PAST_75S NOT_REACHED)"
         echo "VIDEO_RTP_LAST_SECONDS_FROM_INITIAL_START=$(last_marker VIDEO_RTP_LAST_SECONDS_FROM_INITIAL_START NOT_REACHED)"
         echo "MEDIA_ACTIVE_DURATION_SECONDS=$(last_marker MEDIA_ACTIVE_DURATION_SECONDS NOT_REACHED)"
+        echo "MEDIA_ACTIVE_DURATION_WITHIN_CAP=$(last_marker MEDIA_ACTIVE_DURATION_WITHIN_CAP NOT_REACHED)"
         echo "VIDEO_PACKET_COUNTER_PROGRESSING=$(last_marker VIDEO_PACKET_COUNTER_PROGRESSING NOT_REACHED)"
     fi
     echo "ICE_NEGOTIATION_COUNT=$(last_marker ICE_NEGOTIATION_COUNT NOT_REACHED)"
