@@ -258,6 +258,20 @@ class ComelitAttachedRingMediaSession:
             return True
         return await self._transport.async_wait_inactive(timeout)
 
+    async def async_force_stop(self, *, reason: str) -> dict[str, object]:
+        """Force the bounded attached-media lifecycle closed, clearing all leases."""
+        if not reason or len(reason) > 64:
+            raise ComelitAttachedMediaError("invalid_attached_media_reason")
+        async with self._lock:
+            self._leases.clear()
+            try:
+                await self._transport.async_stop()
+            except Exception as exc:
+                self._last_error = f"stop_failed:{type(exc).__name__}"
+                raise ComelitAttachedMediaError(self._last_error) from exc
+            self._panel = None
+            return self.status()
+
     async def async_release(self, *, reason: str) -> dict[str, object]:
         async with self._lock:
             count = self._leases.get(reason, 0)
