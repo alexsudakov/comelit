@@ -19,6 +19,10 @@
 - `docs/ha-integration-target-architecture.md`;
 - `docs/intercom-media-session-architecture.md`.
 
+Implementation architecture for the Home Assistant card is fixed separately in:
+
+- `docs/custom-card-architecture.md`.
+
 При конфликте safety/lifecycle правил приоритет имеют более строгие утверждённые protocol/safety contracts проекта.
 
 
