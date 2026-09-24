@@ -58,6 +58,12 @@ class ComelitCard extends HTMLElement {
     this._selectedCamera = undefined;
     this._viewerGeneration = 0;
     this._viewerElement = undefined;
+    this._intercomViewerGeneration = 0;
+    this._intercomViewerElement = undefined;
+    this._intercomViewerOpen = false;
+    this._selectedIntercomPanel = "entrance";
+    this._doorActionInFlight = new Set();
+    this._doorActionMessage = undefined;
     this._rendered = false;
     this._focusedCallEventId = undefined;
   }
@@ -310,6 +316,12 @@ class ComelitCard extends HTMLElement {
 
     this._focusedCallEventId = call.eventId;
     this._activeTab = "intercom";
+    if (call.panel === "entrance" || call.panel === "gate") {
+      if (this._selectedIntercomPanel !== call.panel) {
+        this._intercomViewerOpen = false;
+      }
+      this._selectedIntercomPanel = call.panel;
+    }
     return true;
   }
 
@@ -320,6 +332,8 @@ class ComelitCard extends HTMLElement {
 
     this._viewerGeneration += 1;
     this._viewerElement = undefined;
+    this._intercomViewerGeneration += 1;
+    this._intercomViewerElement = undefined;
 
     const cameras = this._hass ? this._surveillanceEntities() : [];
     if (
@@ -480,6 +494,102 @@ class ComelitCard extends HTMLElement {
           font-size: 0.9rem;
         }
 
+        .intercom-panel.selected-panel {
+          border-color: var(--primary-color);
+        }
+
+        .panel-select {
+          display: flex;
+          width: 100%;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          border: 0;
+          padding: 0;
+          background: transparent;
+          color: var(--primary-text-color);
+          font: inherit;
+          font-size: 1rem;
+          font-weight: 600;
+          text-align: left;
+          cursor: pointer;
+        }
+
+        .panel-select:disabled {
+          cursor: default;
+        }
+
+        .panel-status {
+          color: var(--secondary-text-color);
+          font-size: 0.82rem;
+          font-weight: 400;
+          text-align: right;
+        }
+
+        .door-action,
+        .secondary-action {
+          border: 0;
+          border-radius: 10px;
+          padding: 10px 14px;
+          font: inherit;
+          cursor: pointer;
+        }
+
+        .door-action {
+          width: 100%;
+          margin-top: 14px;
+          background: var(--primary-color);
+          color: var(--text-primary-color, white);
+          font-weight: 600;
+        }
+
+        .secondary-action {
+          background: var(--secondary-background-color);
+          color: var(--primary-text-color);
+        }
+
+        .door-action:disabled,
+        .secondary-action:disabled {
+          opacity: 0.45;
+          cursor: default;
+        }
+
+        .intercom-viewer-block {
+          margin-top: 12px;
+        }
+
+        .viewer-toolbar {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          margin-bottom: 8px;
+        }
+
+        #intercom-viewer {
+          min-height: 120px;
+        }
+
+        .notice.compact {
+          padding: 12px;
+        }
+
+        .action-message {
+          margin-top: 12px;
+          padding: 12px;
+          border-radius: 10px;
+          background: var(--secondary-background-color);
+          color: var(--secondary-text-color);
+        }
+
+        .action-message:empty {
+          display: none;
+        }
+
+        .runtime-status {
+          margin-top: 12px;
+        }
+
         .intercom-panel h3 {
           margin: 0 0 8px 0;
           font-size: 1rem;
@@ -514,6 +624,12 @@ class ComelitCard extends HTMLElement {
 
     if (this._activeTab === "surveillance" && this._selectedCamera) {
       this._mountViewer(this._selectedCamera);
+    } else if (
+      this._activeTab === "intercom" &&
+      this._selectedIntercomPanel === "entrance" &&
+      this._intercomViewerOpen
+    ) {
+      this._mountIntercomViewer();
     } else {
       this._updateDynamicState();
     }
@@ -526,6 +642,9 @@ class ComelitCard extends HTMLElement {
 
     if (this._viewerElement) {
       this._viewerElement.hass = this._hass;
+    }
+    if (this._intercomViewerElement) {
+      this._intercomViewerElement.hass = this._hass;
     }
 
     for (const button of this.shadowRoot.querySelectorAll("[data-camera]")) {
@@ -578,17 +697,59 @@ class ComelitCard extends HTMLElement {
       );
     }
 
-    for (const button of this.shadowRoot.querySelectorAll("[data-door]")) {
-      const item =
-        button.dataset.door === "entrance"
-          ? model.entranceDoor
-          : model.gateDoor;
-      button.textContent = item.state
-        ? item.state.state === "unavailable"
-          ? "недоступно"
-          : "доступно"
-        : "entity unavailable";
+    this._updateDoorActionUi(model, call);
+
+    const cameraToggle = this.shadowRoot.querySelector(
+      "[data-intercom-camera-toggle]",
+    );
+    if (cameraToggle) {
+      const camera = this._cameraPresentation(model);
+      cameraToggle.disabled = !camera.available;
+      cameraToggle.textContent = this._intercomViewerOpen
+        ? "Скрыть камеру"
+        : "Показать камеру";
     }
+  }
+
+  _doorPresentation(panel, model, call) {
+    const item = panel === "entrance" ? model.entranceDoor : model.gateDoor;
+    const state = item.state;
+    const lockedByCall =
+      call.active && Boolean(call.panel) && call.panel !== panel;
+    const inFlight = this._doorActionInFlight.has(panel);
+    const pressAllowed =
+      Boolean(state) &&
+      state.state !== "unavailable" &&
+      state.attributes?.standard_press_allowed === true;
+    const blockedByMedia = state?.attributes?.blocked_by_media_session === true;
+
+    let status = "Недоступно";
+    if (inFlight) {
+      status = "Отправка…";
+    } else if (lockedByCall) {
+      status = "Недоступно во время другого вызова";
+    } else if (blockedByMedia) {
+      status = "Недоступно во время отдельной media-сессии";
+    } else if (pressAllowed) {
+      status = "Доступно";
+    }
+
+    return {
+      item,
+      pressAllowed,
+      lockedByCall,
+      inFlight,
+      disabled: !pressAllowed || lockedByCall || inFlight,
+      status,
+    };
+  }
+
+  _cameraPresentation(model) {
+    const state = model.entranceCamera.state;
+    return {
+      entityId: model.entranceCamera.entry?.entity_id || null,
+      available: Boolean(state) && state.state !== "unavailable",
+    };
   }
 
   _renderSurveillance(cameras) {
@@ -645,31 +806,66 @@ class ComelitCard extends HTMLElement {
     }
 
     const model = this._intercomModel();
+    const call = this._callPresentation();
     const listener =
       model.listenerStatus.state?.state ||
       (model.listenerStatus.entry ? "unknown" : "entity unavailable");
-    const call = this._callPresentation();
     const callPanelName = call.panel
       ? call.panel === "entrance"
         ? "Подъезд"
         : "Калитка"
       : "";
 
-    const entranceCamera = model.entranceCamera.entry
-      ? model.entranceCamera.entry.entity_id
-      : "камера недоступна";
+    if (call.active && (call.panel === "entrance" || call.panel === "gate")) {
+      this._selectedIntercomPanel = call.panel;
+    }
 
-    const entranceDoor = model.entranceDoor.state
-      ? model.entranceDoor.state.state === "unavailable"
-        ? "недоступно"
-        : "доступно"
-      : "entity unavailable";
+    const entranceSelected = this._selectedIntercomPanel === "entrance";
+    const gateSelected = this._selectedIntercomPanel === "gate";
+    const entranceLocked =
+      call.active && Boolean(call.panel) && call.panel !== "entrance";
+    const gateLocked =
+      call.active && Boolean(call.panel) && call.panel !== "gate";
 
-    const gateDoor = model.gateDoor.state
-      ? model.gateDoor.state.state === "unavailable"
-        ? "недоступно"
-        : "доступно"
-      : "entity unavailable";
+    const entranceDoor = this._doorPresentation("entrance", model, call);
+    const gateDoor = this._doorPresentation("gate", model, call);
+    const camera = this._cameraPresentation(model);
+
+    const actionMessage = `
+      <div
+        data-door-action-message
+        class="action-message ${this._doorActionMessage?.kind === "error" ? "error" : ""}"
+      >${escapeHtml(this._doorActionMessage?.text || "")}</div>
+    `;
+
+    const selectedViewer = entranceSelected
+      ? `
+        <div class="intercom-viewer-block">
+          <div class="viewer-toolbar">
+            <strong>Камера подъезда</strong>
+            <button
+              class="secondary-action"
+              data-intercom-camera-toggle
+              ${camera.available ? "" : "disabled"}
+            >${this._intercomViewerOpen ? "Скрыть камеру" : "Показать камеру"}</button>
+          </div>
+          ${camera.available
+            ? this._intercomViewerOpen
+              ? '<div id="intercom-viewer"></div>'
+              : '<div class="notice compact">Видео запускается только после нажатия «Показать камеру».</div>'
+            : '<div class="notice compact">Камера подъезда сейчас недоступна.</div>'}
+        </div>
+      `
+      : `
+        <div class="intercom-viewer-block">
+          <div class="viewer-toolbar">
+            <strong>Камера калитки</strong>
+          </div>
+          <div class="notice compact">
+            Отдельная камера калитки пока не опубликована интеграцией.
+          </div>
+        </div>
+      `;
 
     return `
       <div class="call-banner ${call.active ? "active" : ""}">
@@ -679,28 +875,52 @@ class ComelitCard extends HTMLElement {
           <span data-call-media>${call.mediaAttached ? " · видео активно" : ""}</span>
         </span>
       </div>
+
       <div class="intercom-grid">
-        <div
-          class="intercom-panel ${call.active && call.panel === "entrance" ? "active-call" : ""} ${call.active && call.panel && call.panel !== "entrance" ? "call-locked" : ""}"
+        <section
+          class="intercom-panel ${entranceSelected ? "selected-panel" : ""} ${call.active && call.panel === "entrance" ? "active-call" : ""} ${entranceLocked ? "call-locked" : ""}"
           data-intercom-panel="entrance"
         >
-          <h3>Подъезд</h3>
-          <div class="meta">Камера: ${escapeHtml(entranceCamera)}</div>
-          <div class="meta">Открытие: <span data-door="entrance">${escapeHtml(entranceDoor)}</span></div>
-        </div>
-        <div
-          class="intercom-panel ${call.active && call.panel === "gate" ? "active-call" : ""} ${call.active && call.panel && call.panel !== "gate" ? "call-locked" : ""}"
+          <button
+            class="panel-select"
+            data-intercom-select="entrance"
+            ${entranceLocked ? "disabled" : ""}
+          >
+            <span>Подъезд</span>
+            <span class="panel-status">${escapeHtml(entranceDoor.status)}</span>
+          </button>
+          <button
+            class="door-action"
+            data-door-action="entrance"
+            ${entranceDoor.disabled ? "disabled" : ""}
+          >Открыть подъезд</button>
+        </section>
+
+        <section
+          class="intercom-panel ${gateSelected ? "selected-panel" : ""} ${call.active && call.panel === "gate" ? "active-call" : ""} ${gateLocked ? "call-locked" : ""}"
           data-intercom-panel="gate"
         >
-          <h3>Калитка</h3>
-          <div class="meta">Камера: пока не опубликована интеграцией</div>
-          <div class="meta">Открытие: <span data-door="gate">${escapeHtml(gateDoor)}</span></div>
-        </div>
+          <button
+            class="panel-select"
+            data-intercom-select="gate"
+            ${gateLocked ? "disabled" : ""}
+          >
+            <span>Калитка</span>
+            <span class="panel-status">${escapeHtml(gateDoor.status)}</span>
+          </button>
+          <button
+            class="door-action"
+            data-door-action="gate"
+            ${gateDoor.disabled ? "disabled" : ""}
+          >Открыть калитку</button>
+        </section>
       </div>
-      <div class="meta">Listener: <span data-listener-state>${escapeHtml(listener)}</span></div>
-      <div class="notice" style="margin-top: 12px">
-        Вкладка использует authoritative call state из Home Assistant.
-        Управляющие Media/Door/microphone actions будут добавлены отдельным этапом.
+
+      ${selectedViewer}
+      ${actionMessage}
+
+      <div class="meta runtime-status">
+        Listener: <span data-listener-state>${escapeHtml(listener)}</span>
       </div>
     `;
   }
@@ -708,7 +928,11 @@ class ComelitCard extends HTMLElement {
   _bindHandlers() {
     for (const button of this.shadowRoot.querySelectorAll("[data-tab]")) {
       button.addEventListener("click", () => {
-        this._activeTab = button.dataset.tab;
+        const nextTab = button.dataset.tab;
+        if (nextTab === "surveillance") {
+          this._intercomViewerOpen = false;
+        }
+        this._activeTab = nextTab;
         this._render();
       });
     }
@@ -718,6 +942,198 @@ class ComelitCard extends HTMLElement {
         this._selectedCamera = button.dataset.camera;
         this._render();
       });
+    }
+
+    for (const button of this.shadowRoot.querySelectorAll("[data-intercom-select]")) {
+      button.addEventListener("click", () => {
+        const panel = button.dataset.intercomSelect;
+        const call = this._callPresentation();
+        if (
+          panel !== "entrance" &&
+          panel !== "gate"
+        ) {
+          return;
+        }
+        if (call.active && call.panel && call.panel !== panel) {
+          return;
+        }
+        if (panel !== this._selectedIntercomPanel) {
+          this._intercomViewerOpen = false;
+        }
+        this._selectedIntercomPanel = panel;
+        this._doorActionMessage = undefined;
+        this._render();
+      });
+    }
+
+    const cameraToggle = this.shadowRoot.querySelector(
+      "[data-intercom-camera-toggle]",
+    );
+    if (cameraToggle) {
+      cameraToggle.addEventListener("click", () => {
+        const model = this._intercomModel();
+        const camera = this._cameraPresentation(model);
+        if (!camera.available || this._selectedIntercomPanel !== "entrance") {
+          return;
+        }
+        this._intercomViewerOpen = !this._intercomViewerOpen;
+        this._render();
+      });
+    }
+
+    for (const button of this.shadowRoot.querySelectorAll("[data-door-action]")) {
+      button.addEventListener("click", () => {
+        this._pressDoor(button.dataset.doorAction);
+      });
+    }
+  }
+
+  async _pressDoor(panel) {
+    if (!this._hass || (panel !== "entrance" && panel !== "gate")) {
+      return;
+    }
+
+    const model = this._intercomModel();
+    const call = this._callPresentation();
+    const door = this._doorPresentation(panel, model, call);
+    const entityId = door.item.entry?.entity_id;
+
+    if (door.disabled || !entityId) {
+      this._doorActionMessage = {
+        kind: "error",
+        text: "Открытие сейчас недоступно.",
+      };
+      this._updateDynamicState();
+      return;
+    }
+
+    this._doorActionInFlight.add(panel);
+    this._doorActionMessage = undefined;
+    this._updateDynamicState();
+
+    try {
+      // One explicit user press maps to exactly one semantic HA button press.
+      // No automatic retry is allowed here.
+      await this._hass.callService("button", "press", {
+        entity_id: entityId,
+      });
+      this._doorActionMessage = {
+        kind: "info",
+        text:
+          panel === "entrance"
+            ? "Команда открытия подъезда отправлена. Физическое открытие не подтверждается интеграцией."
+            : "Команда открытия калитки отправлена. Физическое открытие не подтверждается интеграцией.",
+      };
+    } catch (error) {
+      this._doorActionMessage = {
+        kind: "error",
+        text: `Команда не выполнена: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      };
+    } finally {
+      this._doorActionInFlight.delete(panel);
+      this._updateDynamicState();
+    }
+  }
+
+  _updateDoorActionUi(model, call) {
+    for (const button of this.shadowRoot.querySelectorAll("[data-door-action]")) {
+      const panel = button.dataset.doorAction;
+      if (panel !== "entrance" && panel !== "gate") {
+        continue;
+      }
+      const door = this._doorPresentation(panel, model, call);
+      button.disabled = door.disabled;
+      button.textContent =
+        door.inFlight
+          ? "Отправка…"
+          : panel === "entrance"
+            ? "Открыть подъезд"
+            : "Открыть калитку";
+
+      const panelRoot = this.shadowRoot.querySelector(
+        `[data-intercom-panel="${panel}"]`,
+      );
+      const status = panelRoot?.querySelector(".panel-status");
+      if (status) {
+        status.textContent = door.status;
+      }
+    }
+
+    const message = this.shadowRoot.querySelector("[data-door-action-message]");
+    if (message) {
+      message.textContent = this._doorActionMessage?.text || "";
+      message.classList.toggle(
+        "error",
+        this._doorActionMessage?.kind === "error",
+      );
+    }
+  }
+
+  async _mountIntercomViewer() {
+    const target = this.shadowRoot?.querySelector("#intercom-viewer");
+    if (
+      !target ||
+      !this._hass ||
+      !this._intercomViewerOpen ||
+      this._selectedIntercomPanel !== "entrance"
+    ) {
+      return;
+    }
+
+    const model = this._intercomModel();
+    const camera = this._cameraPresentation(model);
+    if (!camera.entityId || !camera.available) {
+      target.innerHTML = '<div class="notice compact">Камера подъезда недоступна.</div>';
+      return;
+    }
+
+    const generation = ++this._intercomViewerGeneration;
+    target.innerHTML = '<div class="notice compact">Подключение камеры подъезда…</div>';
+
+    try {
+      if (typeof window.loadCardHelpers !== "function") {
+        throw new Error("loadCardHelpers unavailable");
+      }
+
+      const helpers = await window.loadCardHelpers();
+      const viewer = await helpers.createCardElement({
+        type: "picture-entity",
+        entity: camera.entityId,
+        camera_view: "live",
+        show_name: false,
+        show_state: false,
+      });
+
+      if (
+        generation !== this._intercomViewerGeneration ||
+        !this._intercomViewerOpen ||
+        this._selectedIntercomPanel !== "entrance" ||
+        this._activeTab !== "intercom"
+      ) {
+        return;
+      }
+
+      viewer.hass = this._hass;
+      this._intercomViewerElement = viewer;
+      const currentTarget = this.shadowRoot?.querySelector("#intercom-viewer");
+      if (currentTarget) {
+        currentTarget.replaceChildren(viewer);
+      }
+    } catch (error) {
+      if (generation !== this._intercomViewerGeneration) {
+        return;
+      }
+      const currentTarget = this.shadowRoot?.querySelector("#intercom-viewer");
+      if (currentTarget) {
+        currentTarget.innerHTML = `
+          <div class="notice compact error">
+            Не удалось открыть камеру подъезда:
+            ${escapeHtml(error instanceof Error ? error.message : error)}
+          </div>
+        `;
+      }
     }
   }
 

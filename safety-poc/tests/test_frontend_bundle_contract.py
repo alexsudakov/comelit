@@ -35,11 +35,35 @@ class FrontendBundleContractTest(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, source)
 
-    def test_surveillance_mvp_does_not_issue_ha_service_actions(self) -> None:
+    def test_intercom_door_actions_use_only_semantic_ha_button_press(self) -> None:
         source = CARD.read_text(encoding="utf-8")
 
-        self.assertNotIn(".callService(", source)
-        self.assertNotIn(".call_service(", source)
+        self.assertIn('this._hass.callService("button", "press"', source)
+        self.assertEqual(source.count(".callService("), 1)
+        self.assertNotIn('callService("comelit"', source)
+        self.assertNotIn("async_open_door", source)
+        self.assertIn("No automatic retry is allowed here.", source)
+        self.assertIn(
+            "Физическое открытие не подтверждается интеграцией.",
+            source,
+        )
+
+    def test_intercom_camera_view_is_explicit_and_uses_standard_ha_viewer(self) -> None:
+        source = CARD.read_text(encoding="utf-8")
+
+        self.assertIn("data-intercom-camera-toggle", source)
+        self.assertIn('id="intercom-viewer"', source)
+        self.assertIn("this._intercomViewerOpen", source)
+        self.assertIn("async _mountIntercomViewer()", source)
+        self.assertIn('camera_view: "live"', source)
+
+    def test_active_call_locks_other_intercom_panel(self) -> None:
+        source = CARD.read_text(encoding="utf-8")
+
+        self.assertIn("data-intercom-select", source)
+        self.assertIn("call.active && call.panel && call.panel !== panel", source)
+        self.assertIn('data-door-action="entrance"', source)
+        self.assertIn('data-door-action="gate"', source)
 
     def test_card_uses_authoritative_call_state_for_one_shot_focus(self) -> None:
         source = CARD.read_text(encoding="utf-8")
