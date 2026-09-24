@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import inspect
 import logging
 import re
@@ -15,8 +14,6 @@ from homeassistant.components.camera import (
 )
 from homeassistant.components.camera.const import DATA_CAMERA_PREFS
 from homeassistant.components.stream import (
-    ATTR_SETTINGS,
-    ATTR_STREAMS,
     DOMAIN as STREAM_DOMAIN,
     Stream,
 )
@@ -86,6 +83,8 @@ _CAMERA_VIEW_LEASE_REASON = "camera_view"
 _CAMERA_VIEW_MONITOR_INTERVAL_SECONDS = 1.0
 _CAMERA_VIEW_PROVIDER_START_TIMEOUT_SECONDS = 65.0
 _CAMERA_VIEW_ABSOLUTE_LIMIT_SECONDS = 600.0
+_CAMERA_ATTACHED_JOIN_WAIT_SECONDS = 2.0
+_CAMERA_ATTACHED_JOIN_POLL_SECONDS = 0.05
 _DIAGNOSTIC_SAFE_STRING = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
 _HLS_CODEC_STRING = re.compile(
     r"^(avc1|avc3|hvc1|hev1|mp4a|opus|mp4v)\.[0-9A-Fa-f.]+$"
@@ -568,7 +567,10 @@ class ComelitEntranceCamera(Camera):
 
     def _log_hls_runtime_diagnostics_if_changed(self) -> None:
         payload = self._hls_runtime_diagnostics()
-        payload["video_packet_count"] = self._transport.video_packet_count
+        active_transport = self._camera_view_transport or self._transport
+        payload["video_packet_count"] = getattr(
+            active_transport, "video_packet_count", 0
+        )
         signature = tuple((field, payload[field]) for field in sorted(payload))
         if signature == self._last_hls_diagnostics_signature:
             return
@@ -615,6 +617,19 @@ class ComelitEntranceCamera(Camera):
             )
             self._automatic_start_ready = False
             return False
+
+    async def _async_wait_for_attached_claim(self) -> bool:
+        """Wait briefly for a just-observed inbound Ring to claim its session."""
+        session = self._attached_session
+        if session is None:
+            return False
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _CAMERA_ATTACHED_JOIN_WAIT_SECONDS
+        while loop.time() < deadline:
+            if session.claimed:
+                return True
+            await asyncio.sleep(_CAMERA_ATTACHED_JOIN_POLL_SECONDS)
+        return session.claimed
 
     async def _async_bind_camera_view(
         self,
@@ -684,7 +699,7 @@ class ComelitEntranceCamera(Camera):
                     and attached_session is not None
                     and attached_transport is not None
                     and attached_provider is not None
-                    and attached_session.claimed
+                    and await self._async_wait_for_attached_claim()
                 ):
                     try:
                         await attached_session.async_acquire(
