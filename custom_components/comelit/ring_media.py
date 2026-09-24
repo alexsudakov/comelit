@@ -182,16 +182,14 @@ class HAStreamMediaProvider:
     async def async_release_consumer(self, reason: str) -> None:
         if not _SAFE_STREAM_CONSUMER.fullmatch(reason):
             raise ValueError("invalid_stream_consumer_reason")
-        should_close = False
         async with self._consumer_lock:
             count = self._consumers.get(reason, 0)
             if count <= 1:
                 self._consumers.pop(reason, None)
             else:
                 self._consumers[reason] = count - 1
-            should_close = not self._consumers
-        if should_close:
-            await self.async_close()
+            if not self._consumers:
+                await self._async_close_unlocked()
 
     async def _async_stream_source(self) -> str | None:
         if not self._manager.active:
@@ -244,11 +242,18 @@ class HAStreamMediaProvider:
             return None
         return await stream.async_get_image()
 
-    async def async_close(self) -> None:
+    async def _async_close_unlocked(self) -> None:
         stream = self._stream
         self._stream = None
         if stream is not None and hasattr(stream, "stop"):
             await stream.stop()
+
+    async def async_close(self) -> None:
+        """Close only when no named stream consumer still owns the provider."""
+        async with self._consumer_lock:
+            if self._consumers:
+                return
+            await self._async_close_unlocked()
 
     async def async_record_mp4(
         self,
