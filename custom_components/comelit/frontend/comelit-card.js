@@ -6,7 +6,24 @@ const INTERCOM_UNIQUE_IDS = Object.freeze({
   entranceDoor: "comelit_main_entrance_open_door",
   gateDoor: "comelit_main_gate_open_door",
   listenerStatus: "comelit_listener_status",
+  callState: "comelit_call_state",
 });
+
+const CALL_STATE_LABELS = Object.freeze({
+  idle: "Нет активного вызова",
+  ringing: "Входящий вызов",
+  answering: "Ответ",
+  in_call: "Разговор",
+  ending: "Завершение",
+  error: "Ошибка вызова",
+});
+
+const ACTIVE_CALL_STATES = new Set([
+  "ringing",
+  "answering",
+  "in_call",
+  "ending",
+]);
 
 const INTERCOM_CAMERA_UNIQUE_IDS = new Set([
   INTERCOM_UNIQUE_IDS.entranceCamera,
@@ -42,6 +59,7 @@ class ComelitCard extends HTMLElement {
     this._viewerGeneration = 0;
     this._viewerElement = undefined;
     this._rendered = false;
+    this._focusedCallEventId = undefined;
   }
 
   static getStubConfig() {
@@ -86,6 +104,12 @@ class ComelitCard extends HTMLElement {
     this._loadRegistries();
 
     if (firstHass || !this._rendered) {
+      this._maybeFocusIncomingCall();
+      this._render();
+      return;
+    }
+
+    if (this._maybeFocusIncomingCall()) {
       this._render();
       return;
     }
@@ -125,6 +149,7 @@ class ComelitCard extends HTMLElement {
       })
       .finally(() => {
         this._registryPromise = undefined;
+        this._maybeFocusIncomingCall();
         this._render();
       });
 
@@ -247,7 +272,45 @@ class ComelitCard extends HTMLElement {
       entranceDoor: resolve("entranceDoor"),
       gateDoor: resolve("gateDoor"),
       listenerStatus: resolve("listenerStatus"),
+      callState: resolve("callState"),
     };
+  }
+
+  _callPresentation() {
+    const model = this._intercomModel();
+    const state = model.callState.state;
+    const callState = state?.state || "unavailable";
+    const panel = state?.attributes?.panel || null;
+    const eventId = state?.attributes?.event_id || null;
+    const active = ACTIVE_CALL_STATES.has(callState);
+
+    return {
+      state: callState,
+      label: CALL_STATE_LABELS[callState] || callState,
+      panel,
+      eventId,
+      active,
+      mediaAttached: state?.attributes?.media_attached === true,
+    };
+  }
+
+  _maybeFocusIncomingCall() {
+    if (!this._registryLoaded || !this._hass) {
+      return false;
+    }
+
+    const call = this._callPresentation();
+    if (
+      call.state !== "ringing" ||
+      !call.eventId ||
+      call.eventId === this._focusedCallEventId
+    ) {
+      return false;
+    }
+
+    this._focusedCallEventId = call.eventId;
+    this._activeTab = "intercom";
+    return true;
   }
 
   _render() {
@@ -385,6 +448,36 @@ class ComelitCard extends HTMLElement {
           border: 1px solid var(--divider-color);
           border-radius: 14px;
           background: var(--card-background-color);
+          transition: opacity 120ms ease, border-color 120ms ease;
+        }
+
+        .intercom-panel.active-call {
+          border-color: var(--primary-color);
+          box-shadow: inset 0 0 0 1px var(--primary-color);
+        }
+
+        .intercom-panel.call-locked {
+          opacity: 0.48;
+        }
+
+        .call-banner {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          align-items: center;
+          margin-bottom: 12px;
+          padding: 10px 12px;
+          border-radius: 12px;
+          background: var(--secondary-background-color);
+        }
+
+        .call-banner.active {
+          border: 1px solid var(--primary-color);
+        }
+
+        .call-panel-name {
+          color: var(--secondary-text-color);
+          font-size: 0.9rem;
         }
 
         .intercom-panel h3 {
@@ -447,16 +540,45 @@ class ComelitCard extends HTMLElement {
       }
     }
 
+    const model = this._intercomModel();
     const listener = this.shadowRoot.querySelector("[data-listener-state]");
     if (listener) {
-      const model = this._intercomModel();
       listener.textContent =
         model.listenerStatus.state?.state ||
         (model.listenerStatus.entry ? "unknown" : "entity unavailable");
     }
 
+    const call = this._callPresentation();
+    const callState = this.shadowRoot.querySelector("[data-call-state]");
+    if (callState) {
+      callState.textContent = call.label;
+    }
+    const callPanel = this.shadowRoot.querySelector("[data-call-panel]");
+    if (callPanel) {
+      callPanel.textContent = call.panel
+        ? call.panel === "entrance"
+          ? "Подъезд"
+          : "Калитка"
+        : "";
+    }
+    const callMedia = this.shadowRoot.querySelector("[data-call-media]");
+    if (callMedia) {
+      callMedia.textContent = call.mediaAttached ? "видео активно" : "";
+    }
+
+    for (const panel of this.shadowRoot.querySelectorAll("[data-intercom-panel]")) {
+      const panelId = panel.dataset.intercomPanel;
+      panel.classList.toggle(
+        "active-call",
+        call.active && call.panel === panelId,
+      );
+      panel.classList.toggle(
+        "call-locked",
+        call.active && call.panel && call.panel !== panelId,
+      );
+    }
+
     for (const button of this.shadowRoot.querySelectorAll("[data-door]")) {
-      const model = this._intercomModel();
       const item =
         button.dataset.door === "entrance"
           ? model.entranceDoor
@@ -526,6 +648,12 @@ class ComelitCard extends HTMLElement {
     const listener =
       model.listenerStatus.state?.state ||
       (model.listenerStatus.entry ? "unknown" : "entity unavailable");
+    const call = this._callPresentation();
+    const callPanelName = call.panel
+      ? call.panel === "entrance"
+        ? "Подъезд"
+        : "Калитка"
+      : "";
 
     const entranceCamera = model.entranceCamera.entry
       ? model.entranceCamera.entry.entity_id
@@ -544,13 +672,26 @@ class ComelitCard extends HTMLElement {
       : "entity unavailable";
 
     return `
+      <div class="call-banner ${call.active ? "active" : ""}">
+        <strong data-call-state>${escapeHtml(call.label)}</strong>
+        <span class="call-panel-name">
+          <span data-call-panel>${escapeHtml(callPanelName)}</span>
+          <span data-call-media>${call.mediaAttached ? " · видео активно" : ""}</span>
+        </span>
+      </div>
       <div class="intercom-grid">
-        <div class="intercom-panel">
+        <div
+          class="intercom-panel ${call.active && call.panel === "entrance" ? "active-call" : ""} ${call.active && call.panel && call.panel !== "entrance" ? "call-locked" : ""}"
+          data-intercom-panel="entrance"
+        >
           <h3>Подъезд</h3>
           <div class="meta">Камера: ${escapeHtml(entranceCamera)}</div>
           <div class="meta">Открытие: <span data-door="entrance">${escapeHtml(entranceDoor)}</span></div>
         </div>
-        <div class="intercom-panel">
+        <div
+          class="intercom-panel ${call.active && call.panel === "gate" ? "active-call" : ""} ${call.active && call.panel && call.panel !== "gate" ? "call-locked" : ""}"
+          data-intercom-panel="gate"
+        >
           <h3>Калитка</h3>
           <div class="meta">Камера: пока не опубликована интеграцией</div>
           <div class="meta">Открытие: <span data-door="gate">${escapeHtml(gateDoor)}</span></div>
@@ -558,8 +699,8 @@ class ComelitCard extends HTMLElement {
       </div>
       <div class="meta">Listener: <span data-listener-state>${escapeHtml(listener)}</span></div>
       <div class="notice" style="margin-top: 12px">
-        На этом MVP вкладка «Домофон» только отображает состояние.
-        Media/Door actions и call routing будут добавлены отдельным этапом.
+        Вкладка использует authoritative call state из Home Assistant.
+        Управляющие Media/Door/microphone actions будут добавлены отдельным этапом.
       </div>
     `;
   }
