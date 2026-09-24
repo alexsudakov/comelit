@@ -564,36 +564,149 @@ class ComelitEntranceCamera(Camera):
             ),
         )
 
+    async def _async_disable_preload_stream(self) -> bool:
+        """Persistently disable HA stream preloading for this intercom camera."""
+        try:
+            settings = await get_dynamic_camera_stream_settings(
+                self.hass, self.entity_id
+            )
+            if not settings.preload_stream:
+                self._automatic_start_ready = True
+                return True
+
+            prefs = self.hass.data.get(DATA_CAMERA_PREFS)
+            if prefs is None:
+                _LOGGER.error(
+                    "Comelit automatic camera start blocked: camera preferences unavailable"
+                )
+                self._automatic_start_ready = False
+                return False
+
+            await prefs.async_update(self.entity_id, preload_stream=False)
+            settings = await get_dynamic_camera_stream_settings(
+                self.hass, self.entity_id
+            )
+            self._automatic_start_ready = not settings.preload_stream
+            if not self._automatic_start_ready:
+                _LOGGER.error(
+                    "Comelit automatic camera start blocked: preload_stream remained enabled"
+                )
+            return self._automatic_start_ready
+        except Exception:
+            _LOGGER.exception(
+                "Comelit automatic camera start blocked: cannot disable preload_stream"
+            )
+            self._automatic_start_ready = False
+            return False
+
+    async def _async_acquire_camera_view_media(self) -> None:
+        """Acquire one camera-view lease, preferring an inbound Ring transaction."""
+        async with self._camera_view_lock:
+            if self._camera_view_owner is not None:
+                if self._camera_view_owner.active:
+                    return
+                self._camera_view_owner = None
+                self._camera_view_transport = None
+                self._camera_view_owner_kind = None
+
+            attached_session = self._attached_session
+            attached_transport = self._attached_transport
+
+            if (
+                attached_session is not None
+                and attached_transport is not None
+                and attached_session.claimed
+            ):
+                await attached_session.async_acquire(
+                    panel="entrance",
+                    reason=_CAMERA_VIEW_LEASE_REASON,
+                )
+                self._camera_view_owner = attached_session
+                self._camera_view_transport = attached_transport
+                self._camera_view_owner_kind = "attached_inbound"
+                return
+
+            try:
+                await self._manager.async_acquire(
+                    panel="entrance",
+                    reason=_CAMERA_VIEW_LEASE_REASON,
+                )
+            except ComelitMediaSessionError as exc:
+                # A Ring can win the race after the claimed check above. The
+                # on-demand manager rejects attached media before pausing the
+                # listener or sending any network request, so joining the now
+                # claimed inbound transaction is not a retry of an ambiguous
+                # media bootstrap.
+                if (
+                    str(exc) == "attached_inbound_media_busy"
+                    and attached_session is not None
+                    and attached_transport is not None
+                    and attached_session.claimed
+                ):
+                    try:
+                        await attached_session.async_acquire(
+                            panel="entrance",
+                            reason=_CAMERA_VIEW_LEASE_REASON,
+                        )
+                    except ComelitAttachedMediaError:
+                        raise
+                    self._camera_view_owner = attached_session
+                    self._camera_view_transport = attached_transport
+                    self._camera_view_owner_kind = "attached_inbound"
+                    return
+                raise
+
+            self._camera_view_owner = self._manager
+            self._camera_view_transport = self._transport
+            self._camera_view_owner_kind = "on_demand"
+
+    async def _async_release_camera_view_media(self) -> None:
+        async with self._camera_view_lock:
+            owner = self._camera_view_owner
+            self._camera_view_owner = None
+            self._camera_view_transport = None
+            self._camera_view_owner_kind = None
+            if owner is None:
+                return
+            try:
+                await owner.async_release(reason=_CAMERA_VIEW_LEASE_REASON)
+            except Exception:
+                _LOGGER.exception("Failed to release Comelit camera-view media lease")
+
     async def stream_source(self) -> str | None:
-        """Return local SDP only while the explicit media switch owns a session."""
-        if not self._manager.active:
+        """Return the local SDP for the camera-owned live-view lease."""
+        owner = self._camera_view_owner
+        transport = self._camera_view_transport
+        if owner is None or transport is None or not owner.active:
             return None
-        path = self._transport.local_sdp_path
+        path = transport.local_sdp_path
         ready = await self.hass.async_add_executor_job(
-            lambda: self._transport.local_sdp_ready
+            lambda: transport.local_sdp_ready
         )
         if not ready:
             return None
         return str(path)
 
     async def async_create_stream(self) -> Stream | None:
-        """Create HA Stream while passing SDP protocol permissions to PyAV.
+        """Start one bounded Comelit session only for an explicit HA stream request."""
+        if not self._automatic_start_ready:
+            if not await self._async_disable_preload_stream():
+                return None
 
-        Current Home Assistant validates camera ``stream_options`` and no longer
-        accepts arbitrary FFmpeg/PyAV keys such as ``protocol_whitelist``.
-        A local SDP file which references RTP/UDP still requires that whitelist
-        at the libavformat layer, so construct the standard HA Stream directly
-        with the required PyAV option instead of placing it in stream_options.
-        """
-        if not self._manager.active:
-            return None
         if not self._create_stream_lock:
             self._create_stream_lock = asyncio.Lock()
+
         async with self._create_stream_lock:
-            if self.stream is None:
+            if self.stream is not None and self._camera_view_owner is not None:
+                return self.stream
+
+            await self._async_acquire_camera_view_media()
+            try:
                 source = await self.stream_source()
                 if source is None:
-                    return None
+                    raise HomeAssistantError(
+                        "Comelit live-view media source did not become ready"
+                    )
                 stream = Stream(
                     self.hass,
                     source,
@@ -611,23 +724,31 @@ class ComelitEntranceCamera(Camera):
                 self.stream = stream
                 self._reset_hls_http_probe_state()
                 self._last_hls_diagnostics_signature = None
-            return self.stream
+                self._start_camera_view_monitor()
+                return stream
+            except BaseException:
+                await self._async_release_camera_view_media()
+                raise
 
     async def async_camera_image(
         self,
         width: int | None = None,
         height: int | None = None,
     ) -> bytes | None:
-        """Return a still only from an already-active local media stream."""
-        if not self._manager.active:
-            return None
-        stream = self.stream or await self.async_create_stream()
-        if stream is None:
+        """Return a still only if a live stream already owns media.
+
+        This method deliberately never calls async_create_stream(), preventing
+        entity-picture/thumbnail polling from opening the intercom camera.
+        """
+        owner = self._camera_view_owner
+        stream = self.stream
+        if owner is None or not owner.active or stream is None:
             return None
         return await stream.async_get_image(width=width, height=height)
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
+        await self._async_disable_preload_stream()
         self.async_on_remove(
             self._manager.async_add_status_listener(self._handle_status_update)
         )
@@ -636,15 +757,25 @@ class ComelitEntranceCamera(Camera):
         )
 
     async def async_will_remove_from_hass(self) -> None:
+        monitor = self._camera_view_monitor_task
+        self._camera_view_monitor_task = None
+        if monitor is not None and not monitor.done():
+            monitor.cancel()
+            try:
+                await monitor
+            except asyncio.CancelledError:
+                pass
         await self._async_reset_stream()
+        await self._async_release_camera_view_media()
         await super().async_will_remove_from_hass()
 
     def _handle_status_update(self) -> None:
-        if not self._manager.active and self.stream is not None:
+        owner = self._camera_view_owner
+        if owner is not None and not owner.active and self.stream is not None:
             if self._stream_reset_task is None or self._stream_reset_task.done():
                 self._stream_reset_task = self.hass.async_create_task(
-                    self._async_reset_stream(),
-                    "reset Comelit entrance camera stream",
+                    self._async_end_camera_view("media_owner_inactive"),
+                    "end Comelit camera view after media owner stopped",
                 )
         hls_diagnostics = self._hls_runtime_diagnostics()
         if (
@@ -664,6 +795,85 @@ class ComelitEntranceCamera(Camera):
             )
         self._log_hls_runtime_diagnostics_if_changed()
         self.async_write_ha_state()
+
+    def _start_camera_view_monitor(self) -> None:
+        task = self._camera_view_monitor_task
+        if task is not None and not task.done():
+            return
+        self._camera_view_monitor_task = self.hass.async_create_task(
+            self._async_monitor_camera_view(),
+            "monitor Comelit camera live-view lease",
+        )
+
+    async def _async_monitor_camera_view(self) -> None:
+        """Release media after HA removes the last stream consumer.
+
+        HLS itself owns the viewer-idle timer. This monitor only observes the
+        provider lifecycle; it does not invent a second idle timeout. A short
+        startup bound prevents an abandoned async_create_stream() call from
+        holding Comelit media when no provider is ever attached.
+        """
+        loop = asyncio.get_running_loop()
+        provider_start_deadline = (
+            loop.time() + _CAMERA_VIEW_PROVIDER_START_TIMEOUT_SECONDS
+        )
+        absolute_deadline = loop.time() + _CAMERA_VIEW_ABSOLUTE_LIMIT_SECONDS
+        provider_seen = False
+        reason = "provider_never_started"
+
+        try:
+            while True:
+                owner = self._camera_view_owner
+                stream = self.stream
+                if owner is None or stream is None:
+                    reason = "camera_view_missing"
+                    break
+                if not owner.active:
+                    reason = "media_owner_inactive"
+                    break
+                if loop.time() >= absolute_deadline:
+                    reason = "camera_view_absolute_timeout"
+                    break
+
+                try:
+                    outputs = stream.outputs()
+                except Exception:
+                    reason = "stream_outputs_unavailable"
+                    break
+
+                if outputs:
+                    provider_seen = True
+                    hls_provider = outputs.get(HLS_PROVIDER)
+                    non_hls_present = any(
+                        name != HLS_PROVIDER for name in outputs
+                    )
+                    if (
+                        hls_provider is not None
+                        and not non_hls_present
+                        and bool(getattr(hls_provider, "idle", False))
+                    ):
+                        reason = "hls_idle"
+                        break
+                elif provider_seen:
+                    reason = "last_stream_provider_removed"
+                    break
+                elif loop.time() >= provider_start_deadline:
+                    reason = "provider_never_started"
+                    break
+
+                await asyncio.sleep(_CAMERA_VIEW_MONITOR_INTERVAL_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        else:
+            await self._async_end_camera_view(reason)
+        finally:
+            if self._camera_view_monitor_task is asyncio.current_task():
+                self._camera_view_monitor_task = None
+
+    async def _async_end_camera_view(self, reason: str) -> None:
+        _LOGGER.debug("Ending Comelit camera live view: %s", reason)
+        await self._async_reset_stream()
+        await self._async_release_camera_view_media()
 
     async def _async_reset_stream(self) -> None:
         self._reset_hls_http_probe_state()
