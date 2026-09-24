@@ -13,7 +13,7 @@ Category: Integration
 
 ## Home Assistant Custom Card
 
-Version 1.5.16 includes the surveillance-first Lovelace card, the authoritative Home Assistant call-state sensor, and state-only incoming-call routing in the card.
+Version 1.5.18 adds Phase C intercom controls to the Lovelace card: explicit entrance live view plus semantic Entrance/Gate Door buttons.
 
 After updating the integration and restarting Home Assistant, register this resource once in the Lovelace resource settings:
 
@@ -46,7 +46,13 @@ The card deliberately does not discover every Home Assistant camera automaticall
 
 The surveillance viewer delegates playback to Home Assistant's built-in `picture-entity` card with `camera_view: live`. The card does not enable camera stream preload.
 
-The intercom tab remains action-free in this MVP: it does not invoke Door, media or microphone services.
+The intercom tab now supports an explicit entrance live view and semantic Entrance/Gate Door buttons.
+
+Opening the entrance camera is always an explicit user action. The card delegates playback to Home Assistant's standard camera viewer and does not expose raw stream credentials.
+
+Door buttons resolve the current Comelit button entities by stable unique id and invoke exactly one Home Assistant `button.press` per explicit user click. The card does not retry automatically and never claims that the physical door/gate opened merely because the service call completed.
+
+Microphone / Answer / Hangup remain intentionally out of scope until the full-duplex transport is separately validated.
 
 On a new authoritative `ringing` event, the card focuses the «Домофон» tab once and highlights the active panel. If the user then switches to «Видеонаблюдение», the card does not force the tab back on subsequent Home Assistant state updates. This keeps surveillance viewing independent while a call is active.
 
@@ -70,6 +76,7 @@ On a new authoritative `ringing` event, the card focuses the «Домофон» 
 - Absolute media-session ceiling remains 600 seconds
 - Bundled surveillance-first Home Assistant Custom Card
 - Custom Card incoming-call focus and active-panel highlighting from `sensor.comelit_call_state`
+- Custom Card explicit entrance live view and semantic Entrance/Gate Door buttons
 
 ## Call-state lifecycle
 
