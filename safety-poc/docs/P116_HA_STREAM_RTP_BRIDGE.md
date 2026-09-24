@@ -252,8 +252,11 @@ FFmpeg SDP `sprop-parameter-sets` is the SDP path that seeds H264 extradata.
 По host-прогону выше in-band SPS/PPS достаточно для remux/fMP4-avcC, поэтому
 session-derived `sprop-parameter-sets` в этой фазе НЕ реализуется
 (`SPS_PPS_REQUIREMENT=NOT_REQUIRED` для проверенного пути).
-P116-пин теперь указывает на установленный воспроизводимый native helper:
-`MEDIA_NATIVE_BINARY_SHA256=a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8`.
+P116-пин указывал на установленный воспроизводимый native helper:
+`MEDIA_NATIVE_BINARY_SHA256=a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8`
+(historical since R65; see "R65 production media refresh native build
+provenance" below for the current pin
+`76218861c72e9a2b87283df6c5c7e0b03a4d7fb11bee4364f59be1513acd6129`).
 
 ## Native build provenance
 
@@ -285,12 +288,30 @@ Runtime sections and ABI are identical for that historical comparison:
 `.text`, `.rodata`, `.data`, dynamic section, interpreter, NEEDED libraries,
 symbols, relocations, and PT_LOAD geometry match.
 
-Packaged native pin:
+Packaged native pin (historical, pre-R65):
 
 - `MEDIA_NATIVE_BINARY_SHA256=a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8`
 - `GENERATED_SOURCE_SHA256=1c89d61de4372d96b25f6894862741244753c107a3a9b9e04817250b3bea55b2`
 - Generator: `safety-poc/research/media/v1/entrance_p106_teardown_state_classification_transform.py`
   (P106 teardown-state classification composition, `include_p116=1`), not the standalone P80 transform.
+
+## R65 production media refresh native build provenance
+
+R65 promoted a new packaged native artifact over the pin above, adding a
+bounded same-session periodic 0x001A refresh so on-demand entrance media
+holds video RTP well past the historical ~35s cutoff. Current pin:
+
+- `MEDIA_NATIVE_BINARY_SHA256=76218861c72e9a2b87283df6c5c7e0b03a4d7fb11bee4364f59be1513acd6129`
+- `GENERATED_SOURCE_SHA256=4fc6188c6231b94682205973b6a6f628ca005e8b7c3a04efbd8056c5a608c58c`
+- Generator: `safety-poc/research/media/v1/entrance_p116_r65_production_media_refresh_transform.py`
+  (composes the live-proven R27 repeat-0x001A candidate, itself composed on
+  the P106+P116 generator above), `include_p116=1`.
+- Full raw build facts and gates: `safety-poc/research/media/v1/p116_r65_production_media_build_meta.txt`.
+- `protocol_behavior_changed=false`, `automatic_retry_added=false`,
+  `door_semantics_changed=false`, `gate_semantics_changed=false` — the only
+  functional change is the refresh scheduler in the on-demand media helper;
+  `custom_components/comelit/native/comelit-v4` (persistent listener,
+  Door/Gate) is a disjoint build, untouched.
 
 The generator has an explicit P116 provenance switch:
 
@@ -318,7 +339,8 @@ Provenance table for historical evidence and the current P116 pin:
 |---|---|---:|---|---|---|---|
 | Packaged historical pin | `6fe4413861e7f597bb2f05f445eeb6513d7e8406` | `0` | `0c15927dbc40bdb1f7c522f063a8a2f38c557f9eb735cdd981cdd49449595c79` | Alpine `3.24.1`, GCC `(Alpine 15.2.0) 15.2.0`, musl interpreter `/lib/ld-musl-x86_64.so.1`, C flags `-O2 -g -Wall -Wextra -Wl,--as-needed`, NEEDED `libc.musl-x86_64.so.1,libglib-2.0.so.0,libgobject-2.0.so.0,libnice.so.10` | `91335b4490bc58910c78cb58b9c2d3eccc13f40dcfff7651995ad428cd71ddc7` | Historical reference only after P116 pin |
 | Rebuilt historical source evidence | `6fe4413861e7f597bb2f05f445eeb6513d7e8406` | `0` | `0c15927dbc40bdb1f7c522f063a8a2f38c557f9eb735cdd981cdd49449595c79` | Same runtime toolchain identity as packaged pin; BuildID/debug path metadata differ | `f17ad2d6efbe002335a658c075da84677ced44246d556afe80953a8f59129841` | Runtime equivalence PASS; hash mismatch class `NON_RUNTIME_BUILD_METADATA` |
-| P116 current pin | `53ce0632008709687d9eae69dbaa31b019f021ea` | `1` | `1c89d61de4372d96b25f6894862741244753c107a3a9b9e04817250b3bea55b2` | Alpine `3.24.1`, GCC `(Alpine 15.2.0) 15.2.0`, pkg-config `2.5.1`, glib/gobject `2.88.1`, libnice `0.1.22`, musl interpreter `/lib/ld-musl-x86_64.so.1`, C flags `-O2 -g -Wall -Wextra -Wl,--as-needed`, NEEDED `libc.musl-x86_64.so.1,libglib-2.0.so.0,libgobject-2.0.so.0,libnice.so.10` | `a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8` | MUSL_INTERPRETER_GATE PASS; NO_GLIBC_DEPENDENCY PASS; NO_NEW_RUNTIME_DEPENDENCY PASS; LIB_IDENTICAL PASS; two clean builds byte-identical |
+| P116 pin (historical, pre-R65) | `53ce0632008709687d9eae69dbaa31b019f021ea` | `1` | `1c89d61de4372d96b25f6894862741244753c107a3a9b9e04817250b3bea55b2` | Alpine `3.24.1`, GCC `(Alpine 15.2.0) 15.2.0`, pkg-config `2.5.1`, glib/gobject `2.88.1`, libnice `0.1.22`, musl interpreter `/lib/ld-musl-x86_64.so.1`, C flags `-O2 -g -Wall -Wextra -Wl,--as-needed`, NEEDED `libc.musl-x86_64.so.1,libglib-2.0.so.0,libgobject-2.0.so.0,libnice.so.10` | `a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8` | MUSL_INTERPRETER_GATE PASS; NO_GLIBC_DEPENDENCY PASS; NO_NEW_RUNTIME_DEPENDENCY PASS; LIB_IDENTICAL PASS; two clean builds byte-identical |
+| R65 current pin | `7ef1444f7b0754315ed78f125e5d9101ac648263` | `1` | `4fc6188c6231b94682205973b6a6f628ca005e8b7c3a04efbd8056c5a608c58c` | Alpine `3.24.1` cached chroot, musl interpreter `/lib/ld-musl-x86_64.so.1`, NEEDED `libc.musl-x86_64.so.1,libglib-2.0.so.0,libgobject-2.0.so.0,libnice.so.10` (toolchain version strings NOT_OBSERVED this build) | `76218861c72e9a2b87283df6c5c7e0b03a4d7fb11bee4364f59be1513acd6129` | MUSL_INTERPRETER_GATE PASS; NO_GLIBC_DEPENDENCY PASS; NO_NEW_RUNTIME_DEPENDENCY PASS; two clean builds byte-identical (REPRODUCIBLE_BINARY_CMP_GATE PASS) |
 
 Pinned vs rebuilt-historical binary diagnosis: full-file SHA256 is not
 reproducible, but runtime semantics are equivalent. `.text`, `.rodata`,

@@ -253,13 +253,13 @@ class Mvp1RingTelegramOfflineBuildTests(unittest.TestCase):
     def test_media_and_r30h_code_unchanged_by_hash(self) -> None:
         expected = {
             "custom_components/comelit/camera.py": "3bac789e303abba857b45cb794a55aa6a088c6a998507bf664459de4a60f96bd",
-            "custom_components/comelit/media_transport.py": "52e4873ede9c8df16f81ac88dba4c7ffaf27842738e22ab68896c216411aa1d0",
-            "safety-poc/research/media/v1/entrance_p116_r27_repeat_001a_transform.py": "d35275b286c871e38a7dee131ea84e60ff5abad137304dfb95b687652e42d170",
-            "safety-poc/research/media/v1/ct120_run_p116_r27_repeat_001a_live.sh": "eacf557b65e3e7167b4bbb09e2972c3475aaae1e1a78b72de0e3eef7dbe5d87c",
+            "custom_components/comelit/media_transport.py": "5fc79d135a34c48638e49bbc2d010cdd88b4a1c414b005d35de12030fb8df746",
+            "safety-poc/research/media/v1/entrance_p116_r27_repeat_001a_transform.py": "9c4ebff3fe5c54b05bdb31d6bfd1ddbadd76efa72d5c6f1abdc8c8bd4d69160b",
+            "safety-poc/research/media/v1/ct120_run_p116_r27_repeat_001a_live.sh": "d83db03d3e5004dec08cf562ac1eb5933711132a8eeecb994a8374a263e95750",
             "safety-poc/research/media/v1/entrance_p116_r30_call_ctp_envelope_model.py": "367db8028a0a1ed5c09a86b40bb5ae01657d823ca8f6561557338a609ba5a8d0",
             "safety-poc/research/media/v1/entrance_p116_r30b_call_transaction_model.py": "ed14393eb234890d5d2c9d30a9538fe417c52d8658ac7b3f75e3c49e9fa4da47",
             "safety-poc/research/media/v1/ct120_run_p116_r30h_a_repeat_001a_offline_preflight.sh": "7bd144cb2c1ab0971eee55805e81b2e4688a973483edbfc297becc3632fc9a14",
-            "safety-poc/research/media/v1/ct120_run_p116_r30h_c_musl_launcher_offline.sh": "adc609791be328b2f7cada85b9f325067d24bc6dc3390bbb5f34d287e3a225b0",
+            "safety-poc/research/media/v1/ct120_run_p116_r30h_c_musl_launcher_offline.sh": "ddbf36ee7c77305e02581c28af487264150bc84947bd1dd1031109bb2df43c39",
         }
         for relative, digest in expected.items():
             self.assertEqual(sha256(ROOT / relative), digest, relative)

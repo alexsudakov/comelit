@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # CT120 research-only P116/R27 same-session repeat 0x001A live runner.
-# The helper observes for 70 seconds after MEDIA_ACTIVE.  The outer timeout is
-# a hard 150 second bound, giving 80 seconds for OAuth/bootstrap/ICE/P2P and
-# RTPC/ACK setup before the helper's own 70 second observation can finish.
+# The helper observes for 100 seconds after MEDIA_ACTIVE. The wrapper timeout is
+# a hard 120 second per-session bound, allowing at least 90 seconds of proven
+# media while preserving the campaign ceiling.
 
 set -u -o pipefail
 umask 077
@@ -16,11 +16,22 @@ BASE_WRAPPER_SHA256=a564535dff0cf10b1fe4766171f2960c52fb581f1c816cf81d2992c5c84e
 BUILDER_REL=safety-poc/research/media/v1/ct120_build_p80_haos_media_helper.sh
 TRANSFORM_REL=safety-poc/research/media/v1/entrance_p116_r27_repeat_001a_transform.py
 RUNNER_REL=safety-poc/research/media/v1/ct120_run_p116_r27_repeat_001a_live.sh
-EXPECTED_SOURCE_SHA=1c9f13cff0d1d3599e00109146310c7372b1b0ae12117bb46ad68f091a841d42
+EXPECTED_SOURCE_SHA=a923576b493ee94faeb6ec7eb5ece3faaddce951408b05deb24a1952beb31394
 VIDEO_RTP_PORT=17899
 AUDIO_RTP_PORT=17808
-MAX_LIVE_OBSERVATION_SECONDS=70
-OUTER_TIMEOUT_SECONDS=150
+MAX_SINGLE_SESSION_SECONDS=120
+MEDIA_OBSERVATION_SECONDS=115
+# Minimum wall-clock time reserved for build/listener-stop/candidate-launch steps
+# that must complete before the observation window starts. This is an
+# independent requirement, not derived from SETUP_MARGIN_SECONDS below, so the
+# R27_BOUND_INVARIANT check in print_final_block can actually fail if someone
+# shrinks SETUP_MARGIN_SECONDS below what setup needs.
+MIN_SETUP_MARGIN_SECONDS=45
+SETUP_MARGIN_SECONDS=60
+MAX_LIVE_OBSERVATION_SECONDS=$MEDIA_OBSERVATION_SECONDS
+OUTER_TIMEOUT_SECONDS=$((SETUP_MARGIN_SECONDS + MEDIA_OBSERVATION_SECONDS))
+CREDENTIAL_MIN_TTL_SECONDS=900
+OAUTH_STATUS=/usr/local/sbin/comelit-oauth-status
 RUN_DIR=/run/comelit-media
 STOP_FILE="$RUN_DIR/stop"
 CANDIDATE_HOLDER_NAME=comelit-r27-repeat-001a
@@ -46,6 +57,7 @@ LISTENER_RUNNING_AFTER=false
 LISTENER_READY_AFTER=false
 PRODUCTION_MEDIA_ACTIVE=false
 CAMPAIGN_PROCESSES_REMAINING=UNKNOWN
+RTP_SINK_PORTS_REMAINING=UNKNOWN
 CT120_RESEARCH_HELPER_STOPPED=false
 CT120_RESEARCH_SESSION_CLOSED=false
 R27_SESSION_CLOSED=false
@@ -53,6 +65,10 @@ TEARDOWN_CONFIDENCE=UNCERTAIN
 R27_RUN_CLASSIFICATION=NOT_RUN
 R27_REPEAT_EXECUTED=false
 R27_HELPER_EVIDENCE=false
+CREDENTIAL_STATUS_PRESENT=false
+CREDENTIAL_TTL_SECONDS=NOT_REACHED
+CREDENTIAL_TTL_GATE=NOT_REACHED
+CREDENTIAL_REFRESH_REQUIRED=unknown
 
 fail() {
     echo "$1"
@@ -122,7 +138,7 @@ status_stopped() {
 start_udp_sink() {
     local port="$1"
     local count_file="$2"
-    python3 - "$port" "$count_file" "$OUTER_TIMEOUT_SECONDS" <<'PY' &
+    python3 - "$port" "$count_file" "$OUTER_TIMEOUT_SECONDS" >"${count_file}.log" 2>&1 <<'PY' &
 from pathlib import Path
 import signal
 import socket
@@ -237,6 +253,34 @@ last_marker_equals() {
     [ "$(last_marker "$key" __MISSING__)" = "$expected" ]
 }
 
+last_marker_gt() {
+    local key="$1"
+    local threshold="$2"
+    local value
+    value="$(last_marker "$key" NOT_REACHED)"
+    case "$value" in
+        ''|*[!0-9]*)
+            printf '%s\n' NOT_REACHED
+            ;;
+        *)
+            if [ "$value" -gt "$threshold" ]; then
+                printf '%s\n' true
+            else
+                printf '%s\n' false
+            fi
+            ;;
+    esac
+}
+
+sink_datagram_count() {
+    local count_file="$1"
+    if [ -f "$count_file" ]; then
+        tr -d '[:space:]' < "$count_file"
+    else
+        printf '%s' NOT_REACHED
+    fi
+}
+
 p80_video_rtp_progress_positive() {
     [ -f "$SESSION_LOG" ] || return 1
     awk -F= '
@@ -271,6 +315,18 @@ campaign_processes_remaining() {
         CAMPAIGN_PROCESSES_REMAINING=NONE
     fi
     echo "CAMPAIGN_PROCESSES_REMAINING=$CAMPAIGN_PROCESSES_REMAINING"
+}
+
+rtp_sink_ports_remaining() {
+    local remaining=0
+    if [ -n "$VIDEO_SINK_PID" ] && kill -0 "$VIDEO_SINK_PID" 2>/dev/null; then
+        remaining=$((remaining + 1))
+    fi
+    if [ -n "$AUDIO_SINK_PID" ] && kill -0 "$AUDIO_SINK_PID" 2>/dev/null; then
+        remaining=$((remaining + 1))
+    fi
+    RTP_SINK_PORTS_REMAINING="$remaining"
+    echo "RTP_SINK_PORTS_REMAINING=$RTP_SINK_PORTS_REMAINING"
 }
 
 derive_teardown_confidence() {
@@ -325,19 +381,137 @@ derive_production_media_active() {
     echo "PRODUCTION_MEDIA_ACTIVE=$PRODUCTION_MEDIA_ACTIVE"
 }
 
+credential_gate() {
+    local output="$RUN_ROOT/oauth-status.txt"
+    local rc
+    local duuid_present vip_present access_present refresh_present ttl
+
+    echo "CREDENTIAL_MIN_TTL_SECONDS=$CREDENTIAL_MIN_TTL_SECONDS"
+    if [ ! -x "$OAUTH_STATUS" ]; then
+        CREDENTIAL_STATUS_PRESENT=false
+        CREDENTIAL_TTL_GATE=FAIL
+        CREDENTIAL_REFRESH_REQUIRED=true
+        echo "CREDENTIAL_STATUS_PRESENT=false"
+        echo "CREDENTIAL_TTL_SECONDS=NOT_REACHED"
+        echo "CREDENTIAL_TTL_GATE=FAIL"
+        echo "CREDENTIAL_REFRESH_REQUIRED=true"
+        echo "CREDENTIAL_REFUSAL_BEFORE_LISTENER_STOP=true"
+        return 2
+    fi
+
+    set +e
+    "$OAUTH_STATUS" > "$output" 2>&1
+    rc=$?
+    set -u -o pipefail
+    if [ "$rc" -ne 0 ]; then
+        CREDENTIAL_STATUS_PRESENT=false
+        CREDENTIAL_TTL_GATE=FAIL
+        CREDENTIAL_REFRESH_REQUIRED=true
+        echo "CREDENTIAL_STATUS_PRESENT=false"
+        echo "CREDENTIAL_STATUS_RC=$rc"
+        echo "CREDENTIAL_TTL_SECONDS=NOT_REACHED"
+        echo "CREDENTIAL_TTL_GATE=FAIL"
+        echo "CREDENTIAL_REFRESH_REQUIRED=true"
+        echo "CREDENTIAL_REFUSAL_BEFORE_LISTENER_STOP=true"
+        return 2
+    fi
+
+    duuid_present="$(awk -F= '$1=="COMELIT_DUUID_PRESENT"{print $2}' "$output" | tail -1)"
+    vip_present="$(awk -F= '$1=="COMELIT_VIP_TOKEN_PRESENT"{print $2}' "$output" | tail -1)"
+    access_present="$(awk -F= '$1=="COMELIT_OAUTH_ACCESS_TOKEN_PRESENT"{print $2}' "$output" | tail -1)"
+    refresh_present="$(awk -F= '$1=="COMELIT_OAUTH_REFRESH_TOKEN_PRESENT"{print $2}' "$output" | tail -1)"
+    ttl="$(awk -F= '$1=="OAUTH_ACCESS_TOKEN_TTL_SECONDS"{print $2}' "$output" | tail -1)"
+    [ -n "$ttl" ] || ttl=NOT_REACHED
+    CREDENTIAL_TTL_SECONDS="$ttl"
+    if [ "$duuid_present" = true ] &&
+       [ "$vip_present" = true ] &&
+       [ "$access_present" = true ] &&
+       [ "$refresh_present" = true ]; then
+        CREDENTIAL_STATUS_PRESENT=true
+    else
+        CREDENTIAL_STATUS_PRESENT=false
+    fi
+
+    echo "CREDENTIAL_STATUS_PRESENT=$CREDENTIAL_STATUS_PRESENT"
+    echo "CREDENTIAL_TTL_SECONDS=$CREDENTIAL_TTL_SECONDS"
+    if [ "$CREDENTIAL_STATUS_PRESENT" = true ] &&
+       [ "$ttl" != NOT_REACHED ] &&
+       [ "$ttl" -ge "$CREDENTIAL_MIN_TTL_SECONDS" ] 2>/dev/null; then
+        CREDENTIAL_TTL_GATE=PASS
+        CREDENTIAL_REFRESH_REQUIRED=false
+        echo "CREDENTIAL_TTL_GATE=PASS"
+        echo "CREDENTIAL_REFRESH_REQUIRED=false"
+        return 0
+    fi
+
+    CREDENTIAL_TTL_GATE=FAIL
+    CREDENTIAL_REFRESH_REQUIRED=true
+    echo "CREDENTIAL_TTL_GATE=FAIL"
+    echo "CREDENTIAL_REFRESH_REQUIRED=true"
+    echo "CREDENTIAL_REFUSAL_BEFORE_LISTENER_STOP=true"
+    return 2
+}
+
 print_final_block() {
     echo "=== COMELIT P116 R27 REPEAT 001A LIVE FINAL ==="
     echo "LIVE_INVOCATIONS=$LIVE_INVOCATIONS"
     echo "WRAPPER_RC=$WRAPPER_RC"
     echo "CAMPAIGN_PROCESSES_REMAINING=$CAMPAIGN_PROCESSES_REMAINING"
+    echo "RTP_SINK_PORTS_REMAINING=$RTP_SINK_PORTS_REMAINING"
     echo "CT120_RESEARCH_HELPER_STOPPED=$CT120_RESEARCH_HELPER_STOPPED"
     echo "CT120_RESEARCH_SESSION_CLOSED=$CT120_RESEARCH_SESSION_CLOSED"
     echo "R27_SESSION_CLOSED=$R27_SESSION_CLOSED"
+    echo "MEDIA_TEARDOWN=$TEARDOWN_CONFIDENCE"
+    if [ "$RESTORE_OK" -eq 1 ]; then
+        echo "LISTENER_RESTORED=true"
+    else
+        echo "LISTENER_RESTORED=false"
+    fi
     echo "TEARDOWN_CONFIDENCE=$TEARDOWN_CONFIDENCE"
     echo "R27_RUN_CLASSIFICATION=$R27_RUN_CLASSIFICATION"
+    echo "CREDENTIAL_STATUS_PRESENT=$CREDENTIAL_STATUS_PRESENT"
+    echo "CREDENTIAL_TTL_SECONDS=$CREDENTIAL_TTL_SECONDS"
+    echo "CREDENTIAL_TTL_GATE=$CREDENTIAL_TTL_GATE"
+    echo "CREDENTIAL_REFRESH_REQUIRED=$CREDENTIAL_REFRESH_REQUIRED"
     echo "R27_REPEAT_EXECUTED=$R27_REPEAT_EXECUTED"
     echo "GENERATED_SOURCE_SHA256=$(build_provenance_marker GENERATED_SOURCE_SHA256 NOT_REACHED)"
-    echo "R27_REPEAT_DELAY_SECONDS=20"
+    echo "SETUP_MARGIN_SECONDS=$SETUP_MARGIN_SECONDS"
+    echo "MEDIA_OBSERVATION_SECONDS=$MEDIA_OBSERVATION_SECONDS"
+    echo "WRAPPER_BOUND_SECONDS=$OUTER_TIMEOUT_SECONDS"
+    echo "MAX_SINGLE_SESSION_SECONDS=$MAX_SINGLE_SESSION_SECONDS"
+    echo "MIN_SETUP_MARGIN_SECONDS=$MIN_SETUP_MARGIN_SECONDS"
+    REQUIRED_MIN_WRAPPER_BOUND_SECONDS=$((MEDIA_OBSERVATION_SECONDS + MIN_SETUP_MARGIN_SECONDS))
+    echo "REQUIRED_MIN_WRAPPER_BOUND_SECONDS=$REQUIRED_MIN_WRAPPER_BOUND_SECONDS"
+    if [ "$OUTER_TIMEOUT_SECONDS" -ge "$REQUIRED_MIN_WRAPPER_BOUND_SECONDS" ] &&
+       [ "$MEDIA_OBSERVATION_SECONDS" -le "$MAX_SINGLE_SESSION_SECONDS" ]; then
+        echo "R27_BOUND_INVARIANT=PASS"
+    else
+        echo "R27_BOUND_INVARIANT=FAIL"
+    fi
+    if [ "$WRAPPER_RC" = 124 ] || [ "$WRAPPER_RC" = 137 ]; then
+        echo "R27_WRAPPER_BOUND_HIT=true"
+    else
+        echo "R27_WRAPPER_BOUND_HIT=$(last_marker R27_WRAPPER_BOUND_HIT false)"
+    fi
+    echo "R27_WRAPPER_BOUND_SECONDS=$OUTER_TIMEOUT_SECONDS"
+    echo "R27_HELPER_SUMMARY_PRINTED=$(last_marker R27_HELPER_SUMMARY_PRINTED false)"
+    echo "R27_PARTIAL_MARKERS_PRESENT=$(last_marker R27_PARTIAL_MARKERS_PRESENT false)"
+    echo "R27_LAST_STAGE=$(last_marker R27_LAST_STAGE NOT_REACHED)"
+    R27_VIDEO_SINK_DATAGRAMS="$(sink_datagram_count "$RUN_ROOT/video.count")"
+    R27_AUDIO_SINK_DATAGRAMS="$(sink_datagram_count "$RUN_ROOT/audio.count")"
+    echo "R27_VIDEO_SINK_DATAGRAMS=$R27_VIDEO_SINK_DATAGRAMS"
+    echo "R27_AUDIO_SINK_DATAGRAMS=$R27_AUDIO_SINK_DATAGRAMS"
+    case "$R27_VIDEO_SINK_DATAGRAMS" in
+        ''|*[!0-9]*) echo "R27_CONTINUATION_EVIDENCE_SOURCE=HELPER_INTERNAL_COUNTER_ONLY" ;;
+        0) echo "R27_CONTINUATION_EVIDENCE_SOURCE=HELPER_INTERNAL_COUNTER_ONLY_SINK_ZERO" ;;
+        *) echo "R27_CONTINUATION_EVIDENCE_SOURCE=INDEPENDENT_UDP_SINK" ;;
+    esac
+    echo "R27_REPEAT_DELAY_SECONDS=25"
+    echo "REFRESH_CADENCE_SECONDS=$(last_marker REFRESH_CADENCE_SECONDS 25)"
+    echo "CADENCE_SOURCE=$(last_marker CADENCE_SOURCE LOCAL_LIVE_EVIDENCE)"
+    echo "CADENCE_SAFETY_MARGIN_SECONDS=$(last_marker CADENCE_SAFETY_MARGIN_SECONDS 11)"
+    echo "REFRESH_OVERLAP=$(last_marker REFRESH_OVERLAP false)"
+    echo "REFRESH_RETRY=$(last_marker REFRESH_RETRY false)"
     echo "R27_REPEAT_DELAY_IS_PROTOCOL_CONSTANT=false"
     echo "R27_REPEAT_DELAY_PROMOTED_TO_PRODUCTION=false"
     if [ "$R27_RUN_CLASSIFICATION" != OBSERVATION_USABLE ]; then
@@ -352,14 +526,26 @@ print_final_block() {
         echo "R27_USABLE_EVIDENCE=true"
         echo "INITIAL_001A_SENT_COUNT=$(last_marker INITIAL_001A_SENT_COUNT NOT_REACHED)"
         echo "REPEAT_001A_SENT_COUNT=$(last_marker REPEAT_001A_SENT_COUNT NOT_REACHED)"
+        echo "REFRESH_SENT_COUNT=$(last_marker REFRESH_SENT_COUNT NOT_REACHED)"
+        echo "REFRESH_RESPONSE_1=$(last_marker REFRESH_RESPONSE_1 NOT_REACHED)"
+        echo "REFRESH_RESPONSE_2=$(last_marker REFRESH_RESPONSE_2 NOT_REACHED)"
+        echo "REFRESH_RESPONSE_3=$(last_marker REFRESH_RESPONSE_3 NOT_REACHED)"
+        echo "REFRESH_RESPONSE_4=$(last_marker REFRESH_RESPONSE_4 NOT_REACHED)"
+        echo "REFRESH_OUTSTANDING=$(last_marker REFRESH_OUTSTANDING NOT_REACHED)"
+        echo "REFRESH_FAIL_CLOSED=$(last_marker REFRESH_FAIL_CLOSED NOT_REACHED)"
         echo "TOTAL_001A_SENT_COUNT=$(last_marker TOTAL_001A_SENT_COUNT NOT_REACHED)"
         echo "SECOND_001A_RESPONSE=$(last_marker SECOND_001A_RESPONSE NOT_REACHED)"
+        echo "SECOND_001A_ACK_CLASSIFICATION=$(last_marker SECOND_001A_ACK_CLASSIFICATION NOT_REACHED)"
         echo "VIDEO_RTP_BEFORE_REPEAT=$(last_marker VIDEO_RTP_BEFORE_REPEAT NOT_REACHED)"
         echo "VIDEO_PACKET_COUNT_AT_REPEAT=$(last_marker VIDEO_PACKET_COUNT_AT_REPEAT NOT_REACHED)"
         echo "VIDEO_RTP_AFTER_REPEAT=$(last_marker VIDEO_RTP_AFTER_REPEAT NOT_REACHED)"
         echo "VIDEO_RTP_PAST_35S=$(last_marker VIDEO_RTP_PAST_35S NOT_REACHED)"
         echo "VIDEO_RTP_PAST_40S=$(last_marker VIDEO_RTP_PAST_40S NOT_REACHED)"
+        echo "VIDEO_RTP_PAST_75S=$(last_marker VIDEO_RTP_PAST_75S NOT_REACHED)"
         echo "VIDEO_RTP_LAST_SECONDS_FROM_INITIAL_START=$(last_marker VIDEO_RTP_LAST_SECONDS_FROM_INITIAL_START NOT_REACHED)"
+        echo "MEDIA_ACTIVE_DURATION_SECONDS=$(last_marker MEDIA_ACTIVE_DURATION_SECONDS NOT_REACHED)"
+        echo "MEDIA_ACTIVE_DURATION_WITHIN_CAP=$(last_marker MEDIA_ACTIVE_DURATION_WITHIN_CAP NOT_REACHED)"
+        echo "VIDEO_PACKET_COUNTER_PROGRESSING=$(last_marker VIDEO_PACKET_COUNTER_PROGRESSING NOT_REACHED)"
     fi
     echo "ICE_NEGOTIATION_COUNT=$(last_marker ICE_NEGOTIATION_COUNT NOT_REACHED)"
     echo "PSEUDOTCP_OPEN_COUNT=$(last_marker PSEUDOTCP_OPEN_COUNT NOT_REACHED)"
@@ -367,6 +553,8 @@ print_final_block() {
     echo "RTPC_CLIENT_OPEN_COUNT=$(last_marker RTPC_CLIENT_OPEN_COUNT NOT_REACHED)"
     echo "SELF_ACTIVATION_COUNT=$(last_marker SELF_ACTIVATION_COUNT NOT_REACHED)"
     echo "HELPER_PROCESS_UNCHANGED=$(last_marker HELPER_PROCESS_UNCHANGED NOT_REACHED)"
+    echo "SECOND_MEDIA_SESSION=$(last_marker SECOND_MEDIA_SESSION NOT_REACHED)"
+    echo "MEDIA_SESSION_IDENTITY_UNCHANGED=$(last_marker MEDIA_SESSION_IDENTITY_UNCHANGED NOT_REACHED)"
     echo "LISTENER_RUNNING_AFTER=$LISTENER_RUNNING_AFTER"
     echo "LISTENER_READY_AFTER=$LISTENER_READY_AFTER"
     echo "PRODUCTION_MEDIA_ACTIVE_DERIVED_FROM=LISTENER_READY_AFTER"
@@ -374,17 +562,18 @@ print_final_block() {
     echo "PRODUCTION_MEDIA_ACTIVE=$PRODUCTION_MEDIA_ACTIVE"
     echo "DOOR_ACTIONS_SENT=0"
     echo "GATE_ACTIONS_SENT=0"
-    echo "SECOND_MEDIA_SESSION=false"
-    echo "THIRD_001A=false"
-    echo "REFRESH_LOOP=false"
+    echo "NEW_RTPC_OPEN=$(last_marker NEW_RTPC_OPEN NOT_REACHED)"
+    echo "NEW_SELF_ACTIVATION=$(last_marker NEW_SELF_ACTIVATION NOT_REACHED)"
+    echo "THIRD_001A=$(last_marker R27_THIRD_001A_BLOCKED NOT_REACHED)"
+    echo "REFRESH_LOOP=bounded_periodic"
     echo "AUTOMATIC_RETRY_001A=false"
     echo "RTCP_PLI=false"
     echo "RTCP_FIR=false"
-    echo "NEW_ICE_NEGOTIATION_AFTER_REPEAT=false"
-    echo "NEW_PSEUDOTCP_AFTER_REPEAT=false"
-    echo "NEW_CTPP_REGISTRATION_AFTER_REPEAT=false"
-    echo "NEW_RTPC_OPEN_AFTER_REPEAT=false"
-    echo "NEW_SELF_ACTIVATION_AFTER_REPEAT=false"
+    echo "NEW_ICE_NEGOTIATION_AFTER_REPEAT=$(last_marker_gt ICE_NEGOTIATION_COUNT 1)"
+    echo "NEW_PSEUDOTCP_AFTER_REPEAT=$(last_marker_gt PSEUDOTCP_OPEN_COUNT 1)"
+    echo "NEW_CTPP_REGISTRATION_AFTER_REPEAT=$(last_marker_gt CTPP_REGISTRATION_COUNT 1)"
+    echo "NEW_RTPC_OPEN_AFTER_REPEAT=$(last_marker_gt RTPC_CLIENT_OPEN_COUNT 2)"
+    echo "NEW_SELF_ACTIVATION_AFTER_REPEAT=$(last_marker_gt SELF_ACTIVATION_COUNT 1)"
     echo "OFFICIAL_APP_CAPTURE=false"
     echo "RAW_PCAP_CAPTURE=false"
     echo "=== END COMELIT P116 R27 REPEAT 001A LIVE FINAL ==="
@@ -395,6 +584,7 @@ on_exit() {
     stop_candidate_if_needed || true
     stop_pid "$VIDEO_SINK_PID"
     stop_pid "$AUDIO_SINK_PID"
+    rtp_sink_ports_remaining
     if [ "$LISTENER_STOPPED" -eq 1 ]; then
         restore_listener || rc=91
     fi
@@ -649,6 +839,9 @@ else
 fi
 [ "$FAIL" -eq 0 ] || exit 1
 
+echo "=== VERIFY CREDENTIAL STATUS ==="
+credential_gate || exit 2
+
 echo "=== VERIFY LISTENER READY ==="
 STATUS_BEFORE="$RUN_ROOT/listener-status-before.json"
 post_control status "$STATUS_BEFORE" 10
@@ -697,6 +890,7 @@ derive_teardown_confidence
 
 stop_pid "$VIDEO_SINK_PID"
 stop_pid "$AUDIO_SINK_PID"
+rtp_sink_ports_remaining
 VIDEO_SINK_PID=""
 AUDIO_SINK_PID=""
 

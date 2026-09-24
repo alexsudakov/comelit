@@ -33,7 +33,7 @@ _MEDIA_STARTUP_WINDOW_SECONDS = 45.0
 _MEDIA_LOCAL_SDP_READY_REASON = "local_sdp_ready_timeout"
 
 MEDIA_NATIVE_BINARY_SHA256 = (
-    "a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8"
+    "76218861c72e9a2b87283df6c5c7e0b03a4d7fb11bee4364f59be1513acd6129"
 )
 MEDIA_VIDEO_RTP_PORT = 17899
 MEDIA_VIDEO_HA_RTP_PORT = 17999
@@ -62,6 +62,12 @@ _MEDIA_NATIVE_MARKER_PREFIXES = (
     "P78_",
     "P80_",
     "P116_",
+    # R65 bounded same-session periodic refresh (research/media/v1
+    # entrance_p116_r65_production_media_refresh_transform.py, composed on
+    # the live-proven R27 repeat-0x001A candidate).
+    "R27_",
+    "R65_",
+    "REFRESH_",
 )
 _MEDIA_NATIVE_MARKER_TAIL_LIMIT = 40
 _MEDIA_NATIVE_PROTOCOL_MARKER_LIMIT = 80
@@ -80,6 +86,9 @@ _MEDIA_NATIVE_PROTOCOL_MARKER_PREFIXES = (
     "P80_AUDIO_RTP_PORT",
     "P80_VIDEO_RTP_FORWARDING",
     "P80_AUDIO_RTP_FORWARDING",
+    "R27_",
+    "R65_",
+    "REFRESH_",
 )
 _MEDIA_STATUS_NOTIFY_MIN_INTERVAL_SECONDS = 1.0
 

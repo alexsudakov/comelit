@@ -9,7 +9,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 TRANSPORT = ROOT / "custom_components" / "comelit" / "media_transport.py"
 BINARY = ROOT / "custom_components" / "comelit" / "native" / "comelit-media"
-EXPECTED_SHA256 = "a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8"
+EXPECTED_SHA256 = "76218861c72e9a2b87283df6c5c7e0b03a4d7fb11bee4364f59be1513acd6129"
 
 
 class P80MediaTransportStaticContractTests(unittest.TestCase):
@@ -146,6 +146,22 @@ class P80MediaTransportStaticContractTests(unittest.TestCase):
         self.assertIn("last_native_failure_markers", self.source)
         self.assertNotIn("_LOGGER.error(line", self.source)
         self.assertNotIn("_LOGGER.info(line", self.source)
+
+    def test_r65_refresh_markers_are_allowlisted_for_diagnostics(self) -> None:
+        # Flip: without these three prefixes, every R65 production refresh
+        # marker (REFRESH_CADENCE_SECONDS, R65_PRODUCTION_REFRESH,
+        # R27_REPEAT_001A_SENT, ...) would be silently dropped by
+        # _safe_native_marker and never reach the bounded diagnostics tail
+        # or the protocol-marker success summary.
+        prefixes_start = self.source.index("_MEDIA_NATIVE_MARKER_PREFIXES = (")
+        prefixes_end = self.source.index(")\n", prefixes_start)
+        general_prefixes = self.source[prefixes_start:prefixes_end]
+        protocol_start = self.source.index("_MEDIA_NATIVE_PROTOCOL_MARKER_PREFIXES = (")
+        protocol_end = self.source.index(")\n", protocol_start)
+        protocol_prefixes = self.source[protocol_start:protocol_end]
+        for prefix in ('"R27_",', '"R65_",', '"REFRESH_",'):
+            self.assertIn(prefix, general_prefixes)
+            self.assertIn(prefix, protocol_prefixes)
 
 
 if __name__ == "__main__":

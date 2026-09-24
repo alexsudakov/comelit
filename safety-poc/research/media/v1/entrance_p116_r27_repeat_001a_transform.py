@@ -39,15 +39,21 @@ _STATE_OLD = """static gboolean p97_signaling_finished = FALSE;
 
 _STATE_NEW = """static gboolean p97_signaling_finished = FALSE;
 
-/* R27 one-shot same-session repeat 0x001A research state. */
-#define R27_REPEAT_DELAY_SECONDS 20u
+/* R27 bounded same-session periodic refresh 0x001A research state. */
+#define R27_REFRESH_CADENCE_SECONDS 25u
+#define R27_CADENCE_SAFETY_MARGIN_SECONDS 11u
+#define R27_MAX_REFRESH_COUNT 4u
 #define R27_REPEAT_ACK_TIMEOUT_SECONDS 5u
-#define R27_MAX_LIVE_OBSERVATION_SECONDS 70u
+#define R27_MAX_LIVE_OBSERVATION_SECONDS 115u
+#define R27_MAX_SINGLE_SESSION_SECONDS 120u
 #define R27_VIDEO_PAST_35S_SECONDS 35u
 #define R27_VIDEO_PAST_40S_SECONDS 40u
+#define R27_VIDEO_PAST_75S_SECONDS 75u
 static guint r27_initial_001a_sent_count = 0;
 static guint r27_repeat_001a_sent_count = 0;
 static guint r27_repeat_attempt_count = 0;
+static guint r27_refresh_current_index = 0;
+static guint r27_refresh_last_accepted_index = 0;
 static gboolean r27_repeat_timer_armed = FALSE;
 static gboolean r27_repeat_timer_cancelled = FALSE;
 static gboolean r27_repeat_outstanding = FALSE;
@@ -55,7 +61,9 @@ static gboolean r27_repeat_ack_observed = FALSE;
 static gboolean r27_repeat_ack_timed_out = FALSE;
 static gboolean r27_repeat_ambiguous = FALSE;
 static gboolean r27_third_001a_blocked = FALSE;
+static gboolean r27_refresh_fail_closed = FALSE;
 static gboolean r27_final_summary_printed = FALSE;
+static volatile sig_atomic_t r27_bound_signal_seen = 0;
 static long long r27_media_active_monotonic_ms = 0;
 static long long r27_repeat_sent_monotonic_ms = 0;
 static guint64 r27_video_packet_count_at_repeat = 0;
@@ -64,12 +72,19 @@ static guint r27_rtpc_client_001a_repeat_len = 0;
 static guint32 r27_initial_001a_sequence = 0;
 static guint32 r27_repeat_001a_sequence = 0;
 static gboolean r27_sequence_model_pass = FALSE;
+static guint r27_self_activation_sent_count = 0;
+static guint r27_helper_pid_at_media_start = 0;
 
 static gboolean pseudotcp_begin_graceful_stop(const char *reason);
 static gboolean r27_repeat_delay_cb(gpointer data);
 static gboolean r27_repeat_ack_timeout_cb(gpointer data);
 static gboolean r27_live_observation_timeout_cb(gpointer data);
 static gboolean r27_try_queue_repeat_001a(const char *reason);
+static gboolean r27_schedule_next_refresh(const char *reason);
+static void r27_bound_signal_handler(int signum);
+static gboolean r27_build_repeat_001a_body(void);
+static gboolean r27_repeat_body_diff_gate(void);
+static void r27_print_identity_markers(void);
 static gboolean r27_handle_repeat_ack(guint16 request_id, const guint8 *body, guint body_len);
 static void r27_cancel_repeat_timers(void);
 static void r27_print_final_summary(void);
@@ -108,11 +123,13 @@ static gboolean
 r27_queue_rtpc_client_001a_repeat(void)
 {
     if (r27_initial_001a_sent_count > 1u ||
-        r27_repeat_001a_sent_count > 0u ||
-        r27_initial_001a_sent_count + r27_repeat_001a_sent_count >= 2u) {
+        r27_repeat_001a_sent_count >= R27_MAX_REFRESH_COUNT ||
+        r27_initial_001a_sent_count + r27_repeat_001a_sent_count >=
+            1u + R27_MAX_REFRESH_COUNT) {
         r27_third_001a_blocked = TRUE;
         failed = TRUE;
         fprintf(stderr, "R27_THIRD_001A_BLOCKED=true\n");
+        fprintf(stderr, "R27_REFRESH_LIMIT_BLOCKED=true\n");
         if (loop)
             g_main_loop_quit(loop);
         return FALSE;
@@ -169,10 +186,15 @@ _TX_COMPLETION_NEW = r'''        case P78_TX_RTPC_CLIENT_001A:
 
         case R27_TX_RTPC_CLIENT_001A_REPEAT:
             r27_repeat_001a_sent_count++;
+            r27_refresh_current_index = r27_repeat_001a_sent_count;
             r27_repeat_sent_monotonic_ms = p116_monotonic_ms();
             r27_repeat_outstanding = TRUE;
             r27_video_packet_count_at_repeat = p80_video_rtp_packets;
             printf("R27_REPEAT_001A_SENT=PASS\n");
+            printf("REFRESH_INDEX=%u\n", r27_refresh_current_index);
+            printf("REFRESH_SENT_COUNT=%u\n", r27_repeat_001a_sent_count);
+            printf("REFRESH_MONOTONIC_MS=%lld\n", r27_repeat_sent_monotonic_ms);
+            printf("REFRESH_OUTSTANDING=true\n");
             printf("INITIAL_001A_SENT_COUNT=%u\n", r27_initial_001a_sent_count);
             printf("REPEAT_001A_SENT_COUNT=%u\n", r27_repeat_001a_sent_count);
             printf("TOTAL_001A_SENT_COUNT=%u\n",
@@ -190,6 +212,24 @@ _TX_COMPLETION_NEW = r'''        case P78_TX_RTPC_CLIENT_001A:
             break;
 '''
 
+_SELF_ACTIVATION_COMPLETION_OLD = r'''        case P12_TX_ENTRANCE_SELF_ACTIVATION:
+            entrance_self_activation_sent = TRUE;
+            entrance_signal_stage = ENTRANCE_SIGNAL_WAIT_SELF_ACK;
+            printf("ENTRANCE_SELF_ACTIVATION_SENT=PASS\n");
+            fflush(stdout);
+            break;
+'''
+
+_SELF_ACTIVATION_COMPLETION_NEW = r'''        case P12_TX_ENTRANCE_SELF_ACTIVATION:
+            entrance_self_activation_sent = TRUE;
+            r27_self_activation_sent_count++;
+            entrance_signal_stage = ENTRANCE_SIGNAL_WAIT_SELF_ACK;
+            printf("ENTRANCE_SELF_ACTIVATION_SENT=PASS\n");
+            printf("SELF_ACTIVATION_COUNT=%u\n", r27_self_activation_sent_count);
+            fflush(stdout);
+            break;
+'''
+
 _MEDIA_ACTIVE_OLD = """    p80_media_forwarding_enabled = TRUE;
     g_timeout_add_seconds(10, p91_media_rx_diagnostic_timeout_cb, NULL);
 
@@ -199,7 +239,7 @@ _MEDIA_ACTIVE_OLD = """    p80_media_forwarding_enabled = TRUE;
 _MEDIA_ACTIVE_NEW = """    p80_media_forwarding_enabled = TRUE;
     g_timeout_add_seconds(10, p91_media_rx_diagnostic_timeout_cb, NULL);
     r27_media_active_monotonic_ms = p116_monotonic_ms();
-    if (g_timeout_add_seconds(R27_REPEAT_DELAY_SECONDS, r27_repeat_delay_cb, NULL) == 0) {
+    if (g_timeout_add_seconds(R27_REFRESH_CADENCE_SECONDS, r27_repeat_delay_cb, NULL) == 0) {
         fprintf(stderr, "R27_REPEAT_TIMER_START=FAIL\\n");
         return FALSE;
     }
@@ -209,17 +249,18 @@ _MEDIA_ACTIVE_NEW = """    p80_media_forwarding_enabled = TRUE;
         return FALSE;
     }
     r27_repeat_timer_armed = TRUE;
+    r27_helper_pid_at_media_start = (guint)getpid();
 
     printf("P80_MEDIA_ACTIVE=true\\n");
-    printf("R27_REPEAT_DELAY_SECONDS=%u\\n", R27_REPEAT_DELAY_SECONDS);
+    printf("R27_REPEAT_DELAY_SECONDS=%u\\n", R27_REFRESH_CADENCE_SECONDS);
+    printf("REFRESH_CADENCE_SECONDS=%u\\n", R27_REFRESH_CADENCE_SECONDS);
+    printf("CADENCE_SOURCE=LOCAL_LIVE_EVIDENCE\\n");
+    printf("CADENCE_SAFETY_MARGIN_SECONDS=%u\\n", R27_CADENCE_SAFETY_MARGIN_SECONDS);
+    printf("REFRESH_OVERLAP=false\\n");
+    printf("REFRESH_RETRY=false\\n");
     printf("R27_REPEAT_DELAY_IS_PROTOCOL_CONSTANT=false\\n");
     printf("R27_REPEAT_DELAY_PROMOTED_TO_PRODUCTION=false\\n");
-    printf("ICE_NEGOTIATION_COUNT=1\\n");
-    printf("PSEUDOTCP_OPEN_COUNT=1\\n");
-    printf("CTPP_REGISTRATION_COUNT=1\\n");
-    printf("RTPC_CLIENT_OPEN_COUNT=2\\n");
-    printf("SELF_ACTIVATION_COUNT=1\\n");
-    printf("HELPER_PROCESS_UNCHANGED=true\\n");
+    r27_print_identity_markers();
 """
 
 _ACK_HOOK_OLD = """        } else if (p97_wait_device_ack_000a || p97_wait_device_ack_001a) {
@@ -317,13 +358,37 @@ r27_cancel_repeat_timers(void)
     r27_repeat_timer_armed = FALSE;
 }
 
+static void
+r27_bound_signal_handler(int signum)
+{
+    r27_bound_signal_seen = signum;
+    printf("R27_WRAPPER_BOUND_HIT=true\n");
+    printf("R27_BOUND_SIGNAL=%d\n", signum);
+    printf("R27_HELPER_SUMMARY_PRINTED=true\n");
+    printf("R27_PARTIAL_MARKERS_PRESENT=true\n");
+    printf("R27_LAST_STAGE=BOUND_SIGNAL\n");
+    r27_cancel_repeat_timers();
+    r27_print_final_summary();
+    (void)pseudotcp_begin_graceful_stop("r27-bound-signal");
+    fflush(stdout);
+    if (loop)
+        g_main_loop_quit(loop);
+}
+
 static gboolean
 r27_repeat_preconditions_ok(void)
 {
     if (r27_initial_001a_sent_count != 1u ||
-        r27_repeat_001a_sent_count != 0u ||
-        r27_repeat_attempt_count != 0u ||
-        r27_initial_001a_sent_count + r27_repeat_001a_sent_count != 1u)
+        r27_initial_001a_sent_count + r27_repeat_001a_sent_count >=
+            1u + R27_MAX_REFRESH_COUNT)
+        return FALSE;
+    if (r27_repeat_outstanding)
+        return FALSE;
+    if (r27_repeat_attempt_count != r27_repeat_001a_sent_count)
+        return FALSE;
+    if (r27_repeat_001a_sent_count != r27_refresh_last_accepted_index)
+        return FALSE;
+    if (r27_refresh_fail_closed)
         return FALSE;
     if (!p78_rtpc_client_001a_sent || !p97_device_ack_001a_observed ||
         !p97_signaling_finished || !p80_media_forwarding_enabled)
@@ -352,17 +417,22 @@ r27_try_queue_repeat_001a(const char *reason)
         return FALSE;
     }
 
-    r27_repeat_attempt_count++;
-    if (r27_repeat_attempt_count != 1u) {
+    if (r27_repeat_001a_sent_count >= R27_MAX_REFRESH_COUNT) {
         r27_third_001a_blocked = TRUE;
         failed = TRUE;
         fprintf(stderr, "R27_THIRD_001A_BLOCKED=true\n");
+        fprintf(stderr, "R27_REFRESH_LIMIT_BLOCKED=true\n");
         if (loop)
             g_main_loop_quit(loop);
         return FALSE;
     }
+    r27_repeat_attempt_count++;
 
-    r27_rtpc_client_001a_repeat_len = p78_rtpc_client_001a_len;
+    if (!r27_build_repeat_001a_body()) {
+        p78_fail_rtpc("R27_REPEAT_001A_BUILD=FAIL");
+        return FALSE;
+    }
+
     status = p76_generate_client_001a(
         &p78_rtpc_runtime,
         r27_rtpc_client_001a_repeat,
@@ -371,43 +441,127 @@ r27_try_queue_repeat_001a(const char *reason)
         p78_fail_rtpc("R27_REPEAT_001A_GENERATION=FAIL");
         return FALSE;
     }
+    printf("R27_REPEAT_001A_BUILD=PASS\n");
+    printf("R27_REPEAT_001A_VALIDATION=PASS\n");
 
-    /* R27_SEQUENCE_MODEL_DERIVED_FROM_LIVE_INITIAL_001A_SEQUENCE:
-     * the second mutable CTPP sequence is derived from the already-sent live
-     * initial 0x001A sequence, while target/geometry/address roles are
-     * regenerated from p78_rtpc_runtime semantic state. The delta is the
-     * lineage's P97_CLIENT_001A_SEQUENCE_DELTA_FROM_ACK 0x00010000u
-     * (entrance_p97_complete_post_000a_ack_cycle_transform.py:205-206,
-     * applied at :351-355) and the P72 contract's nearest-preceding
-     * same-request client CTPP frame delta
-     * (P72_RTPC_CLIENT_MEDIA_GENERATION_CONTRACT.md:74-75). For this repeat,
-     * the nearest preceding same-request client frame is the initial 0x001A
-     * itself. */
-    r27_repeat_001a_sequence =
-        r27_initial_001a_sequence + P97_CLIENT_001A_SEQUENCE_DELTA_FROM_ACK;
-    write_le32(r27_rtpc_client_001a_repeat + 2u, r27_repeat_001a_sequence);
-    r27_sequence_model_pass =
-        r27_repeat_001a_sequence != r27_initial_001a_sequence &&
-        memcmp(r27_rtpc_client_001a_repeat + 10u,
-               p78_rtpc_client_001a + 10u,
-               50u) == 0;
-    if (!r27_sequence_model_pass) {
-        p78_fail_rtpc("R27_REPEAT_SEQUENCE_MODEL=FAIL");
+    if (!r27_repeat_body_diff_gate()) {
+        p78_fail_rtpc("R27_REPEAT_BODY_DIFF_GATE=FAIL");
         return FALSE;
     }
 
     printf("R27_REPEAT_SEQUENCE_MODEL=PASS\n");
-    printf("R27_REPEAT_SEQUENCE_SOURCE=LIVE_INITIAL_001A_SEQUENCE_PLUS_P97_DELTA\n");
+    printf("R27_REPEAT_SEQUENCE_SOURCE=LIVE_INITIAL_001A_SEQUENCE_BYTE_PLUS_ONE_MOD_256\n");
+    printf("R27_REPEAT_BODY_DIFF_GATE=PASS\n");
+    printf("R27_REPEAT_BODY_CHANGED_OFFSETS=4\n");
+    printf("R27_REPEAT_CTP_ACK_BYTE_UNCHANGED=true\n");
     printf("CAPTURED_LITERAL_REUSE=false\n");
     printf("R27_REPEAT_SEMANTIC_FIELDS_REUSED=TARGET_GEOMETRY_ADDRESS_ROLES\n");
-    printf("ICE_NEGOTIATION_COUNT=1\n");
-    printf("PSEUDOTCP_OPEN_COUNT=1\n");
-    printf("CTPP_REGISTRATION_COUNT=1\n");
-    printf("RTPC_CLIENT_OPEN_COUNT=2\n");
-    printf("SELF_ACTIVATION_COUNT=1\n");
-    printf("HELPER_PROCESS_UNCHANGED=true\n");
+    r27_print_identity_markers();
     fflush(stdout);
     return r27_queue_rtpc_client_001a_repeat();
+}
+
+static void
+r27_print_identity_markers(void)
+{
+    guint ice_negotiation_count;
+    guint pseudotcp_open_count;
+    guint ctpp_registration_count;
+    guint rtpc_client_open_count;
+    gboolean helper_process_unchanged;
+    gboolean second_media_session;
+    gboolean new_rtpc_open;
+    gboolean new_self_activation;
+    gboolean media_session_identity_unchanged;
+
+    ice_negotiation_count =
+        ice_connected && ice_ready && selected_pair_present ? 1u : 0u;
+    pseudotcp_open_count = pseudo_tcp && pseudotcp_open ? 1u : 0u;
+    ctpp_registration_count =
+        p78_rtpc_runtime.registered_ctpp_reused == P76_TRUE &&
+        p78_rtpc_runtime.second_ctpp_open_attempted == P76_FALSE ? 1u : 0u;
+    rtpc_client_open_count =
+        (p78_rtpc_open_1_sent ? 1u : 0u) +
+        (p78_rtpc_open_2_sent ? 1u : 0u);
+    helper_process_unchanged =
+        r27_helper_pid_at_media_start != 0u &&
+        r27_helper_pid_at_media_start == (guint)getpid();
+    new_rtpc_open = rtpc_client_open_count > 2u;
+    new_self_activation = r27_self_activation_sent_count > 1u;
+    second_media_session =
+        ice_negotiation_count != 1u ||
+        pseudotcp_open_count != 1u ||
+        ctpp_registration_count != 1u ||
+        new_rtpc_open ||
+        new_self_activation ||
+        !helper_process_unchanged;
+    media_session_identity_unchanged =
+        !second_media_session &&
+        rtpc_client_open_count == 2u &&
+        r27_self_activation_sent_count == 1u;
+
+    printf("ICE_NEGOTIATION_COUNT=%u\n", ice_negotiation_count);
+    printf("PSEUDOTCP_OPEN_COUNT=%u\n", pseudotcp_open_count);
+    printf("CTPP_REGISTRATION_COUNT=%u\n", ctpp_registration_count);
+    printf("RTPC_CLIENT_OPEN_COUNT=%u\n", rtpc_client_open_count);
+    printf("SELF_ACTIVATION_COUNT=%u\n", r27_self_activation_sent_count);
+    printf("HELPER_PROCESS_UNCHANGED=%s\n",
+           helper_process_unchanged ? "true" : "false");
+    printf("SECOND_MEDIA_SESSION=%s\n", second_media_session ? "true" : "false");
+    printf("NEW_RTPC_OPEN=%s\n", new_rtpc_open ? "true" : "false");
+    printf("NEW_SELF_ACTIVATION=%s\n", new_self_activation ? "true" : "false");
+    printf("MEDIA_SESSION_IDENTITY_UNCHANGED=%s\n",
+           media_session_identity_unchanged ? "true" : "false");
+}
+
+static gboolean
+r27_build_repeat_001a_body(void)
+{
+    guint i;
+    guint8 initial_sequence_byte;
+
+    if (p78_rtpc_client_001a_len != 60u)
+        return FALSE;
+    if (p78_rtpc_client_001a[0] != 0x40u ||
+        p78_rtpc_client_001a[1] != 0x18u ||
+        p78_rtpc_client_001a[6] != 0x00u ||
+        p78_rtpc_client_001a[7] != 0x1au)
+        return FALSE;
+
+    r27_rtpc_client_001a_repeat_len = p78_rtpc_client_001a_len;
+    for (i = 0; i < r27_rtpc_client_001a_repeat_len; i++)
+        r27_rtpc_client_001a_repeat[i] = p78_rtpc_client_001a[i];
+
+    initial_sequence_byte = p78_rtpc_client_001a[4];
+    r27_rtpc_client_001a_repeat[4] = (guint8)((initial_sequence_byte + 1u) & 0xffu);
+    r27_initial_001a_sequence = read_le32(p78_rtpc_client_001a + 2u);
+    r27_repeat_001a_sequence = read_le32(r27_rtpc_client_001a_repeat + 2u);
+    r27_sequence_model_pass =
+        r27_rtpc_client_001a_repeat[4] == (guint8)((initial_sequence_byte + 1u) & 0xffu) &&
+        r27_rtpc_client_001a_repeat[5] == p78_rtpc_client_001a[5] &&
+        r27_repeat_001a_sequence != r27_initial_001a_sequence;
+    return r27_sequence_model_pass;
+}
+
+static gboolean
+r27_repeat_body_diff_gate(void)
+{
+    guint i;
+
+    if (r27_rtpc_client_001a_repeat_len != p78_rtpc_client_001a_len ||
+        r27_rtpc_client_001a_repeat_len != 60u)
+        return FALSE;
+    for (i = 0; i < r27_rtpc_client_001a_repeat_len; i++) {
+        if (r27_rtpc_client_001a_repeat[i] == p78_rtpc_client_001a[i])
+            continue;
+        if (i != 4u)
+            return FALSE;
+    }
+    return r27_rtpc_client_001a_repeat[4] == (guint8)((p78_rtpc_client_001a[4] + 1u) & 0xffu) &&
+        r27_rtpc_client_001a_repeat[5] == p78_rtpc_client_001a[5] &&
+        memcmp(r27_rtpc_client_001a_repeat + 10u,
+               p78_rtpc_client_001a + 10u,
+               50u) == 0;
 }
 
 static gboolean
@@ -422,28 +576,65 @@ r27_repeat_delay_cb(gpointer data)
 }
 
 static gboolean
+r27_schedule_next_refresh(const char *reason)
+{
+    (void)reason;
+    if (r27_repeat_timer_cancelled || pseudotcp_graceful_stop_started)
+        return FALSE;
+    if (r27_refresh_fail_closed)
+        return FALSE;
+    if (r27_repeat_outstanding)
+        return FALSE;
+    if (r27_repeat_001a_sent_count >= R27_MAX_REFRESH_COUNT)
+        return FALSE;
+    if (g_timeout_add_seconds(R27_REFRESH_CADENCE_SECONDS,
+                              r27_repeat_delay_cb, NULL) == 0) {
+        p78_fail_rtpc("R27_REFRESH_TIMER_START=FAIL");
+        return FALSE;
+    }
+    r27_repeat_timer_armed = TRUE;
+    printf("REFRESH_NEXT_SCHEDULED=true\n");
+    printf("REFRESH_CADENCE_SECONDS=%u\n", R27_REFRESH_CADENCE_SECONDS);
+    printf("REFRESH_OVERLAP=false\n");
+    printf("REFRESH_RETRY=false\n");
+    fflush(stdout);
+    return TRUE;
+}
+
+static gboolean
 r27_repeat_ack_timeout_cb(gpointer data)
 {
     (void)data;
-    if (!r27_repeat_outstanding || r27_repeat_ack_observed)
+    if (!r27_repeat_outstanding)
         return G_SOURCE_REMOVE;
     r27_repeat_ack_timed_out = TRUE;
     r27_repeat_outstanding = FALSE;
+    r27_refresh_fail_closed = TRUE;
     printf("SECOND_001A_RESPONSE=ABSENT\n");
+    printf("SECOND_001A_ACK_CLASSIFICATION=ABSENT\n");
+    printf("REFRESH_RESPONSE_%u=ABSENT\n", r27_refresh_current_index);
+    printf("REFRESH_OUTSTANDING=false\n");
+    printf("REFRESH_FAIL_CLOSED=true\n");
     fflush(stdout);
+    (void)pseudotcp_begin_graceful_stop("r27-refresh-timeout");
     return G_SOURCE_REMOVE;
 }
 
 static gboolean
 r27_handle_repeat_ack(guint16 request_id, const guint8 *body, guint body_len)
 {
-    if (!r27_repeat_outstanding || r27_repeat_001a_sent_count != 1u)
+    if (!r27_repeat_outstanding)
         return FALSE;
     if (p99_state_scoped_structural_ack(request_id, body, body_len)) {
         r27_repeat_ack_observed = TRUE;
         r27_repeat_outstanding = FALSE;
+        r27_refresh_last_accepted_index = r27_refresh_current_index;
         printf("SECOND_001A_RESPONSE=STRUCTURAL_ACK\n");
+        printf("SECOND_001A_ACK_CLASSIFICATION=STATE_SCOPED_STRUCTURAL\n");
         printf("R27_REPEAT_ACK_BINDING=STATE_SCOPED_STRUCTURAL\n");
+        printf("REFRESH_RESPONSE_%u=STRUCTURAL_ACK\n", r27_refresh_current_index);
+        printf("REFRESH_OUTSTANDING=false\n");
+        (void)r27_schedule_next_refresh("structural-ack");
         fflush(stdout);
         return TRUE;
     }
@@ -454,8 +645,14 @@ r27_handle_repeat_ack(guint16 request_id, const guint8 *body, guint body_len)
          * state instead of a dead REJECTED state. */
         r27_repeat_ambiguous = TRUE;
         r27_repeat_outstanding = FALSE;
+        r27_refresh_fail_closed = TRUE;
         printf("SECOND_001A_RESPONSE=AMBIGUOUS\n");
+        printf("SECOND_001A_ACK_CLASSIFICATION=AMBIGUOUS\n");
+        printf("REFRESH_RESPONSE_%u=AMBIGUOUS\n", r27_refresh_current_index);
+        printf("REFRESH_OUTSTANDING=false\n");
+        printf("REFRESH_FAIL_CLOSED=true\n");
         fflush(stdout);
+        (void)pseudotcp_begin_graceful_stop("r27-refresh-ambiguous");
         return TRUE;
     }
     return FALSE;
@@ -465,9 +662,13 @@ static void
 r27_print_final_summary(void)
 {
     guint last_video_seconds = 0;
+    guint media_active_duration_seconds = 0;
     gboolean after_repeat = FALSE;
+    gboolean after_last_refresh = FALSE;
     gboolean past35 = FALSE;
     gboolean past40 = FALSE;
+    gboolean past75 = FALSE;
+    gboolean video_packet_counter_progressing = FALSE;
 
     if (r27_final_summary_printed)
         return;
@@ -478,30 +679,65 @@ r27_print_final_summary(void)
         last_video_seconds = (guint)(
             (p116_video_rtp.last_monotonic_ms - r27_media_active_monotonic_ms) / 1000);
     }
+    if (r27_media_active_monotonic_ms > 0) {
+        long long now_ms = p116_monotonic_ms();
+        if (now_ms >= r27_media_active_monotonic_ms)
+            media_active_duration_seconds = (guint)(
+                (now_ms - r27_media_active_monotonic_ms) / 1000);
+    }
+    video_packet_counter_progressing =
+        p116_video_rtp.packet_count > 1u &&
+        p116_video_rtp.last_monotonic_ms > p116_video_rtp.first_monotonic_ms;
     after_repeat = r27_repeat_001a_sent_count == 1u &&
+        p80_video_rtp_packets > r27_video_packet_count_at_repeat;
+    /* r27_video_packet_count_at_repeat is overwritten on every refresh send
+     * (see R27_TX_RTPC_CLIENT_001A_REPEAT completion), so at summary time it
+     * always holds the packet count captured at the most recent refresh,
+     * regardless of how many periodic refreshes have run. VIDEO_RTP_AFTER_REPEAT
+     * keeps its original one-shot-only definition for historical comparability;
+     * VIDEO_RTP_AFTER_LAST_REFRESH generalises the same evidence to the
+     * periodic case instead of silently reading false once sent_count > 1. */
+    after_last_refresh = r27_repeat_001a_sent_count >= 1u &&
         p80_video_rtp_packets > r27_video_packet_count_at_repeat;
     past35 = last_video_seconds >= R27_VIDEO_PAST_35S_SECONDS;
     past40 = last_video_seconds >= R27_VIDEO_PAST_40S_SECONDS;
+    past75 = last_video_seconds >= R27_VIDEO_PAST_75S_SECONDS;
 
     if (r27_repeat_001a_sent_count == 1u && !r27_repeat_ack_observed &&
         !r27_repeat_ack_timed_out && !r27_repeat_ambiguous)
         printf("SECOND_001A_RESPONSE=ABSENT\n");
+    if (r27_repeat_001a_sent_count == 1u && !r27_repeat_ack_observed &&
+        !r27_repeat_ambiguous)
+        printf("SECOND_001A_ACK_CLASSIFICATION=ABSENT\n");
     printf("VIDEO_RTP_AFTER_REPEAT=%s\n", after_repeat ? "true" : "false");
+    printf("VIDEO_RTP_AFTER_LAST_REFRESH=%s\n", after_last_refresh ? "true" : "false");
     printf("VIDEO_RTP_PAST_35S=%s\n", past35 ? "true" : "false");
     printf("VIDEO_RTP_PAST_40S=%s\n", past40 ? "true" : "false");
+    printf("VIDEO_RTP_PAST_75S=%s\n", past75 ? "true" : "false");
     printf("VIDEO_RTP_LAST_SECONDS_FROM_INITIAL_START=%u\n", last_video_seconds);
+    printf("MEDIA_ACTIVE_DURATION_SECONDS=%u\n", media_active_duration_seconds);
+    printf("MEDIA_SESSION_CAP_SECONDS=%u\n", R27_MAX_SINGLE_SESSION_SECONDS);
+    printf("MEDIA_ACTIVE_DURATION_WITHIN_CAP=%s\n",
+           media_active_duration_seconds <= R27_MAX_SINGLE_SESSION_SECONDS ? "true" : "false");
+    printf("R27_HELPER_SUMMARY_PRINTED=true\n");
+    printf("R27_PARTIAL_MARKERS_PRESENT=true\n");
+    printf("VIDEO_PACKET_COUNTER_PROGRESSING=%s\n",
+           video_packet_counter_progressing ? "true" : "false");
+    printf("REFRESH_SENT_COUNT=%u\n", r27_repeat_001a_sent_count);
+    printf("REFRESH_CADENCE_SECONDS=%u\n", R27_REFRESH_CADENCE_SECONDS);
+    printf("CADENCE_SOURCE=LOCAL_LIVE_EVIDENCE\n");
+    printf("CADENCE_SAFETY_MARGIN_SECONDS=%u\n", R27_CADENCE_SAFETY_MARGIN_SECONDS);
+    printf("REFRESH_OVERLAP=false\n");
+    printf("REFRESH_RETRY=false\n");
+    printf("REFRESH_OUTSTANDING=%s\n", r27_repeat_outstanding ? "true" : "false");
+    printf("REFRESH_FAIL_CLOSED=%s\n", r27_refresh_fail_closed ? "true" : "false");
     printf("INITIAL_001A_SENT_COUNT=%u\n", r27_initial_001a_sent_count);
     printf("REPEAT_001A_SENT_COUNT=%u\n", r27_repeat_001a_sent_count);
     printf("TOTAL_001A_SENT_COUNT=%u\n",
            r27_initial_001a_sent_count + r27_repeat_001a_sent_count);
     printf("R27_THIRD_001A_BLOCKED=%s\n",
            r27_third_001a_blocked ? "true" : "false");
-    printf("ICE_NEGOTIATION_COUNT=1\n");
-    printf("PSEUDOTCP_OPEN_COUNT=1\n");
-    printf("CTPP_REGISTRATION_COUNT=1\n");
-    printf("RTPC_CLIENT_OPEN_COUNT=2\n");
-    printf("SELF_ACTIVATION_COUNT=1\n");
-    printf("HELPER_PROCESS_UNCHANGED=true\n");
+    r27_print_identity_markers();
     fflush(stdout);
 }
 
@@ -532,6 +768,35 @@ _MAIN_FINAL_NEW = """    r27_cancel_repeat_timers();
 }
 """
 
+_MAIN_ENTRY_OLD = """int
+main(void)
+{
+    if (g_mkdir_with_parents(
+"""
+
+_MAIN_ENTRY_NEW = """int
+main(void)
+{
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    printf("R27_STDOUT_LINE_BUFFERED=true\\n");
+    fflush(stdout);
+
+    if (g_mkdir_with_parents(
+"""
+
+_SIGNAL_INSTALL_OLD = """    printf("ICE_GATHER_START=PASS\\n");
+    fflush(stdout);
+"""
+
+_SIGNAL_INSTALL_NEW = """    printf("ICE_GATHER_START=PASS\\n");
+    fflush(stdout);
+    signal(SIGTERM, r27_bound_signal_handler);
+    signal(SIGINT, r27_bound_signal_handler);
+    printf("R27_BOUND_SIGNAL_HANDLER_INSTALLED=true\\n");
+    fflush(stdout);
+"""
+
 
 def _replace_once(source: str, old: str, new: str, label: str) -> str:
     count = source.count(old)
@@ -548,11 +813,14 @@ def transform(source: str, *, include_p116: bool = True) -> str:
         (_TX_ENUM_OLD, _TX_ENUM_NEW, "R27 tx enum"),
         (_STATE_OLD, _STATE_NEW, "R27 state"),
         (_QUEUE_FUNCTION_OLD, _QUEUE_FUNCTION_NEW, "R27 queue function"),
+        (_SELF_ACTIVATION_COMPLETION_OLD, _SELF_ACTIVATION_COMPLETION_NEW, "R27 self activation count"),
         (_TX_COMPLETION_OLD, _TX_COMPLETION_NEW, "R27 tx completion"),
         (_MEDIA_ACTIVE_OLD, _MEDIA_ACTIVE_NEW, "R27 media active timers"),
         (_ACK_HOOK_OLD, _ACK_HOOK_NEW, "R27 ACK hook"),
         (_GRACEFUL_HELPER_ANCHOR, _GRACEFUL_HELPER_NEW, "R27 graceful stop helper"),
         (_HELPER_ANCHOR, _R27_HELPERS + _HELPER_ANCHOR, "R27 helpers"),
+        (_MAIN_ENTRY_OLD, _MAIN_ENTRY_NEW, "R27 main line buffering"),
+        (_SIGNAL_INSTALL_OLD, _SIGNAL_INSTALL_NEW, "R27 bound signal handler"),
         (_MAIN_FINAL_OLD, _MAIN_FINAL_NEW, "R27 final summary"),
     ):
         candidate = _replace_once(candidate, old, new, label)
@@ -566,7 +834,10 @@ def report() -> str:
             "R27_COMPOSES=P106_INCLUDE_P116",
             "R27_REPEAT_SEQUENCE_MODEL=LIVE_INITIAL_001A_SEQUENCE_PLUS_P97_DELTA",
             "CAPTURED_LITERAL_REUSE=false",
-            "R27_REPEAT_DELAY_SECONDS=20",
+            "R27_REPEAT_DELAY_SECONDS=25",
+            "REFRESH_CADENCE_SECONDS=25",
+            "CADENCE_SOURCE=LOCAL_LIVE_EVIDENCE",
+            "CADENCE_SAFETY_MARGIN_SECONDS=11",
             "R27_REPEAT_DELAY_IS_PROTOCOL_CONSTANT=false",
             "R27_REPEAT_DELAY_PROMOTED_TO_PRODUCTION=false",
             "R27_PRODUCTION_REFRESH=false",

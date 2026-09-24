@@ -13,13 +13,20 @@ ROOT = Path(__file__).resolve().parents[2]
 PINNED = ROOT / "custom_components" / "comelit" / "native" / "comelit-media"
 MEDIA_TRANSPORT = ROOT / "custom_components" / "comelit" / "media_transport.py"
 P116_BUILD_META = ROOT / "safety-poc" / "research" / "media" / "v1" / "p116_media_telemetry_build_meta.txt"
+R65_BUILD_META = ROOT / "safety-poc" / "research" / "media" / "v1" / "p116_r65_production_media_build_meta.txt"
 P114_BUILD_META = ROOT / "safety-poc" / "research" / "media" / "v1" / "p114_media_diagnostics_build_meta.txt"
 HISTORICAL_PINNED = ROOT / ".p116-evidence" / "bin" / "pinned-historical.bin"
 REBUILT = ROOT / ".p116-evidence" / "bin" / "rebuilt-historical-source.bin"
-PINNED_SHA256 = "a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8"
+# R65 promoted a new production binary (bounded periodic media refresh) over
+# the R30E-era one. PINNED_SHA256/R65_SOURCE_SHA256 are the current shipped
+# artifact; PRE_R65_PACKAGED_* are what p116_media_telemetry_build_meta.txt
+# (now a historical record, left unmodified) still documents.
+PINNED_SHA256 = "76218861c72e9a2b87283df6c5c7e0b03a4d7fb11bee4364f59be1513acd6129"
+R65_SOURCE_SHA256 = "4fc6188c6231b94682205973b6a6f628ca005e8b7c3a04efbd8056c5a608c58c"
+PRE_R65_PACKAGED_BINARY_SHA256 = "a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8"
+PRE_R65_PACKAGED_SOURCE_SHA256 = "1c89d61de4372d96b25f6894862741244753c107a3a9b9e04817250b3bea55b2"
 HISTORICAL_PINNED_SHA256 = "91335b4490bc58910c78cb58b9c2d3eccc13f40dcfff7651995ad428cd71ddc7"
 HISTORICAL_SOURCE_SHA256 = "0c15927dbc40bdb1f7c522f063a8a2f38c557f9eb735cdd981cdd49449595c79"
-P116_SOURCE_SHA256 = "1c89d61de4372d96b25f6894862741244753c107a3a9b9e04817250b3bea55b2"
 PRE_R30E_PACKAGED_BINARY_SHA256 = "35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622"
 PRE_R30E_PACKAGED_SOURCE_SHA256 = "93756730fd088b9227f37c4e0e3edbd18ac30c110db03b75bcc63f1c93952e66"
 REBUILT_SHA256 = "f17ad2d6efbe002335a658c075da84677ced44246d556afe80953a8f59129841"
@@ -201,28 +208,23 @@ class P116ProvenanceBinaryAnalysisTests(unittest.TestCase):
         self.assertGreater(binary.count(b"P116_"), 0)
 
     def test_committed_build_metadata_records_historical_non_runtime_mismatch(self) -> None:
+        # p116_media_telemetry_build_meta.txt is the frozen R30E-era build
+        # record. R65 promoted a new binary over it, so that file now
+        # documents the *superseded* (pre-R65) artifact -- it is left
+        # unmodified as history, not rewritten to claim the current pin.
         p116_meta = _metadata(P116_BUILD_META)
         p114_meta = _metadata(P114_BUILD_META)
 
-        self.assertEqual(p116_meta["NATIVE_BINARY_SHA256"], PINNED_SHA256)
-        self.assertEqual(p116_meta["GENERATED_SOURCE_SHA256"], P116_SOURCE_SHA256)
-        self.assertEqual(p116_meta["build_a_sha256"], PINNED_SHA256)
-        self.assertEqual(p116_meta["build_b_sha256"], PINNED_SHA256)
+        self.assertEqual(p116_meta["NATIVE_BINARY_SHA256"], PRE_R65_PACKAGED_BINARY_SHA256)
+        self.assertEqual(p116_meta["GENERATED_SOURCE_SHA256"], PRE_R65_PACKAGED_SOURCE_SHA256)
+        self.assertEqual(p116_meta["build_a_sha256"], PRE_R65_PACKAGED_BINARY_SHA256)
+        self.assertEqual(p116_meta["build_b_sha256"], PRE_R65_PACKAGED_BINARY_SHA256)
         self.assertEqual(p116_meta["reproducible_binary_sha_gate"], "PASS")
         self.assertEqual(p116_meta["reproducible_binary_cmp_gate"], "PASS")
-        self.assertEqual(p116_meta["NATIVE_BINARY_SIZE"], str(PINNED.stat().st_size))
-        # Build metadata records the promoted artifact mode. A shared checkout
-        # may expose group-write (for example 0775 under a cooperative umask),
-        # which is not a change to the committed binary provenance. Preserve
-        # the release contract and enforce the live safety properties instead
-        # of equating metadata to checkout-mode side effects.
-        self.assertEqual(p116_meta["NATIVE_BINARY_MODE"], "755")
-        live_mode = PINNED.stat().st_mode & 0o777
-        self.assertEqual(live_mode & 0o111, 0o111)
-        self.assertEqual(live_mode & 0o002, 0)
+        self.assertNotEqual(_sha256(PINNED), PRE_R65_PACKAGED_BINARY_SHA256)
         self.assertEqual(p116_meta["historical_pre_r30e_native_binary_sha256"], PRE_R30E_PACKAGED_BINARY_SHA256)
         self.assertEqual(p116_meta["historical_pre_r30e_generated_source_sha256"], PRE_R30E_PACKAGED_SOURCE_SHA256)
-        self.assertNotEqual(_sha256(PINNED), PRE_R30E_PACKAGED_BINARY_SHA256)
+        self.assertNotEqual(PRE_R65_PACKAGED_BINARY_SHA256, PRE_R30E_PACKAGED_BINARY_SHA256)
         self.assertEqual(p114_meta["NATIVE_BINARY_SHA256"], HISTORICAL_PINNED_SHA256)
         self.assertEqual(p114_meta["GENERATED_SOURCE_SHA256"], HISTORICAL_SOURCE_SHA256)
 
@@ -236,6 +238,40 @@ class P116ProvenanceBinaryAnalysisTests(unittest.TestCase):
         self.assertEqual(match.group(1), REBUILT_SHA256)
         self.assertEqual(match.group(2), HISTORICAL_PINNED_SHA256)
         self.assertEqual(match.group(3), "NON_RUNTIME_BUILD_METADATA")
+
+    def test_r65_build_metadata_matches_current_pin(self) -> None:
+        # The R65 build-meta file (§1 raw facts from the CT120 offline
+        # reproducible build) is the current provenance record; this proves
+        # it actually matches what's now shipped, not just that it exists.
+        r65_meta = _metadata(R65_BUILD_META)
+
+        self.assertEqual(r65_meta["NATIVE_BINARY_SHA256"], PINNED_SHA256)
+        self.assertEqual(r65_meta["GENERATED_SOURCE_SHA256"], R65_SOURCE_SHA256)
+        self.assertEqual(r65_meta["build_a_sha256"], PINNED_SHA256)
+        self.assertEqual(r65_meta["build_b_sha256"], PINNED_SHA256)
+        self.assertEqual(r65_meta["reproducible_binary_sha_gate"], "PASS")
+        self.assertEqual(r65_meta["reproducible_binary_cmp_gate"], "PASS")
+        self.assertEqual(r65_meta["musl_interpreter_gate"], "PASS")
+        self.assertEqual(r65_meta["no_glibc_dependency"], "PASS")
+        self.assertEqual(r65_meta["no_new_runtime_dependency"], "PASS")
+        self.assertEqual(r65_meta["NATIVE_BINARY_SIZE"], str(PINNED.stat().st_size))
+        self.assertEqual(r65_meta["NATIVE_BINARY_SIZE"], "295056")
+        # Build metadata records the promoted artifact mode. A shared checkout
+        # may expose group-write (for example 0775 under a cooperative umask),
+        # which is not a change to the committed binary provenance. Preserve
+        # the release contract and enforce the live safety properties instead
+        # of equating metadata to checkout-mode side effects.
+        self.assertEqual(r65_meta["NATIVE_BINARY_MODE"], "755")
+        live_mode = PINNED.stat().st_mode & 0o777
+        self.assertEqual(live_mode & 0o111, 0o111)
+        self.assertEqual(live_mode & 0o002, 0)
+        self.assertEqual(r65_meta["superseded_native_binary_sha256"], PRE_R65_PACKAGED_BINARY_SHA256)
+        self.assertEqual(r65_meta["superseded_generated_source_sha256"], PRE_R65_PACKAGED_SOURCE_SHA256)
+        self.assertEqual(r65_meta["protocol_behavior_changed"], "false")
+        self.assertEqual(r65_meta["automatic_retry_added"], "false")
+        self.assertEqual(r65_meta["door_semantics_changed"], "false")
+        self.assertEqual(r65_meta["gate_semantics_changed"], "false")
+        self.assertEqual(r65_meta["candidate_executed"], "false")
 
     def test_rebuilt_historical_binary_mismatch_is_non_runtime_metadata(self) -> None:
         if not HISTORICAL_PINNED.is_file():
