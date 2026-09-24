@@ -89,9 +89,14 @@ class P115HaEntityMappingAndGateAvailabilityTests(unittest.TestCase):
         )
 
     def test_no_duplicate_entities_are_added(self) -> None:
-        self.assertEqual(self.camera_text.count("async_add_entities(["), 1)
-        self.assertEqual(self.switch_text.count("async_add_entities(["), 1)
-        self.assertIn("ComelitEntranceCamera(manager, transport)", self.camera_text)
+        # Camera setup now passes shared providers and attached-session owners,
+        # so do not pin the historical one-line constructor formatting.
+        self.assertEqual(self.camera_text.count("async_add_entities("), 1)
+        self.assertEqual(self.switch_text.count("async_add_entities("), 1)
+        self.assertEqual(self.camera_text.count("ComelitEntranceCamera("), 2)
+        self.assertEqual(self.switch_text.count("ComelitEntranceMediaSwitch("), 2)
+        self.assertIn("media_provider=media_provider", self.camera_text)
+        self.assertIn("attached_session=attached_session", self.camera_text)
         self.assertIn(
             "ComelitEntranceMediaSwitch(manager, transport)",
             self.switch_text,
