@@ -1,7 +1,7 @@
 {
   "domain": "comelit",
   "name": "Comelit",
-  "version": "1.5.13",
+  "version": "1.5.14",
   "documentation": "https://github.com/alexsudakov/comelit",
   "issue_tracker": "https://github.com/alexsudakov/comelit/issues",
   "codeowners": [
@@ -12,6 +12,7 @@
   "integration_type": "hub",
   "iot_class": "cloud_push",
   "dependencies": [
+    "http",
     "webhook",
     "stream"
   ],
