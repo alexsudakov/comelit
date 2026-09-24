@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 import logging
+from pathlib import Path
 
 import voluptuous as vol
 
+from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
@@ -53,9 +55,22 @@ from .test_control import async_register_test_control, async_unregister_test_con
 
 _LOGGER = logging.getLogger(__name__)
 
+_FRONTEND_URL = "/api/comelit/frontend"
+_FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
+
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Register direct Comelit services."""
+    """Register direct Comelit services and the bundled Lovelace card."""
+
+    await hass.http.async_register_static_paths(
+        [
+            StaticPathConfig(
+                _FRONTEND_URL,
+                str(_FRONTEND_DIR),
+                cache_headers=False,
+            )
+        ]
+    )
 
     async def handle_open_door(call: ServiceCall) -> dict[str, object]:
         domain_data = hass.data.get(DOMAIN, {})
