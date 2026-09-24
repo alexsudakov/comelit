@@ -127,7 +127,7 @@ class CallStateIntegrationContractTests(unittest.TestCase):
 
     def test_runtime_begins_only_non_synthetic_ring_state(self) -> None:
         self.assertIn('event.get("synthetic") is not True', self.runtime)
-        self.assertIn("self._call_state.begin(", self.runtime)
+        self.assertIn("self._call_state_tracker().begin(", self.runtime)
 
     def test_runtime_terminal_state_comes_from_remote_release_markers(self) -> None:
         for marker in (
@@ -136,7 +136,7 @@ class CallStateIntegrationContractTests(unittest.TestCase):
             "R64_TERMINAL_REMOTE_RELEASE_OBSERVED=true",
         ):
             self.assertIn(marker, self.runtime)
-        self.assertIn("self._call_state.remote_release()", self.runtime)
+        self.assertIn("self._call_state_tracker().remote_release()", self.runtime)
 
     def test_media_close_does_not_end_call_state(self) -> None:
         close_block = self.runtime.split(
