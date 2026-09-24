@@ -55,6 +55,7 @@ from .media_session import ComelitMediaSessionError
 _LOGGER = logging.getLogger(__name__)
 
 _SAFE_EVENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")
+_SAFE_STREAM_CONSUMER = re.compile(r"^[a-z0-9_]{1,64}$")
 _RING_MEDIA_REASON = "ring_media"
 _JPEG_SOI = b"\xff\xd8"
 _JPEG_EOI = b"\xff\xd9"
@@ -160,7 +161,37 @@ class HAStreamMediaProvider:
         self._camera_entity = camera_entity
         self._stream: Any | None = None
         self._create_stream_lock: asyncio.Lock | None = None
+        self._consumer_lock = asyncio.Lock()
+        self._consumers: dict[str, int] = {}
         self.last_failure_reason: str | None = None
+
+    @property
+    def stream(self) -> Any | None:
+        return self._stream
+
+    @property
+    def consumers(self) -> dict[str, int]:
+        return dict(self._consumers)
+
+    async def async_acquire_consumer(self, reason: str) -> None:
+        if not _SAFE_STREAM_CONSUMER.fullmatch(reason):
+            raise ValueError("invalid_stream_consumer_reason")
+        async with self._consumer_lock:
+            self._consumers[reason] = self._consumers.get(reason, 0) + 1
+
+    async def async_release_consumer(self, reason: str) -> None:
+        if not _SAFE_STREAM_CONSUMER.fullmatch(reason):
+            raise ValueError("invalid_stream_consumer_reason")
+        should_close = False
+        async with self._consumer_lock:
+            count = self._consumers.get(reason, 0)
+            if count <= 1:
+                self._consumers.pop(reason, None)
+            else:
+                self._consumers[reason] = count - 1
+            should_close = not self._consumers
+        if should_close:
+            await self.async_close()
 
     async def _async_stream_source(self) -> str | None:
         if not self._manager.active:
@@ -172,6 +203,10 @@ class HAStreamMediaProvider:
         if not ready:
             return None
         return str(path)
+
+    async def async_get_stream(self) -> Any | None:
+        """Return the one shared HA Stream for this upstream RTP transport."""
+        return await self._async_create_stream()
 
     async def _async_create_stream(self) -> Any | None:
         if self._stream is not None:
@@ -404,6 +439,7 @@ class RingMediaCoordinator:
         stop_event: asyncio.Event,
     ) -> None:
         acquired = False
+        stream_consumer_acquired = False
         recording_state = RECORDING_STATE_FAILED
         recording_started: float | None = None
         recording_actual = 0.0
@@ -411,6 +447,12 @@ class RingMediaCoordinator:
         try:
             await self._manager.async_acquire(panel=door, reason=_RING_MEDIA_REASON)
             acquired = True
+            acquire_consumer = getattr(
+                self._snapshot_provider, "async_acquire_consumer", None
+            )
+            if callable(acquire_consumer):
+                await acquire_consumer(_RING_MEDIA_REASON)
+                stream_consumer_acquired = True
             snapshot_task = asyncio.create_task(
                 self._async_snapshot_loop(event_id, door, paths, stop_event)
             )
@@ -469,12 +511,24 @@ class RingMediaCoordinator:
                     await self._manager.async_release(reason=_RING_MEDIA_REASON)
                 except Exception:
                     _LOGGER.exception("Comelit ring media release failed")
-            close = getattr(self._snapshot_provider, "async_close", None)
-            if close is not None:
-                try:
-                    await close()
-                except Exception:
-                    _LOGGER.exception("Comelit ring media stream cleanup failed")
+            if stream_consumer_acquired:
+                release_consumer = getattr(
+                    self._snapshot_provider, "async_release_consumer", None
+                )
+                if callable(release_consumer):
+                    try:
+                        await release_consumer(_RING_MEDIA_REASON)
+                    except Exception:
+                        _LOGGER.exception(
+                            "Comelit ring media stream-consumer release failed"
+                        )
+            else:
+                close = getattr(self._snapshot_provider, "async_close", None)
+                if close is not None:
+                    try:
+                        await close()
+                    except Exception:
+                        _LOGGER.exception("Comelit ring media stream cleanup failed")
             if self._active_event_id == event_id:
                 self._active_event_id = None
                 self._stop_event = None
