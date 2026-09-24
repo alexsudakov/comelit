@@ -41,6 +41,17 @@ class FrontendBundleContractTest(unittest.TestCase):
         self.assertNotIn(".callService(", source)
         self.assertNotIn(".call_service(", source)
 
+    def test_card_uses_authoritative_call_state_for_one_shot_focus(self) -> None:
+        source = CARD.read_text(encoding="utf-8")
+
+        self.assertIn('"comelit_call_state"', source)
+        self.assertIn('call.state !== "ringing"', source)
+        self.assertIn("call.eventId === this._focusedCallEventId", source)
+        self.assertIn('this._activeTab = "intercom"', source)
+        self.assertIn("ACTIVE_CALL_STATES", source)
+        self.assertIn('data-intercom-panel="entrance"', source)
+        self.assertIn('data-intercom-panel="gate"', source)
+
     def test_live_viewer_is_not_recreated_on_every_hass_update(self) -> None:
         source = CARD.read_text(encoding="utf-8")
 
