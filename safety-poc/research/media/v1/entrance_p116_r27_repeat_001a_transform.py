@@ -664,6 +664,7 @@ r27_print_final_summary(void)
     guint last_video_seconds = 0;
     guint media_active_duration_seconds = 0;
     gboolean after_repeat = FALSE;
+    gboolean after_last_refresh = FALSE;
     gboolean past35 = FALSE;
     gboolean past40 = FALSE;
     gboolean past75 = FALSE;
@@ -689,6 +690,15 @@ r27_print_final_summary(void)
         p116_video_rtp.last_monotonic_ms > p116_video_rtp.first_monotonic_ms;
     after_repeat = r27_repeat_001a_sent_count == 1u &&
         p80_video_rtp_packets > r27_video_packet_count_at_repeat;
+    /* r27_video_packet_count_at_repeat is overwritten on every refresh send
+     * (see R27_TX_RTPC_CLIENT_001A_REPEAT completion), so at summary time it
+     * always holds the packet count captured at the most recent refresh,
+     * regardless of how many periodic refreshes have run. VIDEO_RTP_AFTER_REPEAT
+     * keeps its original one-shot-only definition for historical comparability;
+     * VIDEO_RTP_AFTER_LAST_REFRESH generalises the same evidence to the
+     * periodic case instead of silently reading false once sent_count > 1. */
+    after_last_refresh = r27_repeat_001a_sent_count >= 1u &&
+        p80_video_rtp_packets > r27_video_packet_count_at_repeat;
     past35 = last_video_seconds >= R27_VIDEO_PAST_35S_SECONDS;
     past40 = last_video_seconds >= R27_VIDEO_PAST_40S_SECONDS;
     past75 = last_video_seconds >= R27_VIDEO_PAST_75S_SECONDS;
@@ -700,6 +710,7 @@ r27_print_final_summary(void)
         !r27_repeat_ambiguous)
         printf("SECOND_001A_ACK_CLASSIFICATION=ABSENT\n");
     printf("VIDEO_RTP_AFTER_REPEAT=%s\n", after_repeat ? "true" : "false");
+    printf("VIDEO_RTP_AFTER_LAST_REFRESH=%s\n", after_last_refresh ? "true" : "false");
     printf("VIDEO_RTP_PAST_35S=%s\n", past35 ? "true" : "false");
     printf("VIDEO_RTP_PAST_40S=%s\n", past40 ? "true" : "false");
     printf("VIDEO_RTP_PAST_75S=%s\n", past75 ? "true" : "false");

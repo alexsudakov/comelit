@@ -16,8 +16,8 @@ ROOT = Path(__file__).resolve().parents[2]
 MEDIA = ROOT / "safety-poc" / "research" / "media" / "v1"
 SOURCE = ROOT / "safety-poc" / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-ctpp-door.c"
 TRANSFORM = MEDIA / "entrance_p116_r27_repeat_001a_transform.py"
-EXPECTED_GENERATED_SOURCE_SHA = "b04b973d98f4913ed0160e8cd6267c3cb0d5ddd2cfab3bf0d004aada6b8f60c4"
-RUNNER_EXPECTED_SOURCE_SHA = "b04b973d98f4913ed0160e8cd6267c3cb0d5ddd2cfab3bf0d004aada6b8f60c4"
+EXPECTED_GENERATED_SOURCE_SHA = "a923576b493ee94faeb6ec7eb5ece3faaddce951408b05deb24a1952beb31394"
+RUNNER_EXPECTED_SOURCE_SHA = "a923576b493ee94faeb6ec7eb5ece3faaddce951408b05deb24a1952beb31394"
 RUNNER_HISTORICAL_PRE_R30D_SOURCE_SHA = "62e0023521cef0e4178248beb78408f89752d108d9d009c388ff153d94195368"
 
 # This is an explicit source-local declaration-order gate for R27-added code in
@@ -669,6 +669,41 @@ def _compile_and_run_harness(candidate: str) -> str:
             return 0;
         }
 
+        static int test_video_rtp_after_last_refresh_generalizes_to_periodic_case(void)
+        {
+            /* R65 residual fix: with more than one refresh sent (the periodic
+             * production case), the legacy VIDEO_RTP_AFTER_REPEAT marker is
+             * defined only for sent_count==1 and stays false forever once a
+             * second refresh has been sent, even though RTP is still
+             * progressing after the most recent refresh. Flip check: if
+             * VIDEO_RTP_AFTER_LAST_REFRESH regressed back to the same
+             * sent_count==1 guard, this assertion would fail because the
+             * marker would read false instead of true here. */
+            reset_state();
+            r27_repeat_001a_sent_count = 4u;
+            r27_video_packet_count_at_repeat = 500u;
+            p80_video_rtp_packets = 900u;
+            r27_print_final_summary();
+            CHECK(strstr(output, "VIDEO_RTP_AFTER_REPEAT=false\n") != NULL);
+            CHECK(strstr(output, "VIDEO_RTP_AFTER_LAST_REFRESH=true\n") != NULL);
+
+            reset_state();
+            r27_repeat_001a_sent_count = 4u;
+            r27_video_packet_count_at_repeat = 900u;
+            p80_video_rtp_packets = 900u;
+            r27_print_final_summary();
+            CHECK(strstr(output, "VIDEO_RTP_AFTER_LAST_REFRESH=false\n") != NULL);
+
+            reset_state();
+            r27_repeat_001a_sent_count = 1u;
+            r27_video_packet_count_at_repeat = 3u;
+            p80_video_rtp_packets = 9u;
+            r27_print_final_summary();
+            CHECK(strstr(output, "VIDEO_RTP_AFTER_REPEAT=true\n") != NULL);
+            CHECK(strstr(output, "VIDEO_RTP_AFTER_LAST_REFRESH=true\n") != NULL);
+            return 0;
+        }
+
         int main(void)
         {
             if (test_third_001a_blocked()) return 1;
@@ -684,6 +719,7 @@ def _compile_and_run_harness(candidate: str) -> str:
             if (test_ack_timeout_absent_no_retry()) return 1;
             if (test_unrelated_ack_does_not_satisfy_repeat_gate()) return 1;
             if (test_video_rtp_last_seconds_uses_stream_last_packet()) return 1;
+            if (test_video_rtp_after_last_refresh_generalizes_to_periodic_case()) return 1;
             puts("HARNESS_PASS");
             return 0;
         }
@@ -920,6 +956,7 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
             "R27_REPEAT_DELAY_IS_PROTOCOL_CONSTANT=false",
             "R27_REPEAT_DELAY_PROMOTED_TO_PRODUCTION=false",
             "VIDEO_RTP_AFTER_REPEAT=%s",
+            "VIDEO_RTP_AFTER_LAST_REFRESH=%s",
             "VIDEO_RTP_PAST_35S=%s",
             "VIDEO_RTP_PAST_40S=%s",
             "VIDEO_RTP_PAST_75S=%s",

@@ -147,6 +147,22 @@ class P80MediaTransportStaticContractTests(unittest.TestCase):
         self.assertNotIn("_LOGGER.error(line", self.source)
         self.assertNotIn("_LOGGER.info(line", self.source)
 
+    def test_r65_refresh_markers_are_allowlisted_for_diagnostics(self) -> None:
+        # Flip: without these three prefixes, every R65 production refresh
+        # marker (REFRESH_CADENCE_SECONDS, R65_PRODUCTION_REFRESH,
+        # R27_REPEAT_001A_SENT, ...) would be silently dropped by
+        # _safe_native_marker and never reach the bounded diagnostics tail
+        # or the protocol-marker success summary.
+        prefixes_start = self.source.index("_MEDIA_NATIVE_MARKER_PREFIXES = (")
+        prefixes_end = self.source.index(")\n", prefixes_start)
+        general_prefixes = self.source[prefixes_start:prefixes_end]
+        protocol_start = self.source.index("_MEDIA_NATIVE_PROTOCOL_MARKER_PREFIXES = (")
+        protocol_end = self.source.index(")\n", protocol_start)
+        protocol_prefixes = self.source[protocol_start:protocol_end]
+        for prefix in ('"R27_",', '"R65_",', '"REFRESH_",'):
+            self.assertIn(prefix, general_prefixes)
+            self.assertIn(prefix, protocol_prefixes)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -62,6 +62,12 @@ _MEDIA_NATIVE_MARKER_PREFIXES = (
     "P78_",
     "P80_",
     "P116_",
+    # R65 bounded same-session periodic refresh (research/media/v1
+    # entrance_p116_r65_production_media_refresh_transform.py, composed on
+    # the live-proven R27 repeat-0x001A candidate).
+    "R27_",
+    "R65_",
+    "REFRESH_",
 )
 _MEDIA_NATIVE_MARKER_TAIL_LIMIT = 40
 _MEDIA_NATIVE_PROTOCOL_MARKER_LIMIT = 80
@@ -80,6 +86,9 @@ _MEDIA_NATIVE_PROTOCOL_MARKER_PREFIXES = (
     "P80_AUDIO_RTP_PORT",
     "P80_VIDEO_RTP_FORWARDING",
     "P80_AUDIO_RTP_FORWARDING",
+    "R27_",
+    "R65_",
+    "REFRESH_",
 )
 _MEDIA_STATUS_NOTIFY_MIN_INTERVAL_SECONDS = 1.0
 
