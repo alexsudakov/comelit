@@ -105,7 +105,7 @@ class P116HaStreamRtpBridgeTests(unittest.TestCase):
             run_cycle.index("active_wait = asyncio.create_task(self._media_active.wait())"),
             run_cycle.index("await self._hass.async_add_executor_job(_write_local_sdp)"),
         )
-        self.assertIn("self._transport.local_sdp_ready", self.camera)
+        self.assertIn("lambda: transport.local_sdp_ready", self.camera)
         self.assertIn("if not ready:\n            return None", self.camera)
 
     def test_t6_camera_owns_bounded_live_view_without_raw_bootstrap(self) -> None:
