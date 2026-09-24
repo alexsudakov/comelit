@@ -484,20 +484,31 @@ class ComelitRingRuntime:
 
     def async_add_status_listener(self, callback: Callable[[], None]) -> Callable[[], None]:
         """Register an in-process runtime status listener and return its remover."""
-        self._status_listeners.add(callback)
+        listeners = getattr(self, "_status_listeners", None)
+        if listeners is None:
+            listeners = set()
+            self._status_listeners = listeners
+        listeners.add(callback)
 
         def remove() -> None:
-            self._status_listeners.discard(callback)
+            listeners.discard(callback)
 
         return remove
 
     def _notify_status(self) -> None:
-        for callback in tuple(self._status_listeners):
+        for callback in tuple(getattr(self, "_status_listeners", ())):
             callback()
+
+    def _call_state_tracker(self) -> ComelitCallStateTracker:
+        tracker = getattr(self, "_call_state", None)
+        if tracker is None:
+            tracker = ComelitCallStateTracker()
+            self._call_state = tracker
+        return tracker
 
     def call_status(self) -> dict[str, object]:
         """Return bounded user-facing call state reconstructed from runtime evidence."""
-        snapshot = self._call_state.snapshot()
+        snapshot = self._call_state_tracker().snapshot()
         return {
             "state": snapshot.state,
             "panel": snapshot.panel,
@@ -616,7 +627,7 @@ class ComelitRingRuntime:
                 isinstance(panel, str)
                 and isinstance(event_id, str)
                 and isinstance(started_at, str)
-                and self._call_state.begin(
+                and self._call_state_tracker().begin(
                     panel=panel,
                     event_id=event_id,
                     started_at=started_at,
@@ -913,7 +924,7 @@ class ComelitRingRuntime:
         self._last_ring_event = None
         self._last_error = None
         self._media_diagnostics.reset()
-        self._call_state.reset()
+        self._call_state_tracker().reset()
         self._notify_status()
         self._task = self._entry.async_create_background_task(
             self._hass,
@@ -1214,7 +1225,7 @@ class ComelitRingRuntime:
             ComelitSdpError,
         ) as exc:
             self._last_error = str(exc)
-            if self._call_state.fail_active("listener_failure"):
+            if self._call_state_tracker().fail_active("listener_failure"):
                 self._notify_status()
             if (
                 isinstance(exc, ComelitRingRuntimeError)
@@ -1358,7 +1369,7 @@ class ComelitRingRuntime:
                 "R64_POST_CALL_REMOTE_RELEASE_OBSERVED=true",
                 "R64_TERMINAL_REMOTE_RELEASE_OBSERVED=true",
             }:
-                if self._call_state.remote_release():
+                if self._call_state_tracker().remote_release():
                     self._notify_status()
             if (
                 line == "R64_POST_CALL_SNAPSHOT=true"
