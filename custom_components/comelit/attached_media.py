@@ -186,10 +186,23 @@ class ComelitAttachedRingMediaSession:
     def active(self) -> bool:
         return self._transport.active
 
+    @property
+    def claimed(self) -> bool:
+        """Return whether this inbound call media lifecycle already has an owner.
+
+        This is intentionally broader than active: while the first ring-media
+        acquire is still waiting for the native attached channel to open, the
+        lease already exists. A camera live-view request can therefore join the
+        same call transaction instead of racing into a second self-activation
+        bootstrap.
+        """
+        return self.active or bool(self._leases)
+
     def status(self) -> dict[str, object]:
         return {
             "panel": self._panel,
             "active": self.active,
+            "claimed": self.claimed,
             "leases": dict(self._leases),
             "last_error": self._last_error,
             "listener_paused": False,
