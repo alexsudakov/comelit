@@ -30,8 +30,10 @@ from .attached_media import (
     ComelitAttachedRingMediaTransport,
 )
 from .const import (
+    DATA_ATTACHED_MEDIA_PROVIDERS,
     DATA_ATTACHED_MEDIA_SESSIONS,
     DATA_ATTACHED_MEDIA_TRANSPORTS,
+    DATA_MEDIA_PROVIDERS,
     DATA_MEDIA_SESSIONS,
     DATA_MEDIA_TRANSPORTS,
     DOMAIN,
@@ -40,6 +42,7 @@ from .const import (
 )
 from .media_session import MEDIA_PHASE_ERROR, ComelitMediaSessionManager
 from .media_transport import ComelitEntranceMediaTransport
+from .ring_media import HAStreamMediaProvider
 
 try:  # pragma: no cover - import-shape guard around HA internals
     from homeassistant.components.stream import HLS_PROVIDER
@@ -230,14 +233,22 @@ async def async_setup_entry(
     attached_transport: ComelitAttachedRingMediaTransport | None = domain_data.get(
         DATA_ATTACHED_MEDIA_TRANSPORTS, {}
     ).get(entry.entry_id)
-    if manager is not None and transport is not None:
+    media_provider: HAStreamMediaProvider | None = domain_data.get(
+        DATA_MEDIA_PROVIDERS, {}
+    ).get(entry.entry_id)
+    attached_provider: HAStreamMediaProvider | None = domain_data.get(
+        DATA_ATTACHED_MEDIA_PROVIDERS, {}
+    ).get(entry.entry_id)
+    if manager is not None and transport is not None and media_provider is not None:
         async_add_entities(
             [
                 ComelitEntranceCamera(
                     manager,
                     transport,
+                    media_provider=media_provider,
                     attached_session=attached_session,
                     attached_transport=attached_transport,
+                    attached_provider=attached_provider,
                 )
             ]
         )
@@ -263,20 +274,25 @@ class ComelitEntranceCamera(Camera):
         manager: ComelitMediaSessionManager,
         transport: ComelitEntranceMediaTransport,
         *,
+        media_provider: HAStreamMediaProvider,
         attached_session: ComelitAttachedRingMediaSession | None = None,
         attached_transport: ComelitAttachedRingMediaTransport | None = None,
+        attached_provider: HAStreamMediaProvider | None = None,
     ) -> None:
         super().__init__()
         self._manager = manager
         self._transport = transport
+        self._media_provider = media_provider
         self._attached_session = attached_session
         self._attached_transport = attached_transport
+        self._attached_provider = attached_provider
         self._camera_view_owner: (
             ComelitMediaSessionManager | ComelitAttachedRingMediaSession | None
         ) = None
         self._camera_view_transport: (
             ComelitEntranceMediaTransport | ComelitAttachedRingMediaTransport | None
         ) = None
+        self._camera_view_provider: HAStreamMediaProvider | None = None
         self._camera_view_owner_kind: str | None = None
         self._camera_view_lock = asyncio.Lock()
         self._camera_view_monitor_task: asyncio.Task[None] | None = None
