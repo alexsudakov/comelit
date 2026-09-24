@@ -13,7 +13,7 @@ Category: Integration
 
 ## Home Assistant Custom Card
 
-Version 1.5.14 bundles the first surveillance-first Lovelace card.
+Version 1.5.15 includes the surveillance-first Lovelace card and an authoritative Home Assistant call-state sensor.
 
 After updating the integration and restarting Home Assistant, register this resource once in the Lovelace resource settings:
 
@@ -52,6 +52,7 @@ The intercom tab is read-only in this MVP. Door/media actions and authoritative 
 
 - Direct Comelit cloud P2P bootstrap and persistent session
 - Incoming `comelit_ring` Home Assistant events
+- `sensor.comelit_call_state` authoritative current call state reconstructed from runtime evidence
 - Exact-frame retransmit deduplication for incoming CALL_INIT
 - OAuth access-token refresh with refresh-token persistence in the Home Assistant config entry
 - Entrance and Gate Door actions through `comelit.open_door`
@@ -65,6 +66,24 @@ The intercom tab is read-only in this MVP. Door/media actions and authoritative 
 - Same-session periodic media refresh keeps entrance video alive beyond the historical 30–35 second cutoff
 - Absolute media-session ceiling remains 600 seconds
 - Bundled surveillance-first Home Assistant Custom Card
+
+## Call-state lifecycle
+
+The integration publishes `sensor.comelit_call_state` with stable unique id `comelit_call_state`.
+
+Current emitted states are intentionally conservative:
+
+```text
+idle
+ringing
+error
+```
+
+Future enum values `answering`, `in_call` and `ending` are reserved for later full-duplex work and are not synthesized by the current runtime.
+
+The sensor stores the active panel and event id as attributes. Incoming attached media is represented independently as `media_attached`; opening or closing video alone does not mean that the call ended.
+
+`ringing -> idle` is driven by backend-observed remote-release evidence. The frontend does not infer call termination from a timer or from the age of the last `comelit_ring` event.
 
 ## Camera lifecycle
 
