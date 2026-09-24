@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # CT120 research-only P116/R27 same-session repeat 0x001A live runner.
-# The helper observes for 70 seconds after MEDIA_ACTIVE.  The outer timeout is
-# a hard 150 second bound, giving 80 seconds for OAuth/bootstrap/ICE/P2P and
-# RTPC/ACK setup before the helper's own 70 second observation can finish.
+# The helper observes for 100 seconds after MEDIA_ACTIVE. The wrapper timeout is
+# a hard 120 second per-session bound, allowing at least 90 seconds of proven
+# media while preserving the campaign ceiling.
 
 set -u -o pipefail
 umask 077
@@ -16,11 +16,11 @@ BASE_WRAPPER_SHA256=a564535dff0cf10b1fe4766171f2960c52fb581f1c816cf81d2992c5c84e
 BUILDER_REL=safety-poc/research/media/v1/ct120_build_p80_haos_media_helper.sh
 TRANSFORM_REL=safety-poc/research/media/v1/entrance_p116_r27_repeat_001a_transform.py
 RUNNER_REL=safety-poc/research/media/v1/ct120_run_p116_r27_repeat_001a_live.sh
-EXPECTED_SOURCE_SHA=1c9f13cff0d1d3599e00109146310c7372b1b0ae12117bb46ad68f091a841d42
+EXPECTED_SOURCE_SHA=7449d477738c1b4a66e9a598d93451caa936b4facfde9919ab935c3335d2a99c
 VIDEO_RTP_PORT=17899
 AUDIO_RTP_PORT=17808
-MAX_LIVE_OBSERVATION_SECONDS=70
-OUTER_TIMEOUT_SECONDS=150
+MAX_LIVE_OBSERVATION_SECONDS=100
+OUTER_TIMEOUT_SECONDS=120
 RUN_DIR=/run/comelit-media
 STOP_FILE="$RUN_DIR/stop"
 CANDIDATE_HOLDER_NAME=comelit-r27-repeat-001a
@@ -46,6 +46,7 @@ LISTENER_RUNNING_AFTER=false
 LISTENER_READY_AFTER=false
 PRODUCTION_MEDIA_ACTIVE=false
 CAMPAIGN_PROCESSES_REMAINING=UNKNOWN
+RTP_SINK_PORTS_REMAINING=UNKNOWN
 CT120_RESEARCH_HELPER_STOPPED=false
 CT120_RESEARCH_SESSION_CLOSED=false
 R27_SESSION_CLOSED=false
@@ -273,6 +274,18 @@ campaign_processes_remaining() {
     echo "CAMPAIGN_PROCESSES_REMAINING=$CAMPAIGN_PROCESSES_REMAINING"
 }
 
+rtp_sink_ports_remaining() {
+    local remaining=0
+    if [ -n "$VIDEO_SINK_PID" ] && kill -0 "$VIDEO_SINK_PID" 2>/dev/null; then
+        remaining=$((remaining + 1))
+    fi
+    if [ -n "$AUDIO_SINK_PID" ] && kill -0 "$AUDIO_SINK_PID" 2>/dev/null; then
+        remaining=$((remaining + 1))
+    fi
+    RTP_SINK_PORTS_REMAINING="$remaining"
+    echo "RTP_SINK_PORTS_REMAINING=$RTP_SINK_PORTS_REMAINING"
+}
+
 derive_teardown_confidence() {
     local wrapper_gone=true
     if [ -n "$WRAPPER_PID" ] && kill -0 "$WRAPPER_PID" 2>/dev/null; then
@@ -330,6 +343,7 @@ print_final_block() {
     echo "LIVE_INVOCATIONS=$LIVE_INVOCATIONS"
     echo "WRAPPER_RC=$WRAPPER_RC"
     echo "CAMPAIGN_PROCESSES_REMAINING=$CAMPAIGN_PROCESSES_REMAINING"
+    echo "RTP_SINK_PORTS_REMAINING=$RTP_SINK_PORTS_REMAINING"
     echo "CT120_RESEARCH_HELPER_STOPPED=$CT120_RESEARCH_HELPER_STOPPED"
     echo "CT120_RESEARCH_SESSION_CLOSED=$CT120_RESEARCH_SESSION_CLOSED"
     echo "R27_SESSION_CLOSED=$R27_SESSION_CLOSED"
@@ -354,12 +368,16 @@ print_final_block() {
         echo "REPEAT_001A_SENT_COUNT=$(last_marker REPEAT_001A_SENT_COUNT NOT_REACHED)"
         echo "TOTAL_001A_SENT_COUNT=$(last_marker TOTAL_001A_SENT_COUNT NOT_REACHED)"
         echo "SECOND_001A_RESPONSE=$(last_marker SECOND_001A_RESPONSE NOT_REACHED)"
+        echo "SECOND_001A_ACK_CLASSIFICATION=$(last_marker SECOND_001A_ACK_CLASSIFICATION NOT_REACHED)"
         echo "VIDEO_RTP_BEFORE_REPEAT=$(last_marker VIDEO_RTP_BEFORE_REPEAT NOT_REACHED)"
         echo "VIDEO_PACKET_COUNT_AT_REPEAT=$(last_marker VIDEO_PACKET_COUNT_AT_REPEAT NOT_REACHED)"
         echo "VIDEO_RTP_AFTER_REPEAT=$(last_marker VIDEO_RTP_AFTER_REPEAT NOT_REACHED)"
         echo "VIDEO_RTP_PAST_35S=$(last_marker VIDEO_RTP_PAST_35S NOT_REACHED)"
         echo "VIDEO_RTP_PAST_40S=$(last_marker VIDEO_RTP_PAST_40S NOT_REACHED)"
+        echo "VIDEO_RTP_PAST_75S=$(last_marker VIDEO_RTP_PAST_75S NOT_REACHED)"
         echo "VIDEO_RTP_LAST_SECONDS_FROM_INITIAL_START=$(last_marker VIDEO_RTP_LAST_SECONDS_FROM_INITIAL_START NOT_REACHED)"
+        echo "MEDIA_ACTIVE_DURATION_SECONDS=$(last_marker MEDIA_ACTIVE_DURATION_SECONDS NOT_REACHED)"
+        echo "VIDEO_PACKET_COUNTER_PROGRESSING=$(last_marker VIDEO_PACKET_COUNTER_PROGRESSING NOT_REACHED)"
     fi
     echo "ICE_NEGOTIATION_COUNT=$(last_marker ICE_NEGOTIATION_COUNT NOT_REACHED)"
     echo "PSEUDOTCP_OPEN_COUNT=$(last_marker PSEUDOTCP_OPEN_COUNT NOT_REACHED)"
@@ -375,6 +393,8 @@ print_final_block() {
     echo "DOOR_ACTIONS_SENT=0"
     echo "GATE_ACTIONS_SENT=0"
     echo "SECOND_MEDIA_SESSION=false"
+    echo "NEW_RTPC_OPEN=false"
+    echo "NEW_SELF_ACTIVATION=false"
     echo "THIRD_001A=false"
     echo "REFRESH_LOOP=false"
     echo "AUTOMATIC_RETRY_001A=false"
@@ -395,6 +415,7 @@ on_exit() {
     stop_candidate_if_needed || true
     stop_pid "$VIDEO_SINK_PID"
     stop_pid "$AUDIO_SINK_PID"
+    rtp_sink_ports_remaining
     if [ "$LISTENER_STOPPED" -eq 1 ]; then
         restore_listener || rc=91
     fi
@@ -697,6 +718,7 @@ derive_teardown_confidence
 
 stop_pid "$VIDEO_SINK_PID"
 stop_pid "$AUDIO_SINK_PID"
+rtp_sink_ports_remaining
 VIDEO_SINK_PID=""
 AUDIO_SINK_PID=""
 

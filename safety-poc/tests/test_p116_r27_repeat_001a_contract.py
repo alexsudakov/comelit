@@ -16,8 +16,8 @@ ROOT = Path(__file__).resolve().parents[2]
 MEDIA = ROOT / "safety-poc" / "research" / "media" / "v1"
 SOURCE = ROOT / "safety-poc" / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-ctpp-door.c"
 TRANSFORM = MEDIA / "entrance_p116_r27_repeat_001a_transform.py"
-EXPECTED_GENERATED_SOURCE_SHA = "1c9f13cff0d1d3599e00109146310c7372b1b0ae12117bb46ad68f091a841d42"
-RUNNER_EXPECTED_SOURCE_SHA = "1c9f13cff0d1d3599e00109146310c7372b1b0ae12117bb46ad68f091a841d42"
+EXPECTED_GENERATED_SOURCE_SHA = "7449d477738c1b4a66e9a598d93451caa936b4facfde9919ab935c3335d2a99c"
+RUNNER_EXPECTED_SOURCE_SHA = "7449d477738c1b4a66e9a598d93451caa936b4facfde9919ab935c3335d2a99c"
 RUNNER_HISTORICAL_PRE_R30D_SOURCE_SHA = "62e0023521cef0e4178248beb78408f89752d108d9d009c388ff153d94195368"
 
 # This is an explicit source-local declaration-order gate for R27-added code in
@@ -49,13 +49,13 @@ R27_DECLARATION_BEFORE_USE = (
     ("p78_rtpc_stage", "static P78RtpcLiveStage p78_rtpc_stage = P78_RTPC_IDLE;", "if (p78_rtpc_stage != P78_RTPC_COMPLETE ||"),
     ("p116_video_rtp", "static P116RtpTelemetry p116_video_rtp = {", "        p116_video_rtp.packet_count > 0u &&"),
     ("read_le32", "static guint32\nread_le32(", "r27_initial_001a_sequence = read_le32(p78_rtpc_client_001a + 2u);"),
-    ("write_le32", "static void\nwrite_le32(", "write_le32(r27_rtpc_client_001a_repeat + 2u, r27_repeat_001a_sequence);"),
     ("p116_monotonic_ms", "static long long\np116_monotonic_ms(void)", "r27_media_active_monotonic_ms = p116_monotonic_ms();"),
     ("p12_queue_vip_frame", "p12_queue_vip_frame(\n    guint32 request_id,", "if (!p12_queue_vip_frame(\n            v4_ctpp_channel_id,\n            r27_rtpc_client_001a_repeat,"),
     ("p12_flush_tx", "p12_flush_tx(void);", "if (!p12_flush_tx()) {\n        p78_fail_rtpc(\"R27_REPEAT_001A_FLUSH=FAIL\");"),
     ("p78_fail_rtpc", "static void p78_fail_rtpc(const char *marker);", "p78_fail_rtpc(\"R27_REPEAT_001A_GENERATION=FAIL\");"),
     ("p76_generate_client_001a", "static P76Status p76_generate_client_001a(P76Runtime *runtime, const p76_u8 body[P76_MAX_BODY], p76_u32 len)", "status = p76_generate_client_001a(\n        &p78_rtpc_runtime,"),
-    ("P97_CLIENT_001A_SEQUENCE_DELTA_FROM_ACK", "#define P97_CLIENT_001A_SEQUENCE_DELTA_FROM_ACK 0x00010000u", "r27_initial_001a_sequence + P97_CLIENT_001A_SEQUENCE_DELTA_FROM_ACK;"),
+    ("r27_build_repeat_001a_body", "static gboolean r27_build_repeat_001a_body(void);", "if (!r27_build_repeat_001a_body()) {"),
+    ("r27_repeat_body_diff_gate", "static gboolean r27_repeat_body_diff_gate(void);", "if (!r27_repeat_body_diff_gate()) {"),
     ("p99_state_scoped_structural_ack", "p99_state_scoped_structural_ack(guint16 request_id, const guint8 *body, guint body_len)", "if (p99_state_scoped_structural_ack(request_id, body, body_len)) {"),
     ("r27_repeat_delay_cb", "static gboolean r27_repeat_delay_cb(gpointer data);", "if (g_timeout_add_seconds(R27_REPEAT_DELAY_SECONDS, r27_repeat_delay_cb, NULL) == 0)"),
     ("r27_live_observation_timeout_cb", "static gboolean r27_live_observation_timeout_cb(gpointer data);", "                              r27_live_observation_timeout_cb, NULL) == 0)"),
@@ -130,6 +130,7 @@ def _compile_and_run_harness(candidate: str) -> str:
         #define R27_TX_RTPC_CLIENT_001A_REPEAT 78
         #define R27_VIDEO_PAST_35S_SECONDS 35u
         #define R27_VIDEO_PAST_40S_SECONDS 40u
+        #define R27_VIDEO_PAST_75S_SECONDS 75u
         #define P97_CLIENT_001A_SEQUENCE_DELTA_FROM_ACK 0x00010000u
 
         typedef struct {
@@ -179,6 +180,9 @@ def _compile_and_run_harness(candidate: str) -> str:
         static int queue_call_count;
         static int flush_call_count;
         static int timeout_call_count;
+        static guint16 queued_channel;
+        static guint8 queued_body[128];
+        static p76_u32 queued_len;
         static gboolean queue_should_succeed = TRUE;
         static gboolean flush_should_succeed = TRUE;
         static gboolean structural_ack_result;
@@ -187,6 +191,8 @@ def _compile_and_run_harness(candidate: str) -> str:
         static size_t output_len;
 
         static gboolean r27_queue_rtpc_client_001a_repeat(void);
+        static gboolean r27_build_repeat_001a_body(void);
+        static gboolean r27_repeat_body_diff_gate(void);
 
         static int harness_printf(const char *fmt, ...)
         {
@@ -213,16 +219,21 @@ def _compile_and_run_harness(candidate: str) -> str:
         static void p78_fail_rtpc(const char *reason) { (void)reason; failed = TRUE; }
         static gboolean p12_queue_vip_frame(guint16 channel, guint8 *buf, p76_u32 len, int kind)
         {
-            (void)channel; (void)buf; (void)len; (void)kind;
+            (void)kind;
             queue_call_count++;
+            queued_channel = channel;
+            queued_len = len;
+            memcpy(queued_body, buf, len);
             return queue_should_succeed;
         }
         static gboolean p12_flush_tx(void) { flush_call_count++; return flush_should_succeed; }
-        static P76Status p76_generate_client_001a(int *runtime, guint8 *out, p76_u32 len)
+        static P76Status p76_generate_client_001a(int *runtime, guint8 *body, p76_u32 len)
         {
             (void)runtime;
-            memset(out, 0, len);
-            memcpy(out + 10u, p78_rtpc_client_001a + 10u, 50u);
+            if (len != 60u || body[0] != 0x40u || body[1] != 0x18u ||
+                body[6] != 0x00u || body[7] != 0x1au ||
+                memcmp(body + 10u, p78_rtpc_client_001a + 10u, 50u) != 0)
+                return 1;
             return P76_OK;
         }
         static guint32 read_le32(const guint8 *p)
@@ -285,12 +296,26 @@ def _compile_and_run_harness(candidate: str) -> str:
             queue_call_count = 0;
             flush_call_count = 0;
             timeout_call_count = 0;
+            queued_channel = 0;
+            queued_len = 0;
+            memset(queued_body, 0, sizeof(queued_body));
             queue_should_succeed = TRUE;
             flush_should_succeed = TRUE;
             structural_ack_result = FALSE;
             fake_now_ms = 1000;
             memset(output, 0, sizeof(output));
             output_len = 0;
+            memset(p78_rtpc_client_001a, 0, sizeof(p78_rtpc_client_001a));
+            p78_rtpc_client_001a[0] = 0x40;
+            p78_rtpc_client_001a[1] = 0x18;
+            p78_rtpc_client_001a[2] = 0x34;
+            p78_rtpc_client_001a[3] = 0x12;
+            p78_rtpc_client_001a[4] = 0x22;
+            p78_rtpc_client_001a[5] = 0x88;
+            p78_rtpc_client_001a[6] = 0x00;
+            p78_rtpc_client_001a[7] = 0x1a;
+            for (unsigned int i = 10; i < 60; i++)
+                p78_rtpc_client_001a[i] = (guint8)i;
         }
 
         #define CHECK(expr) do { if (!(expr)) { fprintf(stderr, "CHECK failed: %s\n", #expr); return 1; } } while (0)
@@ -302,7 +327,6 @@ def _compile_and_run_harness(candidate: str) -> str:
             r27_repeat_001a_sent_count = 1u;
             CHECK(r27_queue_rtpc_client_001a_repeat() == FALSE);
             CHECK(r27_third_001a_blocked == TRUE);
-            CHECK(failed == TRUE);
             CHECK(queue_call_count == 0);
             return 0;
         }
@@ -326,6 +350,77 @@ def _compile_and_run_harness(candidate: str) -> str:
             CHECK(r27_try_queue_repeat_001a("no-video") == FALSE);
             CHECK(queue_call_count == 0);
             CHECK(r27_repeat_attempt_count == 0);
+            return 0;
+        }
+
+        static int test_repeat_body_build_validate_and_diff_gate(void)
+        {
+            reset_state();
+            r27_initial_001a_sent_count = 1u;
+            CHECK(r27_try_queue_repeat_001a("valid") == TRUE);
+            CHECK(failed == FALSE);
+            CHECK(queue_call_count == 1);
+            CHECK(flush_call_count == 1);
+            CHECK(queued_channel == v4_ctpp_channel_id);
+            CHECK(queued_len == 60u);
+            CHECK(memcmp(queued_body, p78_rtpc_client_001a, 4u) == 0);
+            CHECK(queued_body[4] == 0x23);
+            CHECK(queued_body[5] == 0x88);
+            CHECK(memcmp(queued_body + 6u, p78_rtpc_client_001a + 6u, 54u) == 0);
+            CHECK(strstr(output, "R27_REPEAT_001A_BUILD=PASS\n") != NULL);
+            CHECK(strstr(output, "R27_REPEAT_001A_VALIDATION=PASS\n") != NULL);
+            CHECK(strstr(output, "R27_REPEAT_BODY_DIFF_GATE=PASS\n") != NULL);
+            CHECK(strstr(output, "R27_REPEAT_BODY_CHANGED_OFFSETS=4\n") != NULL);
+            return 0;
+        }
+
+        static int test_sequence_rollover_does_not_mutate_ack(void)
+        {
+            reset_state();
+            p78_rtpc_client_001a[4] = 0xff;
+            p78_rtpc_client_001a[5] = 0x5a;
+            CHECK(r27_build_repeat_001a_body() == TRUE);
+            CHECK(r27_repeat_body_diff_gate() == TRUE);
+            CHECK(r27_rtpc_client_001a_repeat[4] == 0x00);
+            CHECK(r27_rtpc_client_001a_repeat[5] == 0x5a);
+            return 0;
+        }
+
+        static int test_deterministic_repeat_build_flips_when_input_differs(void)
+        {
+            guint8 first[128];
+            guint8 second[128];
+            reset_state();
+            CHECK(r27_build_repeat_001a_body() == TRUE);
+            memcpy(first, r27_rtpc_client_001a_repeat, 60u);
+            CHECK(r27_build_repeat_001a_body() == TRUE);
+            memcpy(second, r27_rtpc_client_001a_repeat, 60u);
+            CHECK(memcmp(first, second, 60u) == 0);
+            p78_rtpc_client_001a[16] ^= 0x01u;
+            CHECK(r27_build_repeat_001a_body() == TRUE);
+            CHECK(memcmp(first, r27_rtpc_client_001a_repeat, 60u) != 0);
+            return 0;
+        }
+
+        static int test_malformed_repeat_inputs_fail_closed(void)
+        {
+            reset_state();
+            r27_initial_001a_sent_count = 1u;
+            p78_rtpc_client_001a[7] = 0x19;
+            CHECK(r27_try_queue_repeat_001a("bad-shape") == FALSE);
+            CHECK(failed == TRUE);
+            CHECK(queue_call_count == 0);
+
+            reset_state();
+            p78_rtpc_client_001a_len = 59u;
+            CHECK(r27_try_queue_repeat_001a("bad-len") == FALSE);
+            CHECK(queue_call_count == 0);
+
+            reset_state();
+            r27_initial_001a_sent_count = 1u;
+            CHECK(r27_build_repeat_001a_body() == TRUE);
+            r27_rtpc_client_001a_repeat[16] ^= 0x01u;
+            CHECK(r27_repeat_body_diff_gate() == FALSE);
             return 0;
         }
 
@@ -393,6 +488,10 @@ def _compile_and_run_harness(candidate: str) -> str:
         {
             if (test_third_001a_blocked()) return 1;
             if (test_repeat_preconditions_fail_closed()) return 1;
+            if (test_repeat_body_build_validate_and_diff_gate()) return 1;
+            if (test_sequence_rollover_does_not_mutate_ack()) return 1;
+            if (test_deterministic_repeat_build_flips_when_input_differs()) return 1;
+            if (test_malformed_repeat_inputs_fail_closed()) return 1;
             if (test_ack_timeout_absent_no_retry()) return 1;
             if (test_unrelated_ack_does_not_satisfy_repeat_gate()) return 1;
             if (test_video_rtp_last_seconds_uses_stream_last_packet()) return 1;
@@ -412,7 +511,9 @@ def _compile_and_run_harness(candidate: str) -> str:
         )
         if compiled.returncode != 0:
             raise AssertionError(compiled.stderr)
-        completed = subprocess.run([str(exe_path)], check=True, text=True, capture_output=True)
+        completed = subprocess.run([str(exe_path)], text=True, capture_output=True)
+        if completed.returncode != 0:
+            raise AssertionError(completed.stdout + completed.stderr)
         return completed.stdout
 
 
@@ -481,7 +582,8 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
         self.assertIn("r27_initial_001a_sequence = read_le32(p78_rtpc_client_001a + 2u);", self.r27_queue)
         self.assertNotIn("p78_rtpc_client_001a + 2u", self.r27_completion)
         self.assertIn("r27_repeat_001a_sequence =", self.r27_helpers)
-        self.assertIn("P97_CLIENT_001A_SEQUENCE_DELTA_FROM_ACK", self.r27_helpers)
+        self.assertIn("r27_build_repeat_001a_body", self.r27_helpers)
+        self.assertIn("LIVE_INITIAL_001A_SEQUENCE_BYTE_PLUS_ONE_MOD_256", self.r27_helpers)
         self.assertIn("r27_repeat_001a_sequence != r27_initial_001a_sequence", self.r27_helpers)
         self.assertIn("CAPTURED_LITERAL_REUSE=false", self.r27_helpers)
 
@@ -571,7 +673,10 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
             "VIDEO_RTP_AFTER_REPEAT=%s",
             "VIDEO_RTP_PAST_35S=%s",
             "VIDEO_RTP_PAST_40S=%s",
+            "VIDEO_RTP_PAST_75S=%s",
             "VIDEO_RTP_LAST_SECONDS_FROM_INITIAL_START=%u",
+            "MEDIA_ACTIVE_DURATION_SECONDS=%u",
+            "VIDEO_PACKET_COUNTER_PROGRESSING=%s",
         ):
             self.assertIn(marker, self.r27_segments)
         self.assertEqual(self.sha, EXPECTED_GENERATED_SOURCE_SHA)
@@ -582,7 +687,8 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
 
     def test_runner_timeout_fail_closed_and_teardown_markers(self) -> None:
         runner = (MEDIA / "ct120_run_p116_r27_repeat_001a_live.sh").read_text(encoding="utf-8")
-        self.assertIn("OUTER_TIMEOUT_SECONDS=150", runner)
+        self.assertIn("MAX_LIVE_OBSERVATION_SECONDS=100", runner)
+        self.assertIn("OUTER_TIMEOUT_SECONDS=120", runner)
         self.assertIn(f"EXPECTED_SOURCE_SHA={RUNNER_EXPECTED_SOURCE_SHA}", runner)
         self.assertEqual(RUNNER_EXPECTED_SOURCE_SHA, EXPECTED_GENERATED_SOURCE_SHA)
         self.assertNotEqual(RUNNER_HISTORICAL_PRE_R30D_SOURCE_SHA, EXPECTED_GENERATED_SOURCE_SHA)
@@ -591,9 +697,19 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
         self.assertIn("CT120_RESEARCH_SESSION_CLOSED=", runner)
         self.assertIn("R27_SESSION_CLOSED=", runner)
         self.assertIn("TEARDOWN_CONFIDENCE=", runner)
+        self.assertIn("RTP_SINK_PORTS_REMAINING=", runner)
         self.assertIn("R27_RUN_CLASSIFICATION=INCONCLUSIVE_OUTER_TIMEOUT", runner)
         self.assertIn("R27_SCALARS_SUPPRESSED=true", runner)
         self.assertIn("PRODUCTION_MEDIA_ACTIVE_DERIVED_FROM=LISTENER_READY_AFTER", runner)
+        for marker in (
+            "VIDEO_RTP_PAST_75S=",
+            "MEDIA_ACTIVE_DURATION_SECONDS=",
+            "VIDEO_PACKET_COUNTER_PROGRESSING=",
+            "SECOND_001A_ACK_CLASSIFICATION=",
+            "NEW_RTPC_OPEN=false",
+            "NEW_SELF_ACTIVATION=false",
+        ):
+            self.assertIn(marker, runner)
 
     def test_runner_materializes_candidate_wrapper_instead_of_base_wrapper_override(self) -> None:
         runner = (MEDIA / "ct120_run_p116_r27_repeat_001a_live.sh").read_text(encoding="utf-8")
@@ -664,6 +780,9 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
             "TASK_ID=COMELIT-P116-R30H-C-MUSL-LAUNCHER-OFFLINE-CORRECTIVE",
             'if [ "$R30H_C_OFFLINE_RUN" != YES ]; then',
             'if [ "$R27_LIVE_RUN" = YES ]; then',
+            "R30H_C_EXPECTED_CANDIDATE_SHA=${R30H_C_EXPECTED_CANDIDATE_SHA:-baeb9406b503a43542bc89b2a89a8d18b5564b429646113ccfd81367432f69a4}",
+            'EXPECTED_CANDIDATE_SHA="$R30H_C_EXPECTED_CANDIDATE_SHA"',
+            '[ -n "$R30H_C_EXPECTED_CANDIDATE_SHA" ] || fail "R30H_C_EXPECTED_CANDIDATE_SHA_REQUIRED=true"',
             'R27_LIVE_RUN=NO REPO="$REPO" R27_EXPECTED_COMMIT_SHA="$R30H_C_EXPECTED_SHA" bash "$RUN_ROOT/runner.sh"',
             'BUILDER_ROOTFS="$(marker_or P80_OFFLINE_ROOTFS NOT_REACHED)"',
             'SOURCE_MUSL_LOADER="$BUILDER_ROOTFS/lib/ld-musl-x86_64.so.1"',
