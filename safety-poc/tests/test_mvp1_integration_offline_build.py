@@ -95,6 +95,7 @@ class FakeManager:
         self.release_calls = 0
         self.fail_acquire = False
         self.events: list[str] = []
+        self.remote_closed = asyncio.Event()
 
     @property
     def active(self) -> bool:
@@ -113,6 +114,19 @@ class FakeManager:
         self.release_calls += 1
         self._active = False
         return {"active": False}
+
+    async def async_wait_inactive(self, timeout: float) -> bool:
+        if not self._active:
+            return True
+        try:
+            await asyncio.wait_for(self.remote_closed.wait(), timeout=timeout)
+        except TimeoutError:
+            return False
+        return True
+
+    def close_remote(self) -> None:
+        self._active = False
+        self.remote_closed.set()
 
 
 class FakeSnapshotProvider:
@@ -216,6 +230,8 @@ class MVP1IntegrationRingMediaTests(unittest.IsolatedAsyncioTestCase):
         recording: FakeRecordingProvider | None = None,
         manager: FakeManager | None = None,
         clock: FakeClock | None = None,
+        remote_authoritative: bool = False,
+        hard_limit_seconds: int = const.RING_MEDIA_HARD_LIMIT_SECONDS,
     ):
         hass = FakeHass()
         manager = manager or FakeManager()
@@ -237,6 +253,10 @@ class MVP1IntegrationRingMediaTests(unittest.IsolatedAsyncioTestCase):
             snapshot_provider=snapshot,
             recording_provider=recording,
             media_root=tmp,
+            remote_close_waiter=(
+                manager.async_wait_inactive if remote_authoritative else None
+            ),
+            hard_limit_seconds=hard_limit_seconds,
             task_factory=task_factory,
             monotonic_clock=clock or ring_media.monotonic,
         )
@@ -333,6 +353,82 @@ class MVP1IntegrationRingMediaTests(unittest.IsolatedAsyncioTestCase):
                     recording_event[const.ATTR_RECORDING_PATH],
                     str(root / "comelit" / "rings" / event_id / "recording.mp4"),
                 )
+
+    async def test_real_ring_recording_completion_does_not_end_attached_call(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            manager = FakeManager()
+            snapshot = FakeSnapshotProvider([JPEG_1])
+            recording = FakeRecordingProvider(const.RECORDING_STATE_COMPLETED)
+            coordinator, hass, manager, _, _, tasks = self.make_coordinator(
+                Path(td),
+                snapshot=snapshot,
+                recording=recording,
+                manager=manager,
+                remote_authoritative=True,
+            )
+            await coordinator.async_start_for_ring(
+                {
+                    const.ATTR_EVENT_ID: "event-remote-owned",
+                    const.ATTR_DOOR: const.DOOR_ENTRANCE,
+                }
+            )
+
+            for _ in range(100):
+                if any(
+                    event_type == const.EVENT_RECORDING_COMPLETE
+                    for event_type, _ in hass.bus.events
+                ):
+                    break
+                await asyncio.sleep(0)
+            else:
+                self.fail("recording completion event was not emitted")
+
+            self.assertFalse(tasks[0].done())
+            self.assertTrue(manager.active)
+            self.assertEqual(manager.release_calls, 0)
+            self.assertTrue(coordinator.status()["remote_call_lifetime_authoritative"])
+            self.assertEqual(
+                coordinator.status()["ring_media_hard_limit_seconds"],
+                const.RING_MEDIA_HARD_LIMIT_SECONDS,
+            )
+
+            manager.close_remote()
+            await tasks[0]
+
+            self.assertEqual(manager.release_calls, 1)
+            self.assertEqual(coordinator.status()["ring_end_reason"], "remote_closed")
+            recording_events = [
+                payload
+                for event_type, payload in hass.bus.events
+                if event_type == const.EVENT_RECORDING_COMPLETE
+            ]
+            self.assertEqual(len(recording_events), 1)
+
+    async def test_real_ring_remote_wait_is_bounded_by_hard_limit(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            manager = FakeManager()
+            recording = FakeRecordingProvider(const.RECORDING_STATE_COMPLETED)
+            coordinator, _, manager, _, _, tasks = self.make_coordinator(
+                Path(td),
+                recording=recording,
+                manager=manager,
+                remote_authoritative=True,
+                hard_limit_seconds=0.05,
+            )
+            await coordinator.async_start_for_ring(
+                {
+                    const.ATTR_EVENT_ID: "event-hard-limit",
+                    const.ATTR_DOOR: const.DOOR_ENTRANCE,
+                }
+            )
+            await asyncio.wait_for(tasks[0], timeout=1.0)
+
+            self.assertEqual(manager.release_calls, 1)
+            self.assertEqual(coordinator.status()["ring_end_reason"], "hard_limit")
 
     async def test_recording_truncated_and_failed_are_terminal_without_crash(self) -> None:
         import tempfile
