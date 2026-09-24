@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime
 import logging
 import os
@@ -13,6 +14,7 @@ from aiohttp import ClientSession
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
+from .call_state import ComelitCallStateTracker
 from .cloud import (
     ComelitCloudError,
     ComelitCloudHttpError,
@@ -451,6 +453,8 @@ class ComelitRingRuntime:
         self._ring_media: RingMediaCoordinator | None = None
         self._synthetic_ring_media: RingMediaCoordinator | None = None
         self._media_diagnostics = MediaCallDiagnostics()
+        self._status_listeners: set[Callable[[], None]] = set()
+        self._call_state = ComelitCallStateTracker()
 
     @property
     def running(self) -> bool:
@@ -478,6 +482,32 @@ class ComelitRingRuntime:
     def last_door_result(self) -> dict[str, object] | None:
         return dict(self._last_door_result) if self._last_door_result else None
 
+    def async_add_status_listener(self, callback: Callable[[], None]) -> Callable[[], None]:
+        """Register an in-process runtime status listener and return its remover."""
+        self._status_listeners.add(callback)
+
+        def remove() -> None:
+            self._status_listeners.discard(callback)
+
+        return remove
+
+    def _notify_status(self) -> None:
+        for callback in tuple(self._status_listeners):
+            callback()
+
+    def call_status(self) -> dict[str, object]:
+        """Return bounded user-facing call state reconstructed from runtime evidence."""
+        snapshot = self._call_state.snapshot()
+        return {
+            "state": snapshot.state,
+            "panel": snapshot.panel,
+            "event_id": snapshot.event_id,
+            "started_at": snapshot.started_at,
+            "media_attached": self.attached_media_open,
+            "conversation_active": snapshot.conversation_active,
+            "last_error": snapshot.last_error,
+        }
+
     def status(self) -> dict[str, object]:
         event = self._last_ring_event or {}
         r64_post_call_snapshot = getattr(self, "_r64_post_call_snapshot", {})
@@ -494,6 +524,7 @@ class ComelitRingRuntime:
             "attached_media_busy": self.attached_media_busy,
             "attached_media_open": self.attached_media_open,
             "ring_observed": self.ring_observed,
+            "call_state": self.call_status(),
             "ring_door": event.get("door"),
             "ring_source": event.get("source"),
             "ring_kind": event.get("kind"),
@@ -576,6 +607,22 @@ class ComelitRingRuntime:
             event["event_id"] = str(uuid4())
         if "timestamp" not in event:
             event["timestamp"] = datetime.now(UTC).isoformat()
+
+        if event.get("synthetic") is not True:
+            panel = event.get("door")
+            event_id = event.get("event_id")
+            started_at = event.get("timestamp")
+            if (
+                isinstance(panel, str)
+                and isinstance(event_id, str)
+                and isinstance(started_at, str)
+                and self._call_state.begin(
+                    panel=panel,
+                    event_id=event_id,
+                    started_at=started_at,
+                )
+            ):
+                self._notify_status()
 
         self._last_ring_event = dict(event)
         self._hass.bus.async_fire(EVENT_RING, dict(event))
@@ -866,6 +913,8 @@ class ComelitRingRuntime:
         self._last_ring_event = None
         self._last_error = None
         self._media_diagnostics.reset()
+        self._call_state.reset()
+        self._notify_status()
         self._task = self._entry.async_create_background_task(
             self._hass,
             self._async_run_once(),
@@ -983,6 +1032,8 @@ class ComelitRingRuntime:
         self._attached_media_busy.clear()
         self._attached_media_open.clear()
         self._attached_media_closed.clear()
+        self._call_state.reset()
+        self._notify_status()
         await self._hass.async_add_executor_job(_remove_door_target)
         await self._hass.async_add_executor_job(_remove_helper_secret)
 
@@ -1163,6 +1214,8 @@ class ComelitRingRuntime:
             ComelitSdpError,
         ) as exc:
             self._last_error = str(exc)
+            if self._call_state.fail_active("listener_failure"):
+                self._notify_status()
             if (
                 isinstance(exc, ComelitRingRuntimeError)
                 and str(exc).startswith(
@@ -1178,8 +1231,16 @@ class ComelitRingRuntime:
                 _LOGGER.error("Comelit ring listener stopped: %s", exc)
         except Exception as exc:
             self._last_error = f"unexpected:{type(exc).__name__}"
+            if self._call_state.fail_active("listener_failure"):
+                self._notify_status()
             _LOGGER.exception("Unexpected Comelit ring listener failure")
         finally:
+            if (
+                not self._stopping
+                and self._last_error is None
+                and self._call_state.fail_active("listener_stopped_during_call")
+            ):
+                self._notify_status()
             self._process = None
             self._listener_ready.clear()
             self._attached_media_busy.clear()
@@ -1292,6 +1353,13 @@ class ComelitRingRuntime:
             self._observe_canary_log_marker(line)
             self._record_r64_snapshot_marker(line)
             self._record_post_call_transport_marker(line)
+            if line in {
+                "R37_REMOTE_RELEASE_OBSERVED=true",
+                "R64_POST_CALL_REMOTE_RELEASE_OBSERVED=true",
+                "R64_TERMINAL_REMOTE_RELEASE_OBSERVED=true",
+            }:
+                if self._call_state.remote_release():
+                    self._notify_status()
             if (
                 line == "R64_POST_CALL_SNAPSHOT=true"
                 or line.startswith("P116_NATIVE_FAILURE_COUNT=")
@@ -1318,6 +1386,7 @@ class ComelitRingRuntime:
                 self._attached_media_busy.set()
                 self._attached_media_closed.clear()
                 self._attached_media_open.set()
+                self._notify_status()
                 _LOGGER.info("Comelit attached inbound media ACTIVE")
                 continue
 
@@ -1325,6 +1394,7 @@ class ComelitRingRuntime:
                 self._attached_media_busy.clear()
                 self._attached_media_open.clear()
                 self._attached_media_closed.set()
+                self._notify_status()
                 _LOGGER.info("Comelit attached inbound media CLOSED")
                 continue
 
