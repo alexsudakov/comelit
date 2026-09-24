@@ -561,6 +561,22 @@ class RingMediaCoordinator:
                 )
             else:
                 self._ring_end_reason = "media_start_failed"
+
+            if self._ring_end_reason == "hard_limit":
+                force_stop = getattr(self._manager, "async_force_stop", None)
+                if callable(force_stop):
+                    try:
+                        await force_stop(reason="ring_media_hard_limit")
+                    except Exception:
+                        self._ring_end_reason = "hard_limit_stop_failed"
+                        _LOGGER.exception(
+                            "Comelit attached Ring hard-limit teardown failed"
+                        )
+                else:
+                    self._ring_end_reason = "hard_limit_stop_unavailable"
+                    _LOGGER.error(
+                        "Comelit attached Ring hard-limit stop is unavailable"
+                    )
             stop_event.set()
         except (ComelitMediaSessionError, RuntimeError, ValueError) as exc:
             recording_state = RECORDING_STATE_FAILED
