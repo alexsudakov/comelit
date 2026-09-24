@@ -842,6 +842,16 @@ class ComelitEntranceCamera(Camera):
                 await monitor
             except asyncio.CancelledError:
                 pass
+
+        reset_task = self._stream_reset_task
+        self._stream_reset_task = None
+        if reset_task is not None and not reset_task.done():
+            reset_task.cancel()
+            try:
+                await reset_task
+            except asyncio.CancelledError:
+                pass
+
         await self._async_reset_stream()
         await self._async_release_camera_view_media()
         await super().async_will_remove_from_hass()
