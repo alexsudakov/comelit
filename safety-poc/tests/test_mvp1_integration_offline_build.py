@@ -93,6 +93,7 @@ class FakeManager:
         self._active = False
         self.acquire_calls = 0
         self.release_calls = 0
+        self.force_stop_calls = 0
         self.fail_acquire = False
         self.events: list[str] = []
         self.remote_closed = asyncio.Event()
@@ -113,6 +114,13 @@ class FakeManager:
         self.events.append(f"release:{reason}")
         self.release_calls += 1
         self._active = False
+        return {"active": False}
+
+    async def async_force_stop(self, *, reason: str) -> dict[str, object]:
+        self.events.append(f"force_stop:{reason}")
+        self.force_stop_calls += 1
+        self._active = False
+        self.remote_closed.set()
         return {"active": False}
 
     async def async_wait_inactive(self, timeout: float) -> bool:
@@ -427,6 +435,7 @@ class MVP1IntegrationRingMediaTests(unittest.IsolatedAsyncioTestCase):
             )
             await asyncio.wait_for(tasks[0], timeout=1.0)
 
+            self.assertEqual(manager.force_stop_calls, 1)
             self.assertEqual(manager.release_calls, 1)
             self.assertEqual(coordinator.status()["ring_end_reason"], "hard_limit")
 
