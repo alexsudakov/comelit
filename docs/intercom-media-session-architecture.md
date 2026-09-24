@@ -1,7 +1,7 @@
 # Comelit Intercom Media Session Architecture
 
 Status: approved normative supplement, updated after live protocol evidence  
-Date: 2026-09-09  
+Date: 2026-09-24  
 Applies to: `custom_components/comelit`
 
 ## 1. Purpose
@@ -38,12 +38,13 @@ ComelitMediaSessionManager
 Conceptual API:
 
 ```python
-await media.async_acquire(panel="entrance", reason="manual")
+await media.async_acquire(panel="entrance", reason="camera_view")
 await media.async_acquire(panel="entrance", reason="snapshot")
 await media.async_acquire(panel="entrance", reason="recording")
-await media.async_release(reason="snapshot")
-await media.async_force_stop(reason="manual_off")
+await media.async_release(reason="camera_view")
 ```
+
+Normal user-facing live view is camera-owned: an explicit HA stream request for `camera.comelit_entrance` acquires and releases the `camera_view` lease. The integration does not require a separate switch for ordinary use. A deprecated, disabled-by-default switch may remain for one transition release as a diagnostic fallback only.
 
 The manager tracks:
 
@@ -99,29 +100,27 @@ If bootstrap fails before media becomes active, restore the listener. If teardow
 
 ## 5. Home Assistant entities
 
-Manual activation:
-
-```text
-switch.comelit_entrance_camera
-```
-
-Observed active state:
-
-```text
-binary_sensor.comelit_entrance_camera_active
-```
-
-Remaining time diagnostic:
-
-```text
-sensor.comelit_entrance_camera_session_remaining
-```
-
-Camera:
+Primary user-facing camera:
 
 ```text
 camera.comelit_entrance
 ```
+
+An explicit HA live-stream request owns the normal `camera_view` lease. Opening the live view may therefore start one on-demand Comelit media session automatically. Closing the viewer is detected through Home Assistant's Stream provider lifecycle; after the HLS provider becomes idle or disappears, the `camera_view` lease is released and the upstream session is torn down when no other lease remains.
+
+Thumbnail/entity-picture requests must **not** start Comelit media. `use_stream_for_stills=False` is therefore part of the contract. Home Assistant `preload_stream` is also forced off for this intercom camera so HA startup cannot silently open a Comelit session.
+
+For an actual inbound Ring, the camera reuses the already-claimed attached call transaction instead of bootstrapping a second upstream session. Ring media and the user live view share one HA Stream through named consumers.
+
+Transition-only diagnostic fallback:
+
+```text
+switch.comelit_entrance_camera
+  deprecated=true
+  enabled_by_default=false
+```
+
+It is not required for normal operation and is scheduled for removal after the automatic lifecycle is validated in HAOS.
 
 Listener diagnostic remains:
 
@@ -129,21 +128,9 @@ Listener diagnostic remains:
 sensor.comelit_listener_status
 ```
 
-and gains intentional state:
+During a separately bootstrapped on-demand camera session it may report the intentional state `paused_media`.
 
-```text
-paused_media
-```
-
-with diagnostics equivalent to:
-
-```text
-media_paused=true
-runtime_running=false
-listener_ready=false
-```
-
-The camera entity never owns a permanent upstream session. Live view, snapshot and recording all acquire leases through the same manager.
+The camera entity never owns a permanent upstream session. The 600-second absolute deadline remains authoritative and cannot be extended by opening a new viewer, requesting a snapshot, or adding a lease.
 
 ## 6. Absolute timeout
 
@@ -241,8 +228,8 @@ Before exposing media entities in production HA, implementation must prove:
 4. Exclusive listener pause/resume + Door fail-closed boundary.
 5. Package the entrance media native/runtime path for Home Assistant and prove one listener-isolated media cycle.
 6. `switch.comelit_entrance_camera` + active/remaining diagnostics.
-7. `camera.comelit_entrance` live view.
+7. `camera.comelit_entrance` live view with camera-owned automatic media lifecycle.
 8. Snapshot.
-9. 60-second ring recording.
+9. Ring recording.
 10. Gate validation.
 11. Full-duplex conversation.
