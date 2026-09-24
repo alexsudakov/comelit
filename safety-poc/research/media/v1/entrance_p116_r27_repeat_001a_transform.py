@@ -39,16 +39,20 @@ _STATE_OLD = """static gboolean p97_signaling_finished = FALSE;
 
 _STATE_NEW = """static gboolean p97_signaling_finished = FALSE;
 
-/* R27 one-shot same-session repeat 0x001A research state. */
-#define R27_REPEAT_DELAY_SECONDS 20u
+/* R27 bounded same-session periodic refresh 0x001A research state. */
+#define R27_REFRESH_CADENCE_SECONDS 25u
+#define R27_CADENCE_SAFETY_MARGIN_SECONDS 11u
+#define R27_MAX_REFRESH_COUNT 4u
 #define R27_REPEAT_ACK_TIMEOUT_SECONDS 5u
-#define R27_MAX_LIVE_OBSERVATION_SECONDS 100u
+#define R27_MAX_LIVE_OBSERVATION_SECONDS 115u
 #define R27_VIDEO_PAST_35S_SECONDS 35u
 #define R27_VIDEO_PAST_40S_SECONDS 40u
 #define R27_VIDEO_PAST_75S_SECONDS 75u
 static guint r27_initial_001a_sent_count = 0;
 static guint r27_repeat_001a_sent_count = 0;
 static guint r27_repeat_attempt_count = 0;
+static guint r27_refresh_current_index = 0;
+static guint r27_refresh_last_accepted_index = 0;
 static gboolean r27_repeat_timer_armed = FALSE;
 static gboolean r27_repeat_timer_cancelled = FALSE;
 static gboolean r27_repeat_outstanding = FALSE;
@@ -56,6 +60,7 @@ static gboolean r27_repeat_ack_observed = FALSE;
 static gboolean r27_repeat_ack_timed_out = FALSE;
 static gboolean r27_repeat_ambiguous = FALSE;
 static gboolean r27_third_001a_blocked = FALSE;
+static gboolean r27_refresh_fail_closed = FALSE;
 static gboolean r27_final_summary_printed = FALSE;
 static long long r27_media_active_monotonic_ms = 0;
 static long long r27_repeat_sent_monotonic_ms = 0;
@@ -73,6 +78,7 @@ static gboolean r27_repeat_delay_cb(gpointer data);
 static gboolean r27_repeat_ack_timeout_cb(gpointer data);
 static gboolean r27_live_observation_timeout_cb(gpointer data);
 static gboolean r27_try_queue_repeat_001a(const char *reason);
+static gboolean r27_schedule_next_refresh(const char *reason);
 static gboolean r27_build_repeat_001a_body(void);
 static gboolean r27_repeat_body_diff_gate(void);
 static void r27_print_identity_markers(void);
@@ -114,11 +120,13 @@ static gboolean
 r27_queue_rtpc_client_001a_repeat(void)
 {
     if (r27_initial_001a_sent_count > 1u ||
-        r27_repeat_001a_sent_count > 0u ||
-        r27_initial_001a_sent_count + r27_repeat_001a_sent_count >= 2u) {
+        r27_repeat_001a_sent_count >= R27_MAX_REFRESH_COUNT ||
+        r27_initial_001a_sent_count + r27_repeat_001a_sent_count >=
+            1u + R27_MAX_REFRESH_COUNT) {
         r27_third_001a_blocked = TRUE;
         failed = TRUE;
         fprintf(stderr, "R27_THIRD_001A_BLOCKED=true\n");
+        fprintf(stderr, "R27_REFRESH_LIMIT_BLOCKED=true\n");
         if (loop)
             g_main_loop_quit(loop);
         return FALSE;
@@ -175,10 +183,15 @@ _TX_COMPLETION_NEW = r'''        case P78_TX_RTPC_CLIENT_001A:
 
         case R27_TX_RTPC_CLIENT_001A_REPEAT:
             r27_repeat_001a_sent_count++;
+            r27_refresh_current_index = r27_repeat_001a_sent_count;
             r27_repeat_sent_monotonic_ms = p116_monotonic_ms();
             r27_repeat_outstanding = TRUE;
             r27_video_packet_count_at_repeat = p80_video_rtp_packets;
             printf("R27_REPEAT_001A_SENT=PASS\n");
+            printf("REFRESH_INDEX=%u\n", r27_refresh_current_index);
+            printf("REFRESH_SENT_COUNT=%u\n", r27_repeat_001a_sent_count);
+            printf("REFRESH_MONOTONIC_MS=%lld\n", r27_repeat_sent_monotonic_ms);
+            printf("REFRESH_OUTSTANDING=true\n");
             printf("INITIAL_001A_SENT_COUNT=%u\n", r27_initial_001a_sent_count);
             printf("REPEAT_001A_SENT_COUNT=%u\n", r27_repeat_001a_sent_count);
             printf("TOTAL_001A_SENT_COUNT=%u\n",
@@ -223,7 +236,7 @@ _MEDIA_ACTIVE_OLD = """    p80_media_forwarding_enabled = TRUE;
 _MEDIA_ACTIVE_NEW = """    p80_media_forwarding_enabled = TRUE;
     g_timeout_add_seconds(10, p91_media_rx_diagnostic_timeout_cb, NULL);
     r27_media_active_monotonic_ms = p116_monotonic_ms();
-    if (g_timeout_add_seconds(R27_REPEAT_DELAY_SECONDS, r27_repeat_delay_cb, NULL) == 0) {
+    if (g_timeout_add_seconds(R27_REFRESH_CADENCE_SECONDS, r27_repeat_delay_cb, NULL) == 0) {
         fprintf(stderr, "R27_REPEAT_TIMER_START=FAIL\\n");
         return FALSE;
     }
@@ -236,7 +249,12 @@ _MEDIA_ACTIVE_NEW = """    p80_media_forwarding_enabled = TRUE;
     r27_helper_pid_at_media_start = (guint)getpid();
 
     printf("P80_MEDIA_ACTIVE=true\\n");
-    printf("R27_REPEAT_DELAY_SECONDS=%u\\n", R27_REPEAT_DELAY_SECONDS);
+    printf("R27_REPEAT_DELAY_SECONDS=%u\\n", R27_REFRESH_CADENCE_SECONDS);
+    printf("REFRESH_CADENCE_SECONDS=%u\\n", R27_REFRESH_CADENCE_SECONDS);
+    printf("CADENCE_SOURCE=LOCAL_LIVE_EVIDENCE\\n");
+    printf("CADENCE_SAFETY_MARGIN_SECONDS=%u\\n", R27_CADENCE_SAFETY_MARGIN_SECONDS);
+    printf("REFRESH_OVERLAP=false\\n");
+    printf("REFRESH_RETRY=false\\n");
     printf("R27_REPEAT_DELAY_IS_PROTOCOL_CONSTANT=false\\n");
     printf("R27_REPEAT_DELAY_PROMOTED_TO_PRODUCTION=false\\n");
     r27_print_identity_markers();
@@ -341,9 +359,16 @@ static gboolean
 r27_repeat_preconditions_ok(void)
 {
     if (r27_initial_001a_sent_count != 1u ||
-        r27_repeat_001a_sent_count != 0u ||
-        r27_repeat_attempt_count != 0u ||
-        r27_initial_001a_sent_count + r27_repeat_001a_sent_count != 1u)
+        r27_initial_001a_sent_count + r27_repeat_001a_sent_count >=
+            1u + R27_MAX_REFRESH_COUNT)
+        return FALSE;
+    if (r27_repeat_outstanding)
+        return FALSE;
+    if (r27_repeat_attempt_count != r27_repeat_001a_sent_count)
+        return FALSE;
+    if (r27_repeat_001a_sent_count != r27_refresh_last_accepted_index)
+        return FALSE;
+    if (r27_refresh_fail_closed)
         return FALSE;
     if (!p78_rtpc_client_001a_sent || !p97_device_ack_001a_observed ||
         !p97_signaling_finished || !p80_media_forwarding_enabled)
@@ -372,15 +397,16 @@ r27_try_queue_repeat_001a(const char *reason)
         return FALSE;
     }
 
-    r27_repeat_attempt_count++;
-    if (r27_repeat_attempt_count != 1u) {
+    if (r27_repeat_001a_sent_count >= R27_MAX_REFRESH_COUNT) {
         r27_third_001a_blocked = TRUE;
         failed = TRUE;
         fprintf(stderr, "R27_THIRD_001A_BLOCKED=true\n");
+        fprintf(stderr, "R27_REFRESH_LIMIT_BLOCKED=true\n");
         if (loop)
             g_main_loop_quit(loop);
         return FALSE;
     }
+    r27_repeat_attempt_count++;
 
     if (!r27_build_repeat_001a_body()) {
         p78_fail_rtpc("R27_REPEAT_001A_BUILD=FAIL");
@@ -530,29 +556,65 @@ r27_repeat_delay_cb(gpointer data)
 }
 
 static gboolean
+r27_schedule_next_refresh(const char *reason)
+{
+    (void)reason;
+    if (r27_repeat_timer_cancelled || pseudotcp_graceful_stop_started)
+        return FALSE;
+    if (r27_refresh_fail_closed)
+        return FALSE;
+    if (r27_repeat_outstanding)
+        return FALSE;
+    if (r27_repeat_001a_sent_count >= R27_MAX_REFRESH_COUNT)
+        return FALSE;
+    if (g_timeout_add_seconds(R27_REFRESH_CADENCE_SECONDS,
+                              r27_repeat_delay_cb, NULL) == 0) {
+        p78_fail_rtpc("R27_REFRESH_TIMER_START=FAIL");
+        return FALSE;
+    }
+    r27_repeat_timer_armed = TRUE;
+    printf("REFRESH_NEXT_SCHEDULED=true\n");
+    printf("REFRESH_CADENCE_SECONDS=%u\n", R27_REFRESH_CADENCE_SECONDS);
+    printf("REFRESH_OVERLAP=false\n");
+    printf("REFRESH_RETRY=false\n");
+    fflush(stdout);
+    return TRUE;
+}
+
+static gboolean
 r27_repeat_ack_timeout_cb(gpointer data)
 {
     (void)data;
-    if (!r27_repeat_outstanding || r27_repeat_ack_observed)
+    if (!r27_repeat_outstanding)
         return G_SOURCE_REMOVE;
     r27_repeat_ack_timed_out = TRUE;
     r27_repeat_outstanding = FALSE;
+    r27_refresh_fail_closed = TRUE;
     printf("SECOND_001A_RESPONSE=ABSENT\n");
+    printf("SECOND_001A_ACK_CLASSIFICATION=ABSENT\n");
+    printf("REFRESH_RESPONSE_%u=ABSENT\n", r27_refresh_current_index);
+    printf("REFRESH_OUTSTANDING=false\n");
+    printf("REFRESH_FAIL_CLOSED=true\n");
     fflush(stdout);
+    (void)pseudotcp_begin_graceful_stop("r27-refresh-timeout");
     return G_SOURCE_REMOVE;
 }
 
 static gboolean
 r27_handle_repeat_ack(guint16 request_id, const guint8 *body, guint body_len)
 {
-    if (!r27_repeat_outstanding || r27_repeat_001a_sent_count != 1u)
+    if (!r27_repeat_outstanding)
         return FALSE;
     if (p99_state_scoped_structural_ack(request_id, body, body_len)) {
         r27_repeat_ack_observed = TRUE;
         r27_repeat_outstanding = FALSE;
+        r27_refresh_last_accepted_index = r27_refresh_current_index;
         printf("SECOND_001A_RESPONSE=STRUCTURAL_ACK\n");
         printf("SECOND_001A_ACK_CLASSIFICATION=STATE_SCOPED_STRUCTURAL\n");
         printf("R27_REPEAT_ACK_BINDING=STATE_SCOPED_STRUCTURAL\n");
+        printf("REFRESH_RESPONSE_%u=STRUCTURAL_ACK\n", r27_refresh_current_index);
+        printf("REFRESH_OUTSTANDING=false\n");
+        (void)r27_schedule_next_refresh("structural-ack");
         fflush(stdout);
         return TRUE;
     }
@@ -563,9 +625,14 @@ r27_handle_repeat_ack(guint16 request_id, const guint8 *body, guint body_len)
          * state instead of a dead REJECTED state. */
         r27_repeat_ambiguous = TRUE;
         r27_repeat_outstanding = FALSE;
+        r27_refresh_fail_closed = TRUE;
         printf("SECOND_001A_RESPONSE=AMBIGUOUS\n");
         printf("SECOND_001A_ACK_CLASSIFICATION=AMBIGUOUS\n");
+        printf("REFRESH_RESPONSE_%u=AMBIGUOUS\n", r27_refresh_current_index);
+        printf("REFRESH_OUTSTANDING=false\n");
+        printf("REFRESH_FAIL_CLOSED=true\n");
         fflush(stdout);
+        (void)pseudotcp_begin_graceful_stop("r27-refresh-ambiguous");
         return TRUE;
     }
     return FALSE;
@@ -620,6 +687,14 @@ r27_print_final_summary(void)
     printf("MEDIA_ACTIVE_DURATION_SECONDS=%u\n", media_active_duration_seconds);
     printf("VIDEO_PACKET_COUNTER_PROGRESSING=%s\n",
            video_packet_counter_progressing ? "true" : "false");
+    printf("REFRESH_SENT_COUNT=%u\n", r27_repeat_001a_sent_count);
+    printf("REFRESH_CADENCE_SECONDS=%u\n", R27_REFRESH_CADENCE_SECONDS);
+    printf("CADENCE_SOURCE=LOCAL_LIVE_EVIDENCE\n");
+    printf("CADENCE_SAFETY_MARGIN_SECONDS=%u\n", R27_CADENCE_SAFETY_MARGIN_SECONDS);
+    printf("REFRESH_OVERLAP=false\n");
+    printf("REFRESH_RETRY=false\n");
+    printf("REFRESH_OUTSTANDING=%s\n", r27_repeat_outstanding ? "true" : "false");
+    printf("REFRESH_FAIL_CLOSED=%s\n", r27_refresh_fail_closed ? "true" : "false");
     printf("INITIAL_001A_SENT_COUNT=%u\n", r27_initial_001a_sent_count);
     printf("REPEAT_001A_SENT_COUNT=%u\n", r27_repeat_001a_sent_count);
     printf("TOTAL_001A_SENT_COUNT=%u\n",

@@ -254,8 +254,8 @@ class Mvp1RingTelegramOfflineBuildTests(unittest.TestCase):
         expected = {
             "custom_components/comelit/camera.py": "3bac789e303abba857b45cb794a55aa6a088c6a998507bf664459de4a60f96bd",
             "custom_components/comelit/media_transport.py": "52e4873ede9c8df16f81ac88dba4c7ffaf27842738e22ab68896c216411aa1d0",
-            "safety-poc/research/media/v1/entrance_p116_r27_repeat_001a_transform.py": "b5614f6036e255559dbaa8af3f2af7735c88d5028210c56a9fd71bfbd862f443",
-            "safety-poc/research/media/v1/ct120_run_p116_r27_repeat_001a_live.sh": "efda13874fde590e2abe1a6bb7e535054148c6da293d8dcd72e908b1816a21cd",
+            "safety-poc/research/media/v1/entrance_p116_r27_repeat_001a_transform.py": "f79ad2afcbeb985e68dfc5f9de090712909190239bdc6dac84d77c170bc97fd6",
+            "safety-poc/research/media/v1/ct120_run_p116_r27_repeat_001a_live.sh": "c59bfd7b21590b4fb78be5b2af3167a8a6ec63125e2a78c0c913fd5052f5cc62",
             "safety-poc/research/media/v1/entrance_p116_r30_call_ctp_envelope_model.py": "367db8028a0a1ed5c09a86b40bb5ae01657d823ca8f6561557338a609ba5a8d0",
             "safety-poc/research/media/v1/entrance_p116_r30b_call_transaction_model.py": "ed14393eb234890d5d2c9d30a9538fe417c52d8658ac7b3f75e3c49e9fa4da47",
             "safety-poc/research/media/v1/ct120_run_p116_r30h_a_repeat_001a_offline_preflight.sh": "7bd144cb2c1ab0971eee55805e81b2e4688a973483edbfc297becc3632fc9a14",

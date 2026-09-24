@@ -16,8 +16,8 @@ ROOT = Path(__file__).resolve().parents[2]
 MEDIA = ROOT / "safety-poc" / "research" / "media" / "v1"
 SOURCE = ROOT / "safety-poc" / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-ctpp-door.c"
 TRANSFORM = MEDIA / "entrance_p116_r27_repeat_001a_transform.py"
-EXPECTED_GENERATED_SOURCE_SHA = "e62e83c0b1d426fac9f307c84a8069e1bf2c6e7dae47edf78e1cff6012234887"
-RUNNER_EXPECTED_SOURCE_SHA = "e62e83c0b1d426fac9f307c84a8069e1bf2c6e7dae47edf78e1cff6012234887"
+EXPECTED_GENERATED_SOURCE_SHA = "681ab1a6c81a5845e5a5db711c569eaef068829f7634a33355c04495ad06b96f"
+RUNNER_EXPECTED_SOURCE_SHA = "681ab1a6c81a5845e5a5db711c569eaef068829f7634a33355c04495ad06b96f"
 RUNNER_HISTORICAL_PRE_R30D_SOURCE_SHA = "62e0023521cef0e4178248beb78408f89752d108d9d009c388ff153d94195368"
 
 # This is an explicit source-local declaration-order gate for R27-added code in
@@ -57,7 +57,7 @@ R27_DECLARATION_BEFORE_USE = (
     ("r27_build_repeat_001a_body", "static gboolean r27_build_repeat_001a_body(void);", "if (!r27_build_repeat_001a_body()) {"),
     ("r27_repeat_body_diff_gate", "static gboolean r27_repeat_body_diff_gate(void);", "if (!r27_repeat_body_diff_gate()) {"),
     ("p99_state_scoped_structural_ack", "p99_state_scoped_structural_ack(guint16 request_id, const guint8 *body, guint body_len)", "if (p99_state_scoped_structural_ack(request_id, body, body_len)) {"),
-    ("r27_repeat_delay_cb", "static gboolean r27_repeat_delay_cb(gpointer data);", "if (g_timeout_add_seconds(R27_REPEAT_DELAY_SECONDS, r27_repeat_delay_cb, NULL) == 0)"),
+    ("r27_repeat_delay_cb", "static gboolean r27_repeat_delay_cb(gpointer data);", "if (g_timeout_add_seconds(R27_REFRESH_CADENCE_SECONDS, r27_repeat_delay_cb, NULL) == 0)"),
     ("r27_live_observation_timeout_cb", "static gboolean r27_live_observation_timeout_cb(gpointer data);", "                              r27_live_observation_timeout_cb, NULL) == 0)"),
     ("r27_repeat_ack_timeout_cb", "static gboolean r27_repeat_ack_timeout_cb(gpointer data);", "                                      r27_repeat_ack_timeout_cb, NULL) == 0)"),
     ("r27_handle_repeat_ack", "static gboolean r27_handle_repeat_ack(guint16 request_id, const guint8 *body, guint body_len);", "if (r27_handle_repeat_ack(request_id, body, body_len)) {"),
@@ -131,6 +131,9 @@ def _compile_and_run_harness(candidate: str) -> str:
         #define P76_FACT_GENERATED 2
         #define P78_RTPC_COMPLETE 77
         #define R27_TX_RTPC_CLIENT_001A_REPEAT 78
+        #define R27_REFRESH_CADENCE_SECONDS 25u
+        #define R27_CADENCE_SAFETY_MARGIN_SECONDS 11u
+        #define R27_MAX_REFRESH_COUNT 4u
         #define R27_VIDEO_PAST_35S_SECONDS 35u
         #define R27_VIDEO_PAST_40S_SECONDS 40u
         #define R27_VIDEO_PAST_75S_SECONDS 75u
@@ -156,6 +159,8 @@ def _compile_and_run_harness(candidate: str) -> str:
         static guint r27_initial_001a_sent_count;
         static guint r27_repeat_001a_sent_count;
         static guint r27_repeat_attempt_count;
+        static guint r27_refresh_current_index;
+        static guint r27_refresh_last_accepted_index;
         static gboolean r27_repeat_timer_armed;
         static gboolean r27_repeat_timer_cancelled;
         static gboolean r27_repeat_outstanding;
@@ -163,6 +168,7 @@ def _compile_and_run_harness(candidate: str) -> str:
         static gboolean r27_repeat_ack_timed_out;
         static gboolean r27_repeat_ambiguous;
         static gboolean r27_third_001a_blocked;
+        static gboolean r27_refresh_fail_closed;
         static gboolean r27_final_summary_printed;
         static long long r27_media_active_monotonic_ms;
         static long long r27_repeat_sent_monotonic_ms;
@@ -286,6 +292,8 @@ def _compile_and_run_harness(candidate: str) -> str:
             r27_initial_001a_sent_count = 0;
             r27_repeat_001a_sent_count = 0;
             r27_repeat_attempt_count = 0;
+            r27_refresh_current_index = 0;
+            r27_refresh_last_accepted_index = 0;
             r27_repeat_timer_armed = FALSE;
             r27_repeat_timer_cancelled = FALSE;
             r27_repeat_outstanding = FALSE;
@@ -293,6 +301,7 @@ def _compile_and_run_harness(candidate: str) -> str:
             r27_repeat_ack_timed_out = FALSE;
             r27_repeat_ambiguous = FALSE;
             r27_third_001a_blocked = FALSE;
+            r27_refresh_fail_closed = FALSE;
             r27_final_summary_printed = FALSE;
             r27_media_active_monotonic_ms = 0;
             r27_repeat_sent_monotonic_ms = 0;
@@ -359,7 +368,7 @@ def _compile_and_run_harness(candidate: str) -> str:
         {
             reset_state();
             r27_initial_001a_sent_count = 1u;
-            r27_repeat_001a_sent_count = 1u;
+            r27_repeat_001a_sent_count = R27_MAX_REFRESH_COUNT;
             CHECK(r27_queue_rtpc_client_001a_repeat() == FALSE);
             CHECK(r27_third_001a_blocked == TRUE);
             CHECK(queue_call_count == 0);
@@ -395,6 +404,7 @@ def _compile_and_run_harness(candidate: str) -> str:
             CHECK(r27_try_queue_repeat_001a("valid") == TRUE);
             CHECK(failed == FALSE);
             CHECK(queue_call_count == 1);
+            CHECK(r27_repeat_attempt_count == 1u);
             CHECK(flush_call_count == 1);
             CHECK(queued_channel == v4_ctpp_channel_id);
             CHECK(queued_len == 60u);
@@ -524,17 +534,64 @@ def _compile_and_run_harness(candidate: str) -> str:
             return 0;
         }
 
+        static int test_periodic_refresh_single_outstanding_after_structural_ack(void)
+        {
+            guint8 body[4] = {1, 2, 3, 4};
+            reset_state();
+            r27_initial_001a_sent_count = 1u;
+            CHECK(r27_try_queue_repeat_001a("first") == TRUE);
+            r27_repeat_001a_sent_count = 1u;
+            r27_repeat_attempt_count = 1u;
+            r27_refresh_current_index = 1u;
+            r27_repeat_outstanding = TRUE;
+            structural_ack_result = TRUE;
+            CHECK(r27_handle_repeat_ack(v4_ctpp_channel_id, body, sizeof(body)) == TRUE);
+            CHECK(r27_repeat_outstanding == FALSE);
+            CHECK(r27_refresh_last_accepted_index == 1u);
+            CHECK(r27_repeat_timer_armed == TRUE);
+            CHECK(timeout_call_count > 0);
+            CHECK(strstr(output, "REFRESH_RESPONSE_1=STRUCTURAL_ACK\n") != NULL);
+            CHECK(strstr(output, "REFRESH_OVERLAP=false\n") != NULL);
+            CHECK(strstr(output, "REFRESH_RETRY=false\n") != NULL);
+
+            reset_state();
+            r27_initial_001a_sent_count = 1u;
+            r27_repeat_001a_sent_count = 1u;
+            r27_repeat_attempt_count = 1u;
+            r27_repeat_outstanding = TRUE;
+            CHECK(r27_try_queue_repeat_001a("overlap") == FALSE);
+            CHECK(queue_call_count == 0);
+            return 0;
+        }
+
+        static int test_teardown_cancels_pending_refresh(void)
+        {
+            reset_state();
+            r27_cancel_repeat_timers();
+            CHECK(r27_repeat_delay_cb(NULL) == G_SOURCE_REMOVE);
+            CHECK(queue_call_count == 0);
+            reset_state();
+            pseudotcp_graceful_stop_started = TRUE;
+            CHECK(r27_schedule_next_refresh("stop") == FALSE);
+            CHECK(timeout_call_count == 0);
+            return 0;
+        }
+
         static int test_ack_timeout_absent_no_retry(void)
         {
             reset_state();
             r27_repeat_outstanding = TRUE;
             r27_repeat_001a_sent_count = 1u;
+            r27_refresh_current_index = 1u;
             CHECK(r27_repeat_ack_timeout_cb(NULL) == G_SOURCE_REMOVE);
             CHECK(r27_repeat_ack_timed_out == TRUE);
             CHECK(r27_repeat_outstanding == FALSE);
+            CHECK(r27_refresh_fail_closed == TRUE);
+            CHECK(pseudotcp_graceful_stop_started == TRUE);
             CHECK(queue_call_count == 0);
             CHECK(r27_repeat_attempt_count == 0);
             CHECK(strstr(output, "SECOND_001A_RESPONSE=ABSENT\n") != NULL);
+            CHECK(strstr(output, "REFRESH_RESPONSE_1=ABSENT\n") != NULL);
             return 0;
         }
 
@@ -544,6 +601,7 @@ def _compile_and_run_harness(candidate: str) -> str:
             reset_state();
             r27_repeat_outstanding = TRUE;
             r27_repeat_001a_sent_count = 1u;
+            r27_refresh_current_index = 1u;
             structural_ack_result = FALSE;
             CHECK(r27_handle_repeat_ack(999u, body, sizeof(body)) == FALSE);
             CHECK(r27_repeat_ack_observed == FALSE);
@@ -554,7 +612,10 @@ def _compile_and_run_harness(candidate: str) -> str:
             CHECK(r27_handle_repeat_ack(v4_ctpp_channel_id, body, sizeof(body)) == TRUE);
             CHECK(r27_repeat_ack_observed == FALSE);
             CHECK(r27_repeat_ambiguous == TRUE);
+            CHECK(r27_refresh_fail_closed == TRUE);
+            CHECK(pseudotcp_graceful_stop_started == TRUE);
             CHECK(strstr(output, "SECOND_001A_RESPONSE=AMBIGUOUS\n") != NULL);
+            CHECK(strstr(output, "REFRESH_RESPONSE_1=AMBIGUOUS\n") != NULL);
             return 0;
         }
 
@@ -589,6 +650,8 @@ def _compile_and_run_harness(candidate: str) -> str:
             if (test_third_001a_blocked()) return 1;
             if (test_repeat_preconditions_fail_closed()) return 1;
             if (test_repeat_body_build_validate_and_diff_gate()) return 1;
+            if (test_periodic_refresh_single_outstanding_after_structural_ack()) return 1;
+            if (test_teardown_cancels_pending_refresh()) return 1;
             if (test_sequence_rollover_does_not_mutate_ack()) return 1;
             if (test_deterministic_repeat_build_flips_when_input_differs()) return 1;
             if (test_malformed_repeat_inputs_fail_closed()) return 1;
@@ -652,15 +715,18 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
         self.assertEqual(self.r27_completion.count("r27_initial_001a_sent_count++;"), 1)
         self.assertIn("INITIAL_001A_SENT_COUNT=%u", self.r27_completion)
 
-    def test_exactly_one_repeat_001a_queue_and_completion_path(self) -> None:
+    def test_bounded_refresh_001a_queue_and_completion_path(self) -> None:
         self.assertEqual(self.r27_queue.count("R27_TX_RTPC_CLIENT_001A_REPEAT"), 1)
         self.assertEqual(self.r27_completion.count("case R27_TX_RTPC_CLIENT_001A_REPEAT:"), 1)
         self.assertEqual(self.r27_completion.count("r27_repeat_001a_sent_count++;"), 1)
         self.assertIn("REPEAT_001A_SENT_COUNT=%u", self.r27_completion)
+        self.assertIn("REFRESH_SENT_COUNT=%u", self.r27_completion)
+        self.assertIn("R27_MAX_REFRESH_COUNT 4u", self.r27_state)
 
-    def test_third_repeat_is_blocked_fail_closed(self) -> None:
-        self.assertIn("r27_initial_001a_sent_count + r27_repeat_001a_sent_count >= 2u", self.r27_queue)
-        self.assertIn("r27_repeat_attempt_count != 1u", self.r27_helpers)
+    def test_refresh_limit_is_blocked_fail_closed(self) -> None:
+        self.assertIn("R27_MAX_REFRESH_COUNT", self.r27_queue)
+        self.assertIn("R27_REFRESH_LIMIT_BLOCKED=true", self.r27_queue)
+        self.assertIn("r27_repeat_001a_sent_count >= R27_MAX_REFRESH_COUNT", self.r27_helpers)
         self.assertIn('fprintf(stderr, "R27_THIRD_001A_BLOCKED=true\\n");', self.r27_segments)
         self.assertIn("failed = TRUE;", self.r27_segments)
 
@@ -713,15 +779,27 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
         self.assertLess(self.r27_ack_hook.index("r27_repeat_outstanding"), self.r27_ack_hook.index("p97_wait_device_ack_000a"))
         self.assertNotIn("p97_wait_device_ack_001a = TRUE", self.r27_helpers)
 
-    def test_ack_timeout_is_absent_and_no_retry(self) -> None:
+    def test_ack_timeout_is_absent_fail_closed_and_no_retry(self) -> None:
         self.assertIn("r27_repeat_ack_timeout_cb", self.r27_helpers)
         self.assertIn("SECOND_001A_RESPONSE=ABSENT", self.r27_helpers)
+        self.assertIn("REFRESH_FAIL_CLOSED=true", self.r27_helpers)
+        self.assertIn('pseudotcp_begin_graceful_stop("r27-refresh-timeout")', self.r27_helpers)
         self.assertNotIn("r27_try_queue_repeat_001a(", self.r27_helpers.split("r27_repeat_ack_timeout_cb", 1)[1].split("}", 1)[0])
 
     def test_unrelated_ack_cannot_satisfy_repeat_gate(self) -> None:
         self.assertIn("p99_state_scoped_structural_ack(request_id, body, body_len)", self.r27_helpers)
         self.assertIn("request_id == v4_ctpp_channel_id", self.r27_helpers)
         self.assertIn("SECOND_001A_RESPONSE=AMBIGUOUS", self.r27_helpers)
+        self.assertIn('pseudotcp_begin_graceful_stop("r27-refresh-ambiguous")', self.r27_helpers)
+
+    def test_periodic_refresh_is_single_outstanding_and_ack_gated(self) -> None:
+        self.assertIn("r27_schedule_next_refresh", self.r27_helpers)
+        self.assertIn("if (r27_repeat_outstanding)", self.r27_helpers)
+        self.assertIn("r27_repeat_001a_sent_count != r27_refresh_last_accepted_index", self.r27_helpers)
+        self.assertIn("r27_refresh_last_accepted_index = r27_refresh_current_index;", self.r27_helpers)
+        self.assertIn('printf("REFRESH_RESPONSE_%u=STRUCTURAL_ACK\\n"', self.r27_helpers)
+        self.assertIn("REFRESH_OVERLAP=false", self.r27_helpers)
+        self.assertIn("REFRESH_RETRY=false", self.r27_helpers)
 
     def test_no_new_session_setup_paths_in_r27_segments(self) -> None:
         for forbidden in (
@@ -765,8 +843,9 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
         ):
             self.assertIn(derived, self.candidate)
 
-    def test_stop_before_20_seconds_has_no_repeat_callback_path(self) -> None:
-        self.assertIn("R27_REPEAT_DELAY_SECONDS 20u", self.r27_state)
+    def test_stop_before_cadence_has_no_repeat_callback_path(self) -> None:
+        self.assertIn("R27_REFRESH_CADENCE_SECONDS 25u", self.r27_state)
+        self.assertIn("R27_CADENCE_SAFETY_MARGIN_SECONDS 11u", self.r27_state)
         self.assertIn("r27_repeat_timer_cancelled || pseudotcp_graceful_stop_started", self.r27_helpers)
         self.assertIn("return G_SOURCE_REMOVE;", self.r27_helpers)
 
@@ -798,6 +877,11 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
     def test_required_diagnostics_are_present_and_bounded(self) -> None:
         for marker in (
             "R27_REPEAT_DELAY_SECONDS=%u",
+            "REFRESH_CADENCE_SECONDS=%u",
+            "CADENCE_SOURCE=LOCAL_LIVE_EVIDENCE",
+            "CADENCE_SAFETY_MARGIN_SECONDS=%u",
+            "REFRESH_OVERLAP=false",
+            "REFRESH_RETRY=false",
             "R27_REPEAT_DELAY_IS_PROTOCOL_CONSTANT=false",
             "R27_REPEAT_DELAY_PROMOTED_TO_PRODUCTION=false",
             "VIDEO_RTP_AFTER_REPEAT=%s",
@@ -817,7 +901,7 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
 
     def test_runner_timeout_fail_closed_and_teardown_markers(self) -> None:
         runner = (MEDIA / "ct120_run_p116_r27_repeat_001a_live.sh").read_text(encoding="utf-8")
-        self.assertIn("MAX_LIVE_OBSERVATION_SECONDS=100", runner)
+        self.assertIn("MAX_LIVE_OBSERVATION_SECONDS=115", runner)
         self.assertIn("OUTER_TIMEOUT_SECONDS=120", runner)
         self.assertIn(f"EXPECTED_SOURCE_SHA={RUNNER_EXPECTED_SOURCE_SHA}", runner)
         self.assertEqual(RUNNER_EXPECTED_SOURCE_SHA, EXPECTED_GENERATED_SOURCE_SHA)
@@ -836,6 +920,13 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
             "MEDIA_ACTIVE_DURATION_SECONDS=",
             "VIDEO_PACKET_COUNTER_PROGRESSING=",
             "SECOND_001A_ACK_CLASSIFICATION=",
+            "REFRESH_SENT_COUNT=",
+            "REFRESH_RESPONSE_1=",
+            "REFRESH_CADENCE_SECONDS=",
+            "CADENCE_SOURCE=",
+            "CADENCE_SAFETY_MARGIN_SECONDS=",
+            "REFRESH_OVERLAP=",
+            "REFRESH_RETRY=",
             "NEW_RTPC_OPEN=",
             "NEW_SELF_ACTIVATION=",
             "MEDIA_TEARDOWN=",
@@ -855,6 +946,18 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
             "SECOND_MEDIA_SESSION=",
             "MEDIA_SESSION_IDENTITY_UNCHANGED=",
             "REPEAT_001A_SENT_COUNT=",
+            "REFRESH_SENT_COUNT=",
+            "REFRESH_RESPONSE_1=",
+            "REFRESH_RESPONSE_2=",
+            "REFRESH_RESPONSE_3=",
+            "REFRESH_RESPONSE_4=",
+            "REFRESH_OUTSTANDING=",
+            "REFRESH_FAIL_CLOSED=",
+            "REFRESH_CADENCE_SECONDS=",
+            "CADENCE_SOURCE=",
+            "CADENCE_SAFETY_MARGIN_SECONDS=",
+            "REFRESH_OVERLAP=",
+            "REFRESH_RETRY=",
             "SECOND_001A_RESPONSE=",
             "SECOND_001A_ACK_CLASSIFICATION=",
             "NEW_RTPC_OPEN=",
@@ -881,6 +984,25 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
         self.assertIn("CREDENTIAL_REFUSAL_BEFORE_LISTENER_STOP=true", runner)
         self.assertLess(runner.index('echo "=== VERIFY CREDENTIAL STATUS ==="'), runner.index('echo "=== VERIFY LISTENER READY ==="'))
         self.assertLess(runner.index('echo "=== VERIFY CREDENTIAL STATUS ==="'), runner.index('echo "=== STOP ONLY COMELIT LISTENER ==="'))
+
+    def test_runner_derives_post_repeat_identity_claims(self) -> None:
+        runner = (MEDIA / "ct120_run_p116_r27_repeat_001a_live.sh").read_text(encoding="utf-8")
+        self.assertIn("last_marker_gt()", runner)
+        self.assertIn('THIRD_001A=$(last_marker R27_THIRD_001A_BLOCKED NOT_REACHED)', runner)
+        self.assertIn('NEW_ICE_NEGOTIATION_AFTER_REPEAT=$(last_marker_gt ICE_NEGOTIATION_COUNT 1)', runner)
+        self.assertIn('NEW_PSEUDOTCP_AFTER_REPEAT=$(last_marker_gt PSEUDOTCP_OPEN_COUNT 1)', runner)
+        self.assertIn('NEW_CTPP_REGISTRATION_AFTER_REPEAT=$(last_marker_gt CTPP_REGISTRATION_COUNT 1)', runner)
+        self.assertIn('NEW_RTPC_OPEN_AFTER_REPEAT=$(last_marker_gt RTPC_CLIENT_OPEN_COUNT 2)', runner)
+        self.assertIn('NEW_SELF_ACTIVATION_AFTER_REPEAT=$(last_marker_gt SELF_ACTIVATION_COUNT 1)', runner)
+        for literal in (
+            'echo "THIRD_001A=false"',
+            'echo "NEW_ICE_NEGOTIATION_AFTER_REPEAT=false"',
+            'echo "NEW_PSEUDOTCP_AFTER_REPEAT=false"',
+            'echo "NEW_CTPP_REGISTRATION_AFTER_REPEAT=false"',
+            'echo "NEW_RTPC_OPEN_AFTER_REPEAT=false"',
+            'echo "NEW_SELF_ACTIVATION_AFTER_REPEAT=false"',
+        ):
+            self.assertNotIn(literal, runner)
 
     def test_runner_materializes_candidate_wrapper_instead_of_base_wrapper_override(self) -> None:
         runner = (MEDIA / "ct120_run_p116_r27_repeat_001a_live.sh").read_text(encoding="utf-8")

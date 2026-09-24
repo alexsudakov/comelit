@@ -16,10 +16,10 @@ BASE_WRAPPER_SHA256=a564535dff0cf10b1fe4766171f2960c52fb581f1c816cf81d2992c5c84e
 BUILDER_REL=safety-poc/research/media/v1/ct120_build_p80_haos_media_helper.sh
 TRANSFORM_REL=safety-poc/research/media/v1/entrance_p116_r27_repeat_001a_transform.py
 RUNNER_REL=safety-poc/research/media/v1/ct120_run_p116_r27_repeat_001a_live.sh
-EXPECTED_SOURCE_SHA=e62e83c0b1d426fac9f307c84a8069e1bf2c6e7dae47edf78e1cff6012234887
+EXPECTED_SOURCE_SHA=681ab1a6c81a5845e5a5db711c569eaef068829f7634a33355c04495ad06b96f
 VIDEO_RTP_PORT=17899
 AUDIO_RTP_PORT=17808
-MAX_LIVE_OBSERVATION_SECONDS=100
+MAX_LIVE_OBSERVATION_SECONDS=115
 OUTER_TIMEOUT_SECONDS=120
 CREDENTIAL_MIN_TTL_SECONDS=900
 OAUTH_STATUS=/usr/local/sbin/comelit-oauth-status
@@ -244,6 +244,25 @@ last_marker_equals() {
     [ "$(last_marker "$key" __MISSING__)" = "$expected" ]
 }
 
+last_marker_gt() {
+    local key="$1"
+    local threshold="$2"
+    local value
+    value="$(last_marker "$key" NOT_REACHED)"
+    case "$value" in
+        ''|*[!0-9]*)
+            printf '%s\n' NOT_REACHED
+            ;;
+        *)
+            if [ "$value" -gt "$threshold" ]; then
+                printf '%s\n' true
+            else
+                printf '%s\n' false
+            fi
+            ;;
+    esac
+}
+
 p80_video_rtp_progress_positive() {
     [ -f "$SESSION_LOG" ] || return 1
     awk -F= '
@@ -438,7 +457,12 @@ print_final_block() {
     echo "CREDENTIAL_REFRESH_REQUIRED=$CREDENTIAL_REFRESH_REQUIRED"
     echo "R27_REPEAT_EXECUTED=$R27_REPEAT_EXECUTED"
     echo "GENERATED_SOURCE_SHA256=$(build_provenance_marker GENERATED_SOURCE_SHA256 NOT_REACHED)"
-    echo "R27_REPEAT_DELAY_SECONDS=20"
+    echo "R27_REPEAT_DELAY_SECONDS=25"
+    echo "REFRESH_CADENCE_SECONDS=$(last_marker REFRESH_CADENCE_SECONDS 25)"
+    echo "CADENCE_SOURCE=$(last_marker CADENCE_SOURCE LOCAL_LIVE_EVIDENCE)"
+    echo "CADENCE_SAFETY_MARGIN_SECONDS=$(last_marker CADENCE_SAFETY_MARGIN_SECONDS 11)"
+    echo "REFRESH_OVERLAP=$(last_marker REFRESH_OVERLAP false)"
+    echo "REFRESH_RETRY=$(last_marker REFRESH_RETRY false)"
     echo "R27_REPEAT_DELAY_IS_PROTOCOL_CONSTANT=false"
     echo "R27_REPEAT_DELAY_PROMOTED_TO_PRODUCTION=false"
     if [ "$R27_RUN_CLASSIFICATION" != OBSERVATION_USABLE ]; then
@@ -453,6 +477,13 @@ print_final_block() {
         echo "R27_USABLE_EVIDENCE=true"
         echo "INITIAL_001A_SENT_COUNT=$(last_marker INITIAL_001A_SENT_COUNT NOT_REACHED)"
         echo "REPEAT_001A_SENT_COUNT=$(last_marker REPEAT_001A_SENT_COUNT NOT_REACHED)"
+        echo "REFRESH_SENT_COUNT=$(last_marker REFRESH_SENT_COUNT NOT_REACHED)"
+        echo "REFRESH_RESPONSE_1=$(last_marker REFRESH_RESPONSE_1 NOT_REACHED)"
+        echo "REFRESH_RESPONSE_2=$(last_marker REFRESH_RESPONSE_2 NOT_REACHED)"
+        echo "REFRESH_RESPONSE_3=$(last_marker REFRESH_RESPONSE_3 NOT_REACHED)"
+        echo "REFRESH_RESPONSE_4=$(last_marker REFRESH_RESPONSE_4 NOT_REACHED)"
+        echo "REFRESH_OUTSTANDING=$(last_marker REFRESH_OUTSTANDING NOT_REACHED)"
+        echo "REFRESH_FAIL_CLOSED=$(last_marker REFRESH_FAIL_CLOSED NOT_REACHED)"
         echo "TOTAL_001A_SENT_COUNT=$(last_marker TOTAL_001A_SENT_COUNT NOT_REACHED)"
         echo "SECOND_001A_RESPONSE=$(last_marker SECOND_001A_RESPONSE NOT_REACHED)"
         echo "SECOND_001A_ACK_CLASSIFICATION=$(last_marker SECOND_001A_ACK_CLASSIFICATION NOT_REACHED)"
@@ -483,16 +514,16 @@ print_final_block() {
     echo "GATE_ACTIONS_SENT=0"
     echo "NEW_RTPC_OPEN=$(last_marker NEW_RTPC_OPEN NOT_REACHED)"
     echo "NEW_SELF_ACTIVATION=$(last_marker NEW_SELF_ACTIVATION NOT_REACHED)"
-    echo "THIRD_001A=false"
-    echo "REFRESH_LOOP=false"
+    echo "THIRD_001A=$(last_marker R27_THIRD_001A_BLOCKED NOT_REACHED)"
+    echo "REFRESH_LOOP=bounded_periodic"
     echo "AUTOMATIC_RETRY_001A=false"
     echo "RTCP_PLI=false"
     echo "RTCP_FIR=false"
-    echo "NEW_ICE_NEGOTIATION_AFTER_REPEAT=false"
-    echo "NEW_PSEUDOTCP_AFTER_REPEAT=false"
-    echo "NEW_CTPP_REGISTRATION_AFTER_REPEAT=false"
-    echo "NEW_RTPC_OPEN_AFTER_REPEAT=false"
-    echo "NEW_SELF_ACTIVATION_AFTER_REPEAT=false"
+    echo "NEW_ICE_NEGOTIATION_AFTER_REPEAT=$(last_marker_gt ICE_NEGOTIATION_COUNT 1)"
+    echo "NEW_PSEUDOTCP_AFTER_REPEAT=$(last_marker_gt PSEUDOTCP_OPEN_COUNT 1)"
+    echo "NEW_CTPP_REGISTRATION_AFTER_REPEAT=$(last_marker_gt CTPP_REGISTRATION_COUNT 1)"
+    echo "NEW_RTPC_OPEN_AFTER_REPEAT=$(last_marker_gt RTPC_CLIENT_OPEN_COUNT 2)"
+    echo "NEW_SELF_ACTIVATION_AFTER_REPEAT=$(last_marker_gt SELF_ACTIVATION_COUNT 1)"
     echo "OFFICIAL_APP_CAPTURE=false"
     echo "RAW_PCAP_CAPTURE=false"
     echo "=== END COMELIT P116 R27 REPEAT 001A LIVE FINAL ==="
