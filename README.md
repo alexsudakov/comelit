@@ -62,6 +62,7 @@ On a new authoritative `ringing` event, the card focuses the «Домофон» 
 - `camera.comelit_entrance` live view with automatic on-demand media startup
 - Camera live view reuses the already-active inbound Ring transaction when available
 - One shared HA Stream for simultaneous Ring snapshot/recording and user live view
+- Real inbound Ring media remains warm after the 20-second recording until backend-observed remote close
 - Automatic live-view release through Home Assistant Stream/HLS consumer lifecycle
 - Thumbnail/entity-picture requests do not start Comelit media
 - Home Assistant stream preloading is forced off for the intercom camera
@@ -112,4 +113,4 @@ Door operations are one-shot. Automatic Door retry is not allowed. A protocol ac
 
 Intercom media is on-demand only. Home Assistant startup, thumbnails and still-image polling must not open the camera session. Separately bootstrapped on-demand media pauses the persistent listener before bootstrap and restores it only after confirmed teardown. A new viewer or lease never extends the absolute 600-second deadline.
 
-Gate actuation is implemented with the validated protocol profile, but physical Gate effect remains a separate live acceptance item until confirmed on the installation.
+Real inbound Ring media follows backend-observed remote/native close rather than the 20-second recording duration; a 600-second defense-in-depth ceiling remains. Gate actuation is implemented with the validated protocol profile, but physical Gate effect remains a separate live acceptance item until confirmed on the installation.

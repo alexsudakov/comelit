@@ -43,6 +43,8 @@ class AttachedRingRuntime(Protocol):
 
     async def async_wait_attached_media_open(self, timeout: float) -> bool: ...
 
+    async def async_wait_attached_media_closed(self, timeout: float) -> bool: ...
+
     async def async_stop_attached_media(self, timeout: float) -> bool: ...
 
 
@@ -139,6 +141,12 @@ class ComelitAttachedRingMediaTransport:
 
             self._video_recovery_shim = shim
             self._active = True
+
+    async def async_wait_inactive(self, timeout: float) -> bool:
+        """Wait until the remote/native attached media channel closes."""
+        if not self.active:
+            return True
+        return await self._runtime.async_wait_attached_media_closed(timeout)
 
     async def async_stop(self) -> None:
         async with self._lock:
@@ -242,6 +250,26 @@ class ComelitAttachedRingMediaSession:
                 self._panel = None
                 self._leases.clear()
                 raise ComelitAttachedMediaError(self._last_error) from exc
+            return self.status()
+
+    async def async_wait_inactive(self, timeout: float) -> bool:
+        """Wait for the authoritative inbound call media lifetime to end."""
+        if not self.active:
+            return True
+        return await self._transport.async_wait_inactive(timeout)
+
+    async def async_force_stop(self, *, reason: str) -> dict[str, object]:
+        """Force the bounded attached-media lifecycle closed, clearing all leases."""
+        if not reason or len(reason) > 64:
+            raise ComelitAttachedMediaError("invalid_attached_media_reason")
+        async with self._lock:
+            self._leases.clear()
+            try:
+                await self._transport.async_stop()
+            except Exception as exc:
+                self._last_error = f"stop_failed:{type(exc).__name__}"
+                raise ComelitAttachedMediaError(self._last_error) from exc
+            self._panel = None
             return self.status()
 
     async def async_release(self, *, reason: str) -> dict[str, object]:

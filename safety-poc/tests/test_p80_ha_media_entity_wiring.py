@@ -122,6 +122,17 @@ class P80HaMediaEntityWiringTests(unittest.TestCase):
         self.assertIn("if not self._automatic_start_ready:", create_method)
         self.assertIn("return None", create_method)
 
+    def test_real_ring_lifetime_uses_authoritative_remote_close(self) -> None:
+        self.assertIn(
+            "remote_close_waiter=attached_session.async_wait_inactive",
+            self.init,
+        )
+        self.assertIn("RING_MEDIA_HARD_LIMIT_SECONDS = 600", self.const)
+        self.assertIn("async def _async_wait_for_remote_call_end", self.ring_media)
+        self.assertIn('return "remote_closed"', self.ring_media)
+        self.assertIn('return "hard_limit"', self.ring_media)
+        self.assertIn('"remote_call_lifetime_authoritative":', self.ring_media)
+
     def test_shared_ha_stream_is_owned_by_named_consumers(self) -> None:
         self.assertIn("async def async_acquire_consumer", self.ring_media)
         self.assertIn("async def async_release_consumer", self.ring_media)

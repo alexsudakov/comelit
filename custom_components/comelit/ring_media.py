@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 import copy
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -48,6 +48,7 @@ from .const import (
     RECORDING_STATE_FAILED,
     RECORDING_STATE_TRUNCATED,
     RECORDING_TARGET_SECONDS,
+    RING_MEDIA_HARD_LIMIT_SECONDS,
     SNAPSHOT_REFRESH_TARGET_SECONDS,
 )
 from .media_session import ComelitMediaSessionError
@@ -307,6 +308,8 @@ class RingMediaCoordinator:
         camera_entity: str = ENTRANCE_CAMERA_ENTITY_ID,
         snapshot_refresh_seconds: int = SNAPSHOT_REFRESH_TARGET_SECONDS,
         recording_target_seconds: int = RECORDING_TARGET_SECONDS,
+        remote_close_waiter: Callable[[float], Awaitable[bool]] | None = None,
+        hard_limit_seconds: int = RING_MEDIA_HARD_LIMIT_SECONDS,
         task_factory: TaskFactory | None = None,
         monotonic_clock: Callable[[], float] = monotonic,
     ) -> None:
@@ -314,6 +317,8 @@ class RingMediaCoordinator:
             raise ValueError("snapshot_refresh_seconds must be positive")
         if recording_target_seconds <= 0:
             raise ValueError("recording_target_seconds must be positive")
+        if hard_limit_seconds <= 0:
+            raise ValueError("hard_limit_seconds must be positive")
 
         self._hass = hass
         self._manager = manager
@@ -323,6 +328,8 @@ class RingMediaCoordinator:
         self._camera_entity = camera_entity
         self._snapshot_refresh_seconds = snapshot_refresh_seconds
         self._recording_target_seconds = recording_target_seconds
+        self._remote_close_waiter = remote_close_waiter
+        self._hard_limit_seconds = hard_limit_seconds
         self._task_factory = task_factory or _default_task_factory
         self._monotonic = monotonic_clock
         self._active_event_id: str | None = None
@@ -335,6 +342,7 @@ class RingMediaCoordinator:
         self._last_snapshot_path: str | None = None
         self._recording_event_count = 0
         self._last_recording_result: dict[str, object] | None = None
+        self._ring_end_reason: str | None = None
         self._attach_failure_recorder: Callable[[str | None], None] | None = None
 
     def set_attach_failure_recorder(
@@ -387,6 +395,10 @@ class RingMediaCoordinator:
                 if self._last_recording_result is not None
                 else None
             ),
+            "recording_target_seconds": self._recording_target_seconds,
+            "remote_call_lifetime_authoritative": self._remote_close_waiter is not None,
+            "ring_media_hard_limit_seconds": self._hard_limit_seconds,
+            "ring_end_reason": self._ring_end_reason,
         }
 
     async def async_start_for_ring(self, event: dict[str, object]) -> bool:
@@ -408,6 +420,7 @@ class RingMediaCoordinator:
         self._last_snapshot_path = str(paths.snapshot_path)
         self._recording_event_count = 0
         self._last_recording_result = None
+        self._ring_end_reason = None
         self._stop_event = asyncio.Event()
         self._task = self._task_factory(
             self._async_run_lifecycle(
@@ -435,6 +448,56 @@ class RingMediaCoordinator:
         self._stop_event = None
         self._active_event_id = None
 
+    async def _async_wait_for_remote_call_end(
+        self,
+        *,
+        stop_event: asyncio.Event,
+        lifecycle_started: float,
+    ) -> str:
+        """Wait for authoritative remote close, bounded by the safety ceiling."""
+        waiter = self._remote_close_waiter
+        if waiter is None:
+            return "recording_complete"
+
+        remaining = self._hard_limit_seconds - max(
+            0.0,
+            self._monotonic() - lifecycle_started,
+        )
+        if remaining <= 0:
+            return "hard_limit"
+
+        remote_task = asyncio.create_task(
+            waiter(remaining),
+            name="wait Comelit remote ring media close",
+        )
+        stop_task = asyncio.create_task(
+            stop_event.wait(),
+            name="wait Comelit ring media shutdown",
+        )
+        try:
+            done, _ = await asyncio.wait(
+                {remote_task, stop_task},
+                timeout=remaining,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stop_task in done and stop_task.result():
+                return "shutdown"
+            if remote_task in done:
+                try:
+                    return "remote_closed" if remote_task.result() else "remote_close_unconfirmed"
+                except Exception:
+                    _LOGGER.exception("Comelit remote ring close waiter failed")
+                    return "remote_close_unconfirmed"
+            return "hard_limit"
+        finally:
+            for task in (remote_task, stop_task):
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
     async def _async_run_lifecycle(
         self,
         *,
@@ -445,6 +508,9 @@ class RingMediaCoordinator:
     ) -> None:
         acquired = False
         stream_consumer_acquired = False
+        recording_event_fired = False
+        snapshot_task: asyncio.Task[None] | None = None
+        lifecycle_started: float | None = None
         recording_state = RECORDING_STATE_FAILED
         recording_started: float | None = None
         recording_actual = 0.0
@@ -452,6 +518,7 @@ class RingMediaCoordinator:
         try:
             await self._manager.async_acquire(panel=door, reason=_RING_MEDIA_REASON)
             acquired = True
+            lifecycle_started = self._monotonic()
             acquire_consumer = getattr(
                 self._snapshot_provider, "async_acquire_consumer", None
             )
@@ -473,36 +540,10 @@ class RingMediaCoordinator:
             ):
                 recording_state = RECORDING_STATE_TRUNCATED
             recording_failure_reason = self._recording_failure_reason()
-            stop_event.set()
-            try:
-                await snapshot_task
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                _LOGGER.exception("Comelit snapshot loop failed")
-        except (ComelitMediaSessionError, RuntimeError, ValueError) as exc:
-            recording_state = RECORDING_STATE_FAILED
-            recording_failure_reason = "media_start_failed"
-            recorder = getattr(self, "_attach_failure_recorder", None)
-            if recorder is not None:
-                # Sanitized by the recorder's own whitelist; the raw
-                # exception text is never published.
-                recorder(str(exc))
-        except asyncio.CancelledError:
-            stop_event.set()
-            recording_state = RECORDING_STATE_TRUNCATED
-            if recording_started is not None:
-                recording_actual = max(0.0, self._monotonic() - recording_started)
-            raise
-        except Exception:
-            _LOGGER.exception("Comelit ring media lifecycle failed")
-            recording_state = RECORDING_STATE_FAILED
-            recording_failure_reason = (
-                self._recording_failure_reason() or "recorder_exception"
-            )
-            if recording_started is not None:
-                recording_actual = max(0.0, self._monotonic() - recording_started)
-        finally:
+
+            # Recording completion is independent from the lifetime of the
+            # inbound call. Emit the retained-file result immediately, then
+            # keep the attached media/HA Stream warm until Comelit closes it.
             self._fire_recording_complete(
                 event_id,
                 door,
@@ -511,6 +552,77 @@ class RingMediaCoordinator:
                 recording_actual,
                 reason=recording_failure_reason,
             )
+            recording_event_fired = True
+
+            if lifecycle_started is not None:
+                self._ring_end_reason = await self._async_wait_for_remote_call_end(
+                    stop_event=stop_event,
+                    lifecycle_started=lifecycle_started,
+                )
+            else:
+                self._ring_end_reason = "media_start_failed"
+
+            if self._ring_end_reason == "hard_limit":
+                force_stop = getattr(self._manager, "async_force_stop", None)
+                if callable(force_stop):
+                    try:
+                        await force_stop(reason="ring_media_hard_limit")
+                    except Exception:
+                        self._ring_end_reason = "hard_limit_stop_failed"
+                        _LOGGER.exception(
+                            "Comelit attached Ring hard-limit teardown failed"
+                        )
+                else:
+                    self._ring_end_reason = "hard_limit_stop_unavailable"
+                    _LOGGER.error(
+                        "Comelit attached Ring hard-limit stop is unavailable"
+                    )
+            stop_event.set()
+        except (ComelitMediaSessionError, RuntimeError, ValueError) as exc:
+            recording_state = RECORDING_STATE_FAILED
+            recording_failure_reason = "media_start_failed"
+            self._ring_end_reason = "media_error"
+            recorder = getattr(self, "_attach_failure_recorder", None)
+            if recorder is not None:
+                # Sanitized by the recorder's own whitelist; the raw
+                # exception text is never published.
+                recorder(str(exc))
+        except asyncio.CancelledError:
+            stop_event.set()
+            self._ring_end_reason = "shutdown"
+            recording_state = RECORDING_STATE_TRUNCATED
+            if recording_started is not None:
+                recording_actual = max(0.0, self._monotonic() - recording_started)
+            raise
+        except Exception:
+            _LOGGER.exception("Comelit ring media lifecycle failed")
+            self._ring_end_reason = "media_error"
+            recording_state = RECORDING_STATE_FAILED
+            recording_failure_reason = (
+                self._recording_failure_reason() or "recorder_exception"
+            )
+            if recording_started is not None:
+                recording_actual = max(0.0, self._monotonic() - recording_started)
+        finally:
+            stop_event.set()
+            if snapshot_task is not None:
+                try:
+                    await snapshot_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    _LOGGER.exception("Comelit snapshot loop failed")
+
+            if not recording_event_fired:
+                self._fire_recording_complete(
+                    event_id,
+                    door,
+                    paths,
+                    recording_state,
+                    recording_actual,
+                    reason=recording_failure_reason,
+                )
+
             if acquired:
                 try:
                     await self._manager.async_release(reason=_RING_MEDIA_REASON)

@@ -229,6 +229,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             attached_session,
             snapshot_provider=ring_media_provider,
             recording_provider=ring_media_provider,
+            remote_close_waiter=attached_session.async_wait_inactive,
             task_factory=lambda coro, name: entry.async_create_background_task(
                 hass, coro, name
             ),

@@ -1,6 +1,6 @@
 # Camera-owned media lifecycle
 
-Status: implemented for the post-1.5.12 integration line; HAOS live validation pending.
+Status: camera-owned on-demand lifecycle live-validated in HAOS; inbound Ring lifetime now follows authoritative remote close.
 
 ## Goal
 
@@ -91,15 +91,18 @@ absolute deadline, which is never extended by new leases.
 Typical inbound Ring plus user viewing:
 
 ```text
-consumers = {ring_media, camera_view}
-ring recording ends -> release ring_media
-consumers = {camera_view}
-HA Stream remains alive
-viewer closes -> release camera_view
-consumers = {}
-HA Stream closes
-attached media lease closes if no other owner remains
+CALL_INIT -> ring_media acquires attached media + shared HA Stream
+20-second recording completes -> recording artifact/event completes
+ring_media remains held while the real inbound call remains open
+camera_view may join the already-warm shared HA Stream at any point
+remote/native media close -> ring_media releases
+camera_view releases on the same owner becoming inactive
+consumers = {} -> HA Stream closes
 ```
+
+The 20-second recording target is **not** the lifetime of the inbound call. For a real
+Ring, backend-observed remote/native media close is authoritative. A 600-second
+defense-in-depth ceiling remains in case the remote close is never observed.
 
 Direct cleanup cannot close a shared HA Stream while a named consumer remains.
 
