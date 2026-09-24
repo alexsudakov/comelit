@@ -54,7 +54,7 @@ class FrontendBundleContractTest(unittest.TestCase):
         self.assertIn("async_register_static_paths", init_source)
         self.assertIn("/api/comelit/frontend", init_source)
         self.assertIn("http", manifest["dependencies"])
-        self.assertRegex(manifest["version"], r"^\\d+\\.\\d+\\.\\d+$")
+        self.assertRegex(manifest["version"], r"^\d+\.\d+\.\d+$")
 
 
 if __name__ == "__main__":
