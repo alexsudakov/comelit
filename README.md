@@ -11,6 +11,43 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
+## Home Assistant Custom Card
+
+Version 1.5.14 bundles the first surveillance-first Lovelace card.
+
+After updating the integration and restarting Home Assistant, register this resource once in the Lovelace resource settings:
+
+```text
+URL: /api/comelit/frontend/comelit-card.js
+Type: JavaScript Module
+```
+
+Then add the card. The preferred configuration selects ordinary surveillance cameras with a Home Assistant label:
+
+```yaml
+type: custom:comelit-card
+default_tab: surveillance
+surveillance:
+  label: <Home Assistant label id>
+```
+
+An explicit camera allowlist can be used instead:
+
+```yaml
+type: custom:comelit-card
+default_tab: surveillance
+surveillance:
+  include:
+    - camera.example_1
+    - camera.example_2
+```
+
+The card deliberately does not discover every Home Assistant camera automatically. Ordinary surveillance cameras remain standard Home Assistant `camera.*` entities. Their source URLs and credentials are never passed into the card.
+
+The surveillance viewer delegates playback to Home Assistant's built-in `picture-entity` card with `camera_view: live`. The card does not enable camera stream preload.
+
+The intercom tab is read-only in this MVP. Door/media actions and authoritative active-call routing remain separate follow-up phases.
+
 ## Current capabilities
 
 - Direct Comelit cloud P2P bootstrap and persistent session
@@ -27,6 +64,7 @@ Category: Integration
 - Home Assistant stream preloading is forced off for the intercom camera
 - Same-session periodic media refresh keeps entrance video alive beyond the historical 30–35 second cutoff
 - Absolute media-session ceiling remains 600 seconds
+- Bundled surveillance-first Home Assistant Custom Card
 
 ## Camera lifecycle
 
