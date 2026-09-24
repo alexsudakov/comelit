@@ -294,6 +294,7 @@ class ComelitEntranceCamera(Camera):
         self._camera_view_lock = asyncio.Lock()
         self._camera_view_monitor_task: asyncio.Task[None] | None = None
         self._automatic_start_ready = False
+        self._preload_forced_off_once = False
         self._stream_reset_task: asyncio.Task[None] | None = None
         self._last_hls_diagnostics_signature: tuple[Any, ...] | None = None
         self._hls_http_probe_task: asyncio.Task[None] | None = None
@@ -599,6 +600,7 @@ class ComelitEntranceCamera(Camera):
                 return False
 
             await prefs.async_update(self.entity_id, preload_stream=False)
+            self._preload_forced_off_once = True
             settings = await get_dynamic_camera_stream_settings(
                 self.hass, self.entity_id
             )
@@ -761,7 +763,17 @@ class ComelitEntranceCamera(Camera):
     async def async_create_stream(self) -> Stream | None:
         """Start media only for an explicit HA stream/record request."""
         if not self._automatic_start_ready:
+            preload_was_forced_off = self._preload_forced_off_once
             if not await self._async_disable_preload_stream():
+                return None
+            if (
+                self._preload_forced_off_once
+                and not preload_was_forced_off
+            ):
+                # If this call itself had to turn off HA preload, it may be the
+                # startup preloader that already passed its preference check.
+                # Fail this one request closed; the next explicit stream
+                # request is allowed with preload persistently disabled.
                 return None
 
         if not self._create_stream_lock:
