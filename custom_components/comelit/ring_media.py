@@ -589,7 +589,7 @@ class RingMediaCoordinator:
                 recording_actual = max(0.0, self._monotonic() - recording_started)
         finally:
             stop_event.set()
-            if snapshot_task is not None and not snapshot_task.done():
+            if snapshot_task is not None:
                 try:
                     await snapshot_task
                 except asyncio.CancelledError:
