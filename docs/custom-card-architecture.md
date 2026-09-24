@@ -504,7 +504,9 @@ This phase does not require intercom call-state completion.
 
 ### Phase C — idle intercom controls
 
-Add:
+Status: **implemented in Custom Card 1.5.18**.
+
+Implemented:
 
 - entrance normal view;
 - entrance media start/stop UX through semantic HA entities;
@@ -512,6 +514,10 @@ Add:
 - gate camera unavailable state.
 
 No microphone/full-duplex behavior is added.
+
+One explicit frontend Door click maps to exactly one Home Assistant `button.press` against the resolved Comelit button entity. The card does not call low-level Comelit services, does not retry automatically, and does not assert physical opening from service completion alone.
+
+Entrance live view is started only by an explicit user camera action and is rendered through the standard Home Assistant camera presentation path. Leaving the intercom tab closes the card's intercom viewer surface; this does not terminate an independent active inbound call.
 
 ### Phase D — incoming call UI
 
