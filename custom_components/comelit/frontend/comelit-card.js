@@ -35,6 +35,7 @@ class ComelitCard extends HTMLElement {
     this._entityRegistry = [];
     this._labelRegistry = [];
     this._registryPromise = undefined;
+    this._registryLoaded = false;
     this._registryError = undefined;
     this._activeTab = "intercom";
     this._selectedCamera = undefined;
@@ -104,7 +105,7 @@ class ComelitCard extends HTMLElement {
   }
 
   async _loadRegistries() {
-    if (!this._hass || this._registryPromise) {
+    if (!this._hass || this._registryLoaded || this._registryPromise) {
       return this._registryPromise;
     }
 
@@ -115,6 +116,7 @@ class ComelitCard extends HTMLElement {
       .then(([entities, labels]) => {
         this._entityRegistry = Array.isArray(entities) ? entities : [];
         this._labelRegistry = Array.isArray(labels) ? labels : [];
+        this._registryLoaded = true;
         this._registryError = undefined;
       })
       .catch((error) => {
@@ -122,6 +124,7 @@ class ComelitCard extends HTMLElement {
           error instanceof Error ? error.message : "registry_unavailable";
       })
       .finally(() => {
+        this._registryPromise = undefined;
         this._render();
       });
 
