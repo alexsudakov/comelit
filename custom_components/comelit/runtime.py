@@ -1043,7 +1043,7 @@ class ComelitRingRuntime:
         self._attached_media_busy.clear()
         self._attached_media_open.clear()
         self._attached_media_closed.clear()
-        self._call_state.reset()
+        self._call_state_tracker().reset()
         self._notify_status()
         await self._hass.async_add_executor_job(_remove_door_target)
         await self._hass.async_add_executor_job(_remove_helper_secret)
@@ -1242,14 +1242,14 @@ class ComelitRingRuntime:
                 _LOGGER.error("Comelit ring listener stopped: %s", exc)
         except Exception as exc:
             self._last_error = f"unexpected:{type(exc).__name__}"
-            if self._call_state.fail_active("listener_failure"):
+            if self._call_state_tracker().fail_active("listener_failure"):
                 self._notify_status()
             _LOGGER.exception("Unexpected Comelit ring listener failure")
         finally:
             if (
                 not self._stopping
                 and self._last_error is None
-                and self._call_state.fail_active("listener_stopped_during_call")
+                and self._call_state_tracker().fail_active("listener_stopped_during_call")
             ):
                 self._notify_status()
             self._process = None
