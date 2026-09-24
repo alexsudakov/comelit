@@ -39,6 +39,8 @@ class ComelitCard extends HTMLElement {
     this._activeTab = "intercom";
     this._selectedCamera = undefined;
     this._viewerGeneration = 0;
+    this._viewerElement = undefined;
+    this._rendered = false;
   }
 
   static getStubConfig() {
@@ -78,9 +80,16 @@ class ComelitCard extends HTMLElement {
   }
 
   set hass(hass) {
+    const firstHass = !this._hass;
     this._hass = hass;
     this._loadRegistries();
-    this._render();
+
+    if (firstHass || !this._rendered) {
+      this._render();
+      return;
+    }
+
+    this._updateDynamicState();
   }
 
   getCardSize() {
@@ -243,6 +252,9 @@ class ComelitCard extends HTMLElement {
       return;
     }
 
+    this._viewerGeneration += 1;
+    this._viewerElement = undefined;
+
     const cameras = this._hass ? this._surveillanceEntities() : [];
     if (
       this._selectedCamera &&
@@ -402,9 +414,55 @@ class ComelitCard extends HTMLElement {
     `;
 
     this._bindHandlers();
+    this._rendered = true;
 
     if (this._activeTab === "surveillance" && this._selectedCamera) {
       this._mountViewer(this._selectedCamera);
+    } else {
+      this._updateDynamicState();
+    }
+  }
+
+  _updateDynamicState() {
+    if (!this._hass || !this.shadowRoot) {
+      return;
+    }
+
+    if (this._viewerElement) {
+      this._viewerElement.hass = this._hass;
+    }
+
+    for (const button of this.shadowRoot.querySelectorAll("[data-camera]")) {
+      const entityId = button.dataset.camera;
+      const state = entityId ? this._hass.states?.[entityId] : undefined;
+      const dot = button.querySelector(".status-dot");
+      if (dot) {
+        dot.classList.toggle(
+          "unavailable",
+          !state || state.state === "unavailable",
+        );
+      }
+    }
+
+    const listener = this.shadowRoot.querySelector("[data-listener-state]");
+    if (listener) {
+      const model = this._intercomModel();
+      listener.textContent =
+        model.listenerStatus.state?.state ||
+        (model.listenerStatus.entry ? "unknown" : "entity unavailable");
+    }
+
+    for (const button of this.shadowRoot.querySelectorAll("[data-door]")) {
+      const model = this._intercomModel();
+      const item =
+        button.dataset.door === "entrance"
+          ? model.entranceDoor
+          : model.gateDoor;
+      button.textContent = item.state
+        ? item.state.state === "unavailable"
+          ? "недоступно"
+          : "доступно"
+        : "entity unavailable";
     }
   }
 
@@ -487,15 +545,15 @@ class ComelitCard extends HTMLElement {
         <div class="intercom-panel">
           <h3>Подъезд</h3>
           <div class="meta">Камера: ${escapeHtml(entranceCamera)}</div>
-          <div class="meta">Открытие: ${escapeHtml(entranceDoor)}</div>
+          <div class="meta">Открытие: <span data-door="entrance">${escapeHtml(entranceDoor)}</span></div>
         </div>
         <div class="intercom-panel">
           <h3>Калитка</h3>
           <div class="meta">Камера: пока не опубликована интеграцией</div>
-          <div class="meta">Открытие: ${escapeHtml(gateDoor)}</div>
+          <div class="meta">Открытие: <span data-door="gate">${escapeHtml(gateDoor)}</span></div>
         </div>
       </div>
-      <div class="meta">Listener: ${escapeHtml(listener)}</div>
+      <div class="meta">Listener: <span data-listener-state>${escapeHtml(listener)}</span></div>
       <div class="notice" style="margin-top: 12px">
         На этом MVP вкладка «Домофон» только отображает состояние.
         Media/Door actions и call routing будут добавлены отдельным этапом.
@@ -551,6 +609,7 @@ class ComelitCard extends HTMLElement {
       }
 
       viewer.hass = this._hass;
+      this._viewerElement = viewer;
       const currentTarget = this.shadowRoot?.querySelector("#viewer");
       if (!currentTarget) {
         return;
