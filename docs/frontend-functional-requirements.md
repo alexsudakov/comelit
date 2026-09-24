@@ -1,6 +1,6 @@
 # Функциональные требования — Comelit UI
 
-Статус: **approved user requirements baseline**  
+Статус: **approved user requirements baseline, amended after standard HA camera validation**  
 Дата: 2026-09-24  
 Область: Home Assistant Custom Card и Telegram Mini App для Comelit
 
@@ -21,6 +21,7 @@
 
 При конфликте safety/lifecycle правил приоритет имеют более строгие утверждённые protocol/safety contracts проекта.
 
+
 ## 2. Общая структура страницы
 
 Интерфейс MUST иметь две верхнеуровневые вкладки:
@@ -29,9 +30,16 @@
 [ Домофон ] [ Видеонаблюдение ]
 ```
 
-Обе реализации — Home Assistant Custom Card и Telegram Mini App — MUST использовать одинаковую логическую структуру и одинаковые правила выбора камер.
+Обе реализации — Home Assistant Custom Card и Telegram Mini App — MUST использовать одинаковую логическую структуру, но источники данных для двух вкладок различаются:
 
-Frontend MUST получать состав камер и их capabilities из backend/integration metadata и не должен требовать изменения frontend-кода при добавлении новой камеры поддерживаемого типа.
+- «Домофон» получает состояние, capabilities и semantic actions из `custom_components/comelit`;
+- «Видеонаблюдение» работает со стандартными Home Assistant `camera.*` entities и не требует, чтобы обычная камера была известна интеграции Comelit.
+
+Frontend MUST NOT требовать изменения собственного кода при добавлении новой surveillance camera, уже опубликованной в Home Assistant как стандартная `camera.*` entity и включённой в configured surveillance set.
+
+Surveillance set SHOULD определяться средствами Home Assistant, предпочтительно через HA label; явный allowlist MAY использоваться как fallback или override. Frontend MUST NOT автоматически включать вообще все `camera.*` entities Home Assistant.
+
+Raw RTSP/HTTP source URLs, usernames, passwords и иные camera credentials MUST NOT передаваться во frontend и MUST NOT становиться частью публичного UI contract.
 
 ## 3. Вкладка «Домофон»
 
@@ -189,107 +197,161 @@ Hangup MUST:
 
 Если teardown не подтверждён, backend MUST fail closed согласно `docs/intercom-media-session-architecture.md`.
 
+
 ## 6. Вкладка «Видеонаблюдение»
 
-### 6.1 Состав
+### 6.1 Состав и ownership
 
-Во вкладке MUST отображаться все доступные камеры, не относящиеся к двум домофонным точкам.
+Во вкладке MUST отображаться выбранные обычные камеры видеонаблюдения, опубликованные Home Assistant как стандартные `camera.*` entities.
 
-В состав входят:
+Обычные surveillance cameras MUST NOT принадлежать runtime/lifecycle интеграции Comelit. Они могут быть созданы любой подходящей HA integration, например Generic Camera, ONVIF или другой camera integration.
 
-- камеры, доступные пользователю в официальном приложении Comelit;
-- все остальные физические камеры, обнаруженные и подтверждённые проектом;
-- камеры, добавленные позднее и опубликованные integration/backend как supported surveillance cameras.
+Интеграция Comelit MUST оставаться владельцем только intercom-specific функций:
 
-Камеры `entrance` и `gate` MUST NOT дублироваться во вкладке «Видеонаблюдение».
+- `entrance` / `gate`;
+- incoming call state;
+- intercom media/session lifecycle;
+- conversation audio;
+- associated Door semantic actions.
 
-### 6.2 Динамический camera catalog
+Камеры `entrance` и `gate` MUST NOT дублироваться во вкладке «Видеонаблюдение», даже если соответствующие intercom views представлены в HA как `camera.*`.
 
-Frontend MUST NOT содержать hardcoded список surveillance cameras.
+### 6.2 Выбор surveillance entities
 
-Backend должен предоставлять логический camera catalog как минимум с эквивалентом следующих полей:
+Frontend MUST NOT содержать hardcoded transport catalog, RTSP ports или Comelit-specific список surveillance endpoints.
+
+Набор камер SHOULD формироваться из Home Assistant entity/label configuration. Предпочтительный механизм:
 
 ```text
-camera_id
-display_name
-group: intercom | surveillance
-availability
-source_kind
-capabilities
-associated_door
+standard HA camera.* entities
+        +
+configured HA label
+        |
+        v
+surveillance set
 ```
 
-Рекомендуемый capability model:
+Explicit entity allowlist MAY использоваться как override/fallback.
+
+Добавление новой камеры в surveillance set MUST NOT требовать изменения `custom_components/comelit` и SHOULD NOT требовать изменения frontend-кода.
+
+### 6.3 Нормализованная frontend model
+
+Для ordinary surveillance camera frontend достаточно нормализованной модели, эквивалентной:
+
+```text
+entity_id
+display_name
+group: surveillance
+availability
+source_kind: home_assistant_camera
+capabilities
+```
+
+Минимальные capabilities:
 
 ```text
 video
+snapshot
+fullscreen
 audio_rx
+```
+
+Capability MUST отражать реально доступную функцию Home Assistant/player, а не предположение по типу RTSP source.
+
+Intercom-only capabilities:
+
+```text
 audio_tx
 call
 door_open
-snapshot
-fullscreen
+associated_door
 ```
 
-Не все камеры обязаны иметь одинаковые capabilities.
+MUST поступать только из Comelit intercom model и MUST NOT выводиться из обычной `camera.*` entity.
 
-### 6.3 Дедупликация
+### 6.4 Дедупликация
 
-Если одна физическая камера обнаружена несколькими способами, например:
+Если одна физическая surveillance camera представлена несколькими HA entities, UI MAY показывать одну логическую камеру только при наличии явного mapping или достоверного HA/backend identity.
 
-- как камера в Comelit application;
-- как отдельный RTSP endpoint;
-- как ранее найденный технический endpoint,
+Недоказанные соответствия MUST NOT объединяться только по похожему изображению, адресу, имени или номеру порта.
 
-UI SHOULD показывать одну логическую камеру, если backend может достоверно доказать, что источники относятся к одному физическому устройству.
+### 6.5 Представление
 
-Недоказанные соответствия MUST NOT объединяться только по похожему изображению, адресу или номеру порта.
+Основной режим вкладки SHOULD отображать grid/list камер с:
 
-### 6.4 Представление
+- friendly name;
+- live preview или thumbnail, если доступен;
+- availability/connecting state.
 
-Основной режим вкладки SHOULD отображать grid/list доступных камер с:
+Выбор камеры должен открывать live view через стандартный Home Assistant camera/media path.
 
-- логическим именем;
-- thumbnail, если доступен;
-- availability state.
+Поведение live preview в Custom Card должно быть эквивалентно штатному HA `camera_view: live` для совместимых `camera.*` entities.
 
-Выбор камеры должен открывать live view.
+Preload stream НЕ является обязательным требованием. Custom Card MUST NOT самопроизвольно включать preload или требовать постоянно открытой surveillance RTSP session.
 
-Для обычной surveillance camera минимально требуются:
+Если первый запуск потока занимает время, UI SHOULD показывать `connecting`, а не считать камеру недоступной до истечения разумного media timeout.
+
+Для ordinary surveillance camera минимально требуются:
 
 - live video;
 - fullscreen;
-- receive audio, если источник его предоставляет.
+- receive audio только если текущий HA media path действительно его предоставляет.
 
-Microphone, call и door controls MUST отображаться только при наличии соответствующего backend capability.
+Microphone, call и Door controls MUST отображаться только для intercom point при наличии соответствующего validated Comelit capability.
+
 
 ## 7. Media presentation
 
-### 7.1 Текущий путь
+### 7.1 Intercom media path
 
-Существующий рабочий путь Home Assistant:
+Для intercom camera существующий рабочий Home Assistant path остаётся допустимым viewing path и fallback:
 
 ```text
 Comelit RTP
 -> local RTP/SDP
 -> Home Assistant Stream / PyAV
 -> HLS
--> camera entity / HA frontend
+-> Comelit camera entity / HA frontend
 ```
 
-должен сохраняться как допустимый viewing path и fallback.
+Этот path относится к on-demand intercom media lifecycle и подчиняется `ComelitMediaSessionManager`.
 
-### 7.2 WebRTC
+### 7.2 Surveillance media path
 
-Для low-latency просмотра и full-duplex conversation может быть добавлен WebRTC path через HA-managed go2rtc/WebRTC infrastructure.
+Обычные камеры видеонаблюдения используют независимый стандартный Home Assistant path:
 
-Добавление WebRTC MUST NOT само по себе ломать существующий HLS path.
+```text
+camera source
+-> standard HA camera integration
+-> camera.*
+-> HA Stream / media provider
+-> Custom Card / HA frontend
+```
 
-Обычный camera viewer может быть receive-only.
+Конкретный camera source transport не является частью frontend contract.
 
-Conversation UI должен иметь отдельную явно управляемую microphone lifecycle.
+Surveillance viewing MUST NOT acquire a Comelit intercom media lease, pause the persistent Comelit listener или менять `active_call_panel`.
 
-### 7.3 Микрофон
+Практически подтверждённый baseline: standard Generic Camera с H.264 stream source работает как обычная HA `camera.*` entity и может отображаться live без переноса камеры в `custom_components/comelit`.
+
+### 7.3 WebRTC
+
+Для low-latency просмотра Home Assistant MAY использовать HA-managed go2rtc/WebRTC infrastructure, если конкретная `camera.*` entity/provider совместимы с этим path.
+
+HLS/обычный HA Stream должен оставаться допустимым fallback.
+
+Для intercom full-duplex conversation WebRTC остаётся отдельным кандидатом и MUST NOT считаться доказанным backchannel transport до соответствующей validation.
+
+### 7.4 Preload
+
+Preload stream является operational/performance option Home Assistant, а не частью функционального Comelit UI contract.
+
+Custom Card MUST NOT включать preload автоматически.
+
+Пользователь MAY включить preload для отдельных камер, если это необходимо для уменьшения startup latency и приемлемо по ресурсам/числу постоянных upstream sessions.
+
+### 7.5 Микрофон
 
 Microphone access MUST:
 
@@ -297,7 +359,8 @@ Microphone access MUST:
 - не активироваться при обычном открытии камеры;
 - прекращаться при hangup;
 - прекращаться при ошибке или закрытии conversation UI;
-- не использоваться для обычных surveillance cameras без соответствующего validated capability.
+- не использоваться для ordinary surveillance cameras.
+
 
 ## 8. Реализации frontend
 
@@ -306,11 +369,17 @@ Microphone access MUST:
 Custom Card SHOULD использовать:
 
 - Home Assistant authentication;
-- текущие Comelit entities/events/services;
+- стандартные HA `camera.*` entities/media APIs для ordinary surveillance;
+- HA entity/label configuration для формирования surveillance set;
+- текущие Comelit entities/events/services только для intercom-specific функций;
 - HA-managed media/WebRTC infrastructure, где это применимо;
-- semantic actions integration.
+- semantic Comelit actions для Door/call functions.
 
-Custom Card MUST NOT требовать отдельный постоянный Comelit application server.
+Custom Card MUST NOT:
+
+- требовать отдельный постоянный Comelit application server;
+- хранить или запрашивать raw RTSP credentials;
+- переносить ordinary surveillance cameras внутрь Comelit integration только ради отображения UI.
 
 ### 8.2 Telegram Mini App
 
@@ -323,32 +392,41 @@ Mini App MUST предоставлять ту же логическую стру
 
 и те же ограничения active-call routing.
 
-Mini App MUST NOT получать долгоживущий unrestricted Home Assistant access token.
+Для surveillance Mini App должен получать ограниченное представление выбранных HA camera entities через trusted gateway/API facade. Raw RTSP credentials и unrestricted Home Assistant access token MUST NOT передаваться Mini App.
 
 Authentication/authorization должен использовать ограниченный trusted gateway или эквивалентный short-lived authorization mechanism.
 
 Telegram является frontend/notification surface и MUST NOT становиться владельцем отдельной upstream Comelit session.
 
+
 ## 9. Camera/backend separation
 
-Frontend MUST работать с логическими cameras/capabilities, а не с transport-specific деталями.
-
-Рекомендуемая граница:
+Frontend объединяет два независимых backend domains:
 
 ```text
-Comelit / RTSP / future sources
-            |
-            v
-camera registry + media/session backend
-            |
-            +-> HLS/WebRTC presentation
-            |
-            +-> Custom HA Card
-            |
-            +-> Telegram Mini App
+custom_components/comelit
+  -> entrance/gate
+  -> call state
+  -> intercom media/session owner
+  -> Door semantic actions
+              \
+               \
+                -> normalized UI model
+               /
+              /
+standard HA camera integrations
+  -> camera.*
+  -> surveillance entity selection
+  -> HA media presentation
 ```
 
-Добавление новой поддерживаемой surveillance camera SHOULD требовать только обновления backend catalog/discovery, без изменения frontend logic.
+Home Assistant Custom Card может собирать эту модель непосредственно из HA state/entity metadata.
+
+Telegram Mini App получает эквивалентную ограниченную модель через trusted gateway.
+
+Обычная surveillance camera MUST оставаться обычной HA camera entity. Добавление или удаление такой камеры не должно изменять Comelit protocol/runtime implementation.
+
+Frontend MUST NOT зависеть от transport-specific camera details и MUST NOT требовать общего Comelit camera registry для ordinary surveillance.
 
 ## 10. Safety и lifecycle invariants
 
@@ -360,6 +438,8 @@ UI MUST соблюдать действующие project invariants:
 - no raw Comelit target selection from frontend;
 - at most one active intercom upstream media session until another concurrency model is independently proven;
 - ordinary surveillance viewing MUST NOT silently create a second intercom session;
+- ordinary surveillance camera sessions MUST remain independent from `ComelitMediaSessionManager`;
+- raw surveillance camera credentials/source URLs MUST NOT be exposed to frontend or Mini App;
 - conversation uses the existing media/session owner;
 - 600-second absolute media ceiling remains in force until explicitly changed by a later approved architecture decision;
 - conversation audio is not recorded;
@@ -395,6 +475,7 @@ ending
 
 При потере surveillance stream активный intercom call не должен завершаться только из-за ошибки выбранной surveillance camera.
 
+
 ## 12. Минимальные acceptance scenarios
 
 Функциональность считается соответствующей требованиям после проверки как минимум следующих сценариев:
@@ -406,14 +487,36 @@ ending
 5. Ответить на вызов и получить full-duplex audio после завершения protocol implementation.
 6. Во время entrance call убедиться, что gate intercom camera не может быть выбрана.
 7. Во время gate call убедиться, что entrance intercom camera не может быть выбрана.
-8. Во время active intercom call перейти в «Видеонаблюдение» и открыть обычную камеру без изменения call/audio/door binding.
+8. Во время active intercom call перейти в «Видеонаблюдение» и открыть ordinary HA camera без изменения call/audio/door binding.
 9. Вернуться к исходной активной домофонной точке и продолжить тот же разговор.
 10. Завершить разговор и подтвердить безопасный media teardown и восстановление listener.
-11. Открыть каждую доступную surveillance camera из camera catalog.
-12. Добавить новую supported surveillance camera в backend catalog и убедиться, что она появляется в UI без изменения frontend-кода.
-13. Проверить отсутствие дублей entrance/gate во вкладке «Видеонаблюдение».
-14. Проверить, что обычный просмотр камеры никогда не запрашивает microphone permission.
-15. Проверить, что conversation microphone прекращает работу после hangup/error/закрытия UI.
+11. Открыть каждую configured surveillance `camera.*` entity из surveillance set.
+12. Добавить новую standard HA camera в configured label/allowlist и убедиться, что она появляется в UI без изменения Comelit integration/frontend code.
+13. Убедиться, что невыбранная HA camera entity не появляется автоматически во вкладке «Видеонаблюдение».
+14. Проверить отсутствие дублей entrance/gate во вкладке «Видеонаблюдение».
+15. Проверить live preview ordinary HA camera через эквивалент `camera_view: live` при выключенном preload.
+16. Проверить, что включение/выключение HA preload для отдельной surveillance camera не меняет intercom lifecycle.
+17. Проверить, что обычный просмотр surveillance camera никогда не запрашивает microphone permission.
+18. Проверить, что conversation microphone прекращает работу после hangup/error/закрытия UI.
+
+## 13. Зафиксированные UX-решения
+
+На дату этого документа утверждены следующие решения:
+
+- одна страница Comelit;
+- две вкладки: «Домофон» и «Видеонаблюдение»;
+- во вкладке «Домофон» ровно две логические точки: «Подъезд» и «Калитка»;
+- ordinary surveillance cameras остаются стандартными Home Assistant `camera.*` entities и не переносятся в `custom_components/comelit`;
+- surveillance set формируется средствами HA/configuration, предпочтительно через label, с возможностью explicit allowlist;
+- entrance/gate не дублируются во вкладке «Видеонаблюдение»;
+- live presentation ordinary cameras использует стандартный HA media path; `camera_view: live` является подтверждённым baseline behavior;
+- preload stream не является обязательным и не включается frontend автоматически;
+- во время активного разговора нельзя переключаться между двумя домофонными точками;
+- во время активного разговора можно смотреть ordinary surveillance cameras;
+- просмотр другой surveillance camera не меняет active call/audio/door binding;
+- после просмотра surveillance camera можно вернуться только к текущей active intercom point до завершения разговора;
+- Custom HA Card и Telegram Mini App должны реализовывать одну и ту же функциональную модель;
+- Telegram Mini App не получает raw camera credentials или unrestricted HA token.
 
 ## 13. Зафиксированные UX-решения
 
