@@ -13,6 +13,7 @@ from homeassistant.components.camera import (
     CameraEntityFeature,
     get_dynamic_camera_stream_settings,
 )
+from homeassistant.components.camera.const import DATA_CAMERA_PREFS
 from homeassistant.components.stream import (
     ATTR_SETTINGS,
     ATTR_STREAMS,
@@ -23,7 +24,14 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .attached_media import (
+    ComelitAttachedMediaError,
+    ComelitAttachedRingMediaSession,
+    ComelitAttachedRingMediaTransport,
+)
 from .const import (
+    DATA_ATTACHED_MEDIA_SESSIONS,
+    DATA_ATTACHED_MEDIA_TRANSPORTS,
     DATA_MEDIA_SESSIONS,
     DATA_MEDIA_TRANSPORTS,
     DOMAIN,
@@ -70,6 +78,10 @@ except Exception:  # pragma: no cover - direct render unavailable
 
 
 _LOGGER = logging.getLogger(__name__)
+_CAMERA_VIEW_LEASE_REASON = "camera_view"
+_CAMERA_VIEW_MONITOR_INTERVAL_SECONDS = 1.0
+_CAMERA_VIEW_PROVIDER_START_TIMEOUT_SECONDS = 65.0
+_CAMERA_VIEW_ABSOLUTE_LIMIT_SECONDS = 600.0
 _DIAGNOSTIC_SAFE_STRING = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
 _HLS_CODEC_STRING = re.compile(
     r"^(avc1|avc3|hvc1|hev1|mp4a|opus|mp4v)\.[0-9A-Fa-f.]+$"
@@ -212,16 +224,32 @@ async def async_setup_entry(
     transport: ComelitEntranceMediaTransport | None = domain_data.get(
         DATA_MEDIA_TRANSPORTS, {}
     ).get(entry.entry_id)
+    attached_session: ComelitAttachedRingMediaSession | None = domain_data.get(
+        DATA_ATTACHED_MEDIA_SESSIONS, {}
+    ).get(entry.entry_id)
+    attached_transport: ComelitAttachedRingMediaTransport | None = domain_data.get(
+        DATA_ATTACHED_MEDIA_TRANSPORTS, {}
+    ).get(entry.entry_id)
     if manager is not None and transport is not None:
-        async_add_entities([ComelitEntranceCamera(manager, transport)])
+        async_add_entities(
+            [
+                ComelitEntranceCamera(
+                    manager,
+                    transport,
+                    attached_session=attached_session,
+                    attached_transport=attached_transport,
+                )
+            ]
+        )
 
 
 class ComelitEntranceCamera(Camera):
-    """HA camera view over the already-active local Comelit RTP session.
+    """HA camera that owns the user-facing live-view media lease.
 
-    The camera entity never starts a Comelit session itself. The explicit
-    switch owns start/stop, so merely opening a dashboard card cannot create a
-    hidden cloud session or extend the absolute media lifetime.
+    A real inbound Ring reuses the already-live attached call transaction.
+    Otherwise an explicit HA stream request starts one bounded on-demand
+    self-activation session. Thumbnail/still requests never start media and
+    Home Assistant stream preloading is forced off for this entity.
     """
 
     _attr_name = "Comelit — Камера подъезда"
@@ -234,10 +262,25 @@ class ComelitEntranceCamera(Camera):
         self,
         manager: ComelitMediaSessionManager,
         transport: ComelitEntranceMediaTransport,
+        *,
+        attached_session: ComelitAttachedRingMediaSession | None = None,
+        attached_transport: ComelitAttachedRingMediaTransport | None = None,
     ) -> None:
         super().__init__()
         self._manager = manager
         self._transport = transport
+        self._attached_session = attached_session
+        self._attached_transport = attached_transport
+        self._camera_view_owner: (
+            ComelitMediaSessionManager | ComelitAttachedRingMediaSession | None
+        ) = None
+        self._camera_view_transport: (
+            ComelitEntranceMediaTransport | ComelitAttachedRingMediaTransport | None
+        ) = None
+        self._camera_view_owner_kind: str | None = None
+        self._camera_view_lock = asyncio.Lock()
+        self._camera_view_monitor_task: asyncio.Task[None] | None = None
+        self._automatic_start_ready = False
         self._stream_reset_task: asyncio.Task[None] | None = None
         self._last_hls_diagnostics_signature: tuple[Any, ...] | None = None
         self._hls_http_probe_task: asyncio.Task[None] | None = None
@@ -247,8 +290,8 @@ class ComelitEntranceCamera(Camera):
 
     @property
     def use_stream_for_stills(self) -> bool:
-        """Generate snapshots from the same H264 stream as live view."""
-        return True
+        """Never let thumbnail/still polling bootstrap a Comelit media session."""
+        return False
 
     @property
     def available(self) -> bool:
@@ -256,7 +299,12 @@ class ComelitEntranceCamera(Camera):
 
     @property
     def is_streaming(self) -> bool:
-        return self._manager.active and self._transport.video_forwarding
+        if self._camera_view_owner is not None:
+            return self._camera_view_owner.active
+        attached = self._attached_session
+        return (
+            self._manager.active and self._transport.video_forwarding
+        ) or bool(attached is not None and attached.active)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -279,7 +327,14 @@ class ComelitEntranceCamera(Camera):
             "audio_last_packet_age_seconds": (
                 round(audio_age, 1) if audio_age is not None else None
             ),
-            "automatic_session_start": False,
+            "automatic_session_start": True,
+            "automatic_session_start_trigger": "ha_stream_request",
+            "thumbnail_starts_session": False,
+            "preload_stream_allowed": False,
+            "camera_view_owner": self._camera_view_owner_kind,
+            "attached_media_active": bool(
+                self._attached_session is not None and self._attached_session.active
+            ),
             "hard_limit_seconds": self._manager.hard_limit_seconds,
         }
         attrs.update(self._transport.video_recovery_diagnostics())
