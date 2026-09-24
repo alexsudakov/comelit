@@ -8,12 +8,17 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .call_state import CALL_STATES
 from .const import (
+    CALL_STATE_ENTITY_ID,
+    CALL_STATE_UNIQUE_ID,
+    DATA_RUNTIMES,
     DATA_SUPERVISORS,
     DOMAIN,
     LISTENER_STATUS_ENTITY_ID,
     LISTENER_STATUS_UNIQUE_ID,
 )
+from .runtime import ComelitRingRuntime
 from .supervisor import ComelitRuntimeSupervisor, LISTENER_STATES
 
 
@@ -22,11 +27,21 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
+    domain_data = hass.data.get(DOMAIN, {})
     supervisor: ComelitRuntimeSupervisor | None = (
-        hass.data.get(DOMAIN, {}).get(DATA_SUPERVISORS, {}).get(entry.entry_id)
+        domain_data.get(DATA_SUPERVISORS, {}).get(entry.entry_id)
     )
+    runtime: ComelitRingRuntime | None = (
+        domain_data.get(DATA_RUNTIMES, {}).get(entry.entry_id)
+    )
+
+    entities: list[SensorEntity] = []
     if supervisor is not None:
-        async_add_entities([ComelitListenerStatusSensor(supervisor)])
+        entities.append(ComelitListenerStatusSensor(supervisor))
+    if runtime is not None:
+        entities.append(ComelitCallStateSensor(runtime))
+    if entities:
+        async_add_entities(entities)
 
 
 class ComelitListenerStatusSensor(SensorEntity):
@@ -70,6 +85,46 @@ class ComelitListenerStatusSensor(SensorEntity):
         await super().async_added_to_hass()
         self.async_on_remove(
             self._supervisor.async_add_status_listener(self._handle_status_update)
+        )
+
+    def _handle_status_update(self) -> None:
+        self.async_write_ha_state()
+
+
+class ComelitCallStateSensor(SensorEntity):
+    """Authoritative current Comelit call state reconstructed by the runtime."""
+
+    _attr_name = "Comelit — Вызов"
+    _attr_unique_id = CALL_STATE_UNIQUE_ID
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = list(CALL_STATES)
+    _attr_icon = "mdi:phone-in-talk"
+    _attr_should_poll = False
+
+    def __init__(self, runtime: ComelitRingRuntime) -> None:
+        self._runtime = runtime
+        self.entity_id = CALL_STATE_ENTITY_ID
+
+    @property
+    def native_value(self) -> str:
+        return str(self._runtime.call_status()["state"])
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        status = self._runtime.call_status()
+        return {
+            "panel": status["panel"],
+            "event_id": status["event_id"],
+            "started_at": status["started_at"],
+            "media_attached": status["media_attached"],
+            "conversation_active": status["conversation_active"],
+            "last_error": status["last_error"],
+        }
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            self._runtime.async_add_status_listener(self._handle_status_update)
         )
 
     def _handle_status_update(self) -> None:
