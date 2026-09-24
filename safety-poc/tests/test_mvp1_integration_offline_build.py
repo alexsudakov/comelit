@@ -868,6 +868,72 @@ class MVP1IntegrationRingMediaTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             ring_media.safe_ring_media_paths(Path("/media"), "../token")
 
+    async def test_ring_coordinator_uses_named_stream_consumer_when_supported(self) -> None:
+        class FakeSharedMediaProvider:
+            def __init__(self) -> None:
+                self.acquire_reasons: list[str] = []
+                self.release_reasons: list[str] = []
+                self.close_calls = 0
+                self.last_failure_reason = None
+
+            async def async_acquire_consumer(self, reason: str) -> None:
+                self.acquire_reasons.append(reason)
+
+            async def async_release_consumer(self, reason: str) -> None:
+                self.release_reasons.append(reason)
+
+            async def async_capture_jpeg(self) -> bytes | None:
+                return JPEG_1
+
+            async def async_record_mp4(
+                self,
+                path: Path,
+                *,
+                target_seconds: int,
+                stop_event: asyncio.Event,
+            ) -> str:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"mp4")
+                return const.RECORDING_STATE_COMPLETED
+
+            async def async_close(self) -> None:
+                self.close_calls += 1
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            hass = FakeHass()
+            manager = FakeManager()
+            provider = FakeSharedMediaProvider()
+            tasks: list[asyncio.Task[None]] = []
+
+            def task_factory(coro, name):
+                task = asyncio.create_task(coro, name=name)
+                tasks.append(task)
+                return task
+
+            coordinator = ring_media.RingMediaCoordinator(
+                hass,
+                manager,
+                snapshot_provider=provider,
+                recording_provider=provider,
+                media_root=Path(td),
+                task_factory=task_factory,
+            )
+            self.assertTrue(
+                await coordinator.async_start_for_ring(
+                    {
+                        const.ATTR_EVENT_ID: "event-shared-provider",
+                        const.ATTR_DOOR: const.DOOR_ENTRANCE,
+                    }
+                )
+            )
+            await tasks[0]
+
+            self.assertEqual(provider.acquire_reasons, ["ring_media"])
+            self.assertEqual(provider.release_reasons, ["ring_media"])
+            self.assertEqual(provider.close_calls, 0)
+
     async def test_shared_ha_stream_provider_closes_only_after_last_consumer(self) -> None:
         class FakeSharedStream:
             def __init__(self) -> None:
