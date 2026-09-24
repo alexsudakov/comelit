@@ -1,7 +1,7 @@
 # P116 / R65 — long media cutoff corrective result
 
-TASK_ID=`COMELIT-P116-R65-LONG-MEDIA-CUTOFF-CORRECTIVE`  
-Status: **PASS_LONG_MEDIA_FIXED / production artifact not yet deployed**  
+TASK_ID=`COMELIT-P116-R65-LONG-MEDIA-CUTOFF-CORRECTIVE`
+Status: **PASS_LONG_MEDIA_FIXED / production artifact not yet deployed**
 Date: 2026-09-24
 
 ## 1. Scope and baseline
