@@ -17,11 +17,17 @@ TRANSPORT = ROOT / "custom_components" / "comelit" / "media_transport.py"
 BINARY = ROOT / "custom_components" / "comelit" / "native" / "comelit-media"
 NATIVE_LIB = ROOT / "custom_components" / "comelit" / "native" / "lib"
 SOURCE = SAFETY_ROOT / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-ctpp-door.c"
-BUILD_META = MEDIA_DIR / "p116_media_telemetry_build_meta.txt"
-EXPECTED_MUSL_SHA256 = "a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8"
+# p116_media_telemetry_build_meta.txt is the frozen R30E-era provenance
+# record; R65 promoted a new packaged binary over it (bounded periodic media
+# refresh), so the current provenance lives in p116_r65_production_media_build_meta.txt.
+BUILD_META = MEDIA_DIR / "p116_r65_production_media_build_meta.txt"
+PRE_R65_BUILD_META = MEDIA_DIR / "p116_media_telemetry_build_meta.txt"
+EXPECTED_MUSL_SHA256 = "76218861c72e9a2b87283df6c5c7e0b03a4d7fb11bee4364f59be1513acd6129"
 EXPECTED_RUN3_GLIBC_SHA256 = "94063498a35a886dc4cb735c3e629a5097b965224cb3354192723d30e70c16ac"
-PACKAGED_NATIVE_SOURCE_SHA256 = "1c89d61de4372d96b25f6894862741244753c107a3a9b9e04817250b3bea55b2"
-HEAD_P116_SOURCE_SHA256 = "1c89d61de4372d96b25f6894862741244753c107a3a9b9e04817250b3bea55b2"
+PACKAGED_NATIVE_SOURCE_SHA256 = "4fc6188c6231b94682205973b6a6f628ca005e8b7c3a04efbd8056c5a608c58c"
+HEAD_P116_SOURCE_SHA256 = "4fc6188c6231b94682205973b6a6f628ca005e8b7c3a04efbd8056c5a608c58c"
+PRE_R65_PACKAGED_BINARY_SHA256 = "a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8"
+PRE_R65_PACKAGED_SOURCE_SHA256 = "1c89d61de4372d96b25f6894862741244753c107a3a9b9e04817250b3bea55b2"
 PRE_R30E_PACKAGED_BINARY_SHA256 = "35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622"
 PRE_R30E_PACKAGED_SOURCE_SHA256 = "93756730fd088b9227f37c4e0e3edbd18ac30c110db03b75bcc63f1c93952e66"
 EXPECTED_INTERPRETER = "/lib/ld-musl-x86_64.so.1"
@@ -182,12 +188,18 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
     def test_packaged_binary_sha256_matches_transport_pin_and_offline_musl_artifact(self) -> None:
         actual = _sha256_bytes(self.binary_blob)
         meta = _metadata(BUILD_META)
+        pre_r65_meta = _metadata(PRE_R65_BUILD_META)
         self.assertEqual(actual, EXPECTED_MUSL_SHA256)
         self.assertEqual(_transport_sha_pin(self.transport_source), EXPECTED_MUSL_SHA256)
         self.assertEqual(meta["NATIVE_BINARY_SHA256"], EXPECTED_MUSL_SHA256)
         self.assertEqual(meta["build_a_sha256"], EXPECTED_MUSL_SHA256)
         self.assertEqual(meta["build_b_sha256"], EXPECTED_MUSL_SHA256)
-        self.assertEqual(meta["historical_pre_r30e_native_binary_sha256"], PRE_R30E_PACKAGED_BINARY_SHA256)
+        self.assertEqual(meta["superseded_native_binary_sha256"], PRE_R65_PACKAGED_BINARY_SHA256)
+        # pre_r65_meta (the frozen R30E-era record) still documents the
+        # binary it shipped, unmodified, so it must equal the superseded pin.
+        self.assertEqual(pre_r65_meta["NATIVE_BINARY_SHA256"], PRE_R65_PACKAGED_BINARY_SHA256)
+        self.assertEqual(pre_r65_meta["historical_pre_r30e_native_binary_sha256"], PRE_R30E_PACKAGED_BINARY_SHA256)
+        self.assertNotEqual(actual, PRE_R65_PACKAGED_BINARY_SHA256)
         self.assertNotEqual(actual, PRE_R30E_PACKAGED_BINARY_SHA256)
         self.assertNotEqual(actual, EXPECTED_RUN3_GLIBC_SHA256)
 
@@ -226,12 +238,15 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
 
     def test_current_head_source_identity_is_separate_from_packaged_native_provenance(self) -> None:
         sys.path.insert(0, str(MEDIA_DIR))
-        from entrance_p106_teardown_state_classification_transform import transform
+        # R65 is now the canonical generator for the packaged comelit-media
+        # binary (it composes the P106+P116 generator below it), so HEAD
+        # source identity is computed from R65, not P106 directly.
+        from entrance_p116_r65_production_media_refresh_transform import transform
 
         # Deterministic command:
         # PYTHONPATH=safety-poc/research/media/v1 python3 -c
         # 'from pathlib import Path; import hashlib; from
-        # entrance_p106_teardown_state_classification_transform import transform;
+        # entrance_p116_r65_production_media_refresh_transform import transform;
         # print(hashlib.sha256(transform(Path("safety-poc/research/door/v1_5_7/comelit-v4-persistent-ctpp-door.c").read_text(encoding="utf-8"), include_p116=True).encode("utf-8")).hexdigest())'
         candidate = transform(
             SOURCE.read_text(encoding="utf-8"),
@@ -244,7 +259,8 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         self.assertEqual(head_sha, HEAD_P116_SOURCE_SHA256)
         self.assertEqual(head_sha, PACKAGED_NATIVE_SOURCE_SHA256)
         self.assertEqual(meta["GENERATED_SOURCE_SHA256"], HEAD_P116_SOURCE_SHA256)
-        self.assertEqual(meta["historical_pre_r30e_generated_source_sha256"], PRE_R30E_PACKAGED_SOURCE_SHA256)
+        self.assertEqual(meta["superseded_generated_source_sha256"], PRE_R65_PACKAGED_SOURCE_SHA256)
+        self.assertNotEqual(head_sha, PRE_R65_PACKAGED_SOURCE_SHA256)
         self.assertNotEqual(head_sha, PRE_R30E_PACKAGED_SOURCE_SHA256)
         self.assertEqual(f"NATIVE_REBUILD_REQUIRED={str(native_rebuild_required).lower()}", "NATIVE_REBUILD_REQUIRED=false")
         self.assertEqual(
@@ -263,7 +279,7 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
             self.assertEqual(corrupted_binary_sha, EXPECTED_MUSL_SHA256)
 
         sys.path.insert(0, str(MEDIA_DIR))
-        from entrance_p106_teardown_state_classification_transform import transform
+        from entrance_p116_r65_production_media_refresh_transform import transform
 
         candidate = transform(
             SOURCE.read_text(encoding="utf-8"),

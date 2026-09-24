@@ -1,5 +1,13 @@
 # P116 / R65 — production media refresh: native rebuild contract
 
+STATUS=FULFILLED (TURN9) — Hermes ran the build in §3 offline on CT120;
+`P80_BINARY_SHA256=76218861c72e9a2b87283df6c5c7e0b03a4d7fb11bee4364f59be1513acd6129`,
+identical across both independent builds
+(`REPRODUCIBLE_BINARY_CMP_GATE=PASS`). The binary is promoted and every pin
+in §4 has been applied; see
+`safety-poc/research/media/v1/p116_r65_production_media_build_meta.txt` for
+the full raw provenance record.
+
 TASK_ID=COMELIT-P116-R65-LONG-MEDIA-CUTOFF-CORRECTIVE
 CHILD=B_PHASE_C_PRODUCTION
 MODE=OFFLINE_BUILD_ONLY — this document authorizes an offline reproducible
