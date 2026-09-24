@@ -13,7 +13,7 @@ Category: Integration
 
 ## Home Assistant Custom Card
 
-Version 1.5.15 includes the surveillance-first Lovelace card and an authoritative Home Assistant call-state sensor.
+Version 1.5.16 includes the surveillance-first Lovelace card, the authoritative Home Assistant call-state sensor, and state-only incoming-call routing in the card.
 
 After updating the integration and restarting Home Assistant, register this resource once in the Lovelace resource settings:
 
@@ -46,7 +46,9 @@ The card deliberately does not discover every Home Assistant camera automaticall
 
 The surveillance viewer delegates playback to Home Assistant's built-in `picture-entity` card with `camera_view: live`. The card does not enable camera stream preload.
 
-The intercom tab is read-only in this MVP. Door/media actions and authoritative active-call routing remain separate follow-up phases.
+The intercom tab remains action-free in this MVP: it does not invoke Door, media or microphone services.
+
+On a new authoritative `ringing` event, the card focuses the «Домофон» tab once and highlights the active panel. If the user then switches to «Видеонаблюдение», the card does not force the tab back on subsequent Home Assistant state updates. This keeps surveillance viewing independent while a call is active.
 
 ## Current capabilities
 
@@ -66,6 +68,7 @@ The intercom tab is read-only in this MVP. Door/media actions and authoritative 
 - Same-session periodic media refresh keeps entrance video alive beyond the historical 30–35 second cutoff
 - Absolute media-session ceiling remains 600 seconds
 - Bundled surveillance-first Home Assistant Custom Card
+- Custom Card incoming-call focus and active-panel highlighting from `sensor.comelit_call_state`
 
 ## Call-state lifecycle
 
