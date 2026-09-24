@@ -157,6 +157,12 @@ class P116HaStreamRtpBridgeTests(unittest.TestCase):
         self.assertIn('reason = "camera_view_absolute_timeout"', self.camera)
         self.assertIn("await self._async_release_camera_view_media()", self.camera)
 
+    def test_t6e_explicit_switch_is_deprecated_debug_fallback(self) -> None:
+        self.assertIn("_attr_entity_registry_enabled_default = False", self.switch)
+        self.assertIn('"deprecated": True', self.switch)
+        self.assertIn('"replacement_entity_id": ENTRANCE_CAMERA_ENTITY_ID', self.switch)
+        self.assertIn("async_force_stop", self.switch)
+
     def test_t7_hard_limit_and_r63_gate_path_remains_bounded(self) -> None:
         self.assertIn("MEDIA_SESSION_HARD_LIMIT_SECONDS = 600", self.session)
         self.assertIn("- gate", self.services.lower())
