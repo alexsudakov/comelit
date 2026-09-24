@@ -65,6 +65,8 @@ static guint r27_rtpc_client_001a_repeat_len = 0;
 static guint32 r27_initial_001a_sequence = 0;
 static guint32 r27_repeat_001a_sequence = 0;
 static gboolean r27_sequence_model_pass = FALSE;
+static guint r27_self_activation_sent_count = 0;
+static guint r27_helper_pid_at_media_start = 0;
 
 static gboolean pseudotcp_begin_graceful_stop(const char *reason);
 static gboolean r27_repeat_delay_cb(gpointer data);
@@ -73,6 +75,7 @@ static gboolean r27_live_observation_timeout_cb(gpointer data);
 static gboolean r27_try_queue_repeat_001a(const char *reason);
 static gboolean r27_build_repeat_001a_body(void);
 static gboolean r27_repeat_body_diff_gate(void);
+static void r27_print_identity_markers(void);
 static gboolean r27_handle_repeat_ack(guint16 request_id, const guint8 *body, guint body_len);
 static void r27_cancel_repeat_timers(void);
 static void r27_print_final_summary(void);
@@ -193,6 +196,24 @@ _TX_COMPLETION_NEW = r'''        case P78_TX_RTPC_CLIENT_001A:
             break;
 '''
 
+_SELF_ACTIVATION_COMPLETION_OLD = r'''        case P12_TX_ENTRANCE_SELF_ACTIVATION:
+            entrance_self_activation_sent = TRUE;
+            entrance_signal_stage = ENTRANCE_SIGNAL_WAIT_SELF_ACK;
+            printf("ENTRANCE_SELF_ACTIVATION_SENT=PASS\n");
+            fflush(stdout);
+            break;
+'''
+
+_SELF_ACTIVATION_COMPLETION_NEW = r'''        case P12_TX_ENTRANCE_SELF_ACTIVATION:
+            entrance_self_activation_sent = TRUE;
+            r27_self_activation_sent_count++;
+            entrance_signal_stage = ENTRANCE_SIGNAL_WAIT_SELF_ACK;
+            printf("ENTRANCE_SELF_ACTIVATION_SENT=PASS\n");
+            printf("SELF_ACTIVATION_COUNT=%u\n", r27_self_activation_sent_count);
+            fflush(stdout);
+            break;
+'''
+
 _MEDIA_ACTIVE_OLD = """    p80_media_forwarding_enabled = TRUE;
     g_timeout_add_seconds(10, p91_media_rx_diagnostic_timeout_cb, NULL);
 
@@ -212,17 +233,13 @@ _MEDIA_ACTIVE_NEW = """    p80_media_forwarding_enabled = TRUE;
         return FALSE;
     }
     r27_repeat_timer_armed = TRUE;
+    r27_helper_pid_at_media_start = (guint)getpid();
 
     printf("P80_MEDIA_ACTIVE=true\\n");
     printf("R27_REPEAT_DELAY_SECONDS=%u\\n", R27_REPEAT_DELAY_SECONDS);
     printf("R27_REPEAT_DELAY_IS_PROTOCOL_CONSTANT=false\\n");
     printf("R27_REPEAT_DELAY_PROMOTED_TO_PRODUCTION=false\\n");
-    printf("ICE_NEGOTIATION_COUNT=1\\n");
-    printf("PSEUDOTCP_OPEN_COUNT=1\\n");
-    printf("CTPP_REGISTRATION_COUNT=1\\n");
-    printf("RTPC_CLIENT_OPEN_COUNT=2\\n");
-    printf("SELF_ACTIVATION_COUNT=1\\n");
-    printf("HELPER_PROCESS_UNCHANGED=true\\n");
+    r27_print_identity_markers();
 """
 
 _ACK_HOOK_OLD = """        } else if (p97_wait_device_ack_000a || p97_wait_device_ack_001a) {
@@ -393,14 +410,62 @@ r27_try_queue_repeat_001a(const char *reason)
     printf("R27_REPEAT_CTP_ACK_BYTE_UNCHANGED=true\n");
     printf("CAPTURED_LITERAL_REUSE=false\n");
     printf("R27_REPEAT_SEMANTIC_FIELDS_REUSED=TARGET_GEOMETRY_ADDRESS_ROLES\n");
-    printf("ICE_NEGOTIATION_COUNT=1\n");
-    printf("PSEUDOTCP_OPEN_COUNT=1\n");
-    printf("CTPP_REGISTRATION_COUNT=1\n");
-    printf("RTPC_CLIENT_OPEN_COUNT=2\n");
-    printf("SELF_ACTIVATION_COUNT=1\n");
-    printf("HELPER_PROCESS_UNCHANGED=true\n");
+    r27_print_identity_markers();
     fflush(stdout);
     return r27_queue_rtpc_client_001a_repeat();
+}
+
+static void
+r27_print_identity_markers(void)
+{
+    guint ice_negotiation_count;
+    guint pseudotcp_open_count;
+    guint ctpp_registration_count;
+    guint rtpc_client_open_count;
+    gboolean helper_process_unchanged;
+    gboolean second_media_session;
+    gboolean new_rtpc_open;
+    gboolean new_self_activation;
+    gboolean media_session_identity_unchanged;
+
+    ice_negotiation_count =
+        ice_connected && ice_ready && selected_pair_present ? 1u : 0u;
+    pseudotcp_open_count = pseudo_tcp && pseudotcp_open ? 1u : 0u;
+    ctpp_registration_count =
+        p78_rtpc_runtime.registered_ctpp_reused == P76_TRUE &&
+        p78_rtpc_runtime.second_ctpp_open_attempted == P76_FALSE ? 1u : 0u;
+    rtpc_client_open_count =
+        (p78_rtpc_open_1_sent ? 1u : 0u) +
+        (p78_rtpc_open_2_sent ? 1u : 0u);
+    helper_process_unchanged =
+        r27_helper_pid_at_media_start != 0u &&
+        r27_helper_pid_at_media_start == (guint)getpid();
+    new_rtpc_open = rtpc_client_open_count > 2u;
+    new_self_activation = r27_self_activation_sent_count > 1u;
+    second_media_session =
+        ice_negotiation_count != 1u ||
+        pseudotcp_open_count != 1u ||
+        ctpp_registration_count != 1u ||
+        new_rtpc_open ||
+        new_self_activation ||
+        !helper_process_unchanged;
+    media_session_identity_unchanged =
+        !second_media_session &&
+        rtpc_client_open_count == 2u &&
+        r27_self_activation_sent_count == 1u;
+
+    printf("ICE_NEGOTIATION_COUNT=%u\n", ice_negotiation_count);
+    printf("PSEUDOTCP_OPEN_COUNT=%u\n", pseudotcp_open_count);
+    printf("CTPP_REGISTRATION_COUNT=%u\n", ctpp_registration_count);
+    printf("RTPC_CLIENT_OPEN_COUNT=%u\n", rtpc_client_open_count);
+    printf("SELF_ACTIVATION_COUNT=%u\n", r27_self_activation_sent_count);
+    printf("HELPER_PROCESS_UNCHANGED=%s\n",
+           helper_process_unchanged ? "true" : "false");
+    printf("SECOND_MEDIA_SESSION=%s\n", second_media_session ? "true" : "false");
+    printf("NEW_RTPC_OPEN=%s\n", new_rtpc_open ? "true" : "false");
+    printf("NEW_SELF_ACTIVATION=%s\n", new_self_activation ? "true" : "false");
+    printf("MEDIA_SESSION_IDENTITY_UNCHANGED=%s\n",
+           media_session_identity_unchanged ? "true" : "false");
 }
 
 static gboolean
@@ -561,12 +626,7 @@ r27_print_final_summary(void)
            r27_initial_001a_sent_count + r27_repeat_001a_sent_count);
     printf("R27_THIRD_001A_BLOCKED=%s\n",
            r27_third_001a_blocked ? "true" : "false");
-    printf("ICE_NEGOTIATION_COUNT=1\n");
-    printf("PSEUDOTCP_OPEN_COUNT=1\n");
-    printf("CTPP_REGISTRATION_COUNT=1\n");
-    printf("RTPC_CLIENT_OPEN_COUNT=2\n");
-    printf("SELF_ACTIVATION_COUNT=1\n");
-    printf("HELPER_PROCESS_UNCHANGED=true\n");
+    r27_print_identity_markers();
     fflush(stdout);
 }
 
@@ -613,6 +673,7 @@ def transform(source: str, *, include_p116: bool = True) -> str:
         (_TX_ENUM_OLD, _TX_ENUM_NEW, "R27 tx enum"),
         (_STATE_OLD, _STATE_NEW, "R27 state"),
         (_QUEUE_FUNCTION_OLD, _QUEUE_FUNCTION_NEW, "R27 queue function"),
+        (_SELF_ACTIVATION_COMPLETION_OLD, _SELF_ACTIVATION_COMPLETION_NEW, "R27 self activation count"),
         (_TX_COMPLETION_OLD, _TX_COMPLETION_NEW, "R27 tx completion"),
         (_MEDIA_ACTIVE_OLD, _MEDIA_ACTIVE_NEW, "R27 media active timers"),
         (_ACK_HOOK_OLD, _ACK_HOOK_NEW, "R27 ACK hook"),

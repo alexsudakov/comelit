@@ -1,134 +1,115 @@
-# P116 R30H-E repeat 0x001A body offline corrective result
+# P116 R65/R30H-E repeat 0x001A corrective result
 
-TASK_ID=`COMELIT-P116-R30H-E-REPEAT-BODY-OFFLINE-CORRECTIVE`
+TASK_ID=`COMELIT-P116-R65-LONG-MEDIA-CUTOFF-CORRECTIVE`
 
-Mode: `OFFLINE_ONLY`. This result references the historical R30H-E authorization and does not authorize live Comelit traffic, Home Assistant control, production replacement, Door/Gate action, or candidate `main()` execution.
+Mode: `OFFLINE_ONLY`. This note records Phase A closure and live-instrument readiness. It does not authorize this sandbox to run live Comelit traffic, Home Assistant control, production replacement, Door/Gate action, official-app research, go2rtc/Frigate/audio-TX, or literal PCAP replay.
 
-## Source and locus
+## Source and scope
 
 - BASE_SHA: `be3fb5265b19a1212054d81f030cb896d7952d54`
-- WORKTREE_HEAD observed before edits: `be3fb5265b19a1212054d81f030cb896d7952d54`
-- PHASE_A_LOCUS: `R27_REPEAT_CANDIDATE_CONFIRMED`
-- Corrective locus: `safety-poc/research/media/v1/entrance_p116_r27_repeat_001a_transform.py`
+- PHASE_A_COMMITTED_SHA: `565c0f37d4f650d35f5deaec4f17cdbdedaa7316`
+- WORKTREE_HEAD_OBSERVED: `565c0f37d4f650d35f5deaec4f17cdbdedaa7316`
+- Allowed write scope used: `safety-poc/research/media/v1/**` and `safety-poc/tests/**`
+- Current local generated-source SHA after the derived-marker corrective: `e62e83c0b1d426fac9f307c84a8069e1bf2c6e7dae47edf78e1cff6012234887`
 
-## Verified defect
+## Phase A defect and fix
 
-Current-source defect before the corrective was in `r27_try_queue_repeat_001a`: the repeat path set only `r27_rtpc_client_001a_repeat_len` and then called `p76_generate_client_001a(...)` on the unpopulated repeat buffer. In the current corrected file, the fixed order is visible at `entrance_p116_r27_repeat_001a_transform.py:368-376`: `r27_build_repeat_001a_body()` runs before `p76_generate_client_001a(...)`.
+The Phase A defect was in the R27 repeat path: the repeat buffer was validated before being built. The committed Phase A fix builds the repeat body first, validates it with the unchanged `p76_generate_client_001a()`, then runs the diff gate. The repeat body copies the live runtime initial `0x001A` body and mutates only CTP sequence wire byte offset `4` by `+1 mod 256`; byte `5` and offsets `10-59` must remain identical.
 
-The source role split is unchanged:
+One-shot semantics remain: at most two total `0x001A` sends are allowed, initial plus one repeat. A third `0x001A` path is blocked fail-closed, with no retry loop.
 
-- `p76_build_client_001a(...)` constructs the 60-byte client media body, including shape, target, geometry, and roles at `entrance_rtpc_control_media_runtime_transform.py:294-323`.
-- `p76_generate_client_001a(...)` validates an already-populated body against runtime allocation #2 and geometry, then marks the fact generated, at `entrance_rtpc_control_media_runtime_transform.py:415-429`.
+## Hermes-verified CT120 facts
 
-`R30H_D_GENERATION_FAILURE_STATICALLY_EXPLAINED=true`: a zero or stale repeat buffer could not satisfy the validator checks at `entrance_rtpc_control_media_runtime_transform.py:419-427`.
+Host CT122 at `565c0f37d4f650d35f5deaec4f17cdbdedaa7316`:
 
-## Corrective strategy
+- `python3 -m unittest discover -s tests` -> `Ran 2184 tests` -> `OK (skipped=1)`
+- `STATIC_SAFETY_CHECK=PASS`
+- Baseline `be3fb52` had one pre-existing flaky failure in `test_p116_r29i...counter`, unrelated.
 
-Chosen strategy: use the already runtime-generated initial `0x001A` body as the same-session semantic template, mutate only the independent CTP sequence byte, then validate the populated repeat with the existing P76 validator.
+CT120 offline musl harness, two-pass pin discovery:
 
-This is smaller and safer than reallocating RTPC state because it preserves the already-derived target, geometry, role/address semantics, CTPP channel use, ICE, PseudoTCP socket, helper process, and RTPC allocations. No validator rule was removed or relaxed.
+- PASS1 placeholder pin: `P80_CHROOT_BUILD_RC=0`; `GENERATED_SOURCE_SHA256=7449d477738c1b4a66e9a598d93451caa936b4facfde9919ab935c3335d2a99c`; `CANDIDATE_BINARY_SHA256=22e37dd68467fb0ce171b71ff53c6df6b31888f1ef4c0e9b37bdc45ed0a03b61` size `281192`; `CANDIDATE_SHA_GATE=FAIL` intended; `NO_GLIBC_DEPENDENCY=PASS`; `NO_NEW_RUNTIME_DEPENDENCY=PASS`; `EXPECTED_SOURCE_SHA_GATE=PASS`.
+- PASS2 real pin: `PASS2_RC=0`; `R30H_C_HARNESS_RESULT=PASS`; `CANDIDATE_SHA_GATE=PASS`; `CANDIDATE_INTERPRETER_MATCH=PASS`; `CANDIDATE_NEEDED_LIBS_GATE=PASS`; `MUSL_INTERPRETER_GATE=PASS`; `NO_GLIBC_DEPENDENCY=PASS`; `NO_NEW_RUNTIME_DEPENDENCY=PASS`; `LOADER_PROBE_RESOLUTION=PASS`; `WRAPPER_BINDING_GATE=PASS`; `CANDIDATE_MAIN_EXECUTED=false`; `COMELIT_LIVE_EXECUTED=false`; `COMELIT_NETWORK_REQUESTS=0`; `HA_TOUCHED=false`; `PRODUCTION_LISTENER_TOUCHED=false`; `LIVE_INVOCATIONS=0`; listener PID `19978` unchanged; repo clean.
 
-Runtime value sources:
+CT120 pre-live readiness:
 
-- CTPP request/channel: `v4_ctpp_channel_id` used when queueing repeat.
-- Initial body bytes: `p78_rtpc_client_001a` and `p78_rtpc_client_001a_len`, produced by the runtime P76/P97 path.
-- Target binding: body offset `16`, preserved from the runtime initial body and revalidated against allocation #2.
-- Geometry: offsets `24,26,28,30,32`, preserved from the runtime initial body and revalidated by P76.
-- Role/address bindings: offsets `40-59`, preserved from the runtime initial body.
-- Sequence byte: initial body offset `4`, advanced modulo 256.
-- ACK/state byte: initial body offset `5`, explicitly preserved.
+- Listener active PID `19978`, up since `2026-09-01`.
+- 3/3 status samples: `ok/supervisor_running/running/listener_ready=true`, `last_error=null`, `reconnect_count=26`.
+- Base wrapper SHA `a564535dff0cf10b1fe4766171f2960c52fb581f1c816cf81d2992c5c84e79c9` equals runner pin.
+- Rootfs `/root/comelit-p80-haos-build-20260909T193410Z/rootfs` and `ld-musl-x86_64.so.1` present.
+- Ports `17899/17808/8091` free; 0 established UDP/TCP; 0 campaign processes at baseline.
+- Credential state then: `COMELIT_OAUTH_REFRESH_TOKEN_PRESENT=true`, `OAUTH_ACCESS_TOKEN_TTL_SECONDS=-498743`. A `401` on cloud `p2p/start` is credential-state, not a protocol verdict.
 
-No captured target id, channel, address, sequence, or packet literal is promoted to a runtime constant.
+## Derived-marker model
 
-## Acceptance markers
+The live helper now reports session identity from runtime state rather than literal constants:
 
-- `REPEAT_BODY_BUILD=PASS`: `r27_build_repeat_001a_body()` copies the runtime initial body and advances only offset `4`; tested by `test_repeat_body_build_validate_and_diff_gate`.
-- `REPEAT_BODY_VALIDATION=PASS`: validation remains `p76_generate_client_001a(...)` after build, at `entrance_p116_r27_repeat_001a_transform.py:373-382`.
-- `REPEAT_BODY_DIFF_GATE=PASS`: `r27_repeat_body_diff_gate()` permits only offset `4` and requires byte `5` and offsets `10-59` unchanged at `entrance_p116_r27_repeat_001a_transform.py:435-453`.
-- `CTP_SEQUENCE_ROLLOVER_GATE=PASS`: `test_sequence_rollover_does_not_mutate_ack` proves `0xff -> 0x00` with ACK byte `0x5a` unchanged.
-- `DETERMINISTIC_EQUALITY=PASS`: transform output A/B SHA both `7449d477738c1b4a66e9a598d93451caa936b4facfde9919ab935c3335d2a99c`; modified input SHA `5a6723dd42e37a0e22df410d43eaa8995a8fcf672eca4e185dfd58f835e2ecd0` proves the check can flip.
-- `TARGET_BINDING_PRESERVED=true`: queued repeat keeps offset `16+` semantics and validator rejects wrong target; harness mutates offset `16` and the diff gate fails closed.
-- `GEOMETRY_PRESERVED=true`: offsets `24-32` are preserved by full body copy and validated by P76.
-- `ROLE_BINDINGS_PRESERVED=true`: offsets `40-59` are preserved by the diff gate's `memcmp(... + 10, 50)`.
-- `SAME_CTPP=true`: repeat queues on `v4_ctpp_channel_id`.
-- `NO_NEW_RTPC_OPEN=true`, `NO_NEW_ICE=true`, `NO_NEW_PSEUDOTCP=true`, `NO_NEW_SELF_ACTIVATION=true`: no new setup symbols appear in the R27 repeat segments; focused test `test_no_new_session_setup_paths_in_r27_segments`.
-- `VALIDATOR_WEAKENED=false`.
-- `CAPTURE_LITERAL_REPLAY=false`.
+- `ICE_NEGOTIATION_COUNT`: derived from `ice_connected && ice_ready && selected_pair_present`.
+- `PSEUDOTCP_OPEN_COUNT`: derived from `pseudo_tcp && pseudotcp_open`.
+- `CTPP_REGISTRATION_COUNT`: derived from `p78_rtpc_runtime.registered_ctpp_reused == P76_TRUE` and `second_ctpp_open_attempted == P76_FALSE`.
+- `RTPC_CLIENT_OPEN_COUNT`: derived from `p78_rtpc_open_1_sent` plus `p78_rtpc_open_2_sent`.
+- `SELF_ACTIVATION_COUNT`: incremented in the actual `P12_TX_ENTRANCE_SELF_ACTIVATION` completion path.
+- `HELPER_PROCESS_UNCHANGED`: compares `r27_helper_pid_at_media_start` to current `getpid()`.
+- `SECOND_MEDIA_SESSION`: derived from the identity counters and process identity.
+- `MEDIA_SESSION_IDENTITY_UNCHANGED`: derived conjunction requiring no second session, exactly two RTPC opens, and exactly one self-activation.
+- `NEW_RTPC_OPEN` and `NEW_SELF_ACTIVATION`: derived from the same counters.
 
-## Negative tests
+Focused embedded C harness `test_identity_markers_are_derived_and_flip` mutates the underlying state and proves negative forms for ICE, PseudoTCP, CTPP registration, RTPC open count, self-activation count, helper identity, `SECOND_MEDIA_SESSION`, and `MEDIA_SESSION_IDENTITY_UNCHANGED`. Python test `test_identity_markers_are_not_literal_reporting_constants` rejects the old literal report strings.
 
-Focused negative/fail-closed coverage in `safety-poc/tests/test_p116_r27_repeat_001a_contract.py`:
+## Credential gate
 
-- `test_repeat_preconditions_fail_closed`
-- `test_malformed_repeat_inputs_fail_closed`
-- `test_sequence_rollover_does_not_mutate_ack`
-- `test_deterministic_repeat_build_flips_when_input_differs`
-- `test_third_001a_blocked`
-- `test_ack_timeout_absent_no_retry`
-- `test_unrelated_ack_does_not_satisfy_repeat_gate`
-- `test_no_new_session_setup_paths_in_r27_segments`
-- `test_door_and_gate_action_paths_unreachable_from_r27_code`
+The live runner performs a read-only credential gate before listener status/stop and before any network/media action:
+
+- Tool: `/usr/local/sbin/comelit-oauth-status`
+- Markers: `CREDENTIAL_STATUS_PRESENT`, `CREDENTIAL_TTL_SECONDS`, `CREDENTIAL_TTL_GATE`, `CREDENTIAL_REFRESH_REQUIRED`, and `CREDENTIAL_REFUSAL_BEFORE_LISTENER_STOP=true` on refusal.
+- Minimum TTL: `CREDENTIAL_MIN_TTL_SECONDS=900`.
+- Refusal: `credential_gate || exit 2`, before `=== VERIFY LISTENER READY ===` and before `=== STOP ONLY COMELIT LISTENER ===`.
+
+Refresh command for Hermes on CT120 before attempt 1:
+
+```sh
+/usr/local/sbin/comelit-oauth-refresh
+/usr/local/sbin/comelit-oauth-status
+```
+
+Refresh succeeded only if `CREDENTIAL_STATUS_PRESENT=true`, `OAUTH_ACCESS_TOKEN_TTL_SECONDS >= 900`, and the runner emits `CREDENTIAL_TTL_GATE=PASS` with `CREDENTIAL_REFRESH_REQUIRED=false`.
+
+## Runner acceptance block
+
+The final block in `ct120_run_p116_r27_repeat_001a_live.sh` emits the contract marker names:
+
+`ICE_NEGOTIATION_COUNT`, `PSEUDOTCP_OPEN_COUNT`, `CTPP_REGISTRATION_COUNT`, `SELF_ACTIVATION_COUNT`, `HELPER_PROCESS_UNCHANGED`, `SECOND_MEDIA_SESSION`, `MEDIA_SESSION_IDENTITY_UNCHANGED`, `REPEAT_001A_SENT_COUNT`, `SECOND_001A_RESPONSE`, `SECOND_001A_ACK_CLASSIFICATION`, `NEW_RTPC_OPEN`, `NEW_SELF_ACTIVATION`, `VIDEO_RTP_PAST_40S`, `VIDEO_RTP_PAST_75S`, `VIDEO_PACKET_COUNTER_PROGRESSING`, `MEDIA_ACTIVE_DURATION_SECONDS`, `MEDIA_TEARDOWN`, `LISTENER_RESTORED`, `LISTENER_READY_AFTER`, `CAMPAIGN_PROCESSES_REMAINING`, and `RTP_SINK_PORTS_REMAINING`.
 
 ## Local verification
 
-- `PYTHONPATH=$PWD/safety-poc/src:$PWD/safety-poc/research/media/v1 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest safety-poc.tests.test_p116_r27_repeat_001a_contract` -> `Ran 33 tests ... OK`
-- `cd safety-poc && python3 scripts/static_safety_check.py` -> `STATIC_SAFETY_CHECK=PASS`
-- `python3 -m py_compile safety-poc/research/media/v1/entrance_p116_r27_repeat_001a_transform.py safety-poc/tests/test_p116_r27_repeat_001a_contract.py safety-poc/tests/test_mvp1_ring_telegram_offline_build.py` -> PASS
-- `bash -n safety-poc/research/media/v1/ct120_run_p116_r27_repeat_001a_live.sh` -> PASS
-- `python3 -m compileall -q custom_components/comelit` -> PASS
-- Local full suite after Turn 1 pin update: `Ran 2184 tests in 45.211s FAILED (errors=2, skipped=5)`. Residual errors are sandbox-only UDP datagram socket artifacts in `test_p116_r29i_preopen_idle_and_sink_ownership.py`; `NOT_A_R65_REGRESSION`.
+- Focused suite: `PYTHONPATH=$PWD/safety-poc/src:$PWD/safety-poc/research/media/v1 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest safety-poc.tests.test_p116_r27_repeat_001a_contract` -> `Ran 36 tests` -> `OK`.
+- Canonical local suite: `cd safety-poc && PYTHONPATH=$PWD/src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests` -> `Ran 2187 tests in 45.332s` -> `FAILED (errors=2, skipped=5)`.
+- Canonical delta: `+3` against the Hermes host baseline `Ran 2184 tests`; this Turn 4 corrective adds 3 Python `def test_` methods to the focused contract file, growing it from 33 to 36.
+- Canonical local red lines: `test_nonzero_datagram_sink_materializes_final_counter_after_exit` and `test_zero_datagram_sink_materializes_final_counter_after_exit` in `test_p116_r29i_preopen_idle_and_sink_ownership`; classification `NOT_A_R65_REGRESSION` because this sandbox blocks UDP datagram sockets while Hermes reports host pass.
+- Static safety: `STATIC_SAFETY_CHECK=PASS`, `NETWORK_IMPORTS_PRESENT=false`, `COMELIT_ENDPOINTS_PRESENT=false`, `SOURCE_FILES_SCANNED=29`.
+- Syntax: `py_compile` for changed Python files passed; `bash -n ct120_run_p116_r27_repeat_001a_live.sh` passed.
 
-## Host verification from Hermes
+## Live verdict
 
-- BASE SHA `be3fb52` untouched worktree: `Ran 2184 tests`, `FAILED (failures=1, skipped=1)`. Single failure: `tests/test_p116_r29i_preopen_idle_and_sink_ownership.py::test_zero_datagram_sink_materializes_final_counter_after_exit` with `'1' != '0'`, passing 3/3 in isolation. Classification: `PRE_EXISTING_BASELINE_FLAKE`.
-- After Turn 1 change on host: `Ran 2184 tests in 41.289s`, `OK (skipped=1)`. `FULL_REGRESSION=PASS`.
-- Host static safety: `STATIC_SAFETY_CHECK=PASS`, 29 files scanned.
-- Sandbox observation retained: sandbox full suite `Ran 2184 tests in 45.211s FAILED (errors=2, skipped=5)` due to blocked UDP datagram sockets. Classification: `NOT_A_R65_REGRESSION`, root cause `SANDBOX_BLOCKS_UDP_DATAGRAM_SOCKETS`.
-- Test-count check: `test_p116_r27_repeat_001a_contract.py` has 33 `def test_` methods at `origin/main` and 33 after this change; total suite count remains 2184 -> 2184. `TESTS_ADDED=0`; coverage was added by extending existing test methods and the embedded C harness cases.
+`LIVE_VERDICT=GO_LIVE` only after Hermes satisfies the credential precondition on CT120 and confirms the branch head is the intended committed Turn 4 state. The live budget is fixed: `MAX_LIVE_MEDIA_SESSIONS=10`, `MAX_PARALLEL=1`, `MAX_SINGLE_SESSION_SECONDS=120`, `AUTOMATIC_RETRY=false`, panel `entrance`, no physical ring/button, `DOOR_ACTIONS=0`, `GATE_ACTIONS=0`, no go2rtc/Frigate/Gate-media/audio-TX, no official-app research, and no literal PCAP replay.
 
-## R30H-E contract marker mapping
-
-Option B is used for the offline harness path: `ct120_run_p116_r30h_c_musl_launcher_offline.sh` now accepts `R30H_C_EXPECTED_CANDIDATE_SHA` from the CT120 host. The R30H-E result maps the normative contract markers to emitted/derived markers as follows:
-
-- `REPEAT_BODY_BUILD`: derived from focused harness `R27_REPEAT_001A_BUILD=PASS`.
-- `REPEAT_BODY_VALIDATION`: derived from focused harness `R27_REPEAT_001A_VALIDATION=PASS`; `VALID_REPEAT_BODY_VALIDATION=P76_OK` maps to the same validator return path.
-- `REPEAT_BODY_DIFF_GATE`: derived from `R27_REPEAT_BODY_DIFF_GATE=PASS` plus `R27_REPEAT_BODY_CHANGED_OFFSETS=4`.
-- `CTP_SEQUENCE_ROLLOVER_GATE`: derived from embedded harness case `test_sequence_rollover_does_not_mutate_ack`.
-- `ONE_SHOT_REPEAT_CONTRACT`: derived from `INITIAL_001A_SENT_COUNT`, `REPEAT_001A_SENT_COUNT`, `TOTAL_001A_SENT_COUNT`, `R27_THIRD_001A_BLOCKED`, and `ACK_TIMEOUT_RETRY=false`.
-- `CANDIDATE_REPRODUCIBLE`: derived from double transform SHA equality; current A/B SHA `7449d477738c1b4a66e9a598d93451caa936b4facfde9919ab935c3335d2a99c`.
-- `CANDIDATE_BUILD`: derived on CT120 from `P80_CHROOT_BUILD_RC=0`, `MUSL_INTERPRETER_GATE=PASS`, `NO_GLIBC_DEPENDENCY=PASS`, `NO_NEW_RUNTIME_DEPENDENCY=PASS`, and the candidate SHA gate.
-- `LOADER_PROBE_RESOLUTION`: emitted directly by the offline harness.
-- `CANDIDATE_MAIN_EXECUTED=false`: emitted directly by the offline harness.
-- `COMELIT_LIVE_EXECUTED=false`: emitted directly by the offline harness; R27 runner refusal mode must return rc 2 with `R27_OFFLINE_SAFE_REFUSAL=true`.
-- `REPEAT_TARGET_EQUALS_INITIAL_ALLOCATION_2`: derived from preserved offset `16` and P76 allocation #2 validation.
-- `REPEAT_GEOMETRY_PRESERVED`: derived from P76 geometry validation and diff gate preserving offsets `24-32`.
-- `REPEAT_ROLE_BINDINGS_PRESERVED`: derived from diff gate preserving offsets `40-59`.
-- `THIRD_001A_FAIL_CLOSED`: derived from `R27_THIRD_001A_BLOCKED=true` branch and focused test `test_third_repeat_is_blocked_fail_closed`.
-- `NO_NEW_SESSION_SETUP_PATHS`: derived from focused test `test_no_new_session_setup_paths_in_r27_segments`.
-- `DOOR_GATE_PATHS_UNREACHABLE`: derived from focused test `test_door_and_gate_action_paths_unreachable_from_r27_code`.
-
-## Host command needed
-
-The CT120 musl gate must run as root on CT120 after Hermes clones the branch to `$REPO` and exports the authoritative pushed head SHA. A commit cannot embed its own SHA, so `R30H_C_EXPECTED_SHA` is supplied by Hermes from the pushed head report. `R30H_C_EXPECTED_CANDIDATE_SHA` is a two-pass pin: omit it or set the old default on pass 1 to record `CANDIDATE_BINARY_SHA256`; set it to that recorded SHA on pass 2 to verify `CANDIDATE_SHA_GATE=PASS`.
+Attempt command block for CT120:
 
 ```sh
-# on CT120, root
-cd "$REPO" && R30H_C_OFFLINE_RUN=YES R27_LIVE_RUN=NO REPO="$REPO" R30H_C_EXPECTED_SHA="$EXPECTED_SHA" R30H_C_EXPECTED_SOURCE_SHA=7449d477738c1b4a66e9a598d93451caa936b4facfde9919ab935c3335d2a99c R30H_C_EXPECTED_CANDIDATE_SHA="$EXPECTED_CANDIDATE_SHA" bash safety-poc/research/media/v1/ct120_run_p116_r30h_c_musl_launcher_offline.sh
+cd /root/comelit-r65-a-offline
+/usr/local/sbin/comelit-oauth-refresh
+/usr/local/sbin/comelit-oauth-status
+R27_LIVE_RUN=YES REPO=/root/comelit-r65-a-offline R27_EXPECTED_COMMIT_SHA="$EXPECTED_SHA" bash safety-poc/research/media/v1/ct120_run_p116_r27_repeat_001a_live.sh
 ```
 
-Environment sources:
+Attempt classification markers: `CREDENTIAL_TTL_GATE=PASS`, `REPEAT_001A_SENT_COUNT=1`, `SECOND_001A_RESPONSE`, `SECOND_001A_ACK_CLASSIFICATION`, `VIDEO_RTP_PAST_40S`, `VIDEO_RTP_PAST_75S`, `VIDEO_PACKET_COUNTER_PROGRESSING`, `MEDIA_ACTIVE_DURATION_SECONDS`, `SECOND_MEDIA_SESSION=false`, `MEDIA_SESSION_IDENTITY_UNCHANGED=true`, `NEW_RTPC_OPEN=false`, `NEW_SELF_ACTIVATION=false`, `MEDIA_TEARDOWN=CONFIRMED`, `LISTENER_RESTORED=true`, `LISTENER_READY_AFTER=true`, `CAMPAIGN_PROCESSES_REMAINING=NONE`, and `RTP_SINK_PORTS_REMAINING=0`.
 
-- `REPO`: CT120 branch checkout path.
-- `EXPECTED_SHA`: authoritative pushed branch head from Hermes.
-- `EXPECTED_CANDIDATE_SHA`: pass-2 value recorded from pass-1 `CANDIDATE_BINARY_SHA256`.
+## NOT_PROVEN
 
-Expected markers include `EXPECTED_SOURCE_SHA_GATE=PASS`, `MUSL_INTERPRETER_GATE=PASS`, `NO_GLIBC_DEPENDENCY=PASS`, `NO_NEW_RUNTIME_DEPENDENCY=PASS`, `CANDIDATE_INTERPRETER_MATCH=PASS`, `LOADER_PROBE_RESOLUTION=PASS`, `CANDIDATE_MAIN_EXECUTED=false`, `GLIBC_RESOLUTION_USED=false`, `WRAPPER_BINDING_GATE=PASS`, `LIVE_INVOCATIONS=0`, `COMELIT_NETWORK_REQUESTS=0`.
-
-## Remaining unknowns
-
-- `CANDIDATE_BUILD=NOT_PROVEN_LOCALLY`: musl/chroot toolchain is unavailable in this sandbox; Hermes must run the CT120 command above.
-- `MUSL_INTERPRETER_GATE=NOT_PROVEN_LOCALLY`
-- `NO_GLIBC_DEPENDENCY=NOT_PROVEN_LOCALLY`
-- `NO_NEW_RUNTIME_DEPENDENCY=NOT_PROVEN_LOCALLY`
-- `CANDIDATE_SHA_GATE=NOT_PROVEN_LOCALLY`
-- `LIVE_REPEAT_EFFECT=NOT_PROVEN`: no live run was performed or authorized in this phase.
+- `ROOT_CAUSE_STATUS=PARTIAL`: the body-build-before-validation defect is proven and fixed offline; long-media cutoff effect still needs the live attempt.
+- `REPEAT_001A_EFFECT_STATUS=UNTESTED`: no live attempt has been run after the Turn 4 derived-marker and credential-gate corrective.
+- `CURRENT_TURN4_MUSL_GATE=NOT_PROVEN`: prior CT120 musl gate passed for generated source `7449d477...`; the current local generated source is `e62e83c...` and needs Hermes rerun after commit.
+- `LIVE_REPEAT_RESPONSE=NOT_PROVEN`
+- `VIDEO_RTP_PAST_75S=NOT_PROVEN_LIVE`
+- `MEDIA_SESSION_IDENTITY_UNCHANGED=NOT_PROVEN_LIVE`
+- `LISTENER_RESTORED=NOT_PROVEN_LIVE`

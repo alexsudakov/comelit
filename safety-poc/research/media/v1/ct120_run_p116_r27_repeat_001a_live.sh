@@ -16,11 +16,13 @@ BASE_WRAPPER_SHA256=a564535dff0cf10b1fe4766171f2960c52fb581f1c816cf81d2992c5c84e
 BUILDER_REL=safety-poc/research/media/v1/ct120_build_p80_haos_media_helper.sh
 TRANSFORM_REL=safety-poc/research/media/v1/entrance_p116_r27_repeat_001a_transform.py
 RUNNER_REL=safety-poc/research/media/v1/ct120_run_p116_r27_repeat_001a_live.sh
-EXPECTED_SOURCE_SHA=7449d477738c1b4a66e9a598d93451caa936b4facfde9919ab935c3335d2a99c
+EXPECTED_SOURCE_SHA=e62e83c0b1d426fac9f307c84a8069e1bf2c6e7dae47edf78e1cff6012234887
 VIDEO_RTP_PORT=17899
 AUDIO_RTP_PORT=17808
 MAX_LIVE_OBSERVATION_SECONDS=100
 OUTER_TIMEOUT_SECONDS=120
+CREDENTIAL_MIN_TTL_SECONDS=900
+OAUTH_STATUS=/usr/local/sbin/comelit-oauth-status
 RUN_DIR=/run/comelit-media
 STOP_FILE="$RUN_DIR/stop"
 CANDIDATE_HOLDER_NAME=comelit-r27-repeat-001a
@@ -54,6 +56,10 @@ TEARDOWN_CONFIDENCE=UNCERTAIN
 R27_RUN_CLASSIFICATION=NOT_RUN
 R27_REPEAT_EXECUTED=false
 R27_HELPER_EVIDENCE=false
+CREDENTIAL_STATUS_PRESENT=false
+CREDENTIAL_TTL_SECONDS=NOT_REACHED
+CREDENTIAL_TTL_GATE=NOT_REACHED
+CREDENTIAL_REFRESH_REQUIRED=unknown
 
 fail() {
     echo "$1"
@@ -338,6 +344,77 @@ derive_production_media_active() {
     echo "PRODUCTION_MEDIA_ACTIVE=$PRODUCTION_MEDIA_ACTIVE"
 }
 
+credential_gate() {
+    local output="$RUN_ROOT/oauth-status.txt"
+    local rc
+    local duuid_present vip_present access_present refresh_present ttl
+
+    echo "CREDENTIAL_MIN_TTL_SECONDS=$CREDENTIAL_MIN_TTL_SECONDS"
+    if [ ! -x "$OAUTH_STATUS" ]; then
+        CREDENTIAL_STATUS_PRESENT=false
+        CREDENTIAL_TTL_GATE=FAIL
+        CREDENTIAL_REFRESH_REQUIRED=true
+        echo "CREDENTIAL_STATUS_PRESENT=false"
+        echo "CREDENTIAL_TTL_SECONDS=NOT_REACHED"
+        echo "CREDENTIAL_TTL_GATE=FAIL"
+        echo "CREDENTIAL_REFRESH_REQUIRED=true"
+        echo "CREDENTIAL_REFUSAL_BEFORE_LISTENER_STOP=true"
+        return 2
+    fi
+
+    set +e
+    "$OAUTH_STATUS" > "$output" 2>&1
+    rc=$?
+    set -u -o pipefail
+    if [ "$rc" -ne 0 ]; then
+        CREDENTIAL_STATUS_PRESENT=false
+        CREDENTIAL_TTL_GATE=FAIL
+        CREDENTIAL_REFRESH_REQUIRED=true
+        echo "CREDENTIAL_STATUS_PRESENT=false"
+        echo "CREDENTIAL_STATUS_RC=$rc"
+        echo "CREDENTIAL_TTL_SECONDS=NOT_REACHED"
+        echo "CREDENTIAL_TTL_GATE=FAIL"
+        echo "CREDENTIAL_REFRESH_REQUIRED=true"
+        echo "CREDENTIAL_REFUSAL_BEFORE_LISTENER_STOP=true"
+        return 2
+    fi
+
+    duuid_present="$(awk -F= '$1=="COMELIT_DUUID_PRESENT"{print $2}' "$output" | tail -1)"
+    vip_present="$(awk -F= '$1=="COMELIT_VIP_TOKEN_PRESENT"{print $2}' "$output" | tail -1)"
+    access_present="$(awk -F= '$1=="COMELIT_OAUTH_ACCESS_TOKEN_PRESENT"{print $2}' "$output" | tail -1)"
+    refresh_present="$(awk -F= '$1=="COMELIT_OAUTH_REFRESH_TOKEN_PRESENT"{print $2}' "$output" | tail -1)"
+    ttl="$(awk -F= '$1=="OAUTH_ACCESS_TOKEN_TTL_SECONDS"{print $2}' "$output" | tail -1)"
+    [ -n "$ttl" ] || ttl=NOT_REACHED
+    CREDENTIAL_TTL_SECONDS="$ttl"
+    if [ "$duuid_present" = true ] &&
+       [ "$vip_present" = true ] &&
+       [ "$access_present" = true ] &&
+       [ "$refresh_present" = true ]; then
+        CREDENTIAL_STATUS_PRESENT=true
+    else
+        CREDENTIAL_STATUS_PRESENT=false
+    fi
+
+    echo "CREDENTIAL_STATUS_PRESENT=$CREDENTIAL_STATUS_PRESENT"
+    echo "CREDENTIAL_TTL_SECONDS=$CREDENTIAL_TTL_SECONDS"
+    if [ "$CREDENTIAL_STATUS_PRESENT" = true ] &&
+       [ "$ttl" != NOT_REACHED ] &&
+       [ "$ttl" -ge "$CREDENTIAL_MIN_TTL_SECONDS" ] 2>/dev/null; then
+        CREDENTIAL_TTL_GATE=PASS
+        CREDENTIAL_REFRESH_REQUIRED=false
+        echo "CREDENTIAL_TTL_GATE=PASS"
+        echo "CREDENTIAL_REFRESH_REQUIRED=false"
+        return 0
+    fi
+
+    CREDENTIAL_TTL_GATE=FAIL
+    CREDENTIAL_REFRESH_REQUIRED=true
+    echo "CREDENTIAL_TTL_GATE=FAIL"
+    echo "CREDENTIAL_REFRESH_REQUIRED=true"
+    echo "CREDENTIAL_REFUSAL_BEFORE_LISTENER_STOP=true"
+    return 2
+}
+
 print_final_block() {
     echo "=== COMELIT P116 R27 REPEAT 001A LIVE FINAL ==="
     echo "LIVE_INVOCATIONS=$LIVE_INVOCATIONS"
@@ -347,8 +424,18 @@ print_final_block() {
     echo "CT120_RESEARCH_HELPER_STOPPED=$CT120_RESEARCH_HELPER_STOPPED"
     echo "CT120_RESEARCH_SESSION_CLOSED=$CT120_RESEARCH_SESSION_CLOSED"
     echo "R27_SESSION_CLOSED=$R27_SESSION_CLOSED"
+    echo "MEDIA_TEARDOWN=$TEARDOWN_CONFIDENCE"
+    if [ "$RESTORE_OK" -eq 1 ]; then
+        echo "LISTENER_RESTORED=true"
+    else
+        echo "LISTENER_RESTORED=false"
+    fi
     echo "TEARDOWN_CONFIDENCE=$TEARDOWN_CONFIDENCE"
     echo "R27_RUN_CLASSIFICATION=$R27_RUN_CLASSIFICATION"
+    echo "CREDENTIAL_STATUS_PRESENT=$CREDENTIAL_STATUS_PRESENT"
+    echo "CREDENTIAL_TTL_SECONDS=$CREDENTIAL_TTL_SECONDS"
+    echo "CREDENTIAL_TTL_GATE=$CREDENTIAL_TTL_GATE"
+    echo "CREDENTIAL_REFRESH_REQUIRED=$CREDENTIAL_REFRESH_REQUIRED"
     echo "R27_REPEAT_EXECUTED=$R27_REPEAT_EXECUTED"
     echo "GENERATED_SOURCE_SHA256=$(build_provenance_marker GENERATED_SOURCE_SHA256 NOT_REACHED)"
     echo "R27_REPEAT_DELAY_SECONDS=20"
@@ -385,6 +472,8 @@ print_final_block() {
     echo "RTPC_CLIENT_OPEN_COUNT=$(last_marker RTPC_CLIENT_OPEN_COUNT NOT_REACHED)"
     echo "SELF_ACTIVATION_COUNT=$(last_marker SELF_ACTIVATION_COUNT NOT_REACHED)"
     echo "HELPER_PROCESS_UNCHANGED=$(last_marker HELPER_PROCESS_UNCHANGED NOT_REACHED)"
+    echo "SECOND_MEDIA_SESSION=$(last_marker SECOND_MEDIA_SESSION NOT_REACHED)"
+    echo "MEDIA_SESSION_IDENTITY_UNCHANGED=$(last_marker MEDIA_SESSION_IDENTITY_UNCHANGED NOT_REACHED)"
     echo "LISTENER_RUNNING_AFTER=$LISTENER_RUNNING_AFTER"
     echo "LISTENER_READY_AFTER=$LISTENER_READY_AFTER"
     echo "PRODUCTION_MEDIA_ACTIVE_DERIVED_FROM=LISTENER_READY_AFTER"
@@ -392,9 +481,8 @@ print_final_block() {
     echo "PRODUCTION_MEDIA_ACTIVE=$PRODUCTION_MEDIA_ACTIVE"
     echo "DOOR_ACTIONS_SENT=0"
     echo "GATE_ACTIONS_SENT=0"
-    echo "SECOND_MEDIA_SESSION=false"
-    echo "NEW_RTPC_OPEN=false"
-    echo "NEW_SELF_ACTIVATION=false"
+    echo "NEW_RTPC_OPEN=$(last_marker NEW_RTPC_OPEN NOT_REACHED)"
+    echo "NEW_SELF_ACTIVATION=$(last_marker NEW_SELF_ACTIVATION NOT_REACHED)"
     echo "THIRD_001A=false"
     echo "REFRESH_LOOP=false"
     echo "AUTOMATIC_RETRY_001A=false"
@@ -669,6 +757,9 @@ else
     fail "R27_WRAPPER_REWRITE=FAIL"
 fi
 [ "$FAIL" -eq 0 ] || exit 1
+
+echo "=== VERIFY CREDENTIAL STATUS ==="
+credential_gate || exit 2
 
 echo "=== VERIFY LISTENER READY ==="
 STATUS_BEFORE="$RUN_ROOT/listener-status-before.json"

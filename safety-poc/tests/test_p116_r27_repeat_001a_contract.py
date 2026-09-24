@@ -16,8 +16,8 @@ ROOT = Path(__file__).resolve().parents[2]
 MEDIA = ROOT / "safety-poc" / "research" / "media" / "v1"
 SOURCE = ROOT / "safety-poc" / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-ctpp-door.c"
 TRANSFORM = MEDIA / "entrance_p116_r27_repeat_001a_transform.py"
-EXPECTED_GENERATED_SOURCE_SHA = "7449d477738c1b4a66e9a598d93451caa936b4facfde9919ab935c3335d2a99c"
-RUNNER_EXPECTED_SOURCE_SHA = "7449d477738c1b4a66e9a598d93451caa936b4facfde9919ab935c3335d2a99c"
+EXPECTED_GENERATED_SOURCE_SHA = "e62e83c0b1d426fac9f307c84a8069e1bf2c6e7dae47edf78e1cff6012234887"
+RUNNER_EXPECTED_SOURCE_SHA = "e62e83c0b1d426fac9f307c84a8069e1bf2c6e7dae47edf78e1cff6012234887"
 RUNNER_HISTORICAL_PRE_R30D_SOURCE_SHA = "62e0023521cef0e4178248beb78408f89752d108d9d009c388ff153d94195368"
 
 # This is an explicit source-local declaration-order gate for R27-added code in
@@ -126,12 +126,26 @@ def _compile_and_run_harness(candidate: str) -> str:
         #define FALSE 0
         #define G_SOURCE_REMOVE 0
         #define P76_OK 0
+        #define P76_TRUE 1
+        #define P76_FALSE 0
+        #define P76_FACT_GENERATED 2
         #define P78_RTPC_COMPLETE 77
         #define R27_TX_RTPC_CLIENT_001A_REPEAT 78
         #define R27_VIDEO_PAST_35S_SECONDS 35u
         #define R27_VIDEO_PAST_40S_SECONDS 40u
         #define R27_VIDEO_PAST_75S_SECONDS 75u
         #define P97_CLIENT_001A_SEQUENCE_DELTA_FROM_ACK 0x00010000u
+
+        typedef struct {
+            int client_open_1_emitted;
+            int client_open_2_emitted;
+        } P76Facts;
+
+        typedef struct {
+            P76Facts facts;
+            int registered_ctpp_reused;
+            int second_ctpp_open_attempted;
+        } P76Runtime;
 
         typedef struct {
             guint64 packet_count;
@@ -158,7 +172,14 @@ def _compile_and_run_harness(candidate: str) -> str:
         static guint32 r27_initial_001a_sequence;
         static guint32 r27_repeat_001a_sequence;
         static gboolean r27_sequence_model_pass;
+        static guint r27_self_activation_sent_count;
+        static guint r27_helper_pid_at_media_start;
 
+        static gboolean ice_connected;
+        static gboolean ice_ready;
+        static gboolean selected_pair_present;
+        static gboolean p78_rtpc_open_1_sent;
+        static gboolean p78_rtpc_open_2_sent;
         static gboolean p78_rtpc_client_001a_sent;
         static gboolean p97_device_ack_001a_observed;
         static gboolean p97_signaling_finished;
@@ -172,7 +193,7 @@ def _compile_and_run_harness(candidate: str) -> str:
         static int p78_rtpc_stage;
         static p76_u32 p78_rtpc_client_001a_len;
         static guint8 p78_rtpc_client_001a[128];
-        static int p78_rtpc_runtime;
+        static P76Runtime p78_rtpc_runtime;
         static gboolean failed;
         static void *loop;
         static P116RtpTelemetry p116_video_rtp;
@@ -193,6 +214,7 @@ def _compile_and_run_harness(candidate: str) -> str:
         static gboolean r27_queue_rtpc_client_001a_repeat(void);
         static gboolean r27_build_repeat_001a_body(void);
         static gboolean r27_repeat_body_diff_gate(void);
+        static void r27_print_identity_markers(void);
 
         static int harness_printf(const char *fmt, ...)
         {
@@ -216,6 +238,7 @@ def _compile_and_run_harness(candidate: str) -> str:
             (void)seconds; (void)cb; (void)data; timeout_call_count++; return 1u;
         }
         static long long p116_monotonic_ms(void) { return fake_now_ms; }
+        static int getpid(void) { return 4242; }
         static void p78_fail_rtpc(const char *reason) { (void)reason; failed = TRUE; }
         static gboolean p12_queue_vip_frame(guint16 channel, guint8 *buf, p76_u32 len, int kind)
         {
@@ -227,7 +250,7 @@ def _compile_and_run_harness(candidate: str) -> str:
             return queue_should_succeed;
         }
         static gboolean p12_flush_tx(void) { flush_call_count++; return flush_should_succeed; }
-        static P76Status p76_generate_client_001a(int *runtime, guint8 *body, p76_u32 len)
+        static P76Status p76_generate_client_001a(P76Runtime *runtime, guint8 *body, p76_u32 len)
         {
             (void)runtime;
             if (len != 60u || body[0] != 0x40u || body[1] != 0x18u ||
@@ -278,6 +301,13 @@ def _compile_and_run_harness(candidate: str) -> str:
             r27_initial_001a_sequence = 0x11220000u;
             r27_repeat_001a_sequence = 0;
             r27_sequence_model_pass = FALSE;
+            r27_self_activation_sent_count = 1u;
+            r27_helper_pid_at_media_start = 4242u;
+            ice_connected = TRUE;
+            ice_ready = TRUE;
+            selected_pair_present = TRUE;
+            p78_rtpc_open_1_sent = TRUE;
+            p78_rtpc_open_2_sent = TRUE;
             p78_rtpc_client_001a_sent = TRUE;
             p97_device_ack_001a_observed = TRUE;
             p97_signaling_finished = TRUE;
@@ -290,6 +320,11 @@ def _compile_and_run_harness(candidate: str) -> str:
             p12_tx_pending = FALSE;
             p78_rtpc_stage = P78_RTPC_COMPLETE;
             p78_rtpc_client_001a_len = 60u;
+            memset(&p78_rtpc_runtime, 0, sizeof(p78_rtpc_runtime));
+            p78_rtpc_runtime.registered_ctpp_reused = P76_TRUE;
+            p78_rtpc_runtime.second_ctpp_open_attempted = P76_FALSE;
+            p78_rtpc_runtime.facts.client_open_1_emitted = P76_FACT_GENERATED;
+            p78_rtpc_runtime.facts.client_open_2_emitted = P76_FACT_GENERATED;
             for (unsigned int i = 0; i < sizeof(p78_rtpc_client_001a); i++)
                 p78_rtpc_client_001a[i] = (guint8)i;
             failed = FALSE;
@@ -424,6 +459,71 @@ def _compile_and_run_harness(candidate: str) -> str:
             return 0;
         }
 
+        static int test_identity_markers_are_derived_and_flip(void)
+        {
+            reset_state();
+            r27_print_identity_markers();
+            CHECK(strstr(output, "ICE_NEGOTIATION_COUNT=1\n") != NULL);
+            CHECK(strstr(output, "PSEUDOTCP_OPEN_COUNT=1\n") != NULL);
+            CHECK(strstr(output, "CTPP_REGISTRATION_COUNT=1\n") != NULL);
+            CHECK(strstr(output, "RTPC_CLIENT_OPEN_COUNT=2\n") != NULL);
+            CHECK(strstr(output, "SELF_ACTIVATION_COUNT=1\n") != NULL);
+            CHECK(strstr(output, "HELPER_PROCESS_UNCHANGED=true\n") != NULL);
+            CHECK(strstr(output, "SECOND_MEDIA_SESSION=false\n") != NULL);
+            CHECK(strstr(output, "NEW_RTPC_OPEN=false\n") != NULL);
+            CHECK(strstr(output, "NEW_SELF_ACTIVATION=false\n") != NULL);
+            CHECK(strstr(output, "MEDIA_SESSION_IDENTITY_UNCHANGED=true\n") != NULL);
+
+            reset_state();
+            ice_ready = FALSE;
+            r27_print_identity_markers();
+            CHECK(strstr(output, "ICE_NEGOTIATION_COUNT=0\n") != NULL);
+            CHECK(strstr(output, "SECOND_MEDIA_SESSION=true\n") != NULL);
+            CHECK(strstr(output, "MEDIA_SESSION_IDENTITY_UNCHANGED=false\n") != NULL);
+
+            reset_state();
+            pseudotcp_open = FALSE;
+            r27_print_identity_markers();
+            CHECK(strstr(output, "PSEUDOTCP_OPEN_COUNT=0\n") != NULL);
+
+            reset_state();
+            p78_rtpc_runtime.second_ctpp_open_attempted = P76_TRUE;
+            r27_print_identity_markers();
+            CHECK(strstr(output, "CTPP_REGISTRATION_COUNT=0\n") != NULL);
+            CHECK(strstr(output, "SECOND_MEDIA_SESSION=true\n") != NULL);
+
+            reset_state();
+            p78_rtpc_open_2_sent = FALSE;
+            r27_print_identity_markers();
+            CHECK(strstr(output, "RTPC_CLIENT_OPEN_COUNT=1\n") != NULL);
+            CHECK(strstr(output, "MEDIA_SESSION_IDENTITY_UNCHANGED=false\n") != NULL);
+
+            reset_state();
+            p78_rtpc_open_1_sent = TRUE;
+            p78_rtpc_open_2_sent = TRUE;
+            r27_print_identity_markers();
+            CHECK(strstr(output, "RTPC_CLIENT_OPEN_COUNT=2\n") != NULL);
+
+            reset_state();
+            p78_rtpc_open_1_sent = TRUE;
+            p78_rtpc_open_2_sent = TRUE;
+            r27_print_identity_markers();
+            CHECK(strstr(output, "NEW_RTPC_OPEN=false\n") != NULL);
+
+            reset_state();
+            r27_self_activation_sent_count = 2u;
+            r27_print_identity_markers();
+            CHECK(strstr(output, "NEW_SELF_ACTIVATION=true\n") != NULL);
+            CHECK(strstr(output, "SECOND_MEDIA_SESSION=true\n") != NULL);
+
+            reset_state();
+            r27_helper_pid_at_media_start = 999u;
+            r27_print_identity_markers();
+            CHECK(strstr(output, "HELPER_PROCESS_UNCHANGED=false\n") != NULL);
+            CHECK(strstr(output, "SECOND_MEDIA_SESSION=true\n") != NULL);
+            return 0;
+        }
+
         static int test_ack_timeout_absent_no_retry(void)
         {
             reset_state();
@@ -492,6 +592,7 @@ def _compile_and_run_harness(candidate: str) -> str:
             if (test_sequence_rollover_does_not_mutate_ack()) return 1;
             if (test_deterministic_repeat_build_flips_when_input_differs()) return 1;
             if (test_malformed_repeat_inputs_fail_closed()) return 1;
+            if (test_identity_markers_are_derived_and_flip()) return 1;
             if (test_ack_timeout_absent_no_retry()) return 1;
             if (test_unrelated_ack_does_not_satisfy_repeat_gate()) return 1;
             if (test_video_rtp_last_seconds_uses_stream_last_packet()) return 1;
@@ -632,8 +733,37 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
             "P12_TX_ENTRANCE_SELF_ACTIVATION",
         ):
             self.assertNotIn(forbidden, self.r27_segments)
-        self.assertIn("ICE_NEGOTIATION_COUNT=1", self.r27_segments)
+        self.assertIn("ice_negotiation_count =", self.r27_segments)
+        self.assertNotIn('printf("ICE_NEGOTIATION_COUNT=1', self.r27_segments)
+        self.assertNotIn('printf("PSEUDOTCP_OPEN_COUNT=1', self.r27_segments)
+        self.assertNotIn('printf("CTPP_REGISTRATION_COUNT=1', self.r27_segments)
+        self.assertNotIn('printf("RTPC_CLIENT_OPEN_COUNT=2', self.r27_segments)
+        self.assertNotIn('printf("SELF_ACTIVATION_COUNT=1', self.r27_segments)
+        self.assertNotIn('printf("HELPER_PROCESS_UNCHANGED=true', self.r27_segments)
         self.assertIn("NEW_RTPC_OPEN_AFTER_REPEAT", (ROOT / "safety-poc" / "research" / "media" / "v1" / "ct120_run_p116_r27_repeat_001a_live.sh").read_text(encoding="utf-8") if (ROOT / "safety-poc" / "research" / "media" / "v1" / "ct120_run_p116_r27_repeat_001a_live.sh").exists() else "NEW_RTPC_OPEN_AFTER_REPEAT")
+
+    def test_identity_markers_are_not_literal_reporting_constants(self) -> None:
+        for forbidden in (
+            'printf("ICE_NEGOTIATION_COUNT=1',
+            'printf("PSEUDOTCP_OPEN_COUNT=1',
+            'printf("CTPP_REGISTRATION_COUNT=1',
+            'printf("RTPC_CLIENT_OPEN_COUNT=2',
+            'printf("SELF_ACTIVATION_COUNT=1',
+            'printf("HELPER_PROCESS_UNCHANGED=true',
+            'printf("SECOND_MEDIA_SESSION=false',
+            'printf("MEDIA_SESSION_IDENTITY_UNCHANGED=true',
+        ):
+            self.assertNotIn(forbidden, self.candidate)
+        for derived in (
+            "ice_connected && ice_ready && selected_pair_present ? 1u : 0u",
+            "pseudo_tcp && pseudotcp_open ? 1u : 0u",
+            "p78_rtpc_runtime.registered_ctpp_reused == P76_TRUE",
+            "(p78_rtpc_open_1_sent ? 1u : 0u)",
+            "r27_self_activation_sent_count",
+            "r27_helper_pid_at_media_start == (guint)getpid()",
+            "media_session_identity_unchanged =",
+        ):
+            self.assertIn(derived, self.candidate)
 
     def test_stop_before_20_seconds_has_no_repeat_callback_path(self) -> None:
         self.assertIn("R27_REPEAT_DELAY_SECONDS 20u", self.r27_state)
@@ -706,10 +836,51 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
             "MEDIA_ACTIVE_DURATION_SECONDS=",
             "VIDEO_PACKET_COUNTER_PROGRESSING=",
             "SECOND_001A_ACK_CLASSIFICATION=",
-            "NEW_RTPC_OPEN=false",
-            "NEW_SELF_ACTIVATION=false",
+            "NEW_RTPC_OPEN=",
+            "NEW_SELF_ACTIVATION=",
+            "MEDIA_TEARDOWN=",
+            "LISTENER_RESTORED=",
         ):
             self.assertIn(marker, runner)
+
+    def test_runner_final_acceptance_block_uses_contract_marker_names(self) -> None:
+        runner = (MEDIA / "ct120_run_p116_r27_repeat_001a_live.sh").read_text(encoding="utf-8")
+        block = runner.split('echo "=== COMELIT P116 R27 REPEAT 001A LIVE FINAL ==="', 1)[1].split('echo "=== END COMELIT P116 R27 REPEAT 001A LIVE FINAL ==="', 1)[0]
+        required = (
+            "ICE_NEGOTIATION_COUNT=",
+            "PSEUDOTCP_OPEN_COUNT=",
+            "CTPP_REGISTRATION_COUNT=",
+            "SELF_ACTIVATION_COUNT=",
+            "HELPER_PROCESS_UNCHANGED=",
+            "SECOND_MEDIA_SESSION=",
+            "MEDIA_SESSION_IDENTITY_UNCHANGED=",
+            "REPEAT_001A_SENT_COUNT=",
+            "SECOND_001A_RESPONSE=",
+            "SECOND_001A_ACK_CLASSIFICATION=",
+            "NEW_RTPC_OPEN=",
+            "NEW_SELF_ACTIVATION=",
+            "VIDEO_RTP_PAST_40S=",
+            "VIDEO_RTP_PAST_75S=",
+            "VIDEO_PACKET_COUNTER_PROGRESSING=",
+            "MEDIA_ACTIVE_DURATION_SECONDS=",
+            "MEDIA_TEARDOWN=",
+            "LISTENER_RESTORED=",
+            "LISTENER_READY_AFTER=",
+            "CAMPAIGN_PROCESSES_REMAINING=",
+            "RTP_SINK_PORTS_REMAINING=",
+        )
+        for marker in required:
+            with self.subTest(marker=marker):
+                self.assertIn(marker, block)
+
+    def test_runner_credential_gate_refuses_before_listener_stop(self) -> None:
+        runner = (MEDIA / "ct120_run_p116_r27_repeat_001a_live.sh").read_text(encoding="utf-8")
+        self.assertIn("OAUTH_STATUS=/usr/local/sbin/comelit-oauth-status", runner)
+        self.assertIn("CREDENTIAL_MIN_TTL_SECONDS=900", runner)
+        self.assertIn('credential_gate || exit 2', runner)
+        self.assertIn("CREDENTIAL_REFUSAL_BEFORE_LISTENER_STOP=true", runner)
+        self.assertLess(runner.index('echo "=== VERIFY CREDENTIAL STATUS ==="'), runner.index('echo "=== VERIFY LISTENER READY ==="'))
+        self.assertLess(runner.index('echo "=== VERIFY CREDENTIAL STATUS ==="'), runner.index('echo "=== STOP ONLY COMELIT LISTENER ==="'))
 
     def test_runner_materializes_candidate_wrapper_instead_of_base_wrapper_override(self) -> None:
         runner = (MEDIA / "ct120_run_p116_r27_repeat_001a_live.sh").read_text(encoding="utf-8")
