@@ -13,10 +13,7 @@ from homeassistant.components.camera import (
     get_dynamic_camera_stream_settings,
 )
 from homeassistant.components.camera.const import DATA_CAMERA_PREFS
-from homeassistant.components.stream import (
-    DOMAIN as STREAM_DOMAIN,
-    Stream,
-)
+from homeassistant.components.stream import Stream
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
