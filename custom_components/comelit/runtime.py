@@ -979,6 +979,31 @@ class ComelitRingRuntime:
                 except asyncio.CancelledError:
                     pass
 
+    async def async_wait_attached_media_closed(self, timeout: float) -> bool:
+        """Wait for the remote/native attached media channel to close."""
+        if not self.attached_media_open:
+            return True
+
+        task = self._task
+        if task is None or task.done():
+            return not self.attached_media_open
+
+        closed_wait = asyncio.create_task(self._attached_media_closed.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {closed_wait, task},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            return closed_wait in done and closed_wait.result()
+        finally:
+            if not closed_wait.done():
+                closed_wait.cancel()
+                try:
+                    await closed_wait
+                except asyncio.CancelledError:
+                    pass
+
     async def async_stop_attached_media(self, timeout: float = 10.0) -> bool:
         if not self.attached_media_open:
             return True
