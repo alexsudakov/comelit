@@ -18,6 +18,8 @@ import entrance_p80_ha_media_runtime_transform as p80
 
 TRANSPORT = COMPONENT / "media_transport.py"
 CAMERA = COMPONENT / "camera.py"
+RING_MEDIA = COMPONENT / "ring_media.py"
+ATTACHED = COMPONENT / "attached_media.py"
 SESSION = COMPONENT / "media_session.py"
 SWITCH = COMPONENT / "switch.py"
 BUTTON = COMPONENT / "button.py"
@@ -33,6 +35,8 @@ class P116HaStreamRtpBridgeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.transport = TRANSPORT.read_text(encoding="utf-8")
         cls.camera = CAMERA.read_text(encoding="utf-8")
+        cls.ring_media = RING_MEDIA.read_text(encoding="utf-8")
+        cls.attached = ATTACHED.read_text(encoding="utf-8")
         cls.session = SESSION.read_text(encoding="utf-8")
         cls.switch = SWITCH.read_text(encoding="utf-8")
         cls.button = BUTTON.read_text(encoding="utf-8")
@@ -101,13 +105,17 @@ class P116HaStreamRtpBridgeTests(unittest.TestCase):
             run_cycle.index("active_wait = asyncio.create_task(self._media_active.wait())"),
             run_cycle.index("await self._hass.async_add_executor_job(_write_local_sdp)"),
         )
-        self.assertIn("self._transport.local_sdp_ready", self.camera)
+        self.assertIn("lambda: transport.local_sdp_ready", self.camera)
         self.assertIn("if not ready:\n            return None", self.camera)
 
-    def test_t6_camera_stream_gate_does_not_start_or_duplicate_sessions(self) -> None:
-        self.assertIn("if self.stream is None:", self.camera)
-        self.assertIn("self.hass.data[STREAM_DOMAIN][ATTR_STREAMS].append(stream)", self.camera)
-        self.assertNotIn(".async_acquire(", self.camera)
+    def test_t6_camera_owns_bounded_live_view_without_raw_bootstrap(self) -> None:
+        self.assertIn("async def _async_acquire_camera_view_media", self.camera)
+        self.assertIn('reason=_CAMERA_VIEW_LEASE_REASON', self.camera)
+        self.assertIn('owner_kind="on_demand"', self.camera)
+        self.assertIn("_CAMERA_VIEW_ABSOLUTE_LIMIT_SECONDS = 600.0", self.camera)
+        self.assertIn("provider.async_acquire_consumer", self.camera)
+        self.assertIn("provider.async_release_consumer", self.camera)
+        self.assertIn("provider.async_get_stream()", self.camera)
         for forbidden in (
             "async_negotiate_p2p",
             "async_pause_for_media",
@@ -116,6 +124,44 @@ class P116HaStreamRtpBridgeTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, self.camera)
             self.assertNotIn(forbidden, self.switch)
+
+    def test_t6b_thumbnail_and_preload_cannot_bootstrap_media(self) -> None:
+        stills = self.camera.split(
+            "def use_stream_for_stills", 1
+        )[1].split("@property", 1)[0]
+        self.assertIn("return False", stills)
+        image_method = self.camera.split(
+            "async def async_camera_image", 1
+        )[1].split("async def async_added_to_hass", 1)[0]
+        self.assertNotIn("async_create_stream(", image_method)
+        self.assertIn("async def _async_disable_preload_stream", self.camera)
+        self.assertIn("preload_stream=False", self.camera)
+        self.assertIn('"preload_stream_allowed": False', self.camera)
+
+    def test_t6c_real_ring_reuses_attached_session_and_shared_ha_stream(self) -> None:
+        self.assertIn("attached_session.claimed", self.camera)
+        self.assertIn('owner_kind="attached_inbound"', self.camera)
+        self.assertIn("DATA_ATTACHED_MEDIA_PROVIDERS", self.camera)
+        self.assertIn("async def async_acquire_consumer", self.ring_media)
+        self.assertIn("async def async_release_consumer", self.ring_media)
+        self.assertIn("async def async_get_stream", self.ring_media)
+        self.assertIn("stream_consumer_acquired = False", self.ring_media)
+        self.assertIn("self.active or bool(self._leases)", self.attached)
+
+    def test_t6d_camera_view_release_follows_ha_provider_lifecycle(self) -> None:
+        self.assertIn("async def _async_monitor_camera_view", self.camera)
+        self.assertIn("outputs = stream.outputs()", self.camera)
+        self.assertIn('reason = "last_stream_provider_removed"', self.camera)
+        self.assertIn('reason = "hls_idle"', self.camera)
+        self.assertIn('reason = "provider_never_started"', self.camera)
+        self.assertIn('reason = "camera_view_absolute_timeout"', self.camera)
+        self.assertIn("await self._async_release_camera_view_media()", self.camera)
+
+    def test_t6e_explicit_switch_is_deprecated_debug_fallback(self) -> None:
+        self.assertIn("_attr_entity_registry_enabled_default = False", self.switch)
+        self.assertIn('"deprecated": True', self.switch)
+        self.assertIn('"replacement_entity_id": ENTRANCE_CAMERA_ENTITY_ID', self.switch)
+        self.assertIn("async_force_stop", self.switch)
 
     def test_t7_hard_limit_and_r63_gate_path_remains_bounded(self) -> None:
         self.assertIn("MEDIA_SESSION_HARD_LIMIT_SECONDS = 600", self.session)

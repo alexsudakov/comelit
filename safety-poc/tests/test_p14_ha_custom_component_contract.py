@@ -174,10 +174,14 @@ class P14HomeAssistantContractTests(unittest.TestCase):
             "at most one active intercom media session across the whole Comelit integration",
             doc,
         )
-        self.assertIn("switch.comelit_entrance_camera", doc)
-        self.assertIn("binary_sensor.comelit_entrance_camera_active", doc)
-        self.assertIn("sensor.comelit_entrance_camera_session_remaining", doc)
         self.assertIn("camera.comelit_entrance", doc)
+        self.assertIn("camera_view", doc)
+        self.assertIn("use_stream_for_stills=False", doc)
+        self.assertIn("preload_stream", doc)
+        self.assertIn("reuses the already-claimed attached call transaction", doc)
+        self.assertIn("switch.comelit_entrance_camera", doc)
+        self.assertIn("deprecated=true", doc)
+        self.assertIn("enabled_by_default=false", doc)
         self.assertIn("official Comelit application can connect again", doc)
         self.assertIn("must not stop or recreate the persistent Ring/Door listener", doc)
 

@@ -27,8 +27,10 @@ from .const import (
     CONF_OAUTH_ACCESS_TOKEN,
     CONF_SHARED_SECRET,
     CONF_VIP_TOKEN,
+    DATA_ATTACHED_MEDIA_PROVIDERS,
     DATA_ATTACHED_MEDIA_SESSIONS,
     DATA_ATTACHED_MEDIA_TRANSPORTS,
+    DATA_MEDIA_PROVIDERS,
     DATA_MEDIA_SESSIONS,
     DATA_MEDIA_TRANSPORTS,
     DATA_RING_MEDIA,
@@ -203,6 +205,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             attached_session,
             attached_transport,
         )
+        attached_providers = domain_data.setdefault(
+            DATA_ATTACHED_MEDIA_PROVIDERS, {}
+        )
+        attached_providers[entry.entry_id] = ring_media_provider
         ring_media = RingMediaCoordinator(
             hass,
             attached_session,
@@ -224,6 +230,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             media_manager,
             media_transport,
         )
+        media_providers = domain_data.setdefault(DATA_MEDIA_PROVIDERS, {})
+        media_providers[entry.entry_id] = synthetic_ring_media_provider
         synthetic_ring_media = RingMediaCoordinator(
             hass,
             media_manager,
@@ -255,7 +263,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     supervisors = domain_data.get(DATA_SUPERVISORS, {})
     media_sessions = domain_data.get(DATA_MEDIA_SESSIONS, {})
     media_transports = domain_data.get(DATA_MEDIA_TRANSPORTS, {})
+    media_providers = domain_data.get(DATA_MEDIA_PROVIDERS, {})
     attached_sessions = domain_data.get(DATA_ATTACHED_MEDIA_SESSIONS, {})
+    attached_providers = domain_data.get(DATA_ATTACHED_MEDIA_PROVIDERS, {})
     attached_transports = domain_data.get(DATA_ATTACHED_MEDIA_TRANSPORTS, {})
     ring_media_lifecycles = domain_data.get(DATA_RING_MEDIA, {})
     synthetic_lifecycles = domain_data.get(DATA_SYNTHETIC_RING_MEDIA, {})
@@ -264,7 +274,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     supervisor = supervisors.pop(entry.entry_id, None)
     media_manager = media_sessions.pop(entry.entry_id, None)
     media_transport = media_transports.pop(entry.entry_id, None)
+    media_providers.pop(entry.entry_id, None)
     attached_session = attached_sessions.pop(entry.entry_id, None)
+    attached_providers.pop(entry.entry_id, None)
     attached_transports.pop(entry.entry_id, None)
     ring_media = ring_media_lifecycles.pop(entry.entry_id, None)
     synthetic_ring_media = synthetic_lifecycles.pop(entry.entry_id, None)
@@ -311,10 +323,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             domain_data.pop(DATA_MEDIA_SESSIONS, None)
         if not media_transports:
             domain_data.pop(DATA_MEDIA_TRANSPORTS, None)
+        if not media_providers:
+            domain_data.pop(DATA_MEDIA_PROVIDERS, None)
         if not attached_sessions:
             domain_data.pop(DATA_ATTACHED_MEDIA_SESSIONS, None)
         if not attached_transports:
             domain_data.pop(DATA_ATTACHED_MEDIA_TRANSPORTS, None)
+        if not attached_providers:
+            domain_data.pop(DATA_ATTACHED_MEDIA_PROVIDERS, None)
         if not ring_media_lifecycles:
             domain_data.pop(DATA_RING_MEDIA, None)
         if not synthetic_lifecycles:
