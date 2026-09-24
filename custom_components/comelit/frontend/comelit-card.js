@@ -582,6 +582,10 @@ class ComelitCard extends HTMLElement {
           color: var(--secondary-text-color);
         }
 
+        .action-message:empty {
+          display: none;
+        }
+
         .runtime-status {
           margin-top: 12px;
         }
@@ -694,6 +698,17 @@ class ComelitCard extends HTMLElement {
     }
 
     this._updateDoorActionUi(model, call);
+
+    const cameraToggle = this.shadowRoot.querySelector(
+      "[data-intercom-camera-toggle]",
+    );
+    if (cameraToggle) {
+      const camera = this._cameraPresentation(model);
+      cameraToggle.disabled = !camera.available;
+      cameraToggle.textContent = this._intercomViewerOpen
+        ? "Скрыть камеру"
+        : "Показать камеру";
+    }
   }
 
   _doorPresentation(panel, model, call) {
@@ -816,11 +831,12 @@ class ComelitCard extends HTMLElement {
     const gateDoor = this._doorPresentation("gate", model, call);
     const camera = this._cameraPresentation(model);
 
-    const actionMessage = this._doorActionMessage
-      ? `<div data-door-action-message class="action-message ${this._doorActionMessage.kind === "error" ? "error" : ""}">
-          ${escapeHtml(this._doorActionMessage.text)}
-        </div>`
-      : "";
+    const actionMessage = `
+      <div
+        data-door-action-message
+        class="action-message ${this._doorActionMessage?.kind === "error" ? "error" : ""}"
+      >${escapeHtml(this._doorActionMessage?.text || "")}</div>
+    `;
 
     const selectedViewer = entranceSelected
       ? `
