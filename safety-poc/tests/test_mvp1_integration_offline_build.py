@@ -898,6 +898,12 @@ class MVP1IntegrationRingMediaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stream.stop_calls, 0)
         self.assertEqual(provider.consumers, {"camera_view": 1})
 
+        # A legacy/direct cleanup request must not stop a stream still owned by
+        # the live camera consumer.
+        await provider.async_close()
+        self.assertIs(provider.stream, stream)
+        self.assertEqual(stream.stop_calls, 0)
+
         await provider.async_release_consumer("camera_view")
         self.assertIsNone(provider.stream)
         self.assertEqual(stream.stop_calls, 1)
