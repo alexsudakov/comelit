@@ -814,7 +814,7 @@ class ComelitEntranceCamera(Camera):
     ) -> bytes | None:
         """Return a still only if a live stream already owns media.
 
-        This method deliberately never calls async_create_stream(), preventing
+        This method deliberately never enters stream creation, preventing
         entity-picture/thumbnail polling from opening the intercom camera.
         """
         owner = self._camera_view_owner
