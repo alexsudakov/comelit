@@ -214,8 +214,7 @@ STATIC_SAFETY_CHECK=PASS
 COMPILEALL=PASS
 ```
 
-GitHub PR CI remains authoritative for the final branch state after this result document
-and version metadata are added.
+GitHub PR #192 CI on the final pre-merge branch state independently passed both required workflows. The offline-safety job ran 2206 tests successfully (4 skipped in the GitHub runner), and Validate HACS passed.
 
 ## 8. What is and is not proven
 
@@ -284,11 +283,15 @@ PRODUCTION_FIX_IMPLEMENTED=true
 PRODUCTION_ARTIFACT_LIVE_VALIDATED=false
 FULL_REGRESSION=PASS
 FULL_REGRESSION_TESTS=2206
+GITHUB_PR_CI_SKIPPED=4
 OFFLINE_SAFETY=PASS
-HACS_VALIDATION=PENDING_PR_CI
+HACS_VALIDATION=PASS
 PRODUCTION_HA_DEPLOY=false
 HA_RESTART=false
 HA_RELOAD=false
+PR=192
+MERGED=false
+RELEASE=none
 RESULT=PASS_LONG_MEDIA_FIXED
 === END COMELIT LONG MEDIA CORRECTIVE ===
 ```
