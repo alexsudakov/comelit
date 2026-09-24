@@ -22,6 +22,7 @@ from homeassistant.components.stream import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .attached_media import (
@@ -615,6 +616,26 @@ class ComelitEntranceCamera(Camera):
             self._automatic_start_ready = False
             return False
 
+    async def _async_bind_camera_view(
+        self,
+        owner: ComelitMediaSessionManager | ComelitAttachedRingMediaSession,
+        transport: ComelitEntranceMediaTransport | ComelitAttachedRingMediaTransport,
+        provider: HAStreamMediaProvider,
+        *,
+        owner_kind: str,
+    ) -> None:
+        try:
+            await provider.async_acquire_consumer(_CAMERA_VIEW_LEASE_REASON)
+        except BaseException:
+            try:
+                await owner.async_release(reason=_CAMERA_VIEW_LEASE_REASON)
+            finally:
+                raise
+        self._camera_view_owner = owner
+        self._camera_view_transport = transport
+        self._camera_view_provider = provider
+        self._camera_view_owner_kind = owner_kind
+
     async def _async_acquire_camera_view_media(self) -> None:
         """Acquire one camera-view lease, preferring an inbound Ring transaction."""
         async with self._camera_view_lock:
@@ -623,23 +644,28 @@ class ComelitEntranceCamera(Camera):
                     return
                 self._camera_view_owner = None
                 self._camera_view_transport = None
+                self._camera_view_provider = None
                 self._camera_view_owner_kind = None
 
             attached_session = self._attached_session
             attached_transport = self._attached_transport
+            attached_provider = self._attached_provider
 
-            if (
-                attached_session is not None
-                and attached_transport is not None
-                and attached_session.claimed
-            ):
+            if attached_session is not None and attached_session.claimed:
+                if attached_transport is None or attached_provider is None:
+                    raise HomeAssistantError(
+                        "Comelit attached Ring media provider is unavailable"
+                    )
                 await attached_session.async_acquire(
                     panel="entrance",
                     reason=_CAMERA_VIEW_LEASE_REASON,
                 )
-                self._camera_view_owner = attached_session
-                self._camera_view_transport = attached_transport
-                self._camera_view_owner_kind = "attached_inbound"
+                await self._async_bind_camera_view(
+                    attached_session,
+                    attached_transport,
+                    attached_provider,
+                    owner_kind="attached_inbound",
+                )
                 return
 
             try:
@@ -657,6 +683,7 @@ class ComelitEntranceCamera(Camera):
                     str(exc) == "attached_inbound_media_busy"
                     and attached_session is not None
                     and attached_transport is not None
+                    and attached_provider is not None
                     and attached_session.claimed
                 ):
                     try:
@@ -666,24 +693,40 @@ class ComelitEntranceCamera(Camera):
                         )
                     except ComelitAttachedMediaError:
                         raise
-                    self._camera_view_owner = attached_session
-                    self._camera_view_transport = attached_transport
-                    self._camera_view_owner_kind = "attached_inbound"
+                    await self._async_bind_camera_view(
+                        attached_session,
+                        attached_transport,
+                        attached_provider,
+                        owner_kind="attached_inbound",
+                    )
                     return
                 raise
 
-            self._camera_view_owner = self._manager
-            self._camera_view_transport = self._transport
-            self._camera_view_owner_kind = "on_demand"
+            await self._async_bind_camera_view(
+                self._manager,
+                self._transport,
+                self._media_provider,
+                owner_kind="on_demand",
+            )
 
     async def _async_release_camera_view_media(self) -> None:
         async with self._camera_view_lock:
             owner = self._camera_view_owner
+            provider = self._camera_view_provider
             self._camera_view_owner = None
             self._camera_view_transport = None
+            self._camera_view_provider = None
             self._camera_view_owner_kind = None
             if owner is None:
                 return
+
+            if provider is not None:
+                try:
+                    await provider.async_release_consumer(_CAMERA_VIEW_LEASE_REASON)
+                except Exception:
+                    _LOGGER.exception(
+                        "Failed to release Comelit camera-view stream consumer"
+                    )
             try:
                 await owner.async_release(reason=_CAMERA_VIEW_LEASE_REASON)
             except Exception:
@@ -704,7 +747,7 @@ class ComelitEntranceCamera(Camera):
         return str(path)
 
     async def async_create_stream(self) -> Stream | None:
-        """Start one bounded Comelit session only for an explicit HA stream request."""
+        """Start media only for an explicit HA stream/record request."""
         if not self._automatic_start_ready:
             if not await self._async_disable_preload_stream():
                 return None
@@ -715,27 +758,21 @@ class ComelitEntranceCamera(Camera):
         async with self._create_stream_lock:
             if self.stream is not None and self._camera_view_owner is not None:
                 return self.stream
+            if self.stream is not None:
+                await self._async_reset_stream()
 
             await self._async_acquire_camera_view_media()
             try:
-                source = await self.stream_source()
-                if source is None:
+                provider = self._camera_view_provider
+                if provider is None:
+                    raise HomeAssistantError(
+                        "Comelit live-view stream provider is unavailable"
+                    )
+                stream = await provider.async_get_stream()
+                if stream is None:
                     raise HomeAssistantError(
                         "Comelit live-view media source did not become ready"
                     )
-                stream = Stream(
-                    self.hass,
-                    source,
-                    pyav_options={"protocol_whitelist": "file,udp,rtp"},
-                    stream_settings=copy.copy(
-                        self.hass.data[STREAM_DOMAIN][ATTR_SETTINGS]
-                    ),
-                    dynamic_stream_settings=await get_dynamic_camera_stream_settings(
-                        self.hass, self.entity_id
-                    ),
-                    stream_label=self.entity_id,
-                )
-                self.hass.data[STREAM_DOMAIN][ATTR_STREAMS].append(stream)
                 stream.set_update_callback(self.async_write_ha_state)
                 self.stream = stream
                 self._reset_hls_http_probe_state()
@@ -892,14 +929,15 @@ class ComelitEntranceCamera(Camera):
         await self._async_release_camera_view_media()
 
     async def _async_reset_stream(self) -> None:
+        """Detach the camera entity without stopping a Ring-shared HA Stream.
+
+        The selected HAStreamMediaProvider owns the Stream object. Releasing
+        the camera consumer closes it only when no Ring/recording consumer
+        remains.
+        """
         self._reset_hls_http_probe_state()
         self._last_hls_diagnostics_signature = None
-        stream = self.stream
-        if stream is None:
-            return
-        await stream.stop()
-        if self.stream is stream:
-            self.stream = None
+        self.stream = None
 
     async def _async_probe_hls_http_boundary(self) -> None:
         result = self._new_hls_http_probe_result()
