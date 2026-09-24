@@ -868,6 +868,41 @@ class MVP1IntegrationRingMediaTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             ring_media.safe_ring_media_paths(Path("/media"), "../token")
 
+    async def test_shared_ha_stream_provider_closes_only_after_last_consumer(self) -> None:
+        class FakeSharedStream:
+            def __init__(self) -> None:
+                self.stop_calls = 0
+
+            async def stop(self) -> None:
+                self.stop_calls += 1
+
+        hass = FakeHass()
+        manager = FakeManager()
+        provider = ring_media.HAStreamMediaProvider(
+            hass,
+            manager,
+            transport=object(),
+        )
+        stream = FakeSharedStream()
+        provider._stream = stream
+
+        await provider.async_acquire_consumer("ring_media")
+        await provider.async_acquire_consumer("camera_view")
+        self.assertEqual(
+            provider.consumers,
+            {"ring_media": 1, "camera_view": 1},
+        )
+
+        await provider.async_release_consumer("ring_media")
+        self.assertIs(provider.stream, stream)
+        self.assertEqual(stream.stop_calls, 0)
+        self.assertEqual(provider.consumers, {"camera_view": 1})
+
+        await provider.async_release_consumer("camera_view")
+        self.assertIsNone(provider.stream)
+        self.assertEqual(stream.stop_calls, 1)
+        self.assertEqual(provider.consumers, {})
+
     def test_existing_contract_constants_are_unchanged(self) -> None:
         self.assertEqual(const.EVENT_RING, "comelit_ring")
         self.assertEqual(const.EVENT_DOOR_OPERATION, "comelit_door_operation")
