@@ -518,6 +518,7 @@ ending
 - во время активного разговора нельзя переключаться между двумя домофонными точками;
 - во время активного разговора можно смотреть ordinary surveillance cameras;
 - просмотр другой surveillance camera не меняет active call/audio/door binding;
+- если entrance intercom live-view уже был явно открыт пользователем, переход во вкладку «Видеонаблюдение» не должен сам закрывать этот viewer или освобождать intercom camera-view lease; возврат во вкладку «Домофон» должен показывать тот же активный viewer, пока пользователь явно не выбрал «Скрыть камеру» или backend/session lifecycle не завершил media;
 - после просмотра surveillance camera можно вернуться только к текущей active intercom point до завершения разговора;
 - Custom HA Card и Telegram Mini App должны реализовывать одну и ту же функциональную модель;
 - Telegram Mini App не получает raw camera credentials или unrestricted HA token.
