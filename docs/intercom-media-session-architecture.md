@@ -22,7 +22,7 @@ The previous pre-live assumption that media `must not stop or recreate the persi
 8. After media teardown: confirm media inactive, release the pause, restart the persistent listener, and let it return to READY.
 9. If media teardown is uncertain, fail closed and keep the listener paused rather than risk two upstream sessions.
 10. Media lifecycle must never invoke a Door action.
-11. While media owns the connection, Door actions are temporarily unavailable and must not restart the listener behind the manager's back.
+11. While a separately bootstrapped on-demand media session owns the exclusive connection (`media_paused=true`), Door actions are temporarily unavailable and must not restart the listener behind the manager's back. Attached inbound Ring media is a different ownership mode because it reuses the persistent listener transaction.
 12. Home Assistant core must never be stopped or restarted for this lifecycle.
 13. Cleanup is idempotent.
 14. `gate` media remains unvalidated and unavailable.
@@ -193,14 +193,46 @@ transaction and therefore retains the bounded recording-owned test lifecycle.
 
 ## 9. Door behavior during media
 
-Both public Door surfaces fail closed while `media_paused=true`:
+There are two distinct media ownership modes.
+
+### Separately bootstrapped on-demand camera media
+
+When `media_paused=true`, Door actions fail closed because that media session owns the
+exclusive Comelit connection:
 
 ```text
-button.comelit_main_entrance_open_door
-comelit.open_door
+camera self-activation
+-> listener paused
+-> Door unavailable
+-> media teardown
+-> listener restored
+-> Door available
 ```
 
-They must not call `runtime.async_start()` while media owns the exclusive connection. Door availability returns after media is torn down and the listener is restored.
+No Door action may restart the listener behind the media manager.
+
+### Attached inbound Ring media
+
+A real inbound Ring reuses the already-live persistent call transaction and does not
+set `media_paused=true`. Current production UI semantics allow one explicit same-panel
+Door button press during this attached Ring path. The bundled Custom Card uses
+`button.press` on the standard Comelit Door button and never retries automatically.
+
+Current implementation detail:
+
+- `button.comelit_main_entrance_open_door` is the active explicit-user surface used by
+  the Custom Card and current Ring/Telegram automation;
+- `comelit.open_door` currently remains fail-closed while
+  `attached_media_busy=true`.
+
+Therefore current Telegram orchestration must not stop attached Ring media merely to
+open the Door, and must not wait for listener READY first. It uses exactly one button
+press, preserves Ring/media lifetime under the backend, and separately records
+`comelit_ring_interaction(outcome=open_requested)` for Ring correlation.
+
+This distinction is an implementation boundary, not a claim of physical Door effect.
+Automatic retry remains forbidden, and service/button semantics may be unified in a
+future integration change.
 
 ## 10. Full-duplex future
 
