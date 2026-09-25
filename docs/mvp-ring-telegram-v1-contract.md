@@ -1,6 +1,8 @@
-# Comelit Ring / Telegram MVP v1 — current contract
+# Comelit Ring / Telegram MVP v1 — historical milestone contract
 
-Status: **approved current MVP milestone**  
+> Historical note (2026-09-25): this file preserves the original MVP-v1 acceptance boundary. Current production Ring/Telegram behavior is defined by `docs/ring-telegram-ha-automation-current.md` and the maintained `examples/home-assistant/packages/comelit_ring_telegram_live.yaml`. In particular, current Ring lifetime follows backend call state, the 20-second recording no longer ends the call/media lifecycle, and current automation does not use `switch.comelit_entrance_camera`.
+
+Status: **historical MVP milestone; superseded for current production orchestration**  
 Date: 2026-09-17  
 Baseline at creation: `a54d39ea6dc625ea8facefa7cff556648f58515b`
 
