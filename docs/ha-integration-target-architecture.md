@@ -1,6 +1,8 @@
 # Comelit Home Assistant Integration — Target Architecture and MVP Requirements
 
-Status: approved design baseline
+> Historical baseline note (2026-09-25): this file records the original target/design decisions and early research plan. The direct-HA architectural direction remains valid, but the old camera research matrix, 60-second recording goal, 30-second Ring timeout, migration backend and narrow MVP sections are not current production behavior. Current runtime/media rules are in `docs/intercom-media-session-architecture.md`, current camera ownership in `docs/camera-owned-media-lifecycle.md`, current Ring/Telegram orchestration in `docs/ring-telegram-ha-automation-current.md`, and the current UI in `docs/custom-card-architecture.md` plus `README.md`.
+
+Status: historical approved design baseline; current production supplements take precedence
 Date: 2026-09-01
 Repository baseline at decision time: `f0dba9324741b376f67da26543deec58fc4cdd76`
 
