@@ -517,7 +517,7 @@ No microphone/full-duplex behavior is added.
 
 One explicit frontend Door click maps to exactly one Home Assistant `button.press` against the resolved Comelit button entity. The card does not call low-level Comelit services, does not retry automatically, and does not assert physical opening from service completion alone.
 
-Entrance live view is started only by an explicit user camera action and is rendered through the standard Home Assistant camera presentation path. Leaving the intercom tab closes the card's intercom viewer surface; this does not terminate an independent active inbound call.
+Entrance live view is started only by an explicit user camera action and is rendered through the standard Home Assistant camera presentation path. Switching from «Домофон» to «Видеонаблюдение» MUST NOT destroy an explicitly opened entrance intercom viewer. The viewer stays connected to the DOM and retains its HA camera-view lifecycle until the user explicitly hides it, changes away from the relevant intercom point, the card is torn down/reloaded, or the backend/session ends. Ordinary surveillance viewers remain non-persistent and are released when leaving the surveillance tab.
 
 ### Phase D — incoming call UI
 
