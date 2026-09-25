@@ -7,8 +7,7 @@ Status: camera-owned on-demand lifecycle live-validated in HAOS; inbound Ring li
 The user-facing entity `camera.comelit_entrance` owns normal live-view startup and
 shutdown. A separate media switch is no longer required for ordinary use.
 
-The explicit `switch.comelit_entrance_camera` remains for one transition release as
-a disabled-by-default deprecated diagnostic fallback. It is not part of the target UX.
+The explicit `switch.comelit_entrance_camera` remains as a disabled-by-default deprecated diagnostic fallback for compatibility. Camera-owned automatic start/release has already been live-validated in HAOS, and current user/Telegram flows do not depend on the switch.
 
 ## Normal on-demand view
 
@@ -120,5 +119,4 @@ switch.comelit_entrance_camera
 Existing installations may keep the already-enabled switch until the next cleanup
 release. New/clean entity registry setups should not expose it by default.
 
-After HAOS live validation of automatic start, Ring reuse and automatic release, the
-switch platform/entity can be removed from the public integration surface.
+HAOS live validation of automatic camera start and automatic release has passed. The switch can therefore be removed in a later compatibility-cleanup release once existing installations no longer need the fallback. Current Ring/Telegram automation must not reference it.
