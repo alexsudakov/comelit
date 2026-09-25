@@ -346,10 +346,8 @@ class ComelitCard extends HTMLElement {
       this._selectedCamera = cameras[0].entityId;
     }
 
-    const content =
-      this._activeTab === "surveillance"
-        ? this._renderSurveillance(cameras)
-        : this._renderIntercom();
+    const intercomContent = this._renderIntercom();
+    const surveillanceContent = this._renderSurveillance(cameras);
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -389,6 +387,10 @@ class ComelitCard extends HTMLElement {
 
         .content {
           padding: 12px;
+        }
+
+        .tab-content[hidden] {
+          display: none;
         }
 
         .notice {
@@ -613,8 +615,19 @@ class ComelitCard extends HTMLElement {
             data-tab="surveillance"
           >Видеонаблюдение</button>
         </div>
-        <div class="content">
-          ${content}
+        <div
+          class="content tab-content"
+          data-tab-panel="intercom"
+          ${this._activeTab === "intercom" ? "" : "hidden"}
+        >
+          ${intercomContent}
+        </div>
+        <div
+          class="content tab-content"
+          data-tab-panel="surveillance"
+          ${this._activeTab === "surveillance" ? "" : "hidden"}
+        >
+          ${surveillanceContent}
         </div>
       </ha-card>
     `;
@@ -622,17 +635,18 @@ class ComelitCard extends HTMLElement {
     this._bindHandlers();
     this._rendered = true;
 
-    if (this._activeTab === "surveillance" && this._selectedCamera) {
-      this._mountViewer(this._selectedCamera);
-    } else if (
-      this._activeTab === "intercom" &&
+    if (
       this._selectedIntercomPanel === "entrance" &&
       this._intercomViewerOpen
     ) {
       this._mountIntercomViewer();
-    } else {
-      this._updateDynamicState();
     }
+
+    if (this._activeTab === "surveillance" && this._selectedCamera) {
+      this._mountViewer(this._selectedCamera);
+    }
+
+    this._updateDynamicState();
   }
 
   _updateDynamicState() {
@@ -928,19 +942,35 @@ class ComelitCard extends HTMLElement {
   _bindHandlers() {
     for (const button of this.shadowRoot.querySelectorAll("[data-tab]")) {
       button.addEventListener("click", () => {
-        const nextTab = button.dataset.tab;
-        if (nextTab === "surveillance") {
-          this._intercomViewerOpen = false;
-        }
-        this._activeTab = nextTab;
-        this._render();
+        this._setActiveTab(button.dataset.tab);
       });
     }
 
     for (const button of this.shadowRoot.querySelectorAll("[data-camera]")) {
       button.addEventListener("click", () => {
-        this._selectedCamera = button.dataset.camera;
-        this._render();
+        const entityId = button.dataset.camera;
+        if (!entityId || entityId === this._selectedCamera) {
+          return;
+        }
+
+        this._selectedCamera = entityId;
+        for (const candidate of this.shadowRoot.querySelectorAll("[data-camera]")) {
+          candidate.classList.toggle(
+            "selected",
+            candidate.dataset.camera === entityId,
+          );
+        }
+
+        this._viewerGeneration += 1;
+        this._viewerElement = undefined;
+        const target = this.shadowRoot.querySelector("#viewer");
+        if (target) {
+          target.replaceChildren();
+        }
+
+        if (this._activeTab === "surveillance") {
+          this._mountViewer(entityId);
+        }
       });
     }
 
@@ -986,6 +1016,54 @@ class ComelitCard extends HTMLElement {
         this._pressDoor(button.dataset.doorAction);
       });
     }
+  }
+
+  _setActiveTab(nextTab) {
+    if (
+      (nextTab !== "intercom" && nextTab !== "surveillance") ||
+      nextTab === this._activeTab
+    ) {
+      return;
+    }
+
+    this._activeTab = nextTab;
+
+    for (const button of this.shadowRoot.querySelectorAll("[data-tab]")) {
+      button.classList.toggle("active", button.dataset.tab === nextTab);
+    }
+
+    for (const panel of this.shadowRoot.querySelectorAll("[data-tab-panel]")) {
+      panel.hidden = panel.dataset.tabPanel !== nextTab;
+    }
+
+    if (nextTab === "surveillance") {
+      // Keep the explicitly opened intercom viewer connected to the DOM.
+      // This preserves its HA camera-view lease while the user inspects
+      // ordinary surveillance cameras.
+      if (this._selectedCamera && !this._viewerElement) {
+        this._mountViewer(this._selectedCamera);
+      }
+    } else {
+      // Ordinary surveillance viewing is not persistent. Release the hidden
+      // surveillance viewer when leaving its tab so it does not keep an RTSP
+      // stream alive in the background.
+      this._viewerGeneration += 1;
+      this._viewerElement = undefined;
+      const target = this.shadowRoot.querySelector("#viewer");
+      if (target) {
+        target.replaceChildren();
+      }
+
+      if (
+        this._intercomViewerOpen &&
+        this._selectedIntercomPanel === "entrance" &&
+        !this._intercomViewerElement
+      ) {
+        this._mountIntercomViewer();
+      }
+    }
+
+    this._updateDynamicState();
   }
 
   async _pressDoor(panel) {
@@ -1109,8 +1187,7 @@ class ComelitCard extends HTMLElement {
       if (
         generation !== this._intercomViewerGeneration ||
         !this._intercomViewerOpen ||
-        this._selectedIntercomPanel !== "entrance" ||
-        this._activeTab !== "intercom"
+        this._selectedIntercomPanel !== "entrance"
       ) {
         return;
       }
