@@ -57,6 +57,31 @@ class FrontendBundleContractTest(unittest.TestCase):
         self.assertIn("async _mountIntercomViewer()", source)
         self.assertIn('camera_view: "live"', source)
 
+    def test_intercom_viewer_persists_across_tab_switches(self) -> None:
+        source = CARD.read_text(encoding="utf-8")
+
+        self.assertIn('data-tab-panel="intercom"', source)
+        self.assertIn('data-tab-panel="surveillance"', source)
+        self.assertIn("panel.hidden = panel.dataset.tabPanel !== nextTab", source)
+        self.assertIn(
+            "Keep the explicitly opened intercom viewer connected to the DOM.",
+            source,
+        )
+        self.assertNotIn(
+            'if (nextTab === "surveillance") {\n          this._intercomViewerOpen = false;',
+            source,
+        )
+
+    def test_surveillance_viewer_is_released_when_leaving_surveillance(self) -> None:
+        source = CARD.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "Ordinary surveillance viewing is not persistent.",
+            source,
+        )
+        self.assertIn('const target = this.shadowRoot.querySelector("#viewer")', source)
+        self.assertIn("target.replaceChildren()", source)
+
     def test_active_call_locks_other_intercom_panel(self) -> None:
         source = CARD.read_text(encoding="utf-8")
 
