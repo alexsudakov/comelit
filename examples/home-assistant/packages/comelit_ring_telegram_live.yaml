@@ -1,9 +1,12 @@
 # Comelit -> Telegram live interaction package.
 #
-# Validated against Home Assistant 2026.9.1 by a full synthetic-ring trace.
+# Current production-consumer example for the call-state-driven Ring lifecycle.
+# Reviewed against Comelit 1.5.19 / Home Assistant 2026.9.
 #
-# This package consumes the integration-owned Comelit ring-media lifecycle.
-# It does NOT start a second media session and does NOT call camera.snapshot.
+# The integration owns attached Ring media, snapshots and the 20-second
+# recording. This automation never toggles switch.comelit_entrance_camera,
+# never starts a second media session and never infers normal call end from a
+# short local timer.
 #
 # Telegram target for this deployment:
 #   notify.telegram_bot_6207024040_1001409356493
@@ -14,9 +17,11 @@ automation:
   - id: comelit_ring_telegram_live
     alias: "Comelit — звонок в Telegram"
     description: >-
-      При звонке в домофон показывает актуальный кадр в Telegram,
-      обновляет его по мере поступления новых снимков, отправляет
-      20-секундную запись и обрабатывает кнопки открытия/игнорирования.
+      При звонке в домофон отправляет актуальный кадр в Telegram,
+      обновляет его пока backend считает этот event_id активным,
+      отправляет 20-секундную запись и обрабатывает Open/Ignore.
+      Время жизни звонка определяется sensor.comelit_call_state.
+
     mode: single
     max_exceeded: silent
 
@@ -32,11 +37,18 @@ automation:
 
     variables:
       telegram_notify_entity: notify.telegram_bot_6207024040_1001409356493
+      call_state_entity: sensor.comelit_call_state
+      entrance_button_entity: button.comelit_main_entrance_open_door
+
+      # Defense-in-depth only. Normal call end is backend-observed.
+      safety_timeout_seconds: 600
+
       event_id: "{{ trigger.event.data.event_id }}"
       door: "{{ trigger.event.data.door }}"
       open_callback_data: "{{ 'comelit|open|' ~ event_id }}"
       ignore_callback_data: "{{ 'comelit|ignore|' ~ event_id }}"
       started_at: "{{ now() }}"
+
       telegram_chat_id: ""
       telegram_message_id: ""
       snapshot_path: ""
@@ -46,7 +58,7 @@ automation:
       terminal_outcome: ""
 
     actions:
-      # First decodable JPEG may arrive noticeably later than comelit_ring.
+      # Ring media is integration-owned. Wait only for its first retained JPEG.
       - wait_for_trigger:
           - trigger: event
             event_type: comelit_snapshot_updated
@@ -62,7 +74,6 @@ automation:
           snapshot_path: "{{ wait.trigger.event.data.snapshot_path }}"
           snapshot_sequence: "{{ wait.trigger.event.data.sequence | int(1) }}"
 
-      # First Telegram message: retained integration-owned JPEG + controls.
       - action: telegram_bot.send_photo
         data:
           entity_id:
@@ -87,17 +98,20 @@ automation:
           {{ telegram_chat_id | string | length > 0
              and telegram_message_id | string | length > 0 }}
 
-      # Up to 60 s:
-      # - update the same Telegram photo for this event_id;
-      # - send the retained recording when complete;
-      # - accept only callbacks from this exact chat/message/event.
       - repeat:
           while:
             - condition: template
               value_template: "{{ terminal_outcome == '' }}"
             - condition: template
               value_template: >-
-                {{ (as_timestamp(now()) - as_timestamp(started_at)) < 60 }}
+                {{ is_state(call_state_entity, 'ringing')
+                   and state_attr(call_state_entity, 'event_id') | string
+                       == event_id | string }}
+            - condition: template
+              value_template: >-
+                {{ (as_timestamp(now()) - as_timestamp(started_at))
+                   < safety_timeout_seconds }}
+
           sequence:
             - wait_for_trigger:
                 - trigger: event
@@ -106,21 +120,30 @@ automation:
                   event_type: comelit_recording_complete
                 - trigger: event
                   event_type: telegram_callback
+                - trigger: state
+                  entity_id: sensor.comelit_call_state
+                  to: "idle"
+                - trigger: state
+                  entity_id: sensor.comelit_call_state
+                  to: "error"
               timeout: "00:00:02"
               continue_on_timeout: true
 
             - choose:
-                # New JPEG belonging to this exact ring.
+                # New retained JPEG for this exact Ring.
                 - conditions:
                     - condition: template
                       value_template: >-
                         {{ wait.completed
-                           and wait.trigger.event.event_type == 'comelit_snapshot_updated'
+                           and wait.trigger.platform == 'event'
+                           and wait.trigger.event.event_type
+                               == 'comelit_snapshot_updated'
                            and wait.trigger.event.data.event_id == event_id }}
                   sequence:
                     - variables:
                         snapshot_path: "{{ wait.trigger.event.data.snapshot_path }}"
-                        snapshot_sequence: "{{ wait.trigger.event.data.sequence | int(0) }}"
+                        snapshot_sequence: >-
+                          {{ wait.trigger.event.data.sequence | int(0) }}
 
                     - action: telegram_bot.edit_message_media
                       continue_on_error: true
@@ -133,21 +156,27 @@ automation:
                         caption: >-
                           🔔 Звонок в подъезд
                           Кадр {{ snapshot_sequence }}
+                          {% if recording_state | string | length > 0 %}
+                          Запись: {{ recording_state }}
+                          {% endif %}
                         inline_keyboard:
                           - - ["🚪 Открыть дверь", "{{ open_callback_data }}"]
                             - ["🙈 Игнорировать", "{{ ignore_callback_data }}"]
 
-                # Terminal recording event belonging to this exact ring.
+                # Recording is independent from call lifetime.
                 - conditions:
                     - condition: template
                       value_template: >-
                         {{ wait.completed
-                           and wait.trigger.event.event_type == 'comelit_recording_complete'
+                           and wait.trigger.platform == 'event'
+                           and wait.trigger.event.event_type
+                               == 'comelit_recording_complete'
                            and wait.trigger.event.data.event_id == event_id }}
                   sequence:
                     - variables:
                         recording_state: "{{ wait.trigger.event.data.state }}"
-                        recording_path: "{{ wait.trigger.event.data.recording_path }}"
+                        recording_path: >-
+                          {{ wait.trigger.event.data.recording_path | default('') }}
 
                     - action: telegram_bot.edit_caption
                       continue_on_error: true
@@ -181,19 +210,52 @@ automation:
                                   Состояние: {{ recording_state }}
                                 reply_to_message_id: "{{ telegram_message_id }}"
 
-                # Open is accepted only from the exact Telegram message emitted
-                # for this event_id, inside the bounded interaction window.
+                # Authoritative backend call end for this event_id.
                 - conditions:
                     - condition: template
                       value_template: >-
                         {{ wait.completed
+                           and wait.trigger.platform == 'state'
+                           and wait.trigger.entity_id == call_state_entity
+                           and wait.trigger.to_state.state == 'idle'
+                           and wait.trigger.from_state is not none
+                           and wait.trigger.from_state.attributes.event_id | string
+                               == event_id | string }}
+                  sequence:
+                    - variables:
+                        terminal_outcome: call_ended
+
+                # Backend call error for this event_id.
+                - conditions:
+                    - condition: template
+                      value_template: >-
+                        {{ wait.completed
+                           and wait.trigger.platform == 'state'
+                           and wait.trigger.entity_id == call_state_entity
+                           and wait.trigger.to_state.state == 'error'
+                           and wait.trigger.to_state.attributes.event_id | string
+                               == event_id | string }}
+                  sequence:
+                    - variables:
+                        terminal_outcome: call_error
+
+                # OPEN: one explicit semantic HA button press, same current
+                # path as the Comelit Custom Card. No retry, no media stop.
+                - conditions:
+                    - condition: template
+                      value_template: >-
+                        {{ wait.completed
+                           and wait.trigger.platform == 'event'
                            and wait.trigger.event.event_type == 'telegram_callback'
                            and wait.trigger.event.data.data == open_callback_data
                            and wait.trigger.event.data.chat_id | string
                                == telegram_chat_id | string
                            and wait.trigger.event.data.message is mapping
                            and wait.trigger.event.data.message.message_id | string
-                               == telegram_message_id | string }}
+                               == telegram_message_id | string
+                           and is_state(call_state_entity, 'ringing')
+                           and state_attr(call_state_entity, 'event_id') | string
+                               == event_id | string }}
                   sequence:
                     - action: telegram_bot.answer_callback_query
                       continue_on_error: true
@@ -204,18 +266,37 @@ automation:
                     - variables:
                         terminal_outcome: open_requested
 
-                # Ignore uses the same exact event/chat/message correlation.
+                    - action: comelit.emit_ring_interaction
+                      continue_on_error: true
+                      data:
+                        event_id: "{{ event_id }}"
+                        door: "{{ door }}"
+                        outcome: open_requested
+                        chat_id: "{{ telegram_chat_id }}"
+                        message_id: "{{ telegram_message_id }}"
+
+                    - action: button.press
+                      continue_on_error: true
+                      target:
+                        entity_id: "{{ entrance_button_entity }}"
+
+                # IGNORE is Telegram semantics only. It never stops/hangs up
+                # the real Comelit call.
                 - conditions:
                     - condition: template
                       value_template: >-
                         {{ wait.completed
+                           and wait.trigger.platform == 'event'
                            and wait.trigger.event.event_type == 'telegram_callback'
                            and wait.trigger.event.data.data == ignore_callback_data
                            and wait.trigger.event.data.chat_id | string
                                == telegram_chat_id | string
                            and wait.trigger.event.data.message is mapping
                            and wait.trigger.event.data.message.message_id | string
-                               == telegram_message_id | string }}
+                               == telegram_message_id | string
+                           and is_state(call_state_entity, 'ringing')
+                           and state_attr(call_state_entity, 'event_id') | string
+                               == event_id | string }}
                   sequence:
                     - action: telegram_bot.answer_callback_query
                       continue_on_error: true
@@ -226,41 +307,77 @@ automation:
                     - variables:
                         terminal_outcome: ignored
 
-      # If the user has already decided, release an active media lease.
-      # If media has naturally completed, this is a no-op.
-      - choose:
-          - conditions:
-              - condition: template
-                value_template: >-
-                  {{ terminal_outcome in ['open_requested', 'ignored'] }}
-            sequence:
-              - if:
-                  - condition: state
-                    entity_id: switch.comelit_entrance_camera
-                    state: "on"
-                then:
-                  - action: switch.turn_off
-                    target:
-                      entity_id: switch.comelit_entrance_camera
+                    - action: comelit.emit_ring_interaction
+                      continue_on_error: true
+                      data:
+                        event_id: "{{ event_id }}"
+                        door: "{{ door }}"
+                        outcome: ignored
+                        chat_id: "{{ telegram_chat_id }}"
+                        message_id: "{{ telegram_message_id }}"
 
-      # Door actuation is reachable only through the correlated Open callback.
-      - choose:
-          - conditions:
-              - condition: template
-                value_template: "{{ terminal_outcome == 'open_requested' }}"
-            sequence:
-              - wait_template: >-
-                  {{ is_state('switch.comelit_entrance_camera', 'off')
-                     and is_state('sensor.comelit_listener_status', 'ready') }}
-                timeout: "00:00:10"
-                continue_on_timeout: false
+            # Close a race where call state changes between while and wait.
+            - if:
+                - condition: template
+                  value_template: >-
+                    {{ terminal_outcome == ''
+                       and (
+                         not is_state(call_state_entity, 'ringing')
+                         or state_attr(call_state_entity, 'event_id') | string
+                            != event_id | string
+                       ) }}
+              then:
+                - variables:
+                    terminal_outcome: >-
+                      {% if is_state(call_state_entity, 'error') %}
+                        call_error
+                      {% else %}
+                        call_ended
+                      {% endif %}
 
-              - action: comelit.open_door
-                data:
-                  door: entrance
-                  event_id: "{{ event_id }}"
+      # If only the abnormal 600-second automation guard ended the loop,
+      # record the historical interaction outcome vocabulary as timeout.
+      - if:
+          - condition: template
+            value_template: "{{ terminal_outcome == '' }}"
+        then:
+          - variables:
+              terminal_outcome: safety_timeout
 
-      # Remove stale controls after Open / Ignore / timeout.
+          - action: comelit.emit_ring_interaction
+            continue_on_error: true
+            data:
+              event_id: "{{ event_id }}"
+              door: "{{ door }}"
+              outcome: timeout
+              chat_id: "{{ telegram_chat_id }}"
+              message_id: "{{ telegram_message_id }}"
+
+      - action: telegram_bot.edit_caption
+        continue_on_error: true
+        data:
+          entity_id:
+            - "{{ telegram_notify_entity }}"
+          message_id: "{{ telegram_message_id }}"
+          caption: >-
+            🔔 Звонок в подъезд
+            Кадр {{ snapshot_sequence }}
+            {% if recording_state | string | length > 0 %}
+            Запись: {{ recording_state }}
+            {% endif %}
+
+            {% if terminal_outcome == 'open_requested' %}
+            🚪 Запрос на открытие отправлен
+            {% elif terminal_outcome == 'ignored' %}
+            🙈 Звонок проигнорирован
+            {% elif terminal_outcome == 'call_error' %}
+            ⚠️ Звонок завершён с ошибкой
+            {% elif terminal_outcome == 'safety_timeout' %}
+            ⏱ Взаимодействие завершено по защитному таймауту
+            {% else %}
+            📞 Звонок завершён
+            {% endif %}
+
       - action: telegram_bot.edit_replymarkup
         continue_on_error: true
         data:

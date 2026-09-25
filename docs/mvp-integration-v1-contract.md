@@ -1,6 +1,8 @@
-# Comelit Home Assistant Integration MVP v1 — canonical contract
+# Comelit Home Assistant Integration MVP v1 — historical canonical acceptance contract
 
-Status: **current MVP boundary**  
+> Historical note (2026-09-25): this document remains the record of the original MVP acceptance boundary. Later production work has live-proven long-media refresh, camera-owned automatic media lifecycle, authoritative call-state tracking, remote-owned inbound Ring lifetime, and current Home Assistant Ring/Telegram orchestration. Do not read the deferred/30–35-second limitations below as current runtime behavior.
+
+Status: **historical MVP acceptance boundary; superseded by later production evidence**  
 Date: 2026-09-17  
 Baseline at creation: `ee4f99707afa6bda999e1803ec0a2177880a789a`
 

@@ -81,6 +81,7 @@ On a new authoritative `ringing` event, the card focuses the «Домофон» 
 - Bundled surveillance-first Home Assistant Custom Card
 - Custom Card incoming-call focus and active-panel highlighting from `sensor.comelit_call_state`
 - Custom Card explicit entrance live view and semantic Entrance/Gate Door buttons
+- Current Ring -> Telegram automation is driven by `sensor.comelit_call_state`, not by the deprecated camera switch or a short local call timer
 
 ## Call-state lifecycle
 
@@ -100,6 +101,40 @@ The sensor stores the active panel and event id as attributes. Incoming attached
 
 `ringing -> idle` is driven by backend-observed remote-release evidence. The frontend does not infer call termination from a timer or from the age of the last `comelit_ring` event.
 
+## Home Assistant Ring -> Telegram automation
+
+The maintained Home Assistant package example is:
+
+```text
+examples/home-assistant/packages/comelit_ring_telegram_live.yaml
+```
+
+Its current lifecycle is event/state driven:
+
+```text
+comelit_ring
+  -> wait for integration-owned comelit_snapshot_updated
+  -> send one Telegram photo message
+  -> keep editing that same message with new snapshots
+  -> send the retained 20-second recording when comelit_recording_complete fires
+  -> keep the interaction alive while sensor.comelit_call_state is ringing
+  -> finish on backend-observed ringing -> idle for the same event_id
+```
+
+The 20-second recording duration is not a call timeout. The automation does not toggle
+`switch.comelit_entrance_camera`, does not call `camera.snapshot`, and does not stop
+attached Ring media on Ignore.
+
+For an accepted Open callback during a real Ring, the current automation sends exactly
+one `button.press` to `button.comelit_main_entrance_open_door`, matching the current
+Custom Card Door path. It does not retry and does not claim physical opening. The
+current `comelit.open_door` service remains fail-closed while
+`attached_media_busy=true`, so it is not the current Telegram action surface during
+an active attached Ring.
+
+Full current contract and UI-migration notes:
+`docs/ring-telegram-ha-automation-current.md`.
+
 ## Camera lifecycle
 
 Normal use does not require a separate media switch:
@@ -116,11 +151,11 @@ open camera.comelit_entrance
   -> listener READY
 ```
 
-For release 1.5.13, `switch.comelit_entrance_camera` remains only as a disabled-by-default deprecated diagnostic fallback. It is not part of the target user-facing workflow and is planned for removal after HAOS live validation of the automatic lifecycle.
+`switch.comelit_entrance_camera` remains only as a disabled-by-default deprecated diagnostic fallback. Camera-owned automatic startup and automatic release have already been live-validated in HAOS, so current user flows and the maintained Telegram automation do not depend on it. Removal is a later compatibility cleanup.
 
 ## Safety contract
 
-Door operations are one-shot. Automatic Door retry is not allowed. A protocol acknowledgement is never treated as proof that the physical door opened. Physical Door validation requires a separate explicit controlled test.
+Door operations are one-shot. Automatic Door retry is not allowed. A protocol acknowledgement is never treated as proof that the physical door opened. The Custom Card and current Ring/Telegram automation use the standard Door button entity for one explicit user request during an attached Ring; separately bootstrapped on-demand media remains fail-closed for Door actions. Physical Door validation remains separate from protocol outcome.
 
 Intercom media is on-demand only. Home Assistant startup, thumbnails and still-image polling must not open the camera session. Separately bootstrapped on-demand media pauses the persistent listener before bootstrap and restores it only after confirmed teardown. A new viewer or lease never extends the absolute 600-second deadline.
 
