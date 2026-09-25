@@ -13,7 +13,7 @@ Category: Integration
 
 ## Home Assistant Custom Card
 
-Version 1.5.18 adds Phase C intercom controls to the Lovelace card: explicit entrance live view plus semantic Entrance/Gate Door buttons.
+Version 1.5.19 keeps an explicitly opened entrance intercom live view active across switches between «Домофон» and «Видеонаблюдение», while retaining the Phase C controls.
 
 After updating the integration and restarting Home Assistant, register this resource once in the Lovelace resource settings:
 
@@ -49,6 +49,10 @@ The surveillance viewer delegates playback to Home Assistant's built-in `picture
 The intercom tab now supports an explicit entrance live view and semantic Entrance/Gate Door buttons.
 
 Opening the entrance camera is always an explicit user action. The card delegates playback to Home Assistant's standard camera viewer and does not expose raw stream credentials.
+
+An explicitly opened entrance viewer remains connected while the user switches to the surveillance tab. Returning to «Домофон» therefore resumes the same viewer without intentionally releasing the intercom camera-view lease. The intercom viewer stops only after an explicit «Скрыть камеру», a panel change that makes it irrelevant, card teardown/reload, or backend/session termination including the absolute media limit.
+
+Ordinary surveillance viewers remain non-persistent: leaving «Видеонаблюдение» releases that hidden viewer so a standard RTSP/HLS camera is not kept alive unnecessarily.
 
 Door buttons resolve the current Comelit button entities by stable unique id and invoke exactly one Home Assistant `button.press` per explicit user click. The card does not retry automatically and never claims that the physical door/gate opened merely because the service call completed.
 
