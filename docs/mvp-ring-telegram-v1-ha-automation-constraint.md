@@ -1,6 +1,8 @@
-# Comelit Ring / Telegram MVP v1 — Home Assistant automation constraint
+# Comelit Ring / Telegram MVP v1 — historical Home Assistant automation constraint
 
-Status: **normative clarification**  
+> Historical note (2026-09-25): the architectural rule that Telegram orchestration belongs in Home Assistant still applies, but the timing/media details below describe the old MVP. Current production automation is documented in `docs/ring-telegram-ha-automation-current.md` and no longer uses the deprecated camera switch, `camera.snapshot`, a 30-second normal call timeout, or `comelit.open_door` during active attached Ring media.
+
+Status: **historical MVP clarification; Home Assistant ownership rule retained**  
 Date: 2026-09-17  
 Applies to: `docs/mvp-ring-telegram-v1-contract.md` and `docs/mvp-ring-telegram-v1-audit-and-dev-task.md`
 
