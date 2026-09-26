@@ -65,3 +65,13 @@ Successful dry-run output includes `MSL_DRY_RUN_COMPLETED=true`, `MSL_DRY_RUN_RE
 Corrective-2 extends dry-run coverage to the materialized wrapper itself. The runner creates a shebang'd stub base wrapper and a shebang'd stub helper, materializes the candidate wrapper with the same instrumentation function used by the live path, and executes that wrapper. Required dry-run markers include `MSL_DRY_RUN_WRAPPER_EXECUTED=true`, `MSL_DRY_RUN_WRAPPER_RC=0`, `MSL_WRAPPER_SHEBANG_LINE=1`, and `MSL_WRAPPER_FIRST_LINE_GATE=PASS`.
 
 Wrapper instrumentation is inserted after the shebang line and any immediately following comment block; it is never prepended before `#!`. Live runs print `MSL_WRAPPER_FIRST_LINE`, `MSL_WRAPPER_SHEBANG_LINE`, and `MSL_WRAPPER_FIRST_LINE_GATE`, then print a bounded/redacted tail of the wrapper output so early wrapper failures are visible to the orchestrator without exposing raw SDP, tokens, or media bytes. Dry-run-only markers are emitted only when `MSL_DRY_RUN=YES`.
+
+## Clock Base Ownership
+
+Corrective-3 moves the shared clock base outside `/run/comelit-media`, because the base cloud wrapper clears that media run directory before launching the helper. Live runs use `MSL_CLOCK_DIR=/run/comelit-msl` by default and write `MSL_CLOCK_BASE_PATH=/run/comelit-msl/msl-clock-base`. The runner emits `MSL_CLOCK_BASE_PATH` and `MSL_CLOCK_BASE_WRITTEN_MONO_MS` in the final block.
+
+Dry-run and self-test stubs deliberately reproduce the destructive wrapper step by wiping their media run directory before invoking the stub helper. The clock file is written outside that wiped directory, and successful proof emits `MSL_CLOCK_BASE_SURVIVES_WRAPPER_RM=true` plus `MSL_DRY_RUN_SYNTHETIC_OFFER_WRITTEN=true`.
+
+Synthetic summary deltas are derived from marker differences, not hardcoded. The focused test checks `MSL_START_TO_FIRST_RTP_MS == T17 - T03` and `MSL_START_TO_DECODABLE_VIDEO_MS == T18 - T03`.
+
+`MSL_SELFTEST=YES` is a no-network harness check for Hermes before live attempts. It reuses the destructive wrapper/helper stub path and emits `MSL_SELFTEST_COMPLETED=true`, `MSL_SELFTEST_HA_INTERACTION=0`, `MSL_SELFTEST_COMELIT_INTERACTION=0`, `MSL_SELFTEST_CLOCK_BASE_READABLE=true`, `MSL_SELFTEST_SYNTHETIC_OFFER_WRITTEN=true`, and `MSL_SELFTEST_MARKERS_OBSERVED=<n>`.

@@ -178,7 +178,70 @@ class MslV1LatencyInstrumentationTests(unittest.TestCase):
         self.assertIn("P80_MEDIA_ACTIVE=true", proc.stdout)
         self.assertIn("P80_VIDEO_RTP_FORWARDING=PASS", proc.stdout)
         self.assertIn("MSL_T07_CLOUD_P2P_RESPONSE_REMOTE_SDP_WRITTEN_MONO_MS=", proc.stdout)
+        self.assertIn("MSL_CLOCK_BASE_SURVIVES_WRAPPER_RM=true", proc.stdout)
+        self.assertIn("MSL_DRY_RUN_SYNTHETIC_OFFER_WRITTEN=true", proc.stdout)
         print("MSL_DRY_RUN_WRAPPER_EXECED_MARKERS_OBSERVED=true")
+
+    def test_clock_base_destruction_regression_flip_proof(self) -> None:
+        def survives(clock_path: Path, wiped_dir: Path) -> bool:
+            clock_path.parent.mkdir(parents=True, exist_ok=True)
+            wiped_dir.mkdir(parents=True, exist_ok=True)
+            clock_path.write_text("123\n", encoding="utf-8")
+            for child in wiped_dir.iterdir():
+                if child.is_file():
+                    child.unlink()
+            if clock_path.is_relative_to(wiped_dir):
+                try:
+                    clock_path.unlink()
+                except FileNotFoundError:
+                    pass
+            return clock_path.exists()
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            real = survives(root / "clock" / "msl-clock-base", root / "comelit-media")
+            mutated = survives(root / "comelit-media" / "msl-clock-base", root / "comelit-media")
+        self.assertTrue(real)
+        self.assertFalse(mutated)
+        print(f"MSL_CLOCK_BASE_DESTRUCTION_REGRESSION_TEST=PASS REAL={str(real).lower()} MUTATED={str(mutated).lower()}")
+
+    def test_derived_delta_consistency(self) -> None:
+        env = os.environ.copy()
+        env["MSL_DRY_RUN"] = "YES"
+        proc = subprocess.run(["bash", str(RUNNER)], cwd=ROOT, env=env, text=True, capture_output=True, timeout=10, check=False)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        values: dict[str, int] = {}
+        for line in proc.stdout.splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if value.isdigit():
+                values[key] = int(value)
+        first_rtp = values["MSL_T17_FIRST_VIDEO_RTP_MONO_MS"] - values["MSL_T03_NATIVE_HELPER_PROCESS_START_MONO_MS"]
+        decodable = values["MSL_T18_FIRST_SPS_PPS_IDR_MONO_MS"] - values["MSL_T03_NATIVE_HELPER_PROCESS_START_MONO_MS"]
+        real = (
+            values["MSL_START_TO_FIRST_RTP_MS"] == first_rtp
+            and values["MSL_START_TO_DECODABLE_VIDEO_MS"] == decodable
+        )
+        mutated = (0 == first_rtp and 0 == decodable)
+        self.assertTrue(real)
+        self.assertFalse(mutated)
+        print(f"MSL_DERIVED_DELTA_CONSISTENCY=PASS REAL={str(real).lower()} MUTATED={str(mutated).lower()}")
+
+    def test_selftest_no_network_mode(self) -> None:
+        env = os.environ.copy()
+        env["MSL_SELFTEST"] = "YES"
+        proc = subprocess.run(["bash", str(RUNNER)], cwd=ROOT, env=env, text=True, capture_output=True, timeout=10, check=False)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("MSL_SELFTEST_MODE=YES", proc.stdout)
+        self.assertIn("MSL_SELFTEST_COMPLETED=true", proc.stdout)
+        self.assertIn("MSL_SELFTEST_HA_INTERACTION=0", proc.stdout)
+        self.assertIn("MSL_SELFTEST_COMELIT_INTERACTION=0", proc.stdout)
+        self.assertIn("MSL_SELFTEST_CLOCK_BASE_READABLE=true", proc.stdout)
+        self.assertIn("MSL_SELFTEST_SYNTHETIC_OFFER_WRITTEN=true", proc.stdout)
+        match = re.search(r"MSL_SELFTEST_MARKERS_OBSERVED=(\d+)", proc.stdout)
+        self.assertIsNotNone(match)
+        self.assertGreaterEqual(int(match.group(1)), 13)
 
     def test_wrapper_first_line_gate_flip_proof(self) -> None:
         def gate(text: str) -> str:
@@ -207,7 +270,7 @@ class MslV1LatencyInstrumentationTests(unittest.TestCase):
         env["MSL_LIVE_RUN"] = "YES"
         proc = subprocess.run(["bash", str(RUNNER)], cwd=ROOT, env=env, text=True, capture_output=True, check=False)
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("MSL_DRY_RUN_LIVE_RUN_CONFLICT=true", proc.stdout)
+        self.assertIn("MSL_DRY_OR_SELFTEST_LIVE_RUN_CONFLICT=true", proc.stdout)
         self.assertIn("LIVE_INVOCATIONS=0", proc.stdout)
 
     def test_budget_guard_refuses_missing_malformed_and_cap(self) -> None:
@@ -251,6 +314,7 @@ class MslV1LatencyInstrumentationTests(unittest.TestCase):
             "T07_CLOUD_P2P_RESPONSE_REMOTE_SDP_WRITTEN",
             "materialize_candidate_wrapper",
             "MSL_WRAPPER_FIRST_LINE_GATE=PASS",
+            "MSL_CLOCK_BASE_SURVIVES_WRAPPER_RM=true",
             "MSL_T19_T24_NA_REASON=HA_STREAM_HLS_PIPELINE_NOT_IN_THIS_CHILD",
         ):
             self.assertIn(marker, self.runner)

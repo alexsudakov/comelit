@@ -8,6 +8,7 @@ REPO=${REPO:-/root/comelit-door-diag-repo}
 MSL_EXPECTED_COMMIT_SHA=${MSL_EXPECTED_COMMIT_SHA:-}
 MSL_LIVE_RUN=${MSL_LIVE_RUN:-NO}
 MSL_DRY_RUN=${MSL_DRY_RUN:-NO}
+MSL_SELFTEST=${MSL_SELFTEST:-NO}
 MSL_ATTEMPT_LEDGER=${MSL_ATTEMPT_LEDGER:-}
 HA_WEBHOOK_URL=${HA_WEBHOOK_URL:-http://192.168.1.108:8123/api/webhook/comelit-ha-ring-test-control-v1}
 BASE_WRAPPER=/usr/local/sbin/comelit-p2p-cloud-probe
@@ -31,7 +32,8 @@ CREDENTIAL_MIN_TTL_SECONDS=900
 OAUTH_STATUS=/usr/local/sbin/comelit-oauth-status
 RUN_DIR=/run/comelit-media
 STOP_FILE="$RUN_DIR/stop"
-CLOCK_BASE_FILE="$RUN_DIR/msl-clock-base"
+MSL_CLOCK_DIR=${MSL_CLOCK_DIR:-/run/comelit-msl}
+CLOCK_BASE_FILE="$MSL_CLOCK_DIR/msl-clock-base"
 CANDIDATE_HOLDER_NAME=comelit-msl-v1-baseline
 WRAPPER_NAME=comelit-p2p-cloud-probe-msl-v1
 
@@ -61,12 +63,23 @@ MSL_COMELIT_INTERACTION=0
 MSL_HA_INTERACTION=0
 MSL_DRY_RUN_WRAPPER_EXECUTED=false
 MSL_DRY_RUN_WRAPPER_RC=NOT_REACHED
+MSL_CLOCK_BASE_WRITTEN_MONO_MS=NOT_WRITTEN
+MSL_SELFTEST_COMPLETED=false
 
 msl_mono_ms() {
     python3 - <<'PY'
 import time
 print(time.monotonic_ns() // 1_000_000)
 PY
+}
+
+write_clock_base() {
+    local clock_dir
+    clock_dir="$(dirname "$CLOCK_BASE_FILE")"
+    install -d -m 700 "$clock_dir"
+    MSL_CLOCK_BASE_WRITTEN_MONO_MS="$(msl_mono_ms)"
+    printf '%s\n' "$MSL_CLOCK_BASE_WRITTEN_MONO_MS" > "$CLOCK_BASE_FILE"
+    chmod 600 "$CLOCK_BASE_FILE"
 }
 
 msl_since_base() {
@@ -304,7 +317,7 @@ PY
     exit 0
 fi
 
-if [ "$MSL_DRY_RUN" != YES ] && [ "$MSL_LIVE_RUN" != YES ]; then
+if [ "$MSL_DRY_RUN" != YES ] && [ "$MSL_SELFTEST" != YES ] && [ "$MSL_LIVE_RUN" != YES ]; then
     echo "MSL_OFFLINE_SAFE_REFUSAL=true"
     echo "LIVE_INVOCATIONS=0"
     echo "MSL_RUN_CLASSIFICATION=NOT_RUN"
@@ -316,6 +329,8 @@ print_final_block() {
     echo "LIVE_INVOCATIONS=$LIVE_INVOCATIONS"
     echo "WRAPPER_RC=$WRAPPER_RC"
     echo "MSL_START_REFERENCE=T03_NATIVE_MEDIA_HELPER_PROCESS_START"
+    echo "MSL_CLOCK_BASE_PATH=$CLOCK_BASE_FILE"
+    echo "MSL_CLOCK_BASE_WRITTEN_MONO_MS=$MSL_CLOCK_BASE_WRITTEN_MONO_MS"
     echo "SETUP_MARGIN_SECONDS=$SETUP_MARGIN_SECONDS"
     echo "MEDIA_OBSERVATION_SECONDS=$MEDIA_OBSERVATION_SECONDS"
     echo "MEDIA_STARTUP_OUTER_TIMEOUT=$MEDIA_STARTUP_OUTER_TIMEOUT"
@@ -342,7 +357,7 @@ print_final_block() {
     echo "SECOND_MEDIA_SESSION=false"
     echo "MSL_RUN_CLASSIFICATION=$MSL_RUN_CLASSIFICATION"
     echo "MSL_T19_T24_NA_REASON=HA_STREAM_HLS_PIPELINE_NOT_IN_THIS_CHILD"
-    if [ "$MSL_DRY_RUN" = YES ]; then
+if [ "$MSL_DRY_RUN" = YES ]; then
         echo "MSL_DRY_RUN_COMPLETED=$MSL_DRY_RUN_COMPLETED"
         echo "MSL_DRY_RUN_REACHED_FINAL_SUMMARY=$MSL_DRY_RUN_REACHED_FINAL_SUMMARY"
         echo "MSL_DRY_RUN_LIVE_INVOCATIONS=$LIVE_INVOCATIONS"
@@ -350,6 +365,11 @@ print_final_block() {
         echo "MSL_DRY_RUN_HA_INTERACTION=$MSL_HA_INTERACTION"
         echo "MSL_DRY_RUN_WRAPPER_EXECUTED=$MSL_DRY_RUN_WRAPPER_EXECUTED"
         echo "MSL_DRY_RUN_WRAPPER_RC=$MSL_DRY_RUN_WRAPPER_RC"
+    fi
+    if [ "$MSL_SELFTEST" = YES ]; then
+        echo "MSL_SELFTEST_COMPLETED=$MSL_SELFTEST_COMPLETED"
+        echo "MSL_SELFTEST_HA_INTERACTION=$MSL_HA_INTERACTION"
+        echo "MSL_SELFTEST_COMELIT_INTERACTION=$MSL_COMELIT_INTERACTION"
     fi
     echo "=== END COMELIT MSL V1 BASELINE FINAL ==="
 }
@@ -359,12 +379,11 @@ run_dry_run() {
     chmod 700 "$RUN_ROOT"
     SESSION_LOG="$RUN_ROOT/session.log"
     BUILD_PROVENANCE_LOG="$RUN_ROOT/build-provenance.log"
-    CLOCK_BASE_FILE="$RUN_ROOT/msl-clock-base"
+    CLOCK_BASE_FILE="$RUN_ROOT/clock/msl-clock-base"
     : > "$SESSION_LOG"
     : > "$BUILD_PROVENANCE_LOG"
     chmod 600 "$SESSION_LOG" "$BUILD_PROVENANCE_LOG"
-    msl_mono_ms > "$CLOCK_BASE_FILE"
-    chmod 600 "$CLOCK_BASE_FILE"
+    write_clock_base
 
     echo "MSL_DRY_RUN_MODE=YES"
     echo "MSL_DRY_RUN_REAL_HA_WEBHOOK=false"
@@ -398,6 +417,7 @@ run_dry_run() {
     fi
     [ "$FAIL" -eq 0 ] || return 1
 
+    DRY_RUN_MEDIA_DIR="$RUN_ROOT/comelit-media"
     DRY_BASE_WRAPPER="$RUN_ROOT/base-wrapper-stub.sh"
     DRY_STUB_HELPER="$RUN_ROOT/helper-stub.sh"
     CANDIDATE_WRAPPER="$RUN_ROOT/$WRAPPER_NAME"
@@ -406,6 +426,9 @@ run_dry_run() {
 # Dry-run base wrapper stub: preserves bash-only options so shebang breakage is visible.
 set -u -o pipefail
 BASE="$(dirname "$0")"
+RUN="${MSL_DRY_RUN_WRAPPER_RUN_DIR:?}"
+rm -rf "$RUN"
+mkdir -p "$RUN"
 curl() {
     echo "DRY_CURL_STUB=true"
 }
@@ -427,7 +450,14 @@ base = int(Path(sys.argv[1]).read_text(encoding="utf-8").strip())
 print(max(0, time.monotonic_ns() // 1000000 - base))
 PY
 }
-echo "MSL_T03_NATIVE_HELPER_PROCESS_START_MONO_MS=$(msl_stub_ms)"
+test -r "$MSL_CLOCK_BASE_FILE" || {
+    echo "MSL_CLOCK_BASE_MISSING=true"
+    exit 20
+}
+mkdir -p "$MSL_DRY_RUN_WRAPPER_RUN_DIR"
+printf 'synthetic-offer\n' > "$MSL_DRY_RUN_WRAPPER_RUN_DIR/offer.sdp"
+t03="$(msl_stub_ms)"
+echo "MSL_T03_NATIVE_HELPER_PROCESS_START_MONO_MS=$t03"
 echo "ICE_GATHER=PASS"
 echo "MSL_T04_LOCAL_SDP_OFFER_READY_MONO_MS=$(msl_stub_ms)"
 echo "ICE_CONNECTED=PASS"
@@ -450,17 +480,20 @@ echo "MSL_T15_MEDIA_ACTIVE_MONO_MS=$(msl_stub_ms)"
 echo "P80_AUDIO_RTP_FORWARDING=PASS"
 echo "MSL_T16_FIRST_AUDIO_RTP_MONO_MS=$(msl_stub_ms)"
 echo "P80_VIDEO_RTP_FORWARDING=PASS"
-echo "MSL_T17_FIRST_VIDEO_RTP_MONO_MS=$(msl_stub_ms)"
-echo "MSL_T18_FIRST_SPS_PPS_IDR_MONO_MS=$(msl_stub_ms)"
+t17="$(msl_stub_ms)"
+echo "MSL_T17_FIRST_VIDEO_RTP_MONO_MS=$t17"
+t18="$(msl_stub_ms)"
+echo "MSL_T18_FIRST_SPS_PPS_IDR_MONO_MS=$t18"
 echo "MSL_START_REFERENCE=T03_NATIVE_MEDIA_HELPER_PROCESS_START"
-echo "MSL_START_TO_FIRST_RTP_MS=0"
-echo "MSL_START_TO_DECODABLE_VIDEO_MS=0"
+echo "MSL_START_TO_FIRST_RTP_MS=$((t17 - t03))"
+echo "MSL_START_TO_DECODABLE_VIDEO_MS=$((t18 - t03))"
 EOF
     chmod 700 "$DRY_STUB_HELPER"
     materialize_candidate_wrapper "$DRY_BASE_WRAPPER" "$CANDIDATE_WRAPPER" "$DRY_STUB_HELPER" "$CLOCK_BASE_FILE" || return 1
     print_wrapper_first_line_gate "$CANDIDATE_WRAPPER" || return 1
     echo "MSL_DRY_RUN_WRAPPER_FIRST_LINE_GATE=PASS"
     export MSL_CLOCK_BASE_FILE="$CLOCK_BASE_FILE"
+    export MSL_DRY_RUN_WRAPPER_RUN_DIR="$DRY_RUN_MEDIA_DIR"
     "$CANDIDATE_WRAPPER" > "$SESSION_LOG" 2>&1
     WRAPPER_RC=$?
     MSL_DRY_RUN_WRAPPER_EXECUTED=true
@@ -469,6 +502,26 @@ EOF
     echo "MSL_DRY_RUN_WRAPPER_RC=$WRAPPER_RC"
     print_bounded_wrapper_log "$SESSION_LOG"
     [ "$WRAPPER_RC" -eq 0 ] || return 1
+    if [ -r "$CLOCK_BASE_FILE" ]; then
+        echo "MSL_CLOCK_BASE_SURVIVES_WRAPPER_RM=true"
+        [ "$MSL_SELFTEST" = YES ] && echo "MSL_SELFTEST_CLOCK_BASE_READABLE=true"
+    else
+        echo "MSL_CLOCK_BASE_SURVIVES_WRAPPER_RM=false"
+        [ "$MSL_SELFTEST" = YES ] && echo "MSL_SELFTEST_CLOCK_BASE_READABLE=false"
+        return 1
+    fi
+    if [ -s "$DRY_RUN_MEDIA_DIR/offer.sdp" ]; then
+        echo "MSL_DRY_RUN_SYNTHETIC_OFFER_WRITTEN=true"
+        [ "$MSL_SELFTEST" = YES ] && echo "MSL_SELFTEST_SYNTHETIC_OFFER_WRITTEN=true"
+    else
+        echo "MSL_DRY_RUN_SYNTHETIC_OFFER_WRITTEN=false"
+        [ "$MSL_SELFTEST" = YES ] && echo "MSL_SELFTEST_SYNTHETIC_OFFER_WRITTEN=false"
+        return 1
+    fi
+    if [ "$MSL_SELFTEST" = YES ]; then
+        selftest_markers="$(grep -c '^MSL_T[0-9][0-9]_' "$SESSION_LOG" 2>/dev/null || printf 0)"
+        echo "MSL_SELFTEST_MARKERS_OBSERVED=$selftest_markers"
+    fi
     MSL_RUN_CLASSIFICATION=DRY_RUN_COMPLETE
     RTP_SINK_PORTS_REMAINING=0
     CAMPAIGN_PROCESSES_REMAINING=NONE
@@ -477,6 +530,7 @@ EOF
     restore_listener || return 1
     MSL_DRY_RUN_COMPLETED=true
     MSL_DRY_RUN_REACHED_FINAL_SUMMARY=true
+    [ "$MSL_SELFTEST" = YES ] && MSL_SELFTEST_COMPLETED=true
     print_final_block
     rm -rf "$RUN_ROOT"
     return 0
@@ -544,10 +598,18 @@ on_exit() {
 trap on_exit EXIT
 trap 'exit 130' INT TERM HUP
 
-if [ "$MSL_DRY_RUN" = YES ] && [ "$MSL_LIVE_RUN" = YES ]; then
-    echo "MSL_DRY_RUN_LIVE_RUN_CONFLICT=true"
+if { [ "$MSL_DRY_RUN" = YES ] || [ "$MSL_SELFTEST" = YES ]; } && [ "$MSL_LIVE_RUN" = YES ]; then
+    echo "MSL_DRY_OR_SELFTEST_LIVE_RUN_CONFLICT=true"
     echo "LIVE_INVOCATIONS=0"
     exit 2
+fi
+
+if [ "$MSL_SELFTEST" = YES ]; then
+    MSL_DRY_RUN=YES
+    echo "MSL_SELFTEST_MODE=YES"
+    trap - EXIT
+    run_dry_run
+    exit "$?"
 fi
 
 if [ "$MSL_DRY_RUN" = YES ]; then
@@ -617,8 +679,7 @@ cmp "$RUN_ROOT/runner.sh" "$REPO/$RUNNER_REL" >/dev/null 2>&1 || fail "MSL_RUNNE
 [ "$FAIL" -eq 0 ] || exit 1
 
 install -d -m 700 "$RUN_DIR"
-msl_mono_ms > "$CLOCK_BASE_FILE"
-chmod 600 "$CLOCK_BASE_FILE"
+write_clock_base
 msl_mark "T00_RESEARCH_START"
 
 echo "=== BUILD EPHEMERAL MSL HELPER ==="
