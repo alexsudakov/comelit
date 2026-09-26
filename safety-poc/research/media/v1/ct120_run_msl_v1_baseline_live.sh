@@ -7,6 +7,7 @@ umask 077
 REPO=${REPO:-/root/comelit-door-diag-repo}
 MSL_EXPECTED_COMMIT_SHA=${MSL_EXPECTED_COMMIT_SHA:-}
 MSL_LIVE_RUN=${MSL_LIVE_RUN:-NO}
+MSL_DRY_RUN=${MSL_DRY_RUN:-NO}
 MSL_ATTEMPT_LEDGER=${MSL_ATTEMPT_LEDGER:-}
 HA_WEBHOOK_URL=${HA_WEBHOOK_URL:-http://192.168.1.108:8123/api/webhook/comelit-ha-ring-test-control-v1}
 BASE_WRAPPER=/usr/local/sbin/comelit-p2p-cloud-probe
@@ -54,6 +55,10 @@ LISTENER_RESTORE_OK=false
 MEDIA_TEARDOWN=UNCERTAIN
 CAMPAIGN_PROCESSES_REMAINING=UNKNOWN
 RTP_SINK_PORTS_REMAINING=UNKNOWN
+MSL_DRY_RUN_COMPLETED=false
+MSL_DRY_RUN_REACHED_FINAL_SUMMARY=false
+MSL_COMELIT_INTERACTION=0
+MSL_HA_INTERACTION=0
 
 msl_mono_ms() {
     python3 - <<'PY'
@@ -104,7 +109,33 @@ PY
 }
 
 post_control() {
-    local action="$1" output="$2" max_time="$3" http_file="${output}.http" rc
+    local action
+    local output
+    local max_time
+    local http_file
+    local rc
+    action="$1"
+    output="$2"
+    max_time="$3"
+    http_file="${output}.http"
+    if [ "$MSL_DRY_RUN" = YES ]; then
+        case "$action" in
+            status|start)
+                printf '{"ok":true,"supervisor_running":true,"running":true,"listener_ready":true,"last_error":null}\n' > "$output"
+                ;;
+            stop)
+                printf '{"ok":true,"supervisor_running":true,"running":false,"listener_ready":false,"last_error":null}\n' > "$output"
+                ;;
+            *)
+                printf '{"ok":false,"last_error":"unknown dry-run action"}\n' > "$output"
+                ;;
+        esac
+        printf '200\n' > "$http_file"
+        echo "CONTROL_${action^^}_DRY_RUN=true"
+        echo "CONTROL_${action^^}_HTTP_STATUS=200"
+        return 0
+    fi
+    MSL_HA_INTERACTION=$((MSL_HA_INTERACTION + 1))
     curl --silent --show-error --connect-timeout 5 --max-time "$max_time" \
       --header 'Content-Type: application/json' \
       --output "$output" \
@@ -118,7 +149,8 @@ post_control() {
 }
 
 status_ready() {
-    local file="$1"
+    local file
+    file="$1"
     [ "$(json_scalar "$file" ok)" = true ] &&
     [ "$(json_scalar "$file" supervisor_running)" = true ] &&
     [ "$(json_scalar "$file" running)" = true ] &&
@@ -127,14 +159,20 @@ status_ready() {
 }
 
 status_stopped() {
-    local file="$1"
+    local file
+    file="$1"
     [ "$(json_scalar "$file" ok)" = true ] &&
     [ "$(json_scalar "$file" running)" = false ] &&
     [ "$(json_scalar "$file" listener_ready)" = false ]
 }
 
 msl_start_udp_sink() {
-    local port="$1" count_file="$2" timeout_seconds="${3:-2}"
+    local port
+    local count_file
+    local timeout_seconds
+    port="$1"
+    count_file="$2"
+    timeout_seconds="${3:-2}"
     python3 - "$port" "$count_file" "$timeout_seconds" >"${count_file}.log" 2>&1 <<'PY' &
 from pathlib import Path
 import signal, socket, sys, time
@@ -187,7 +225,7 @@ PY
     exit 0
 fi
 
-if [ "$MSL_LIVE_RUN" != YES ]; then
+if [ "$MSL_DRY_RUN" != YES ] && [ "$MSL_LIVE_RUN" != YES ]; then
     echo "MSL_OFFLINE_SAFE_REFUSAL=true"
     echo "LIVE_INVOCATIONS=0"
     echo "MSL_RUN_CLASSIFICATION=NOT_RUN"
@@ -225,11 +263,107 @@ print_final_block() {
     echo "SECOND_MEDIA_SESSION=false"
     echo "MSL_RUN_CLASSIFICATION=$MSL_RUN_CLASSIFICATION"
     echo "MSL_T19_T24_NA_REASON=HA_STREAM_HLS_PIPELINE_NOT_IN_THIS_CHILD"
+    echo "MSL_DRY_RUN_COMPLETED=$MSL_DRY_RUN_COMPLETED"
+    echo "MSL_DRY_RUN_REACHED_FINAL_SUMMARY=$MSL_DRY_RUN_REACHED_FINAL_SUMMARY"
+    echo "MSL_DRY_RUN_LIVE_INVOCATIONS=$LIVE_INVOCATIONS"
+    echo "MSL_DRY_RUN_COMELIT_INTERACTION=$MSL_COMELIT_INTERACTION"
+    echo "MSL_DRY_RUN_HA_INTERACTION=$MSL_HA_INTERACTION"
     echo "=== END COMELIT MSL V1 BASELINE FINAL ==="
 }
 
+run_dry_run() {
+    RUN_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/comelit-msl-v1-dry-run.XXXXXX")"
+    chmod 700 "$RUN_ROOT"
+    SESSION_LOG="$RUN_ROOT/session.log"
+    BUILD_PROVENANCE_LOG="$RUN_ROOT/build-provenance.log"
+    CLOCK_BASE_FILE="$RUN_ROOT/msl-clock-base"
+    : > "$SESSION_LOG"
+    : > "$BUILD_PROVENANCE_LOG"
+    chmod 600 "$SESSION_LOG" "$BUILD_PROVENANCE_LOG"
+    msl_mono_ms > "$CLOCK_BASE_FILE"
+    chmod 600 "$CLOCK_BASE_FILE"
+
+    echo "MSL_DRY_RUN_MODE=YES"
+    echo "MSL_DRY_RUN_REAL_HA_WEBHOOK=false"
+    echo "MSL_DRY_RUN_REAL_COMELIT=false"
+    echo "MSL_DRY_RUN_CHROOT_BUILD=false"
+    echo "MSL_DRY_RUN_CANDIDATE_EXECUTED=false"
+    echo "MSL_BUILD_RC=DRY_RUN"
+    echo "MSL_WRAPPER_INSTRUMENTATION=DRY_RUN"
+
+    msl_mark "T00_RESEARCH_START"
+    msl_mark "T05_OAUTH_ACCESS_TOKEN_AVAILABLE"
+
+    STATUS_BEFORE="$RUN_ROOT/listener-status-before.json"
+    post_control status "$STATUS_BEFORE" 10
+    if status_ready "$STATUS_BEFORE"; then
+        LISTENER_READY_BEFORE=true
+    else
+        fail "MSL_DRY_RUN_STATUS_READY=FAIL"
+    fi
+    [ "$FAIL" -eq 0 ] || return 1
+
+    STOP_RESPONSE="$RUN_ROOT/listener-stop.json"
+    msl_mark "T01_LISTENER_STOP_REQUESTED"
+    LISTENER_STOPPED=1
+    post_control stop "$STOP_RESPONSE" 20
+    if status_stopped "$STOP_RESPONSE"; then
+        msl_mark "T02_LISTENER_RUNTIME_CONFIRMED_STOPPED"
+    else
+        fail "MSL_DRY_RUN_STATUS_STOPPED=FAIL"
+    fi
+    [ "$FAIL" -eq 0 ] || return 1
+
+    {
+        echo "MSL_T03_NATIVE_HELPER_PROCESS_START_MONO_MS=$(msl_since_base)"
+        echo "ICE_GATHER=PASS"
+        echo "MSL_T04_LOCAL_SDP_OFFER_READY_MONO_MS=$(msl_since_base)"
+        echo "MSL_T06_CLOUD_P2P_REQUEST_START_MONO_MS=$(msl_since_base)"
+        echo "MSL_T07_CLOUD_P2P_RESPONSE_REMOTE_SDP_WRITTEN_MONO_MS=$(msl_since_base)"
+        echo "ICE_CONNECTED=PASS"
+        echo "ICE_READY=PASS"
+        echo "MSL_T08_ICE_CONNECTED_MONO_MS=$(msl_since_base)"
+        echo "PSEUDOTCP_OPEN=PASS"
+        echo "MSL_T09_PSEUDOTCP_OPEN_MONO_MS=$(msl_since_base)"
+        echo "VIP_UAUT_OPEN_RESPONSE=PASS"
+        echo "MSL_T10_VIP_UAUT_READY_MONO_MS=$(msl_since_base)"
+        echo "V4_CTPP_INITIAL_ACK_OBSERVED=true"
+        echo "MSL_T11_CTPP_REGISTRATION_READY_MONO_MS=$(msl_since_base)"
+        echo "P78_RTPC_OPEN_2_SENT=PASS"
+        echo "MSL_T12_RTPC_MEDIA_OPEN_CONTROL_READY_MONO_MS=$(msl_since_base)"
+        echo "P78_RTPC_CLIENT_001A_SENT=PASS"
+        echo "MSL_T13_INITIAL_001A_SENT_MONO_MS=$(msl_since_base)"
+        echo "P80_DEVICE_ACK_001A_OBSERVED=PASS"
+        echo "MSL_T14_DEVICE_STRUCTURAL_ACK_MEDIA_ACCEPTANCE_MONO_MS=$(msl_since_base)"
+        echo "P80_MEDIA_ACTIVE=true"
+        echo "MSL_T15_MEDIA_ACTIVE_MONO_MS=$(msl_since_base)"
+        echo "P80_AUDIO_RTP_FORWARDING=PASS"
+        echo "MSL_T16_FIRST_AUDIO_RTP_MONO_MS=$(msl_since_base)"
+        echo "P80_VIDEO_RTP_FORWARDING=PASS"
+        echo "MSL_T17_FIRST_VIDEO_RTP_MONO_MS=$(msl_since_base)"
+        echo "MSL_T18_FIRST_SPS_PPS_IDR_MONO_MS=$(msl_since_base)"
+        echo "MSL_START_REFERENCE=T03_NATIVE_MEDIA_HELPER_PROCESS_START"
+        echo "MSL_START_TO_FIRST_RTP_MS=0"
+        echo "MSL_START_TO_DECODABLE_VIDEO_MS=0"
+    } > "$SESSION_LOG"
+    cat "$SESSION_LOG"
+    WRAPPER_RC=0
+    MSL_RUN_CLASSIFICATION=DRY_RUN_COMPLETE
+    RTP_SINK_PORTS_REMAINING=0
+    CAMPAIGN_PROCESSES_REMAINING=NONE
+    MEDIA_TEARDOWN=CONFIRMED
+
+    restore_listener || return 1
+    MSL_DRY_RUN_COMPLETED=true
+    MSL_DRY_RUN_REACHED_FINAL_SUMMARY=true
+    print_final_block
+    rm -rf "$RUN_ROOT"
+    return 0
+}
+
 stop_pid() {
-    local pid="$1"
+    local pid
+    pid="$1"
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
         kill -TERM "$pid" 2>/dev/null || true
         sleep 1
@@ -238,7 +372,9 @@ stop_pid() {
 }
 
 restore_listener() {
-    local poll status_file start_file
+    local poll
+    local status_file
+    local start_file
     [ "$LISTENER_STOPPED" -eq 1 ] || return 0
     start_file="$RUN_ROOT/listener-start.json"
     post_control start "$start_file" 40 || true
@@ -286,6 +422,18 @@ on_exit() {
 }
 trap on_exit EXIT
 trap 'exit 130' INT TERM HUP
+
+if [ "$MSL_DRY_RUN" = YES ] && [ "$MSL_LIVE_RUN" = YES ]; then
+    echo "MSL_DRY_RUN_LIVE_RUN_CONFLICT=true"
+    echo "LIVE_INVOCATIONS=0"
+    exit 2
+fi
+
+if [ "$MSL_DRY_RUN" = YES ]; then
+    trap - EXIT
+    run_dry_run
+    exit "$?"
+fi
 
 [ -n "$MSL_EXPECTED_COMMIT_SHA" ] || fail "MSL_EXPECTED_COMMIT_SHA_REQUIRED=true"
 [ -n "$MSL_ATTEMPT_LEDGER" ] || fail "MSL_ATTEMPT_LEDGER_REQUIRED=true"

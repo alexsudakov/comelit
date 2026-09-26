@@ -53,3 +53,11 @@ T19-T24 are not part of this child. Reason: HA Stream worker, HLS part/segment/p
 The helper emits `MSL_START_TO_FIRST_RTP_MS`, `MSL_START_TO_DECODABLE_VIDEO_MS`, `MSL_DELTA_T08_T09_MS`, `MSL_DELTA_T09_T11_MS`, `MSL_DELTA_T11_T15_MS`, and `MSL_DELTA_T15_T17_MS` directly from recorded one-shot marker values. Cross-boundary deltas involving T05-T07 are recomputed by Hermes from the combined runner/wrapper/helper log using the same monotonic base.
 
 The runner always emits safety closure scalars: `DOOR_ACTIONS_SENT=0`, `GATE_ACTIONS_SENT=0`, `PHYSICAL_RING_ACTIONS=0`, `AUTOMATIC_PROTOCOL_RETRY=false`, `SECOND_MEDIA_SESSION=false`, `MEDIA_TEARDOWN`, `CAMPAIGN_PROCESSES_REMAINING`, and `RTP_SINK_PORTS_REMAINING`.
+
+## Dry Run
+
+`MSL_DRY_RUN=YES` is an offline, host-independent control-flow check. It cannot be combined with `MSL_LIVE_RUN=YES`; that conflict exits before any control flow that could reach a real media attempt.
+
+The dry run does not require `/root`, `/usr/local/sbin`, chroot, musl, the CT120 base wrapper, the OAuth status helper, the real HA webhook, or any Comelit endpoint. `post_control()` writes canned listener status/stop/start JSON locally, the build phase is marked `DRY_RUN`, and the synthetic session log emits the documented startup markers through T18 plus representative inherited markers such as `ICE_GATHER=PASS`, `P80_MEDIA_ACTIVE=true`, and `P80_VIDEO_RTP_FORWARDING=PASS`.
+
+Successful dry-run output includes `MSL_DRY_RUN_COMPLETED=true`, `MSL_DRY_RUN_REACHED_FINAL_SUMMARY=true`, `LIVE_INVOCATIONS=0`, `MSL_DRY_RUN_COMELIT_INTERACTION=0`, `MSL_DRY_RUN_HA_INTERACTION=0`, `DOOR_ACTIONS_SENT=0`, and `GATE_ACTIONS_SENT=0`.

@@ -119,8 +119,11 @@ class MslV1LatencyInstrumentationTests(unittest.TestCase):
     def test_generated_source_reproducible(self) -> None:
         a = sha_text(self.generated_a)
         b = sha_text(self.generated_b)
+        mutated_generated = msl.transform(self.base + "\n/* MSL_REPRO_MUTATION */\n", include_p116=True)
+        mutated = sha_text(mutated_generated)
         self.assertEqual(self.generated_a, self.generated_b)
-        print(f"MSL_GENERATED_SOURCE_REPRODUCIBLE=true REAL={a} MUTATED={b}")
+        self.assertNotEqual(a, mutated)
+        print(f"MSL_GENERATED_SOURCE_REPRODUCIBLE=true REAL={a} MUTATED={mutated}")
 
     def test_refusal_mode_safe(self) -> None:
         proc = subprocess.run(["bash", str(RUNNER)], cwd=ROOT, text=True, capture_output=True, check=False)
@@ -130,6 +133,44 @@ class MslV1LatencyInstrumentationTests(unittest.TestCase):
         self.assertIn("MSL_RUN_CLASSIFICATION=NOT_RUN", proc.stdout)
         self.assertNotIn("MSL_T00_RESEARCH_START_MONO_MS", proc.stdout)
         print("MSL_REFUSAL_MODE_SAFE=true")
+
+    def test_dry_run_reaches_final_summary_without_live_attempt(self) -> None:
+        env = os.environ.copy()
+        env["MSL_DRY_RUN"] = "YES"
+        proc = subprocess.run(["bash", str(RUNNER)], cwd=ROOT, env=env, text=True, capture_output=True, timeout=10, check=False)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("MSL_DRY_RUN_COMPLETED=true", proc.stdout)
+        self.assertIn("MSL_DRY_RUN_REACHED_FINAL_SUMMARY=true", proc.stdout)
+        self.assertIn("LIVE_INVOCATIONS=0", proc.stdout)
+        self.assertIn("DOOR_ACTIONS_SENT=0", proc.stdout)
+        self.assertIn("GATE_ACTIONS_SENT=0", proc.stdout)
+        self.assertIn("MSL_RUN_CLASSIFICATION=DRY_RUN_COMPLETE", proc.stdout)
+        print("MSL_DRY_RUN_REACHED_FINAL_SUMMARY=true")
+
+    def test_dry_run_has_zero_real_ha_or_comelit_interaction(self) -> None:
+        env = os.environ.copy()
+        env["MSL_DRY_RUN"] = "YES"
+        proc = subprocess.run(["bash", str(RUNNER)], cwd=ROOT, env=env, text=True, capture_output=True, timeout=10, check=False)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("MSL_DRY_RUN_REAL_HA_WEBHOOK=false", proc.stdout)
+        self.assertIn("MSL_DRY_RUN_REAL_COMELIT=false", proc.stdout)
+        self.assertIn("MSL_DRY_RUN_CHROOT_BUILD=false", proc.stdout)
+        self.assertIn("MSL_DRY_RUN_CANDIDATE_EXECUTED=false", proc.stdout)
+        self.assertIn("MSL_DRY_RUN_COMELIT_INTERACTION=0", proc.stdout)
+        self.assertIn("MSL_DRY_RUN_HA_INTERACTION=0", proc.stdout)
+        self.assertNotIn("CONTROL_STATUS_CURL_RC", proc.stdout)
+        self.assertNotIn("BASE_WRAPPER_SHA256=", proc.stdout)
+        print("MSL_DRY_RUN_COMELIT_INTERACTION=0")
+        print("MSL_DRY_RUN_HA_INTERACTION=0")
+
+    def test_dry_run_cannot_combine_with_live_run(self) -> None:
+        env = os.environ.copy()
+        env["MSL_DRY_RUN"] = "YES"
+        env["MSL_LIVE_RUN"] = "YES"
+        proc = subprocess.run(["bash", str(RUNNER)], cwd=ROOT, env=env, text=True, capture_output=True, check=False)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("MSL_DRY_RUN_LIVE_RUN_CONFLICT=true", proc.stdout)
+        self.assertIn("LIVE_INVOCATIONS=0", proc.stdout)
 
     def test_budget_guard_refuses_missing_malformed_and_cap(self) -> None:
         env = os.environ.copy()
@@ -174,6 +215,21 @@ class MslV1LatencyInstrumentationTests(unittest.TestCase):
         ):
             self.assertIn(marker, self.runner)
         self.assertIn("MSL_START_REFERENCE=T03_NATIVE_MEDIA_HELPER_PROCESS_START", self.runner)
+
+    def test_no_local_or_declare_same_statement_self_reference(self) -> None:
+        offenders: list[str] = []
+        assignment_pattern = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)=")
+        for lineno, line in enumerate(self.runner.splitlines(), start=1):
+            stripped = line.strip()
+            if not (stripped.startswith("local ") or stripped.startswith("declare ")):
+                continue
+            assigned = assignment_pattern.findall(stripped)
+            for name in assigned:
+                _, _, rhs = stripped.partition(f"{name}=")
+                if f"${{{name}}}" in rhs or re.search(rf"(^|[^A-Za-z0-9_])\\${name}([^A-Za-z0-9_]|$)", rhs):
+                    offenders.append(f"{lineno}:{stripped}")
+        self.assertFalse(offenders, "\n".join(offenders))
+        print("LOCAL_SELF_REF_PATTERN_REMAINING=0")
 
 
 if __name__ == "__main__":
