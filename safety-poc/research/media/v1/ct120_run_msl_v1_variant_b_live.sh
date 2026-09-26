@@ -555,11 +555,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 from dataclasses import dataclass
 import importlib
 import importlib.util
+import json
 import os
 from pathlib import Path
+import re
 import sys
 import time
 import types
@@ -580,6 +583,13 @@ _CONFIG_SOURCE_NAME = "ct120_secrets_env"
 _DEFAULT_SECRETS_FILE = Path("/root/.config/comelit/secrets.env")
 _SECRETS_PROBE_REL = Path("safety-poc/research/ring/v4_2/comelit_cloud_probe.py")
 _SCENARIOS_REQUIRING_CREDENTIALS = ("none", "secrets_env_success")
+_LIVE_PATH_SCENARIOS = (
+    "live_path_success",
+    "live_path_http_status",
+    "live_path_malformed_body",
+    "live_path_missing_data",
+    "live_path_missing_sdp",
+)
 
 
 @dataclass
@@ -621,6 +631,160 @@ class FakeSession:
         raise BootstrapError("fake_session_network_unavailable")
 
 
+class UrllibHttpSessionResponse:
+    """Shaped like aiohttp.ClientResponse: a `.status` plus an awaitable
+    `.read()`, which is all cloud.async_negotiate_p2p relies on."""
+
+    def __init__(self, status: int, body: bytes) -> None:
+        self.status = status
+        self._body = body
+
+    async def read(self) -> bytes:
+        return self._body
+
+
+class UrllibPostContext:
+    def __init__(self, url: str, data: bytes, headers: dict[str, str], timeout: float) -> None:
+        self._url = url
+        self._data = data
+        self._headers = headers
+        self._timeout = timeout
+
+    async def __aenter__(self) -> UrllibHttpSessionResponse:
+        def _do_request() -> tuple[int, bytes]:
+            import urllib.error
+            import urllib.request
+
+            request = urllib.request.Request(
+                self._url, method="POST", data=self._data, headers=self._headers
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=self._timeout) as response:
+                    return response.status, response.read()
+            except urllib.error.HTTPError as exc:
+                return exc.code, exc.read()
+
+        status, body = await asyncio.to_thread(_do_request)
+        return UrllibHttpSessionResponse(status, body)
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+
+class UrllibHttpSession:
+    # aiohttp.ClientSession-shaped adapter backed by the standard library,
+    # used for the real cloud request because CT120's bare python3 process
+    # (unlike Home Assistant's venv) has no aiohttp installed -- the same
+    # constraint safety-poc/research/ring/v4_2/comelit_cloud_probe.py already
+    # works around with urllib against this exact endpoint. Building this
+    # session independently of whatever `sys.modules["aiohttp"]` was stubbed
+    # to while loading cloud.py/oauth.py (see _load_production_modules) is
+    # what the earlier TypeError was missing: that stub's ClientSession is a
+    # placeholder `object`, which has no async context manager protocol.
+    async def __aenter__(self) -> "UrllibHttpSession":
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+    def post(self, url: str, *, data: bytes, headers: dict[str, str], timeout: float) -> UrllibPostContext:
+        return UrllibPostContext(url, data, headers, timeout)
+
+
+def _have_real_aiohttp() -> bool:
+    if "aiohttp" in sys.modules:
+        return hasattr(sys.modules["aiohttp"], "ClientTimeout")
+    return importlib.util.find_spec("aiohttp") is not None
+
+
+def _build_live_session(have_real_aiohttp: bool) -> object:
+    if have_real_aiohttp:
+        import aiohttp
+
+        return aiohttp.ClientSession()
+    return UrllibHttpSession()
+
+
+class FakeHttpResponse:
+    def __init__(self, status: int, body: bytes) -> None:
+        self.status = status
+        self._body = body
+
+    async def read(self) -> bytes:
+        return self._body
+
+
+class FakeHttpPostContext:
+    def __init__(self, response: FakeHttpResponse) -> None:
+        self._response = response
+
+    async def __aenter__(self) -> FakeHttpResponse:
+        return self._response
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+
+class FakeHttpTransport:
+    # Implements the exact session.post()-as-async-context-manager interface
+    # real aiohttp.ClientSession provides, so the live-path offline exercise
+    # drives the unmodified cloud.async_negotiate_p2p against a scripted,
+    # production-shaped HTTP response instead of the real network -- the
+    # same function that failed live, not a re-implementation of it.
+    def __init__(self, status: int, body: bytes) -> None:
+        self._status = status
+        self._body = body
+        self.request_count = 0
+
+    async def __aenter__(self) -> "FakeHttpTransport":
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+    def post(self, _url: str, *, data: bytes, headers: dict[str, str], timeout: float) -> FakeHttpPostContext:
+        self.request_count += 1
+        return FakeHttpPostContext(FakeHttpResponse(self._status, self._body))
+
+
+def _fake_cloud_http_response(scenario: str) -> tuple[int, bytes]:
+    encoded = base64.b64encode(_fake_remote_sdp().encode("utf-8")).decode("ascii")
+    if scenario == "live_path_success":
+        return 200, json.dumps({"data": {"sdp": encoded}}).encode("utf-8")
+    if scenario == "live_path_http_status":
+        return 503, b'{"error":"service_unavailable"}'
+    if scenario == "live_path_malformed_body":
+        return 200, b"not-json-at-all{{{"
+    if scenario == "live_path_missing_data":
+        return 200, json.dumps({"unexpected": "shape"}).encode("utf-8")
+    if scenario == "live_path_missing_sdp":
+        return 200, json.dumps({"data": {"other": "field"}}).encode("utf-8")
+    raise BootstrapError(f"unknown_live_path_scenario:{scenario}")
+
+
+_REDACT_PATTERNS = (
+    # base64-shaped material (SDP bodies, tokens): only the standard base64
+    # alphabet, deliberately excluding '_'/'-' so ordinary snake_case error
+    # codes like "response_not_json" are never mistaken for secrets.
+    re.compile(r"[A-Za-z0-9+/]{20,}={0,2}"),
+    # long hex strings (device/session identifiers, tokens).
+    re.compile(r"\b[0-9a-fA-F]{20,}\b"),
+    # candidate/peer IPv4 addresses.
+    re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b"),
+)
+
+
+def _sanitize_failure_message(message: str) -> str:
+    for pattern in _REDACT_PATTERNS:
+        message = pattern.sub("<redacted>", message)
+    return message
+
+
+def _failure_detail(exc: Exception) -> str:
+    sanitized = _sanitize_failure_message(str(exc))[:120]
+    return f"{type(exc).__name__}:{sanitized}"
+
+
 def _load_secrets_probe_module(repo: Path) -> object:
     # Reuses the parser this repo's existing CT120 research cloud probe already
     # uses against the same file every research media path treats as the
@@ -651,7 +815,10 @@ def _resolve_runtime_config(args: argparse.Namespace) -> Config:
     oauth_expires_at = ""
     oauth_scope = ""
 
-    needs_credentials = args.fake_scenario in _SCENARIOS_REQUIRING_CREDENTIALS
+    needs_credentials = (
+        args.fake_scenario in _SCENARIOS_REQUIRING_CREDENTIALS
+        or args.fake_scenario in _LIVE_PATH_SCENARIOS
+    )
     if needs_credentials and not (device_uuid and vip_token and oauth_access_token):
         secrets = _read_secrets_env(repo, config_source)
         device_uuid = device_uuid or secrets.get("COMELIT_DUUID", "")
@@ -742,7 +909,7 @@ def _ensure_stub_module(name: str, build) -> None:
         sys.modules[name] = build()
 
 
-def _load_production_modules(config: Config) -> tuple[object, object, object, object]:
+def _load_production_modules(config: Config) -> tuple[object, object, object, object, bool]:
     # oauth.py/cloud.py are HA integration files: they assume aiohttp and the
     # homeassistant package are on sys.path.  This provider runs as a bare
     # python3 process on CT120 (not inside HA's venv), so those are stubbed
@@ -750,6 +917,14 @@ def _load_production_modules(config: Config) -> tuple[object, object, object, ob
     # (see tests/test_p116_observability_success_path.py) when the real
     # packages are not importable; a real aiohttp/homeassistant is preferred
     # and used unmodified when present.
+    #
+    # This stub only exists to satisfy cloud.py's/oauth.py's module-level
+    # `from aiohttp import ...`. It must never be used to build the session
+    # object passed into a real cloud request: its ClientSession is a
+    # placeholder `object`, which raises TypeError under `async with`. The
+    # real request session is built separately by _build_live_session, keyed
+    # off have_real_aiohttp captured here before any stubbing happens.
+    have_real_aiohttp = _have_real_aiohttp()
     _ensure_stub_module("aiohttp", lambda: SimpleNamespace(ClientSession=object, ClientError=Exception))
     _ensure_stub_module("homeassistant", lambda: types.ModuleType("homeassistant"))
     _ensure_stub_module("homeassistant.config_entries", lambda: SimpleNamespace(ConfigEntry=object))
@@ -773,7 +948,7 @@ def _load_production_modules(config: Config) -> tuple[object, object, object, ob
     sdp = _load_module("custom_components.comelit.sdp", component_dir / "sdp.py")
     cloud = _load_module("custom_components.comelit.cloud", component_dir / "cloud.py")
     oauth = _load_module("custom_components.comelit.oauth", component_dir / "oauth.py")
-    return cloud, oauth, sdp, const
+    return cloud, oauth, sdp, const, have_real_aiohttp
 
 
 def _fake_remote_sdp() -> str:
@@ -810,7 +985,7 @@ def _fake_offer() -> bytes:
 
 
 async def _run(config: Config) -> int:
-    cloud, oauth, sdp, const = _load_production_modules(config)
+    cloud, oauth, sdp, const, have_real_aiohttp = _load_production_modules(config)
     runtime = _runtime_write_remote_shim(config)
     cloud_request_count = 0
     markers: list[str] = []
@@ -823,7 +998,7 @@ async def _run(config: Config) -> int:
             raise BootstrapError("offer_missing")
         elif config.fake_scenario == "malformed_offer":
             raw_offer = b"not-sdp"
-        elif config.fake_scenario == "none":
+        elif config.fake_scenario == "none" or config.fake_scenario in _LIVE_PATH_SCENARIOS:
             raw_offer = await _wait_for_offer(config.offer_file, config.timeout_seconds)
         else:
             raw_offer = _fake_offer()
@@ -839,7 +1014,7 @@ async def _run(config: Config) -> int:
         token_source = "ComelitOAuthManager.async_get_access_token"
         # Marker contract: MSL_B_BOOTSTRAP_TOKEN_SOURCE=ComelitOAuthManager.async_get_access_token
         print(f"MSL_B_BOOTSTRAP_TOKEN_SOURCE={token_source}")
-        if config.fake_scenario in _SCENARIOS_REQUIRING_CREDENTIALS:
+        if config.fake_scenario in _SCENARIOS_REQUIRING_CREDENTIALS or config.fake_scenario in _LIVE_PATH_SCENARIOS:
             entry_data: dict[str, object] = {const.CONF_OAUTH_ACCESS_TOKEN: config.oauth_access_token}
             if config.oauth_refresh_token:
                 entry_data[const.CONF_OAUTH_REFRESH_TOKEN] = config.oauth_refresh_token
@@ -862,11 +1037,21 @@ async def _run(config: Config) -> int:
             raise cloud.ComelitCloudError("fake_cloud_failure")
         if config.fake_scenario == "malformed_remote_sdp":
             remote = "not-a-valid-remote-sdp"
-        elif config.fake_scenario != "none":
-            remote = _fake_remote_sdp()
-        else:
-            from aiohttp import ClientSession
-            async with ClientSession() as session:
+        elif config.fake_scenario == "none" or config.fake_scenario in _LIVE_PATH_SCENARIOS:
+            # Both the real live run (fake_scenario == "none") and the
+            # offline live-path exercise (_LIVE_PATH_SCENARIOS) call the
+            # unmodified cloud.async_negotiate_p2p from this one call site;
+            # only the session object differs. That is what makes the
+            # offline exercise able to catch a regression here: a real live
+            # run and the FakeHttpTransport-backed test run the identical
+            # negotiate/validate/write chain, so a mistake in this call
+            # (wrong argument shape, wrong session object) breaks both.
+            if config.fake_scenario == "none":
+                session_cm = _build_live_session(have_real_aiohttp)
+            else:
+                status, body = _fake_cloud_http_response(config.fake_scenario)
+                session_cm = FakeHttpTransport(status, body)
+            async with session_cm as session:
                 remote = await cloud.async_negotiate_p2p(
                     session,
                     device_uuid=config.device_uuid,
@@ -874,6 +1059,10 @@ async def _run(config: Config) -> int:
                     oauth_access_token=access_token,
                     offer_sdp=transformed,
                 )
+            if config.fake_scenario in _LIVE_PATH_SCENARIOS and session.request_count != 1:
+                raise BootstrapError(f"unexpected_transport_request_count:{session.request_count}")
+        elif config.fake_scenario != "none":
+            remote = _fake_remote_sdp()
         cloud._validate_remote_sdp(remote)
         runtime._write_remote(remote)
         if config.remote_file != runtime._REMOTE_FILE:
@@ -889,6 +1078,7 @@ async def _run(config: Config) -> int:
             print("MSL_B_BOOTSTRAP_TRANSFORM=FAIL")
         print(f"MSL_B_BOOTSTRAP_CLOUD_REQUEST_COUNT={cloud_request_count}")
         print(f"MSL_B_BOOTSTRAP_FAIL_CLOSED=true reason={type(exc).__name__}")
+        print(f"MSL_B_BOOTSTRAP_FAILURE_DETAIL={_failure_detail(exc)}")
         return 1
 
 
