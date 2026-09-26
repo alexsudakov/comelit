@@ -38,7 +38,12 @@ MAX_MEDIA_STARTUP_OUTER_TIMEOUT_SECONDS=90
 RUN_DIR=/run/comelit-p2p
 START_FILE="$RUN_DIR/msl-b-start-idle-media"
 STOP_FILE="$RUN_DIR/msl-b-stop-idle-media"
-CLOCK_BASE_FILE="$RUN_DIR/msl-b-clock-base"
+# Shared clock-base contract with ct120_run_msl_v1_baseline_live.sh: same
+# directory, same file name, same "<decimal ms>\n" content written by
+# msl_b_mono_ms/msl_mono_ms, so both variants' native readers agree on one
+# format instead of each variant inventing its own path.
+MSL_CLOCK_DIR=${MSL_CLOCK_DIR:-/run/comelit-msl}
+CLOCK_BASE_FILE="$MSL_CLOCK_DIR/msl-clock-base"
 OFFER_FILE="$RUN_DIR/offer.sdp"
 REMOTE_FILE="$RUN_DIR/remote.sdp"
 CANDIDATE_NAME=comelit-msl-v1-variant-b-listener
@@ -1438,6 +1443,7 @@ if [ "$MSL_B_SELFTEST" = YES ]; then
 fi
 
 install -d -m 700 "$RUN_DIR"
+install -d -m 700 "$MSL_CLOCK_DIR"
 rm -f "$START_FILE" "$STOP_FILE" "$OFFER_FILE" "$REMOTE_FILE"
 msl_b_mono_ms > "$CLOCK_BASE_FILE"
 chmod 600 "$CLOCK_BASE_FILE"

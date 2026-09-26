@@ -53,6 +53,13 @@ typedef gint64 goffset;
 #define G_OBJECT(x) ((gpointer)(x))
 #define G_CALLBACK(f) ((GCallback)(f))
 
+#ifndef MAX
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#endif
+#ifndef MIN
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#endif
+
 typedef void (*GCallback)(void);
 typedef void (*GDestroyNotify)(gpointer data);
 

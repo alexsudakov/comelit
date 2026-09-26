@@ -99,31 +99,64 @@ static gboolean msl_b_b07_decodable_marked = FALSE;
 
 static gboolean r42_queue_media_channel_close(void);
 
-static void
-msl_b_print_clock_marker(const char *name)
-{
-    const char *base_path = getenv("MSL_B_CLOCK_BASE_FILE");
-    gchar *text = NULL;
-    gint64 base = 0;
-    gint64 now = g_get_monotonic_time() / 1000;
-    gchar *end = NULL;
+static gboolean msl_b_clock_base_loaded = FALSE;
+static gboolean msl_b_clock_base_valid = FALSE;
+static gint64 msl_b_clock_base_value = 0;
 
+/* Shared contract with ct120_run_msl_v1_baseline_live.sh's write_clock_base:
+ * the runner writes one decimal millisecond value followed by a trailing
+ * newline ("<n>\n", via python print()/printf '%s\n').  Accept exactly that
+ * -- trailing ASCII whitespace after the digits is well-formed, not corrupt
+ * -- so a genuinely missing/malformed file is the only thing that reports
+ * invalid. */
+static void
+msl_b_load_clock_base(void)
+{
+    const char *base_path;
+    gchar *text = NULL;
+    gchar *end = NULL;
+    gint64 value;
+
+    if (msl_b_clock_base_loaded)
+        return;
+    msl_b_clock_base_loaded = TRUE;
+
+    base_path = getenv("MSL_B_CLOCK_BASE_FILE");
     if (!base_path || !g_file_get_contents(base_path, &text, NULL, NULL)) {
         printf("MSL_B_CLOCK_BASE_MISSING=true\n");
         fflush(stdout);
         g_free(text);
         return;
     }
-    base = g_ascii_strtoll(text, &end, 10);
-    if (!end || *end != '\0') {
+
+    value = g_ascii_strtoll(text, &end, 10);
+    while (end && *end != '\0' && g_ascii_isspace(*end))
+        end++;
+    if (!end || end == text || *end != '\0' || value <= 0) {
         printf("MSL_B_CLOCK_BASE_INVALID=true\n");
         fflush(stdout);
         g_free(text);
         return;
     }
-    printf("MSL_B_%s_MONO_MS=%lld\n", name, (long long)MAX((gint64)0, now - base));
+
+    msl_b_clock_base_valid = TRUE;
+    msl_b_clock_base_value = value;
+    printf("MSL_B_CLOCK_BASE_PATH=%s\n", base_path);
+    printf("MSL_B_CLOCK_BASE_VALUE=%lld\n", (long long)value);
     fflush(stdout);
     g_free(text);
+}
+
+static void
+msl_b_print_clock_marker(const char *name)
+{
+    gint64 now = g_get_monotonic_time() / 1000;
+
+    msl_b_load_clock_base();
+    if (!msl_b_clock_base_valid)
+        return;
+    printf("MSL_B_%s_MONO_MS=%lld\n", name, (long long)MAX((gint64)0, now - msl_b_clock_base_value));
+    fflush(stdout);
 }
 
 static gboolean
@@ -283,7 +316,7 @@ msl_b_activate_idle_media(void)
 {
     if (msl_b_idle_state != MSL_B_IDLE_STATE_SELF_ACTIVATION_TX)
         return;
-    p80_media_forwarding_enabled = TRUE;
+    r42_listener_rtp_arm(1);
     msl_b_media_rx_active = TRUE;
     msl_b_idle_state = MSL_B_IDLE_STATE_ACTIVE;
     r42_media_stage = R42_MEDIA_ACTIVE;
@@ -308,7 +341,7 @@ msl_b_queue_idle_close(void)
         fflush(stdout);
         return TRUE;
     }
-    p80_media_forwarding_enabled = FALSE;
+    r42_listener_rtp_arm(0);
     msl_b_media_rx_active = FALSE;
     msl_b_media_rx_inactive_after_close = TRUE;
     msl_b_idle_state = MSL_B_IDLE_STATE_CLOSE_TX;
@@ -503,6 +536,8 @@ def _assert_gates(candidate: str) -> None:
         "P12_TX_V4_OPEN_CTPP",
         "P12_TX_AUTH",
         "P12_TX_V4_DOOR_WRITE",
+        "p80_media_forwarding_enabled = TRUE",
+        "p80_media_forwarding_enabled = FALSE",
     )
     for needle in forbidden:
         if needle in region:
@@ -518,6 +553,8 @@ def _assert_gates(candidate: str) -> None:
         "msl_b_ready_now",
         "msl_b_queue_idle_channel_open",
         "msl_b_queue_idle_self_activation",
+        "r42_listener_rtp_arm(1);",
+        "r42_listener_rtp_arm(0);",
         "B00_IDLE_MEDIA_REQUEST_RECEIVED",
         "B01_RTPC_MEDIA_OPEN_SEQUENCE_STARTED",
         "B02_RTPC_MEDIA_OPEN_CONTROL_READY",
