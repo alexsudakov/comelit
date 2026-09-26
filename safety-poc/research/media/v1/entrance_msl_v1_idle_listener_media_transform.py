@@ -185,6 +185,30 @@ static guint msl_b_ack_reject_wrong_flags = 0;
 static guint msl_b_ack_reject_address_role = 0;
 static guint msl_b_ack_reject_other = 0;
 
+/* MSL_B_RTPC_WINDOW_DIAGNOSTICS_BEGIN: bounded, no-payload counters covering
+ * only the RTPC-open window (WAIT_DEVICE_OPEN / WAIT_DEVICE_RESPONSES), so a
+ * single live attempt shows whether the panel answered at all even if the
+ * sequence never reaches 0x000A. Reused from P82's own no-target-id,
+ * no-raw-payload diagnostic posture
+ * (entrance_p82_rtpc_device_open_shape_transform.py:1-9,84-91). */
+static guint msl_b_rtpc_window_inbound_count = 0;
+static guint msl_b_rtpc_window_open_schema_count = 0;
+static guint msl_b_rtpc_window_response_schema_count = 0;
+static guint msl_b_rtpc_window_paired_response_count = 0;
+static guint msl_b_rtpc_window_rejected_count = 0;
+
+static void
+msl_b_print_rtpc_window_diagnostics(void)
+{
+    printf("MSL_B_RTPC_WINDOW_INBOUND_COUNT=%u\n", msl_b_rtpc_window_inbound_count);
+    printf("MSL_B_RTPC_WINDOW_OPEN_SCHEMA_COUNT=%u\n", msl_b_rtpc_window_open_schema_count);
+    printf("MSL_B_RTPC_WINDOW_RESPONSE_SCHEMA_COUNT=%u\n", msl_b_rtpc_window_response_schema_count);
+    printf("MSL_B_RTPC_WINDOW_PAIRED_RESPONSE_COUNT=%u\n", msl_b_rtpc_window_paired_response_count);
+    printf("MSL_B_RTPC_WINDOW_REJECTED_COUNT=%u\n", msl_b_rtpc_window_rejected_count);
+    fflush(stdout);
+}
+/* MSL_B_RTPC_WINDOW_DIAGNOSTICS_END */
+
 /* MSL_B_PRE_RTPC_ACTIVATION_STATE_BEGIN: local session state for the reused
  * entrance 0x0028/0x0008/0x0002 preamble primitives, generated the same way
  * the pre-001A block above generates its own sequence/role state -- each
@@ -326,6 +350,7 @@ msl_b_print_reuse_counters(void)
     printf("ACK_REJECT_WRONG_FLAGS=%u\n", msl_b_ack_reject_wrong_flags);
     printf("ACK_REJECT_ADDRESS_ROLE=%u\n", msl_b_ack_reject_address_role);
     printf("ACK_REJECT_OTHER=%u\n", msl_b_ack_reject_other);
+    msl_b_print_rtpc_window_diagnostics();
     fflush(stdout);
 }
 
@@ -1071,44 +1096,83 @@ msl_b_queue_client_000a(void)
     return p12_flush_tx();
 }
 
-/* Reuse of p78_handle_rtpc_control_frame's two request_id==0 stages
- * (entrance_p78_rtpc_media_live_stage_transform.py:363-450): observe the
- * device's own RTPC OPEN, then observe its two RESPONSE frames pairing back
- * to our OPEN_1/OPEN_2 target ids. */
+/* Reuse of P83's request-id-0 classification fix
+ * (entrance_p83_rtpc_response_before_open_transform.py:104-186): live
+ * evidence showed the device may answer one of the two client RTPC OPENs
+ * with a valid RESPONSE before sending its own RTPC OPEN. The prior version
+ * of this handler assumed every request-id-0 frame seen in WAIT_DEVICE_OPEN
+ * was the device OPEN, so an early RESPONSE failed msl_b_rtpc_open_is_valid
+ * and was silently dropped -- losing one of the two pairings the post-000A
+ * cycle later requires. This records a target-id match against either the
+ * OPEN or the RESPONSE schema before deciding what the frame is. */
+static gboolean
+msl_b_record_device_response(const guint8 *body)
+{
+    guint16 target = read_le16(body + 8);
+
+    if (target == msl_b_rtpc_target_1) {
+        if (msl_b_device_response_1_seen)
+            return FALSE;
+        msl_b_device_response_1_seen = TRUE;
+    } else if (target == msl_b_rtpc_target_2) {
+        if (msl_b_device_response_2_seen)
+            return FALSE;
+        msl_b_device_response_2_seen = TRUE;
+    } else {
+        return FALSE;
+    }
+    msl_b_rtpc_window_paired_response_count++;
+    return TRUE;
+}
+
 static gboolean
 msl_b_handle_rtpc_control_frame(guint32 request_id, const guint8 *body, guint body_len)
 {
     if (request_id != 0u)
         return FALSE;
+    if (msl_b_idle_state != MSL_B_IDLE_STATE_WAIT_DEVICE_OPEN &&
+        msl_b_idle_state != MSL_B_IDLE_STATE_WAIT_DEVICE_RESPONSES)
+        return FALSE;
+
+    msl_b_rtpc_window_inbound_count++;
 
     if (msl_b_idle_state == MSL_B_IDLE_STATE_WAIT_DEVICE_OPEN) {
-        if (!msl_b_rtpc_open_is_valid(body, body_len))
-            return FALSE;
+        if (msl_b_rtpc_response_is_valid(body, body_len)) {
+            msl_b_rtpc_window_response_schema_count++;
+            if (!msl_b_record_device_response(body)) {
+                msl_b_rtpc_window_rejected_count++;
+                return TRUE;
+            }
+            msl_b_print_clock_marker("V3_RTPC_EARLY_DEVICE_RESPONSE_OBSERVED");
+            return TRUE;
+        }
+
+        if (!msl_b_rtpc_open_is_valid(body, body_len)) {
+            msl_b_rtpc_window_rejected_count++;
+            return TRUE;
+        }
+        msl_b_rtpc_window_open_schema_count++;
         msl_b_device_open_target = read_le16(body + 12);
         msl_b_print_clock_marker("B02A_DEVICE_RTPC_OPEN_OBSERVED");
         (void)msl_b_queue_rtpc_client_response(msl_b_device_open_target);
         return TRUE;
     }
 
-    if (msl_b_idle_state == MSL_B_IDLE_STATE_WAIT_DEVICE_RESPONSES) {
-        guint16 target;
-        if (!msl_b_rtpc_response_is_valid(body, body_len))
-            return FALSE;
-        target = read_le16(body + 8);
-        if (target == msl_b_rtpc_target_1)
-            msl_b_device_response_1_seen = TRUE;
-        else if (target == msl_b_rtpc_target_2)
-            msl_b_device_response_2_seen = TRUE;
-        else
-            return FALSE;
-        if (!msl_b_device_response_1_seen || !msl_b_device_response_2_seen)
-            return TRUE;
-        msl_b_print_clock_marker("B02B_DEVICE_RESPONSES_OBSERVED");
-        (void)msl_b_queue_client_000a();
+    /* MSL_B_IDLE_STATE_WAIT_DEVICE_RESPONSES */
+    if (!msl_b_rtpc_response_is_valid(body, body_len)) {
+        msl_b_rtpc_window_rejected_count++;
         return TRUE;
     }
-
-    return FALSE;
+    msl_b_rtpc_window_response_schema_count++;
+    if (!msl_b_record_device_response(body)) {
+        msl_b_rtpc_window_rejected_count++;
+        return TRUE;
+    }
+    if (!msl_b_device_response_1_seen || !msl_b_device_response_2_seen)
+        return TRUE;
+    msl_b_print_clock_marker("B02B_DEVICE_RESPONSES_OBSERVED");
+    (void)msl_b_queue_client_000a();
+    return TRUE;
 }
 
 /* Reuse of p97_queue_device_000a_ack's sequence/role derivation
@@ -1284,6 +1348,7 @@ msl_b_queue_idle_close(void)
 {
     if (msl_b_idle_state != MSL_B_IDLE_STATE_ACTIVE || r42_media_channel_id == 0u) {
         printf("MSL_B_IDLE_STOP_PRECONDITION=FAIL\n");
+        msl_b_print_rtpc_window_diagnostics();
         fflush(stdout);
         return FALSE;
     }
@@ -1404,6 +1469,14 @@ TX_COMPLETION_OPEN_REPLACEMENT = """        case P12_TX_MSL_B_PREAMBLE_0028:
             msl_b_idle_state = MSL_B_IDLE_STATE_WAIT_DEVICE_RESPONSES;
             printf("MSL_B_RTPC_CLIENT_RESPONSE_SENT=true\\n");
             fflush(stdout);
+            if (msl_b_device_response_1_seen && msl_b_device_response_2_seen) {
+                msl_b_print_clock_marker("B02B_DEVICE_RESPONSES_OBSERVED");
+                if (!msl_b_queue_client_000a()) {
+                    msl_b_idle_state = MSL_B_IDLE_STATE_FAILED;
+                    printf("MSL_B_RTPC_CLIENT_000A_QUEUE=FAIL\\n");
+                    fflush(stdout);
+                }
+            }
             break;
 
         case P12_TX_MSL_B_RTPC_CLIENT_000A:

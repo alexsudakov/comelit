@@ -522,6 +522,140 @@ class MslV1IdleListenerMediaTests(unittest.TestCase):
             "MUTATED=counter_token_scan"
         )
 
+    def test_rtpc_early_device_response_before_open_is_classified_with_flip_proof(self) -> None:
+        # V3 CLI#2 corrective: port P83's response-before-open fix
+        # (entrance_p83_rtpc_response_before_open_transform.py:104-186) into
+        # the idle path's msl_b_handle_rtpc_control_frame. A request-id-0
+        # frame observed while WAIT_DEVICE_OPEN must be checked against the
+        # RESPONSE schema before being assumed to be the device's own OPEN,
+        # or an early RESPONSE is silently dropped -- exactly the bug P83
+        # fixed, and the divergence identified from the V3 live evidence.
+        handler = self.generated_a.split(
+            "msl_b_handle_rtpc_control_frame(guint32 request_id", 1
+        )[1].split("\n}\n", 1)[0]
+        wait_open_branch = handler.split(
+            "MSL_B_IDLE_STATE_WAIT_DEVICE_OPEN) {", 1
+        )[1].split("/* MSL_B_IDLE_STATE_WAIT_DEVICE_RESPONSES */", 1)[0]
+        self.assertIn("msl_b_rtpc_response_is_valid(body, body_len)", wait_open_branch)
+        self.assertIn("msl_b_record_device_response(body)", wait_open_branch)
+        self.assertLess(
+            wait_open_branch.index("msl_b_rtpc_response_is_valid(body, body_len)"),
+            wait_open_branch.index("msl_b_rtpc_open_is_valid(body, body_len)"),
+        )
+
+        # Flip proof: the pre-V3 shape checked only msl_b_rtpc_open_is_valid
+        # in WAIT_DEVICE_OPEN. Removing the early-response classification
+        # call from that branch must remove the evidence this test asserts
+        # on (the WAIT_DEVICE_RESPONSES branch keeps its own independent
+        # msl_b_rtpc_response_is_valid check, so the mutation is scoped to
+        # the WAIT_DEVICE_OPEN branch alone).
+        mutated = wait_open_branch.replace("msl_b_rtpc_response_is_valid(body, body_len)", "0", 1)
+        self.assertNotIn("msl_b_rtpc_response_is_valid(body, body_len)", mutated)
+        print(
+            "MSL_B_RTPC_EARLY_RESPONSE_CLASSIFIED=true "
+            "REAL=response_schema_checked_before_open_schema_in_wait_device_open "
+            "MUTATED=response_schema_check_removed"
+        )
+
+    def test_rtpc_client_000a_started_at_client_response_completion_when_already_paired_with_flip_proof(self) -> None:
+        # Reuse of P83's ack-completion gate
+        # (entrance_p83_rtpc_response_before_open_transform.py:33-53): both
+        # device RESPONSEs may already have been recorded while still
+        # WAIT_DEVICE_OPEN (the early-response case above), so the
+        # CLIENT_RESPONSE TX completion must itself check both pairing flags
+        # and start 0x000A right there instead of waiting for a third
+        # inbound frame that may never arrive.
+        case = self.generated_a.split("case P12_TX_MSL_B_RTPC_CLIENT_RESPONSE:", 1)[1].split(
+            "case P12_TX_MSL_B_RTPC_CLIENT_000A:", 1
+        )[0]
+        self.assertIn("msl_b_device_response_1_seen && msl_b_device_response_2_seen", case)
+        self.assertIn("msl_b_queue_client_000a()", case)
+
+        mutated = self.generated_a.replace(
+            "if (msl_b_device_response_1_seen && msl_b_device_response_2_seen) {",
+            "if (0) {",
+            1,
+        )
+        mutated_case = mutated.split("case P12_TX_MSL_B_RTPC_CLIENT_RESPONSE:", 1)[1].split(
+            "case P12_TX_MSL_B_RTPC_CLIENT_000A:", 1
+        )[0]
+        self.assertNotIn("msl_b_device_response_1_seen && msl_b_device_response_2_seen", mutated_case)
+        print(
+            "MSL_B_RTPC_000A_GATED_ON_PAIRED_RESPONSES_AT_CLIENT_RESPONSE_COMPLETION=true "
+            "REAL=checked_inline_at_tx_completion "
+            "MUTATED=gate_condition_replaced_with_0"
+        )
+
+    def test_rtpc_no_duplicate_pairing_on_retransmitted_response_with_flip_proof(self) -> None:
+        # msl_b_record_device_response must reject (not double-count) a
+        # second RESPONSE for a target it already paired -- the RTPC
+        # analogue of the existing device-0002 retransmit dedup, and the
+        # source of the "no second ACK on a retransmitted frame" offline
+        # proof this round requires.
+        fn = self.generated_a.split("msl_b_record_device_response(const guint8 *body)\n{", 1)[1].split(
+            "\n}\n", 1
+        )[0]
+        self.assertIn("if (msl_b_device_response_1_seen)\n            return FALSE;", fn)
+        self.assertIn("if (msl_b_device_response_2_seen)\n            return FALSE;", fn)
+
+        mutated = fn.replace("if (msl_b_device_response_1_seen)\n            return FALSE;\n        ", "", 1)
+        self.assertNotIn("if (msl_b_device_response_1_seen)\n            return FALSE;", mutated)
+        print(
+            "MSL_B_RTPC_NO_DUPLICATE_PAIRING_ON_RETRANSMIT=true "
+            "REAL=already_seen_target_rejected "
+            "MUTATED=duplicate_guard_removed"
+        )
+
+    def test_rtpc_window_diagnostics_present_and_derived_with_flip_proof(self) -> None:
+        counters = (
+            "MSL_B_RTPC_WINDOW_INBOUND_COUNT",
+            "MSL_B_RTPC_WINDOW_OPEN_SCHEMA_COUNT",
+            "MSL_B_RTPC_WINDOW_RESPONSE_SCHEMA_COUNT",
+            "MSL_B_RTPC_WINDOW_PAIRED_RESPONSE_COUNT",
+            "MSL_B_RTPC_WINDOW_REJECTED_COUNT",
+        )
+        proofs: list[str] = []
+        for counter in counters:
+            real = self.generated_a.count(counter)
+            mutated = self.generated_a.replace(counter, "MSL_B_COUNTER_MUTATED", 1).count(counter)
+            self.assertGreater(real, 0, counter)
+            self.assertNotEqual(real, mutated, counter)
+            proofs.append(f"{counter}:REAL={real}/MUTATED={mutated}")
+
+        # No target ids or raw payload bytes leave with these diagnostics.
+        window_fn = self.generated_a.split(
+            "msl_b_print_rtpc_window_diagnostics(void)\n{", 1
+        )[1].split("\n}\n", 1)[0]
+        for forbidden in ("target", "body[", "body +"):
+            self.assertNotIn(forbidden, window_fn)
+        print("MSL_B_RTPC_WINDOW_DIAGNOSTICS_DERIVED=true " + ",".join(proofs))
+
+    def test_rtpc_window_diagnostics_surface_on_stuck_stop_precondition_with_flip_proof(self) -> None:
+        # The actual observed V3 failure mode is total silence after RTPC
+        # begins: msl_b_print_reuse_counters is only reachable from a
+        # completed MEDIA_CLOSED transition, which a stuck RTPC exchange
+        # never reaches. msl_b_queue_idle_close's own
+        # MSL_B_IDLE_STOP_PRECONDITION=FAIL branch is reachable regardless of
+        # how far the sequence got, so the window counters must be printed
+        # there too -- otherwise a single bounded live attempt that gets
+        # stuck reports nothing about whether the panel answered at all.
+        close_fn = self.generated_a.split("msl_b_queue_idle_close(void)\n{", 1)[1].split("\n}\n", 1)[0]
+        fail_branch = close_fn.split("MSL_B_IDLE_STOP_PRECONDITION=FAIL", 1)[1].split("return FALSE;", 1)[0]
+        self.assertIn("msl_b_print_rtpc_window_diagnostics()", fail_branch)
+
+        mutated = self.generated_a.replace(
+            'printf("MSL_B_IDLE_STOP_PRECONDITION=FAIL\\n");\n        msl_b_print_rtpc_window_diagnostics();',
+            'printf("MSL_B_IDLE_STOP_PRECONDITION=FAIL\\n");',
+            1,
+        )
+        mutated_close_fn = mutated.split("msl_b_queue_idle_close(void)\n{", 1)[1].split("\n}\n", 1)[0]
+        self.assertNotIn("msl_b_print_rtpc_window_diagnostics()", mutated_close_fn)
+        print(
+            "MSL_B_RTPC_WINDOW_DIAGNOSTICS_SURFACE_ON_STUCK_STOP=true "
+            "REAL=printed_in_stop_precondition_fail_branch "
+            "MUTATED=diagnostics_call_removed"
+        )
+
     def test_r42_close_helper_declared_before_overlay_call(self) -> None:
         proto = self.generated_a.index("static gboolean r42_queue_media_channel_close(void);")
         call = self.generated_a.index("return r42_queue_media_channel_close() && p12_flush_tx();")
