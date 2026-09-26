@@ -37,6 +37,15 @@ CONTROL_DEFS_REPLACEMENT = (
     CONTROL_DEFS_ANCHOR
     + '#define MSL_B_START_FILE RUN_DIR "/msl-b-start-idle-media"\n'
     + '#define MSL_B_STOP_FILE  RUN_DIR "/msl-b-stop-idle-media"\n'
+    + "\n"
+    # The B05/B06/B07 markers are read from the RTP/H.264 receive path, which is
+    # anchored earlier in this file than the overlay block (near the R42 media
+    # state) that owns their storage and printer; forward-declare them here so
+    # the earlier anchors compile against a declaration instead of an implicit one.
+    + "static gboolean msl_b_b05_audio_marked;\n"
+    + "static gboolean msl_b_b06_video_marked;\n"
+    + "static gboolean msl_b_b07_decodable_marked;\n"
+    + "static void msl_b_print_clock_marker(const char *name);\n"
 )
 
 ENUM_ANCHOR = """    P12_TX_R42_MEDIA_CHANNEL_OPEN,
@@ -502,6 +511,10 @@ def _assert_gates(candidate: str) -> None:
         'MSL_B_START_FILE RUN_DIR "/msl-b-start-idle-media"',
         'MSL_B_STOP_FILE  RUN_DIR "/msl-b-stop-idle-media"',
         "static gboolean r42_queue_media_channel_close(void);",
+        "static gboolean msl_b_b05_audio_marked;",
+        "static gboolean msl_b_b06_video_marked;",
+        "static gboolean msl_b_b07_decodable_marked;",
+        "static void msl_b_print_clock_marker(const char *name);",
         "msl_b_ready_now",
         "msl_b_queue_idle_channel_open",
         "msl_b_queue_idle_self_activation",
@@ -530,6 +543,20 @@ def _assert_gates(candidate: str) -> None:
     close_definition = candidate.index("r42_queue_media_channel_close(void)\n{")
     if not (close_proto < close_call < close_definition):
         raise RuntimeError("MSL_B_R42_CLOSE_DECLARATION_ORDER_GATE=FAIL")
+    for symbol, use_marker in (
+        ("msl_b_b05_audio_marked", "msl_b_b05_audio_marked = TRUE;"),
+        ("msl_b_b06_video_marked", "msl_b_b06_video_marked = TRUE;"),
+        ("msl_b_b07_decodable_marked", "msl_b_b07_decodable_marked = TRUE;"),
+    ):
+        decl = candidate.index(f"static gboolean {symbol};")
+        use = candidate.index(use_marker)
+        if not decl < use:
+            raise RuntimeError(f"MSL_B_{symbol.upper()}_DECLARATION_ORDER_GATE=FAIL")
+    marker_proto = candidate.index("static void msl_b_print_clock_marker(const char *name);")
+    marker_first_use = candidate.index('msl_b_print_clock_marker("B07_FIRST_USABLE_SPS_PPS_IDR_RECOVERY_POINT")')
+    marker_definition = candidate.index("msl_b_print_clock_marker(const char *name)\n{")
+    if not (marker_proto < marker_first_use < marker_definition):
+        raise RuntimeError("MSL_B_CLOCK_MARKER_DECLARATION_ORDER_GATE=FAIL")
 
 
 def report() -> str:

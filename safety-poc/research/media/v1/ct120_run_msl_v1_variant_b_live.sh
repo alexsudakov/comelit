@@ -265,7 +265,7 @@ msl_b_build_candidate() {
         echo \"elf_build_id=\$BUILD_ID\"
         echo \"candidate_executed=false\"
       } > out/build-meta.txt
-    " | tee "$RUN_ROOT/build.log"
+    " 2>&1 | tee "$RUN_ROOT/build.log"
     build_rc=${PIPESTATUS[0]}
     set -u -o pipefail
     MSL_B_LAST_BUILD_RC="$build_rc"

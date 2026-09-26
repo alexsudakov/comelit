@@ -46,6 +46,41 @@ def sha_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+_MSL_B_SYMBOL_RE = re.compile(r"\bmsl_b_[a-z0-9_]+\b")
+_MSL_B_PRECEDING_WORD_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*\Z")
+_MSL_B_NON_DECL_PRECEDING_WORDS = {"if", "while", "return", "else", "do", "switch", "for", "sizeof"}
+_MSL_B_NON_DECL_PRECEDING_CHARS = set("(!=&|,?:;{}+-*/<>[]~^%")
+
+
+def msl_b_symbol_declaration_positions(candidate: str) -> dict[str, tuple[int, int]]:
+    """Map every lowercase msl_b_* identifier to (first_declaration_pos, first_occurrence_pos).
+
+    A position is treated as a declaration site when the token immediately
+    preceding the identifier (skipping whitespace) looks like a C type name
+    rather than an operator, keyword, or nothing (a bare call statement).
+    first_declaration_pos is -1 when no occurrence looks like a declaration.
+    """
+    occurrences: dict[str, list[int]] = {}
+    for match in _MSL_B_SYMBOL_RE.finditer(candidate):
+        occurrences.setdefault(match.group(0), []).append(match.start())
+
+    result: dict[str, tuple[int, int]] = {}
+    for symbol, starts in occurrences.items():
+        starts.sort()
+        decl_pos = -1
+        for pos in starts:
+            stripped = candidate[:pos].rstrip()
+            if not stripped or stripped[-1] in _MSL_B_NON_DECL_PRECEDING_CHARS:
+                continue
+            word_match = _MSL_B_PRECEDING_WORD_RE.search(stripped)
+            if not word_match or word_match.group(1) in _MSL_B_NON_DECL_PRECEDING_WORDS:
+                continue
+            decl_pos = pos
+            break
+        result[symbol] = (decl_pos, starts[0])
+    return result
+
+
 class MslV1IdleListenerMediaTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -141,6 +176,36 @@ class MslV1IdleListenerMediaTests(unittest.TestCase):
             mutated[:call],
         )
         print("MSL_B_R42_CLOSE_DECLARATION_ORDER=true REAL=prototype_before_call MUTATED=prototype_removed")
+
+    def test_msl_b_symbols_declared_before_first_use(self) -> None:
+        positions = msl_b_symbol_declaration_positions(self.generated_a)
+        undeclared = sorted(
+            symbol
+            for symbol, (decl_pos, first_pos) in positions.items()
+            if decl_pos == -1 or decl_pos != first_pos
+        )
+        self.assertEqual(undeclared, [], f"used before declared: {undeclared}")
+
+        mutated = self.generated_a
+        for decl in (
+            "static gboolean msl_b_b05_audio_marked;\n",
+            "static gboolean msl_b_b06_video_marked;\n",
+            "static gboolean msl_b_b07_decodable_marked;\n",
+            "static void msl_b_print_clock_marker(const char *name);\n",
+        ):
+            self.assertIn(decl, mutated)
+            mutated = mutated.replace(decl, "", 1)
+        mutated_positions = msl_b_symbol_declaration_positions(mutated)
+        mutated_undeclared = sorted(
+            symbol
+            for symbol, (decl_pos, first_pos) in mutated_positions.items()
+            if decl_pos == -1 or decl_pos != first_pos
+        )
+        self.assertTrue(mutated_undeclared)
+        print(
+            "MSL_B_STRUCTURAL_DECLARATION_TEST=PASS "
+            f"REAL=0_undeclared MUTATED={len(mutated_undeclared)}_undeclared:{','.join(mutated_undeclared)}"
+        )
 
     def test_reuse_counters_are_derived_with_flip_proof(self) -> None:
         proofs: list[str] = []
@@ -269,6 +334,31 @@ class MslV1IdleListenerMediaTests(unittest.TestCase):
             self.assertIn(marker, self.runner)
         self.assertIn("[ \"$MSL_B_LIVE_RUN\" = YES ]; then", self.runner)
         print("MSL_B_SELFTEST_MODE=YES REAL=no_live_stub_path MUTATED=marker_scan")
+
+    def test_build_diagnostics_tail_captures_stderr(self) -> None:
+        marker = '" 2>&1 | tee "$RUN_ROOT/build.log"'
+        self.assertIn(marker, self.runner)
+        mutated = self.runner.replace(marker, '" | tee "$RUN_ROOT/build.log"', 1)
+        self.assertNotIn(marker, mutated)
+
+        def run_pipeline(with_stderr_redirect: bool) -> str:
+            with tempfile.TemporaryDirectory() as run_root:
+                pipeline = (
+                    "timeout 5 /bin/sh -eu -c 'echo out-line; nonexistent_compiler_binary_xyz'"
+                    + (" 2>&1" if with_stderr_redirect else "")
+                    + f' | tee "{run_root}/build.log" >/dev/null'
+                )
+                subprocess.run(["bash", "-c", "set +e\n" + pipeline], text=True, capture_output=True, timeout=10, check=False)
+                return Path(run_root, "build.log").read_text(encoding="utf-8")
+
+        real_log = run_pipeline(with_stderr_redirect=True)
+        mutated_log = run_pipeline(with_stderr_redirect=False)
+        self.assertIn("nonexistent_compiler_binary_xyz", real_log)
+        self.assertNotIn("nonexistent_compiler_binary_xyz", mutated_log)
+        print(
+            "MSL_B_BUILD_DIAGNOSTICS_TAIL_POPULATED=true "
+            f"REAL={real_log.strip()!r} MUTATED={mutated_log.strip()!r}"
+        )
 
     def test_bound_invariant_falsifiable_and_udp_sink_present(self) -> None:
         real = re.search(r"MEDIA_OBSERVATION_SECONDS=\$\{MEDIA_OBSERVATION_SECONDS:-(\d+)\}", self.runner).group(1)
