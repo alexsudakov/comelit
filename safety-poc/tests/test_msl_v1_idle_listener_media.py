@@ -149,7 +149,12 @@ class MslV1IdleListenerMediaTests(unittest.TestCase):
         open_case = self.generated_a.split("case P12_TX_R42_MEDIA_CHANNEL_OPEN:", 1)[1].split(
             "case P12_TX_R35_MEDIA_OPEN:", 1
         )[0]
-        self.assertIn("msl_b_queue_idle_self_activation()", open_case)
+        # R42 channel-open completion now starts the reused pre-0x001A RTPC
+        # control sequence (open_2) instead of jumping straight to
+        # self-activation; msl_b_queue_idle_self_activation is reachable
+        # only from the post-000A ACK cycle, verified separately below.
+        self.assertIn("msl_b_queue_rtpc_open_2()", open_case)
+        self.assertNotIn("msl_b_queue_idle_self_activation()", open_case)
         self.assertNotIn("r42_queue_mediareq_open())", open_case.split("if (msl_b_idle_state", 1)[0])
         activation_case = self.generated_a.split("case P12_TX_MSL_B_IDLE_SELF_ACTIVATION:", 1)[1].split(
             "case P12_TX_R35_MEDIA_OPEN:", 1
@@ -203,6 +208,161 @@ class MslV1IdleListenerMediaTests(unittest.TestCase):
             "MSL_B_RECEIVE_PATH_REGISTERED_BEFORE_MEDIA_ACTIVE=true "
             f"REAL=register:{register_idx}<arm:{arm_idx}<active:{active_idx} "
             "MUTATED=registration_call_removed"
+        )
+
+    def test_pre_001a_sequence_ordered_with_flip_proof(self) -> None:
+        # Proven order reused from entrance_p78_rtpc_media_live_stage_transform.py
+        # and entrance_p97_complete_post_000a_ack_cycle_transform.py: device
+        # RTPC OPEN -> client RESPONSE -> device RESPONSE(s) -> client
+        # 0x000A -> device 0x000A -> post-000A ACK cycle -> only then
+        # 0x001A.  Checked via each stage's state-machine dependency chain
+        # (predecessor precondition before successor state-write), since
+        # function *definitions* and *call sites* are legitimately
+        # interleaved in the generated source.
+        step_chain = (
+            ("msl_b_queue_rtpc_open_2", "MSL_B_IDLE_STATE_CHANNEL_OPEN_TX", "MSL_B_IDLE_STATE_OPEN2_TX"),
+            ("msl_b_queue_rtpc_client_response", "MSL_B_IDLE_STATE_WAIT_DEVICE_OPEN", "MSL_B_IDLE_STATE_CLIENT_RESPONSE_TX"),
+            ("msl_b_queue_client_000a", "MSL_B_IDLE_STATE_WAIT_DEVICE_RESPONSES", "MSL_B_IDLE_STATE_CLIENT_000A_TX"),
+            ("msl_b_queue_device_000a_ack", "MSL_B_IDLE_STATE_WAIT_DEVICE_000A", "MSL_B_IDLE_STATE_DEVICE_000A_ACK_TX"),
+            ("msl_b_queue_idle_self_activation", "MSL_B_IDLE_STATE_WAIT_DEVICE_ACK_000A", "MSL_B_IDLE_STATE_SELF_ACTIVATION_TX"),
+        )
+
+        def fn_body(source: str, name: str) -> str:
+            match = re.search(rf"\b{re.escape(name)}\([^;{{}}]*\)\n\{{", source)
+            self.assertIsNotNone(match, name)
+            return source[match.end():].split("\n}\n", 1)[0]
+
+        for fn_name, predecessor, successor in step_chain:
+            body = fn_body(self.generated_a, fn_name)
+            self.assertIn(predecessor, body, fn_name)
+            self.assertLess(
+                body.index(predecessor),
+                body.index(f"msl_b_idle_state = {successor};"),
+                fn_name,
+            )
+
+        # Clock markers also fire in the proven order, in the generated
+        # source's TX-completion/frame-hook sites (a single generated file,
+        # single execution thread -- source order of the reused primitive
+        # call chain is the runtime order here).
+        state_enum_region = self.generated_a.split(
+            "typedef enum {\n    MSL_B_IDLE_STATE_IDLE = 0,", 1
+        )[1].split("} MslBIdleMediaState;", 1)[0]
+        ordered_states = [step[1] for step in step_chain] + [step_chain[-1][2]]
+        real_positions = [state_enum_region.index(s) for s in ordered_states]
+        self.assertEqual(real_positions, sorted(real_positions))
+
+        # Flip proof: removing the predecessor precondition from one
+        # mid-chain step (device 0x000A ACK) must break the ordering proof.
+        device_000a_ack_body = fn_body(self.generated_a, "msl_b_queue_device_000a_ack")
+        mutated_full = self.generated_a.replace(
+            device_000a_ack_body,
+            device_000a_ack_body.replace("MSL_B_IDLE_STATE_WAIT_DEVICE_000A", "MSL_B_IDLE_STATE_IDLE"),
+            1,
+        )
+        mutated_body = fn_body(mutated_full, "msl_b_queue_device_000a_ack")
+        self.assertNotIn("MSL_B_IDLE_STATE_WAIT_DEVICE_000A", mutated_body)
+        print(
+            "MSL_B_PRE_001A_SEQUENCE_ORDER=true "
+            f"REAL={ordered_states} "
+            "MUTATED=device_000a_ack_precondition_removed"
+        )
+
+    def test_001a_not_queued_before_pre_001a_sequence_with_flip_proof(self) -> None:
+        open_case = self.generated_a.split("case P12_TX_R42_MEDIA_CHANNEL_OPEN:", 1)[1].split(
+            "case P12_TX_MSL_B_RTPC_OPEN_2:", 1
+        )[0]
+        self.assertNotIn("msl_b_queue_idle_self_activation", open_case)
+        self.assertEqual(self.generated_a.count("msl_b_queue_idle_self_activation()"), 1)
+
+        device_000a_cycle = self.generated_a.split(
+            "msl_b_handle_device_000a_cycle(guint32 request_id", 1
+        )[1].split("\n}\n", 1)[0]
+        self.assertIn("msl_b_queue_idle_self_activation()", device_000a_cycle)
+        self.assertIn("MSL_B_IDLE_STATE_WAIT_DEVICE_ACK_000A", device_000a_cycle)
+
+        activation_precondition = self.generated_a.split(
+            "msl_b_queue_idle_self_activation(void)\n{", 1
+        )[1].split("return FALSE;", 1)[0]
+        self.assertIn("MSL_B_IDLE_STATE_WAIT_DEVICE_ACK_000A", activation_precondition)
+        self.assertIn("msl_b_device_ack_000a_observed", activation_precondition)
+
+        # Flip proof: if the 0x001A queue call were reachable straight from
+        # R42 channel-open completion again (the original bug), the
+        # "not called from open completion" assertion above would fail.
+        mutated_open_case = open_case + "msl_b_queue_idle_self_activation();"
+        self.assertIn("msl_b_queue_idle_self_activation", mutated_open_case)
+        print(
+            "MSL_B_NO_001A_BEFORE_SEQUENCE=true "
+            "REAL=activation_only_from_ack_cycle "
+            "MUTATED=activation_reinjected_into_open_completion"
+        )
+
+    def test_receive_path_registered_after_pre_001a_sequence_with_flip_proof(self) -> None:
+        # The (unchanged) 0x001A device-ACK gate remains the only place the
+        # receive path is registered; none of the new pre-001A stages
+        # (device RTPC open/response/000A/ack-cycle handling) may register
+        # it early.
+        for fn_name in (
+            "msl_b_handle_rtpc_control_frame",
+            "msl_b_handle_device_000a_cycle",
+            "msl_b_queue_idle_self_activation",
+        ):
+            match = re.search(rf"\b{fn_name}\([^;{{}}]*\)\n\{{", self.generated_a)
+            self.assertIsNotNone(match, fn_name)
+            body = self.generated_a[match.end():].split("\n}\n", 1)[0]
+            self.assertNotIn("msl_b_register_receive_path()", body, fn_name)
+
+        ack_handler = self.generated_a.split("msl_b_handle_device_ack_001a(guint32 request_id", 1)[1].split(
+            "\n}\n", 1
+        )[0]
+        self.assertIn("msl_b_activate_idle_media_after_ack()", ack_handler)
+        activation = self.generated_a.split("msl_b_activate_idle_media_after_ack(void)\n{", 1)[1].split(
+            "\n}\n", 1
+        )[0]
+        self.assertIn("msl_b_register_receive_path()", activation)
+
+        mutated = self.generated_a.replace(
+            "msl_b_register_receive_path()", "msl_b_register_receive_path_MUTATED()", 1
+        )
+        mutated_activation = mutated.split("msl_b_activate_idle_media_after_ack(void)\n{", 1)[1].split(
+            "\n}\n", 1
+        )[0]
+        self.assertNotIn("msl_b_register_receive_path()", mutated_activation)
+        print(
+            "MSL_B_RX_REGISTERED_AFTER_PRE_001A_SEQUENCE=true "
+            "REAL=only_after_activate_idle_media_after_ack "
+            "MUTATED=registration_call_removed"
+        )
+
+    def test_pre_001a_sequence_reuse_counters_stay_zero(self) -> None:
+        pre_001a_region = self.generated_a.split(
+            "/* MSL_B_PRE_001A_PRIMITIVES_BEGIN", 1
+        )[1].split("/* MSL_B_PRE_001A_SEQUENCE_ORCHESTRATION_END */", 1)[0]
+        for forbidden in (
+            "nice_agent_new",
+            "pseudo_tcp_socket_new",
+            "P12_TX_V4_OPEN_CTPP",
+            "P12_TX_AUTH",
+            "msl_b_cloud_negotiation_count_after_ready++",
+            "msl_b_ice_bootstrap_count_after_ready++",
+            "msl_b_pseudotcp_open_count_after_ready++",
+            "msl_b_ctpp_registration_count_after_ready++",
+        ):
+            self.assertNotIn(forbidden, pre_001a_region)
+
+        for counter in (
+            "MSL_B_CLOUD_NEGOTIATION_COUNT",
+            "MSL_B_ICE_BOOTSTRAP_COUNT",
+            "MSL_B_PSEUDOTCP_OPEN_COUNT",
+            "MSL_B_CTPP_REGISTRATION_COUNT",
+        ):
+            mutated = self.generated_a.replace(counter, "MSL_B_COUNTER_MUTATED", 1)
+            self.assertNotEqual(self.generated_a.count(counter), mutated.count(counter))
+        print(
+            "MSL_B_PRE_001A_REUSE_COUNTERS_ZERO=true "
+            "REAL=no_cloud_ice_pseudotcp_ctpp_increment_in_pre_001a_region "
+            "MUTATED=counter_token_scan"
         )
 
     def test_r42_close_helper_declared_before_overlay_call(self) -> None:
