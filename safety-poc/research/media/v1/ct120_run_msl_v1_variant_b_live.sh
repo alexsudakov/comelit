@@ -380,6 +380,49 @@ if [ "$MSL_B_DRY_RUN" != YES ] && [ "$MSL_B_LIVE_RUN" != YES ] && [ "$MSL_B_SELF
     exit 2
 fi
 
+msl_b_marker_value() {
+    local key="$1"
+    local file="$2"
+    [ -n "$file" ] && [ -f "$file" ] || return 0
+    awk -F= -v key="$key" '$1==key {v=$2} END{print v}' "$file"
+}
+
+msl_b_derive_old_5s_interval() {
+    local file="$1"
+    local b01
+    local b02
+    local delta
+    local ctpp_count
+    b01="$(msl_b_marker_value MSL_B_B01_RTPC_MEDIA_OPEN_SEQUENCE_STARTED_MONO_MS "$file")"
+    b02="$(msl_b_marker_value MSL_B_B02_RTPC_MEDIA_OPEN_CONTROL_READY_MONO_MS "$file")"
+    ctpp_count="$(msl_b_marker_value MSL_B_CTPP_REGISTRATION_COUNT "$file")"
+    if [ -z "$b01" ] || [ -z "$b02" ]; then
+        echo "MSL_B_OLD_5S_INTERVAL=N/A"
+        echo "MSL_B_OLD_5S_INTERVAL_MS=N/A REASON=idle_media_request_not_issued_in_this_run"
+        echo "MSL_B_OLD_5S_INTERVAL_DERIVATION=NOT_LOCALIZED REASON=missing_B01_or_B02_marker"
+        echo "MSL_B_OLD_5S_INTERVAL_LOCALIZATION=NOT_LOCALIZED"
+        return
+    fi
+    delta=$((b02 - b01))
+    echo "MSL_B_OLD_5S_INTERVAL_MS=$delta"
+    case "$ctpp_count" in
+        ''|*[!0-9]*) ctpp_count=-1 ;;
+    esac
+    if [ "$ctpp_count" -eq 0 ] && [ "$delta" -lt 1000 ]; then
+        echo "MSL_B_OLD_5S_INTERVAL=ELIMINATED"
+        echo "MSL_B_OLD_5S_INTERVAL_DERIVATION=measured_B01_to_B02_delta_${delta}ms(MSL_B_B01_RTPC_MEDIA_OPEN_SEQUENCE_STARTED_MONO_MS,MSL_B_B02_RTPC_MEDIA_OPEN_CONTROL_READY_MONO_MS)_with_MSL_B_CTPP_REGISTRATION_COUNT=${ctpp_count}_vs_baseline_T11_to_T12_5088-5100ms(MSL_V1_MEDIA_STARTUP_LATENCY_RESULT.md_section_2)"
+        echo "MSL_B_OLD_5S_INTERVAL_LOCALIZATION=N/A REASON=interval_did_not_recur_CTPP_registered_once_at_bootstrap_before_B00"
+    elif [ "$delta" -ge 4000 ]; then
+        echo "MSL_B_OLD_5S_INTERVAL=STILL_PRESENT"
+        echo "MSL_B_OLD_5S_INTERVAL_DERIVATION=measured_B01_to_B02_delta_${delta}ms_reproduces_baseline_T11_to_T12_magnitude_5088-5100ms"
+        echo "MSL_B_OLD_5S_INTERVAL_LOCALIZATION=NOT_LOCALIZED REASON=root_cause_timer_not_identified_in_frozen_base_source_this_child"
+    else
+        echo "MSL_B_OLD_5S_INTERVAL=TRANSFORMED"
+        echo "MSL_B_OLD_5S_INTERVAL_DERIVATION=measured_B01_to_B02_delta_${delta}ms_partial_vs_baseline_T11_to_T12_5088-5100ms"
+        echo "MSL_B_OLD_5S_INTERVAL_LOCALIZATION=NOT_LOCALIZED REASON=root_cause_timer_not_identified_in_frozen_base_source_this_child"
+    fi
+}
+
 print_final_block() {
     echo "=== COMELIT MSL V1 VARIANT B FINAL ==="
     echo "LIVE_INVOCATIONS=$LIVE_INVOCATIONS"
@@ -409,9 +452,7 @@ print_final_block() {
     echo "MSL_B_T09_PSEUDOTCP_OPEN_MONO_MS=N/A REASON=existing_PseudoTCP_reused"
     echo "MSL_B_T10_VIP_UAUT_READY_MONO_MS=N/A REASON=existing_UAUT_reused"
     echo "MSL_B_T11_CTPP_REGISTRATION_READY_MONO_MS=N/A REASON=existing_CTPP_registration_reused"
-    echo "MSL_B_OLD_5S_INTERVAL=ELIMINATED"
-    echo "MSL_B_OLD_5S_INTERVAL_MS=N/A REASON=Variant_B_start_reference_is_user_idle_media_request_after_READY"
-    echo "MSL_B_OLD_5S_INTERVAL_LOCALIZATION=N/A REASON=bootstrap_precedes_B00_idle_media_request"
+    msl_b_derive_old_5s_interval "$SESSION_LOG"
     echo "MEDIA_TEARDOWN=$MEDIA_TEARDOWN"
     echo "MSL_B_CAMPAIGN_STOPPED_FAIL_CLOSED=$MSL_B_CAMPAIGN_STOPPED_FAIL_CLOSED"
     echo "CAMPAIGN_PROCESSES_REMAINING=$CAMPAIGN_PROCESSES_REMAINING"
@@ -501,12 +542,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 from dataclasses import dataclass
+import importlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import sys
 import time
+import types
 from types import SimpleNamespace
 
 
@@ -632,22 +675,47 @@ def _runtime_write_remote_shim(config: Config) -> object:
     )
 
 
-def _load_production_modules(config: Config) -> tuple[object, object, object, object]:
-    repo = config.repo
-    sys.path.insert(0, str(repo))
+def _ensure_stub_module(name: str, build) -> None:
+    if name in sys.modules:
+        return
     try:
-        from custom_components.comelit import cloud, oauth, runtime, sdp  # type: ignore
-        return cloud, oauth, runtime, sdp
+        importlib.import_module(name)
     except ModuleNotFoundError:
-        base = repo / "custom_components" / "comelit"
-        sys.modules.setdefault("homeassistant", SimpleNamespace())
-        sys.modules.setdefault("homeassistant.config_entries", SimpleNamespace(ConfigEntry=object))
-        sys.modules.setdefault("homeassistant.core", SimpleNamespace(HomeAssistant=object))
-        cloud = _load_module("msl_b_comelit_cloud", base / "cloud.py")
-        oauth = _load_module("msl_b_comelit_oauth", base / "oauth.py")
-        sdp = _load_module("msl_b_comelit_sdp", base / "sdp.py")
-        runtime = _runtime_write_remote_shim(config)
-        return cloud, oauth, runtime, sdp
+        sys.modules[name] = build()
+
+
+def _load_production_modules(config: Config) -> tuple[object, object, object]:
+    # oauth.py/cloud.py are HA integration files: they assume aiohttp and the
+    # homeassistant package are on sys.path.  This provider runs as a bare
+    # python3 process on CT120 (not inside HA's venv), so those are stubbed
+    # here exactly like the repo's other offline HA-module tests do
+    # (see tests/test_p116_observability_success_path.py) when the real
+    # packages are not importable; a real aiohttp/homeassistant is preferred
+    # and used unmodified when present.
+    _ensure_stub_module("aiohttp", lambda: SimpleNamespace(ClientSession=object, ClientError=Exception))
+    _ensure_stub_module("homeassistant", lambda: types.ModuleType("homeassistant"))
+    _ensure_stub_module("homeassistant.config_entries", lambda: SimpleNamespace(ConfigEntry=object))
+    _ensure_stub_module("homeassistant.core", lambda: SimpleNamespace(HomeAssistant=object))
+
+    component_dir = config.repo / "custom_components" / "comelit"
+    if "custom_components" not in sys.modules:
+        pkg = types.ModuleType("custom_components")
+        pkg.__path__ = [str(config.repo / "custom_components")]
+        sys.modules["custom_components"] = pkg
+    if "custom_components.comelit" not in sys.modules:
+        comelit_pkg = types.ModuleType("custom_components.comelit")
+        comelit_pkg.__path__ = [str(component_dir)]
+        sys.modules["custom_components.comelit"] = comelit_pkg
+
+    # const.py has no external dependencies; loading it first (under its real
+    # dotted name) lets oauth.py's `from .const import ...` resolve via
+    # sys.modules without ever executing custom_components/comelit/__init__.py
+    # (which imports voluptuous and is irrelevant to the bootstrap).
+    _load_module("custom_components.comelit.const", component_dir / "const.py")
+    sdp = _load_module("custom_components.comelit.sdp", component_dir / "sdp.py")
+    cloud = _load_module("custom_components.comelit.cloud", component_dir / "cloud.py")
+    oauth = _load_module("custom_components.comelit.oauth", component_dir / "oauth.py")
+    return cloud, oauth, sdp
 
 
 def _fake_remote_sdp() -> str:
@@ -684,10 +752,8 @@ def _fake_offer() -> bytes:
 
 
 async def _run(config: Config) -> int:
-    cloud, oauth, runtime, sdp = _load_production_modules(config)
-    runtime._RUN_DIR = config.run_dir
-    runtime._OFFER_FILE = config.offer_file
-    runtime._REMOTE_FILE = config.remote_file
+    cloud, oauth, sdp = _load_production_modules(config)
+    runtime = _runtime_write_remote_shim(config)
     cloud_request_count = 0
     markers: list[str] = []
     transform_pass = False

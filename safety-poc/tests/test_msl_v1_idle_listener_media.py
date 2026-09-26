@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -194,14 +195,39 @@ class MslV1IdleListenerMediaTests(unittest.TestCase):
             "MSL_B_EXPECTED_COMMIT_SHA_REQUIRED=true",
             "MSL_B_EXPECTED_GENERATED_SOURCE_SHA_REQUIRED=true",
             "MSL_B_ATTEMPT_LEDGER_REQUIRED=true",
-            "MSL_B_ATTEMPT_LEDGER=MALFORMED",
-            "MSL_B_ATTEMPT_LEDGER_CAP=FAIL",
+            'ledger_value_or_fail "$MSL_B_ATTEMPT_LEDGER" MSL_B_ATTEMPT_LEDGER 15',
             "BASE_WRAPPER_SHA256",
             "P78_GATE_DECISION=substituted",
             "MSL_B_TRANSFORM_WORKTREE_BLOB_GATE=FAIL",
             "MSL_B_RUNNER_WORKTREE_BLOB_GATE=FAIL",
         ):
             self.assertIn(marker, self.runner)
+
+    def test_attempt_ledger_malformed_and_cap_fail_closed_at_runtime(self) -> None:
+        fail_fn = re.search(r"^fail\(\) \{\n(?:.*\n)*?^\}\n", self.runner, re.M).group(0)
+        ledger_fn = re.search(r"^ledger_value_or_fail\(\) \{\n(?:.*\n)*?^\}\n", self.runner, re.M).group(0)
+
+        def run_with_ledger(content: str) -> str:
+            with tempfile.NamedTemporaryFile("w", delete=False) as handle:
+                handle.write(content)
+                ledger_path = handle.name
+            try:
+                script = (
+                    "set -u\n"
+                    "FAIL=0\n"
+                    + fail_fn
+                    + ledger_fn
+                    + f'ledger_value_or_fail "{ledger_path}" MSL_B_ATTEMPT_LEDGER 15 || true\n'
+                )
+                proc = subprocess.run(["bash", "-c", script], text=True, capture_output=True, timeout=5, check=False)
+                return proc.stdout
+            finally:
+                os.unlink(ledger_path)
+
+        self.assertIn("MSL_B_ATTEMPT_LEDGER=MALFORMED", run_with_ledger("not-a-number\n"))
+        self.assertIn("MSL_B_ATTEMPT_LEDGER_CAP=FAIL", run_with_ledger("15\n"))
+        self.assertEqual(run_with_ledger("14\n").strip(), "14")
+        print("MSL_B_ATTEMPT_LEDGER_FAIL_CLOSED=true REAL=malformed_and_cap_15 MUTATED=value_14_passes")
 
     def test_runner_uses_offline_chroot_not_docker(self) -> None:
         for forbidden in (
