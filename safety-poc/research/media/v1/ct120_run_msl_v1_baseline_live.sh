@@ -59,6 +59,8 @@ MSL_DRY_RUN_COMPLETED=false
 MSL_DRY_RUN_REACHED_FINAL_SUMMARY=false
 MSL_COMELIT_INTERACTION=0
 MSL_HA_INTERACTION=0
+MSL_DRY_RUN_WRAPPER_EXECUTED=false
+MSL_DRY_RUN_WRAPPER_RC=NOT_REACHED
 
 msl_mono_ms() {
     python3 - <<'PY'
@@ -199,6 +201,83 @@ PY
     printf '%s\n' "$!"
 }
 
+wrapper_shebang_line() {
+    awk 'substr($0, 1, 2) == "#!" { print NR; found = 1; exit } END { if (!found) print 0 }' "$1"
+}
+
+print_wrapper_first_line_gate() {
+    local path
+    local first_line
+    local shebang_line
+    path="$1"
+    first_line="$(head -n 1 "$path" 2>/dev/null || true)"
+    shebang_line="$(wrapper_shebang_line "$path")"
+    echo "MSL_WRAPPER_FIRST_LINE=$first_line"
+    echo "MSL_WRAPPER_SHEBANG_LINE=$shebang_line"
+    if [ "$shebang_line" = 1 ] && [ "${first_line#'#!'}" != "$first_line" ]; then
+        echo "MSL_WRAPPER_FIRST_LINE_GATE=PASS"
+        return 0
+    fi
+    echo "MSL_WRAPPER_FIRST_LINE_GATE=FAIL"
+    return 1
+}
+
+materialize_candidate_wrapper() {
+    local base_wrapper
+    local output_wrapper
+    local holder
+    local clock_base_file
+    base_wrapper="$1"
+    output_wrapper="$2"
+    holder="$3"
+    clock_base_file="$4"
+    python3 - "$base_wrapper" "$output_wrapper" "$holder" "$clock_base_file" <<'PY'
+from pathlib import Path
+import os, sys
+
+src, out, holder, base_file = map(Path, sys.argv[1:])
+text = src.read_text(encoding="utf-8")
+needle = '"$BASE/bin/comelit_ice_offer_holder"'
+if text.count(needle) != 1:
+    raise SystemExit("MSL_WRAPPER_HOLDER_ANCHOR=FAIL")
+lines = text.splitlines(keepends=True)
+if not lines or not lines[0].startswith("#!"):
+    raise SystemExit("MSL_WRAPPER_INPUT_SHEBANG=FAIL")
+insert_at = 1
+while insert_at < len(lines) and lines[insert_at].startswith("#"):
+    insert_at += 1
+prefix = f'''msl_mono_ms() {{ python3 - <<'PY2'\nimport time\nprint(time.monotonic_ns() // 1000000)\nPY2\n}}\nmsl_since_base() {{ python3 - {str(base_file)!r} <<'PY2'\nfrom pathlib import Path\nimport sys, time\nbase=int(Path(sys.argv[1]).read_text().strip())\nprint(max(0, time.monotonic_ns() // 1000000 - base))\nPY2\n}}\nmsl_wrap_mark() {{ printf 'MSL_%s_MONO_MS=%s\\n' "$1" "$(msl_since_base)"; }}\n'''
+text = "".join(lines[:insert_at]) + prefix + "".join(lines[insert_at:])
+text = text.replace(needle, f'"{holder}"', 1)
+text = text.replace("/run/comelit-p2p", "/run/comelit-media")
+text = text.replace("COMELIT_OAUTH_ACCESS_TOKEN_PRESENT=true", "COMELIT_OAUTH_ACCESS_TOKEN_PRESENT=true\nmsl_wrap_mark T05_OAUTH_ACCESS_TOKEN_AVAILABLE", 1)
+text = text.replace("curl ", "msl_wrap_mark T06_CLOUD_P2P_REQUEST_START\ncurl ", 1)
+text = text.replace("REMOTE_SDP_WRITTEN=PASS", "REMOTE_SDP_WRITTEN=PASS\nmsl_wrap_mark T07_CLOUD_P2P_RESPONSE_REMOTE_SDP_WRITTEN", 1)
+out.write_text(text, encoding="utf-8")
+os.chmod(out, 0o700)
+print("MSL_WRAPPER_INSTRUMENTATION=PASS")
+PY
+}
+
+print_bounded_wrapper_log() {
+    local log_file
+    log_file="$1"
+    echo "=== MSL WRAPPER OUTPUT TAIL ==="
+    if [ -f "$log_file" ]; then
+        tail -n 120 "$log_file" | awk '
+            BEGIN { IGNORECASE = 1 }
+            /authorization|access[_-]?token|refresh[_-]?token|vip[_-]?token|raw_sdp|BEGIN SDP|candidate:/ {
+                print "MSL_WRAPPER_LOG_REDACTED=true"
+                next
+            }
+            { print }
+        '
+    else
+        echo "MSL_WRAPPER_LOG_ABSENT=true"
+    fi
+    echo "=== END MSL WRAPPER OUTPUT TAIL ==="
+}
+
 if [ "${MSL_SELF_TEST_UDP_SINK:-NO}" = YES ]; then
     tmp="${TMPDIR:-/tmp}/msl-udp-sink-$$.count"
     pid="$(msl_start_udp_sink 17991 "$tmp" 2)"
@@ -263,11 +342,15 @@ print_final_block() {
     echo "SECOND_MEDIA_SESSION=false"
     echo "MSL_RUN_CLASSIFICATION=$MSL_RUN_CLASSIFICATION"
     echo "MSL_T19_T24_NA_REASON=HA_STREAM_HLS_PIPELINE_NOT_IN_THIS_CHILD"
-    echo "MSL_DRY_RUN_COMPLETED=$MSL_DRY_RUN_COMPLETED"
-    echo "MSL_DRY_RUN_REACHED_FINAL_SUMMARY=$MSL_DRY_RUN_REACHED_FINAL_SUMMARY"
-    echo "MSL_DRY_RUN_LIVE_INVOCATIONS=$LIVE_INVOCATIONS"
-    echo "MSL_DRY_RUN_COMELIT_INTERACTION=$MSL_COMELIT_INTERACTION"
-    echo "MSL_DRY_RUN_HA_INTERACTION=$MSL_HA_INTERACTION"
+    if [ "$MSL_DRY_RUN" = YES ]; then
+        echo "MSL_DRY_RUN_COMPLETED=$MSL_DRY_RUN_COMPLETED"
+        echo "MSL_DRY_RUN_REACHED_FINAL_SUMMARY=$MSL_DRY_RUN_REACHED_FINAL_SUMMARY"
+        echo "MSL_DRY_RUN_LIVE_INVOCATIONS=$LIVE_INVOCATIONS"
+        echo "MSL_DRY_RUN_COMELIT_INTERACTION=$MSL_COMELIT_INTERACTION"
+        echo "MSL_DRY_RUN_HA_INTERACTION=$MSL_HA_INTERACTION"
+        echo "MSL_DRY_RUN_WRAPPER_EXECUTED=$MSL_DRY_RUN_WRAPPER_EXECUTED"
+        echo "MSL_DRY_RUN_WRAPPER_RC=$MSL_DRY_RUN_WRAPPER_RC"
+    fi
     echo "=== END COMELIT MSL V1 BASELINE FINAL ==="
 }
 
@@ -287,7 +370,8 @@ run_dry_run() {
     echo "MSL_DRY_RUN_REAL_HA_WEBHOOK=false"
     echo "MSL_DRY_RUN_REAL_COMELIT=false"
     echo "MSL_DRY_RUN_CHROOT_BUILD=false"
-    echo "MSL_DRY_RUN_CANDIDATE_EXECUTED=false"
+    echo "MSL_DRY_RUN_REAL_CANDIDATE_EXECUTED=false"
+    echo "MSL_DRY_RUN_STUB_HELPER_EXECUTED=via_wrapper"
     echo "MSL_BUILD_RC=DRY_RUN"
     echo "MSL_WRAPPER_INSTRUMENTATION=DRY_RUN"
 
@@ -314,40 +398,77 @@ run_dry_run() {
     fi
     [ "$FAIL" -eq 0 ] || return 1
 
-    {
-        echo "MSL_T03_NATIVE_HELPER_PROCESS_START_MONO_MS=$(msl_since_base)"
-        echo "ICE_GATHER=PASS"
-        echo "MSL_T04_LOCAL_SDP_OFFER_READY_MONO_MS=$(msl_since_base)"
-        echo "MSL_T06_CLOUD_P2P_REQUEST_START_MONO_MS=$(msl_since_base)"
-        echo "MSL_T07_CLOUD_P2P_RESPONSE_REMOTE_SDP_WRITTEN_MONO_MS=$(msl_since_base)"
-        echo "ICE_CONNECTED=PASS"
-        echo "ICE_READY=PASS"
-        echo "MSL_T08_ICE_CONNECTED_MONO_MS=$(msl_since_base)"
-        echo "PSEUDOTCP_OPEN=PASS"
-        echo "MSL_T09_PSEUDOTCP_OPEN_MONO_MS=$(msl_since_base)"
-        echo "VIP_UAUT_OPEN_RESPONSE=PASS"
-        echo "MSL_T10_VIP_UAUT_READY_MONO_MS=$(msl_since_base)"
-        echo "V4_CTPP_INITIAL_ACK_OBSERVED=true"
-        echo "MSL_T11_CTPP_REGISTRATION_READY_MONO_MS=$(msl_since_base)"
-        echo "P78_RTPC_OPEN_2_SENT=PASS"
-        echo "MSL_T12_RTPC_MEDIA_OPEN_CONTROL_READY_MONO_MS=$(msl_since_base)"
-        echo "P78_RTPC_CLIENT_001A_SENT=PASS"
-        echo "MSL_T13_INITIAL_001A_SENT_MONO_MS=$(msl_since_base)"
-        echo "P80_DEVICE_ACK_001A_OBSERVED=PASS"
-        echo "MSL_T14_DEVICE_STRUCTURAL_ACK_MEDIA_ACCEPTANCE_MONO_MS=$(msl_since_base)"
-        echo "P80_MEDIA_ACTIVE=true"
-        echo "MSL_T15_MEDIA_ACTIVE_MONO_MS=$(msl_since_base)"
-        echo "P80_AUDIO_RTP_FORWARDING=PASS"
-        echo "MSL_T16_FIRST_AUDIO_RTP_MONO_MS=$(msl_since_base)"
-        echo "P80_VIDEO_RTP_FORWARDING=PASS"
-        echo "MSL_T17_FIRST_VIDEO_RTP_MONO_MS=$(msl_since_base)"
-        echo "MSL_T18_FIRST_SPS_PPS_IDR_MONO_MS=$(msl_since_base)"
-        echo "MSL_START_REFERENCE=T03_NATIVE_MEDIA_HELPER_PROCESS_START"
-        echo "MSL_START_TO_FIRST_RTP_MS=0"
-        echo "MSL_START_TO_DECODABLE_VIDEO_MS=0"
-    } > "$SESSION_LOG"
-    cat "$SESSION_LOG"
-    WRAPPER_RC=0
+    DRY_BASE_WRAPPER="$RUN_ROOT/base-wrapper-stub.sh"
+    DRY_STUB_HELPER="$RUN_ROOT/helper-stub.sh"
+    CANDIDATE_WRAPPER="$RUN_ROOT/$WRAPPER_NAME"
+    cat > "$DRY_BASE_WRAPPER" <<'EOF'
+#!/usr/bin/env bash
+# Dry-run base wrapper stub: preserves bash-only options so shebang breakage is visible.
+set -u -o pipefail
+BASE="$(dirname "$0")"
+curl() {
+    echo "DRY_CURL_STUB=true"
+}
+COMELIT_OAUTH_ACCESS_TOKEN_PRESENT=true
+curl --dry-run-stub >/dev/null
+"$BASE/bin/comelit_ice_offer_holder"
+REMOTE_SDP_WRITTEN=PASS
+echo "REMOTE_SDP_WRITTEN=PASS"
+EOF
+    chmod 700 "$DRY_BASE_WRAPPER"
+    cat > "$DRY_STUB_HELPER" <<'EOF'
+#!/usr/bin/env bash
+set -u -o pipefail
+msl_stub_ms() {
+    python3 - "$MSL_CLOCK_BASE_FILE" <<'PY'
+from pathlib import Path
+import sys, time
+base = int(Path(sys.argv[1]).read_text(encoding="utf-8").strip())
+print(max(0, time.monotonic_ns() // 1000000 - base))
+PY
+}
+echo "MSL_T03_NATIVE_HELPER_PROCESS_START_MONO_MS=$(msl_stub_ms)"
+echo "ICE_GATHER=PASS"
+echo "MSL_T04_LOCAL_SDP_OFFER_READY_MONO_MS=$(msl_stub_ms)"
+echo "ICE_CONNECTED=PASS"
+echo "ICE_READY=PASS"
+echo "MSL_T08_ICE_CONNECTED_MONO_MS=$(msl_stub_ms)"
+echo "PSEUDOTCP_OPEN=PASS"
+echo "MSL_T09_PSEUDOTCP_OPEN_MONO_MS=$(msl_stub_ms)"
+echo "VIP_UAUT_OPEN_RESPONSE=PASS"
+echo "MSL_T10_VIP_UAUT_READY_MONO_MS=$(msl_stub_ms)"
+echo "V4_CTPP_INITIAL_ACK_OBSERVED=true"
+echo "MSL_T11_CTPP_REGISTRATION_READY_MONO_MS=$(msl_stub_ms)"
+echo "P78_RTPC_OPEN_2_SENT=PASS"
+echo "MSL_T12_RTPC_MEDIA_OPEN_CONTROL_READY_MONO_MS=$(msl_stub_ms)"
+echo "P78_RTPC_CLIENT_001A_SENT=PASS"
+echo "MSL_T13_INITIAL_001A_SENT_MONO_MS=$(msl_stub_ms)"
+echo "P80_DEVICE_ACK_001A_OBSERVED=PASS"
+echo "MSL_T14_DEVICE_STRUCTURAL_ACK_MEDIA_ACCEPTANCE_MONO_MS=$(msl_stub_ms)"
+echo "P80_MEDIA_ACTIVE=true"
+echo "MSL_T15_MEDIA_ACTIVE_MONO_MS=$(msl_stub_ms)"
+echo "P80_AUDIO_RTP_FORWARDING=PASS"
+echo "MSL_T16_FIRST_AUDIO_RTP_MONO_MS=$(msl_stub_ms)"
+echo "P80_VIDEO_RTP_FORWARDING=PASS"
+echo "MSL_T17_FIRST_VIDEO_RTP_MONO_MS=$(msl_stub_ms)"
+echo "MSL_T18_FIRST_SPS_PPS_IDR_MONO_MS=$(msl_stub_ms)"
+echo "MSL_START_REFERENCE=T03_NATIVE_MEDIA_HELPER_PROCESS_START"
+echo "MSL_START_TO_FIRST_RTP_MS=0"
+echo "MSL_START_TO_DECODABLE_VIDEO_MS=0"
+EOF
+    chmod 700 "$DRY_STUB_HELPER"
+    materialize_candidate_wrapper "$DRY_BASE_WRAPPER" "$CANDIDATE_WRAPPER" "$DRY_STUB_HELPER" "$CLOCK_BASE_FILE" || return 1
+    print_wrapper_first_line_gate "$CANDIDATE_WRAPPER" || return 1
+    echo "MSL_DRY_RUN_WRAPPER_FIRST_LINE_GATE=PASS"
+    export MSL_CLOCK_BASE_FILE="$CLOCK_BASE_FILE"
+    "$CANDIDATE_WRAPPER" > "$SESSION_LOG" 2>&1
+    WRAPPER_RC=$?
+    MSL_DRY_RUN_WRAPPER_EXECUTED=true
+    MSL_DRY_RUN_WRAPPER_RC=$WRAPPER_RC
+    echo "MSL_DRY_RUN_WRAPPER_EXECUTED=true"
+    echo "MSL_DRY_RUN_WRAPPER_RC=$WRAPPER_RC"
+    print_bounded_wrapper_log "$SESSION_LOG"
+    [ "$WRAPPER_RC" -eq 0 ] || return 1
     MSL_RUN_CLASSIFICATION=DRY_RUN_COMPLETE
     RTP_SINK_PORTS_REMAINING=0
     CAMPAIGN_PROCESSES_REMAINING=NONE
@@ -531,28 +652,13 @@ export MSL_CLOCK_BASE_FILE="$CLOCK_BASE_FILE"
 exec "$RUN_MUSL_LOADER" --library-path "$PACKAGED_LIB_DIR" "$MSL_OUTPUT" "\$@"
 EOF
 chmod 700 "$CANDIDATE_LAUNCHER"
-
-python3 - "$BASE_WRAPPER" "$CANDIDATE_WRAPPER" "$CANDIDATE_LAUNCHER" "$CLOCK_BASE_FILE" <<'PY'
-from pathlib import Path
-import os, sys
-src, out, holder, base_file = map(Path, sys.argv[1:])
-text = src.read_text(encoding="utf-8")
-needle = '"$BASE/bin/comelit_ice_offer_holder"'
-if text.count(needle) != 1:
-    raise SystemExit("MSL_WRAPPER_HOLDER_ANCHOR=FAIL")
-text = text.replace(needle, f'"{holder}"', 1)
-text = text.replace("/run/comelit-p2p", "/run/comelit-media")
-prefix = f'''msl_mono_ms() {{ python3 - <<'PY2'\nimport time\nprint(time.monotonic_ns() // 1000000)\nPY2\n}}\nmsl_since_base() {{ python3 - {str(base_file)!r} <<'PY2'\nfrom pathlib import Path\nimport sys, time\nbase=int(Path(sys.argv[1]).read_text().strip())\nprint(max(0, time.monotonic_ns() // 1000000 - base))\nPY2\n}}\nmsl_wrap_mark() {{ printf 'MSL_%s_MONO_MS=%s\\n' "$1" "$(msl_since_base)"; }}\n'''
-text = text.replace("\n", "\n", 1)
-text = prefix + text
-text = text.replace("COMELIT_OAUTH_ACCESS_TOKEN_PRESENT=true", "COMELIT_OAUTH_ACCESS_TOKEN_PRESENT=true\nmsl_wrap_mark T05_OAUTH_ACCESS_TOKEN_AVAILABLE", 1)
-text = text.replace("curl ", "msl_wrap_mark T06_CLOUD_P2P_REQUEST_START\ncurl ", 1)
-text = text.replace("REMOTE_SDP_WRITTEN=PASS", "REMOTE_SDP_WRITTEN=PASS\nmsl_wrap_mark T07_CLOUD_P2P_RESPONSE_REMOTE_SDP_WRITTEN", 1)
-out.write_text(text, encoding="utf-8")
-os.chmod(out, 0o700)
-print("MSL_WRAPPER_INSTRUMENTATION=PASS")
-PY
-[ "$?" -eq 0 ] || fail "MSL_WRAPPER_REWRITE=FAIL"
+launcher_first_line="$(head -n 1 "$CANDIDATE_LAUNCHER" 2>/dev/null || true)"
+launcher_shebang_line="$(wrapper_shebang_line "$CANDIDATE_LAUNCHER")"
+echo "MSL_LAUNCHER_FIRST_LINE=$launcher_first_line"
+echo "MSL_LAUNCHER_SHEBANG_LINE=$launcher_shebang_line"
+[ "$launcher_shebang_line" = 1 ] || fail "MSL_LAUNCHER_FIRST_LINE_GATE=FAIL"
+materialize_candidate_wrapper "$BASE_WRAPPER" "$CANDIDATE_WRAPPER" "$CANDIDATE_LAUNCHER" "$CLOCK_BASE_FILE" || fail "MSL_WRAPPER_REWRITE=FAIL"
+print_wrapper_first_line_gate "$CANDIDATE_WRAPPER" || fail "MSL_WRAPPER_FIRST_LINE_GATE=FAIL"
 bash -n "$CANDIDATE_WRAPPER" || fail "MSL_CANDIDATE_WRAPPER_PARSE=FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
 
@@ -611,7 +717,7 @@ WRAPPER_PID=$!
 wait "$WRAPPER_PID"
 WRAPPER_RC=$?
 WRAPPER_PID=""
-cat "$SESSION_LOG"
+print_bounded_wrapper_log "$SESSION_LOG"
 MSL_RUN_CLASSIFICATION=BASELINE_ATTEMPT_COMPLETE
 
 stop_pid "$VIDEO_SINK_PID"

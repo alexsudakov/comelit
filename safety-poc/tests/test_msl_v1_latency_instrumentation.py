@@ -145,6 +145,8 @@ class MslV1LatencyInstrumentationTests(unittest.TestCase):
         self.assertIn("DOOR_ACTIONS_SENT=0", proc.stdout)
         self.assertIn("GATE_ACTIONS_SENT=0", proc.stdout)
         self.assertIn("MSL_RUN_CLASSIFICATION=DRY_RUN_COMPLETE", proc.stdout)
+        self.assertIn("MSL_DRY_RUN_WRAPPER_EXECUTED=true", proc.stdout)
+        self.assertIn("MSL_DRY_RUN_WRAPPER_RC=0", proc.stdout)
         print("MSL_DRY_RUN_REACHED_FINAL_SUMMARY=true")
 
     def test_dry_run_has_zero_real_ha_or_comelit_interaction(self) -> None:
@@ -155,13 +157,49 @@ class MslV1LatencyInstrumentationTests(unittest.TestCase):
         self.assertIn("MSL_DRY_RUN_REAL_HA_WEBHOOK=false", proc.stdout)
         self.assertIn("MSL_DRY_RUN_REAL_COMELIT=false", proc.stdout)
         self.assertIn("MSL_DRY_RUN_CHROOT_BUILD=false", proc.stdout)
-        self.assertIn("MSL_DRY_RUN_CANDIDATE_EXECUTED=false", proc.stdout)
+        self.assertIn("MSL_DRY_RUN_REAL_CANDIDATE_EXECUTED=false", proc.stdout)
+        self.assertIn("MSL_DRY_RUN_STUB_HELPER_EXECUTED=via_wrapper", proc.stdout)
         self.assertIn("MSL_DRY_RUN_COMELIT_INTERACTION=0", proc.stdout)
         self.assertIn("MSL_DRY_RUN_HA_INTERACTION=0", proc.stdout)
         self.assertNotIn("CONTROL_STATUS_CURL_RC", proc.stdout)
         self.assertNotIn("BASE_WRAPPER_SHA256=", proc.stdout)
         print("MSL_DRY_RUN_COMELIT_INTERACTION=0")
         print("MSL_DRY_RUN_HA_INTERACTION=0")
+
+    def test_dry_run_materialized_wrapper_shebang_and_markers(self) -> None:
+        env = os.environ.copy()
+        env["MSL_DRY_RUN"] = "YES"
+        proc = subprocess.run(["bash", str(RUNNER)], cwd=ROOT, env=env, text=True, capture_output=True, timeout=10, check=False)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("MSL_WRAPPER_SHEBANG_LINE=1", proc.stdout)
+        self.assertIn("MSL_WRAPPER_FIRST_LINE_GATE=PASS", proc.stdout)
+        self.assertIn("MSL_DRY_RUN_WRAPPER_FIRST_LINE_GATE=PASS", proc.stdout)
+        self.assertIn("ICE_GATHER=PASS", proc.stdout)
+        self.assertIn("P80_MEDIA_ACTIVE=true", proc.stdout)
+        self.assertIn("P80_VIDEO_RTP_FORWARDING=PASS", proc.stdout)
+        self.assertIn("MSL_T07_CLOUD_P2P_RESPONSE_REMOTE_SDP_WRITTEN_MONO_MS=", proc.stdout)
+        print("MSL_DRY_RUN_WRAPPER_EXECED_MARKERS_OBSERVED=true")
+
+    def test_wrapper_first_line_gate_flip_proof(self) -> None:
+        def gate(text: str) -> str:
+            lines = text.splitlines()
+            first = lines[0] if lines else ""
+            shebang_line = next((i for i, line in enumerate(lines, 1) if line.startswith("#!")), 0)
+            return "PASS" if first.startswith("#!") and shebang_line == 1 else "FAIL"
+
+        real = gate("#!/usr/bin/env bash\nset -u\n")
+        mutated = gate("msl_mono_ms() { :; }\n#!/usr/bin/env bash\nset -u\n")
+        self.assertEqual(real, "PASS")
+        self.assertEqual(mutated, "FAIL")
+        print(f"MSL_WRAPPER_FIRST_LINE_GATE_FLIP_PROOF=REAL={real} MUTATED={mutated}")
+
+    def test_dry_run_only_markers_not_in_refusal_output(self) -> None:
+        proc = subprocess.run(["bash", str(RUNNER)], cwd=ROOT, text=True, capture_output=True, check=False)
+        self.assertNotIn("MSL_DRY_RUN_LIVE_INVOCATIONS=", proc.stdout)
+        self.assertNotIn("MSL_DRY_RUN_HA_INTERACTION=", proc.stdout)
+        self.assertNotIn("MSL_DRY_RUN_COMELIT_INTERACTION=", proc.stdout)
+        self.assertNotIn("MSL_DRY_RUN_WRAPPER_EXECUTED=", proc.stdout)
+        print("MSL_DRY_RUN_ONLY_MARKERS_EMITTED_IN_LIVE_RUN=false")
 
     def test_dry_run_cannot_combine_with_live_run(self) -> None:
         env = os.environ.copy()
@@ -211,6 +249,8 @@ class MslV1LatencyInstrumentationTests(unittest.TestCase):
             "T05_OAUTH_ACCESS_TOKEN_AVAILABLE",
             "T06_CLOUD_P2P_REQUEST_START",
             "T07_CLOUD_P2P_RESPONSE_REMOTE_SDP_WRITTEN",
+            "materialize_candidate_wrapper",
+            "MSL_WRAPPER_FIRST_LINE_GATE=PASS",
             "MSL_T19_T24_NA_REASON=HA_STREAM_HLS_PIPELINE_NOT_IN_THIS_CHILD",
         ):
             self.assertIn(marker, self.runner)
