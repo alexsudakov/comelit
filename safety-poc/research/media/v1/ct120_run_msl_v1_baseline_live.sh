@@ -9,6 +9,7 @@ MSL_EXPECTED_COMMIT_SHA=${MSL_EXPECTED_COMMIT_SHA:-}
 MSL_LIVE_RUN=${MSL_LIVE_RUN:-NO}
 MSL_DRY_RUN=${MSL_DRY_RUN:-NO}
 MSL_SELFTEST=${MSL_SELFTEST:-NO}
+MSL_VARIANT_A=${MSL_VARIANT_A:-NO}
 MSL_ATTEMPT_LEDGER=${MSL_ATTEMPT_LEDGER:-}
 HA_WEBHOOK_URL=${HA_WEBHOOK_URL:-http://192.168.1.108:8123/api/webhook/comelit-ha-ring-test-control-v1}
 BASE_WRAPPER=/usr/local/sbin/comelit-p2p-cloud-probe
@@ -65,6 +66,15 @@ MSL_DRY_RUN_WRAPPER_EXECUTED=false
 MSL_DRY_RUN_WRAPPER_RC=NOT_REACHED
 MSL_CLOCK_BASE_WRITTEN_MONO_MS=NOT_WRITTEN
 MSL_SELFTEST_COMPLETED=false
+
+case "$MSL_VARIANT_A" in
+    YES|NO) ;;
+    *)
+        echo "MSL_VARIANT_A_INVALID=$MSL_VARIANT_A"
+        echo "LIVE_INVOCATIONS=0"
+        exit 2
+        ;;
+esac
 
 msl_mono_ms() {
     python3 - <<'PY'
@@ -240,15 +250,19 @@ materialize_candidate_wrapper() {
     local output_wrapper
     local holder
     local clock_base_file
+    local variant_a
     base_wrapper="$1"
     output_wrapper="$2"
     holder="$3"
     clock_base_file="$4"
-    python3 - "$base_wrapper" "$output_wrapper" "$holder" "$clock_base_file" <<'PY'
+    variant_a="${5:-NO}"
+    python3 - "$base_wrapper" "$output_wrapper" "$holder" "$clock_base_file" "$variant_a" "$OAUTH_STATUS" <<'PY'
 from pathlib import Path
 import os, sys
 
-src, out, holder, base_file = map(Path, sys.argv[1:])
+src, out, holder, base_file = map(Path, sys.argv[1:5])
+variant_a = sys.argv[5]
+oauth_status = sys.argv[6]
 text = src.read_text(encoding="utf-8")
 needle = '"$BASE/bin/comelit_ice_offer_holder"'
 if text.count(needle) != 1:
@@ -263,12 +277,40 @@ prefix = f'''msl_mono_ms() {{ python3 - <<'PY2'\nimport time\nprint(time.monoton
 text = "".join(lines[:insert_at]) + prefix + "".join(lines[insert_at:])
 text = text.replace(needle, f'"{holder}"', 1)
 text = text.replace("/run/comelit-p2p", "/run/comelit-media")
+text = text.replace(
+    'set -uo pipefail',
+    'set -uo pipefail\nMSL_VARIANT_A=${MSL_VARIANT_A:-NO}\necho "MSL_A_ENABLED=$([ "$MSL_VARIANT_A" = YES ] && printf true || printf false)"',
+    1,
+)
+if variant_a == "YES":
+    holder_log_blocks = (
+        '''echo "=== ICE OFFER HOLDER ==="\n\ncat "$RUN/ice-holder.log"\n\nif [ "$READY" != true ]; then\n    echo "ICE_OFFER_READY=false"\n    exit 20\nfi\n\necho "ICE_OFFER_READY=true"\n''',
+        '''echo "=== ICE OFFER HOLDER ==="\ncat "$RUN/ice-holder.log"\nif [ "$READY" != true ]; then\n    echo "ICE_OFFER_READY=false"\n    exit 20\nfi\necho "ICE_OFFER_READY=true"\n''',
+    )
+    optimized_offer_gate = '''if [ "$READY" != true ]; then\n    echo "=== ICE OFFER HOLDER ==="\n    cat "$RUN/ice-holder.log"\n    echo "ICE_OFFER_READY=false"\n    exit 20\nfi\n\necho "ICE_OFFER_READY=true"\necho "MSL_A_DEFERRED_HOLDER_LOG=true"\n'''
+    holder_log_block = next((block for block in holder_log_blocks if text.count(block) == 1), None)
+    if holder_log_block is None:
+        raise SystemExit("MSL_A_HOLDER_LOG_ANCHOR=FAIL")
+    text = text.replace(holder_log_block, optimized_offer_gate, 1)
+    holder_pid_anchor = 'HOLDER_PID=$!\n'
+    if text.count(holder_pid_anchor) != 1:
+        raise SystemExit("MSL_A_HOLDER_PID_ANCHOR=FAIL")
+    credential_probe = f'''HOLDER_PID=$!\n\nMSL_A_CREDENTIAL_PREFLIGHT_RC=NOT_RUN\nif [ -x {oauth_status!r} ]; then\n    {oauth_status!r} >"$RUN/msl-a-oauth-status.txt" 2>&1 &\n    MSL_A_CREDENTIAL_PREFLIGHT_PID=$!\nelse\n    MSL_A_CREDENTIAL_PREFLIGHT_PID=""\nfi\n'''
+    text = text.replace(holder_pid_anchor, credential_probe, 1)
+    transform_anchor = 'TRANSFORM_RC=$?\n'
+    if text.count(transform_anchor) != 1:
+        raise SystemExit("MSL_A_TRANSFORM_RC_ANCHOR=FAIL")
+    credential_join = '''TRANSFORM_RC=$?\n\nif [ -n "${MSL_A_CREDENTIAL_PREFLIGHT_PID:-}" ]; then\n    if wait "$MSL_A_CREDENTIAL_PREFLIGHT_PID"; then\n        MSL_A_CREDENTIAL_PREFLIGHT_RC=0\n    else\n        MSL_A_CREDENTIAL_PREFLIGHT_RC=$?\n    fi\n    echo "MSL_A_CREDENTIAL_PREFLIGHT_RC=$MSL_A_CREDENTIAL_PREFLIGHT_RC"\nfi\n'''
+    text = text.replace(transform_anchor, credential_join, 1)
+elif variant_a != "NO":
+    raise SystemExit("MSL_A_VARIANT_MODE=INVALID")
 text = text.replace("COMELIT_OAUTH_ACCESS_TOKEN_PRESENT=true", "COMELIT_OAUTH_ACCESS_TOKEN_PRESENT=true\nmsl_wrap_mark T05_OAUTH_ACCESS_TOKEN_AVAILABLE", 1)
 text = text.replace("curl ", "msl_wrap_mark T06_CLOUD_P2P_REQUEST_START\ncurl ", 1)
 text = text.replace("REMOTE_SDP_WRITTEN=PASS", "REMOTE_SDP_WRITTEN=PASS\nmsl_wrap_mark T07_CLOUD_P2P_RESPONSE_REMOTE_SDP_WRITTEN", 1)
 out.write_text(text, encoding="utf-8")
 os.chmod(out, 0o700)
 print("MSL_WRAPPER_INSTRUMENTATION=PASS")
+print(f"MSL_A_VARIANT_MODE={variant_a}")
 PY
 }
 
@@ -326,6 +368,8 @@ fi
 
 print_final_block() {
     echo "=== COMELIT MSL V1 BASELINE FINAL ==="
+    echo "MSL_A_VARIANT_MODE=$MSL_VARIANT_A"
+    echo "MSL_A_ENABLED=$([ "$MSL_VARIANT_A" = YES ] && printf true || printf false)"
     echo "LIVE_INVOCATIONS=$LIVE_INVOCATIONS"
     echo "WRAPPER_RC=$WRAPPER_RC"
     echo "MSL_START_REFERENCE=T03_NATIVE_MEDIA_HELPER_PROCESS_START"
@@ -424,7 +468,7 @@ run_dry_run() {
     cat > "$DRY_BASE_WRAPPER" <<'EOF'
 #!/usr/bin/env bash
 # Dry-run base wrapper stub: preserves bash-only options so shebang breakage is visible.
-set -u -o pipefail
+set -uo pipefail
 BASE="$(dirname "$0")"
 RUN="${MSL_DRY_RUN_WRAPPER_RUN_DIR:?}"
 rm -rf "$RUN"
@@ -432,11 +476,53 @@ mkdir -p "$RUN"
 curl() {
     echo "DRY_CURL_STUB=true"
 }
+"$BASE/bin/comelit_ice_offer_holder" >"$RUN/ice-holder.log" 2>&1 &
+HOLDER_PID=$!
+READY=false
+for _ in $(seq 1 5); do
+    if [ -s "$RUN/offer.sdp" ]; then
+        READY=true
+        break
+    fi
+    if ! kill -0 "$HOLDER_PID" 2>/dev/null; then
+        break
+    fi
+    sleep 0.1
+done
+echo "=== ICE OFFER HOLDER ==="
+cat "$RUN/ice-holder.log"
+if [ "$READY" != true ]; then
+    echo "ICE_OFFER_READY=false"
+    exit 20
+fi
+echo "ICE_OFFER_READY=true"
+python3 - "$RUN/offer.sdp" "$RUN/offer-comelit.sdp" <<'PY'
+from pathlib import Path
+import sys
+Path(sys.argv[2]).write_text(Path(sys.argv[1]).read_text(encoding="utf-8"), encoding="utf-8")
+PY
+TRANSFORM_RC=$?
+echo "COMELIT_SDP_TRANSFORM_RC=$TRANSFORM_RC"
+if [ "$TRANSFORM_RC" -ne 0 ]; then
+    echo "P2P_CLOUD_SKIPPED=true"
+    exit 21
+fi
+if kill -0 "$HOLDER_PID" 2>/dev/null; then
+    echo "HOLDER_LIVE=true"
+else
+    echo "HOLDER_LIVE=false"
+    exit 22
+fi
 COMELIT_OAUTH_ACCESS_TOKEN_PRESENT=true
 curl --dry-run-stub >/dev/null
-"$BASE/bin/comelit_ice_offer_holder"
 REMOTE_SDP_WRITTEN=PASS
 echo "REMOTE_SDP_WRITTEN=PASS"
+wait "$HOLDER_PID"
+HOLDER_RC=$?
+echo "ICE_HOLDER_RC=$HOLDER_RC"
+echo "=== ICE HOLDER FINAL LOG ==="
+cat "$RUN/ice-holder.log"
+exit "$HOLDER_RC"
 EOF
     chmod 700 "$DRY_BASE_WRAPPER"
     cat > "$DRY_STUB_HELPER" <<'EOF'
@@ -487,9 +573,10 @@ echo "MSL_T18_FIRST_SPS_PPS_IDR_MONO_MS=$t18"
 echo "MSL_START_REFERENCE=T03_NATIVE_MEDIA_HELPER_PROCESS_START"
 echo "MSL_START_TO_FIRST_RTP_MS=$((t17 - t03))"
 echo "MSL_START_TO_DECODABLE_VIDEO_MS=$((t18 - t03))"
+sleep 1
 EOF
     chmod 700 "$DRY_STUB_HELPER"
-    materialize_candidate_wrapper "$DRY_BASE_WRAPPER" "$CANDIDATE_WRAPPER" "$DRY_STUB_HELPER" "$CLOCK_BASE_FILE" || return 1
+    materialize_candidate_wrapper "$DRY_BASE_WRAPPER" "$CANDIDATE_WRAPPER" "$DRY_STUB_HELPER" "$CLOCK_BASE_FILE" "$MSL_VARIANT_A" || return 1
     print_wrapper_first_line_gate "$CANDIDATE_WRAPPER" || return 1
     echo "MSL_DRY_RUN_WRAPPER_FIRST_LINE_GATE=PASS"
     export MSL_CLOCK_BASE_FILE="$CLOCK_BASE_FILE"
@@ -718,7 +805,7 @@ launcher_shebang_line="$(wrapper_shebang_line "$CANDIDATE_LAUNCHER")"
 echo "MSL_LAUNCHER_FIRST_LINE=$launcher_first_line"
 echo "MSL_LAUNCHER_SHEBANG_LINE=$launcher_shebang_line"
 [ "$launcher_shebang_line" = 1 ] || fail "MSL_LAUNCHER_FIRST_LINE_GATE=FAIL"
-materialize_candidate_wrapper "$BASE_WRAPPER" "$CANDIDATE_WRAPPER" "$CANDIDATE_LAUNCHER" "$CLOCK_BASE_FILE" || fail "MSL_WRAPPER_REWRITE=FAIL"
+materialize_candidate_wrapper "$BASE_WRAPPER" "$CANDIDATE_WRAPPER" "$CANDIDATE_LAUNCHER" "$CLOCK_BASE_FILE" "$MSL_VARIANT_A" || fail "MSL_WRAPPER_REWRITE=FAIL"
 print_wrapper_first_line_gate "$CANDIDATE_WRAPPER" || fail "MSL_WRAPPER_FIRST_LINE_GATE=FAIL"
 bash -n "$CANDIDATE_WRAPPER" || fail "MSL_CANDIDATE_WRAPPER_PARSE=FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

@@ -40,6 +40,11 @@ T_MARKERS = {
     "T18": "MSL_T18_FIRST_SPS_PPS_IDR_MONO_MS",
 }
 
+WRAPPER_T_MARKERS = {
+    "T06": "MSL_T06_CLOUD_P2P_REQUEST_START_MONO_MS",
+    "T07": "MSL_T07_CLOUD_P2P_RESPONSE_REMOTE_SDP_WRITTEN_MONO_MS",
+}
+
 
 def sha_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -58,6 +63,15 @@ class MslV1LatencyInstrumentationTests(unittest.TestCase):
         missing = [name for name in T_MARKERS.values() if name not in self.generated_a]
         self.assertFalse(missing)
         print("MSL_T_MARKER_SET_COMPLETE=true")
+
+    def test_t06_t07_are_wrapper_emitted(self) -> None:
+        for name in WRAPPER_T_MARKERS.values():
+            self.assertIn(name.removeprefix("MSL_").removesuffix("_MONO_MS"), self.runner)
+            self.assertNotIn(name, self.generated_a)
+        report = msl.report()
+        self.assertIn("MSL_T06_CLOUD_P2P_REQUEST_START_EMITTED_BY=RUNNER_WRAPPER", report)
+        self.assertIn("MSL_T07_CLOUD_P2P_RESPONSE_REMOTE_SDP_WRITTEN_EMITTED_BY=RUNNER_WRAPPER", report)
+        print("MSL_A_T06_T07_EMITTED=true")
 
     def test_marker_single_emission_structural(self) -> None:
         for enum_name in (
@@ -148,6 +162,60 @@ class MslV1LatencyInstrumentationTests(unittest.TestCase):
         self.assertIn("MSL_DRY_RUN_WRAPPER_EXECUTED=true", proc.stdout)
         self.assertIn("MSL_DRY_RUN_WRAPPER_RC=0", proc.stdout)
         print("MSL_DRY_RUN_REACHED_FINAL_SUMMARY=true")
+
+    def test_variant_a_dry_run_reaches_final_summary_without_live_attempt(self) -> None:
+        env = os.environ.copy()
+        env["MSL_DRY_RUN"] = "YES"
+        env["MSL_VARIANT_A"] = "YES"
+        proc = subprocess.run(["bash", str(RUNNER)], cwd=ROOT, env=env, text=True, capture_output=True, timeout=10, check=False)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("MSL_A_VARIANT_MODE=YES", proc.stdout)
+        self.assertIn("MSL_A_ENABLED=true", proc.stdout)
+        self.assertIn("MSL_A_DEFERRED_HOLDER_LOG=true", proc.stdout)
+        self.assertIn("MSL_DRY_RUN_REACHED_FINAL_SUMMARY=true", proc.stdout)
+        self.assertIn("LIVE_INVOCATIONS=0", proc.stdout)
+        self.assertIn("DOOR_ACTIONS_SENT=0", proc.stdout)
+        self.assertIn("GATE_ACTIONS_SENT=0", proc.stdout)
+        self.assertIn("AUTOMATIC_PROTOCOL_RETRY=false", proc.stdout)
+        self.assertIn("SECOND_MEDIA_SESSION=false", proc.stdout)
+        self.assertIn("MSL_T06_CLOUD_P2P_REQUEST_START_MONO_MS=", proc.stdout)
+        self.assertIn("MSL_T07_CLOUD_P2P_RESPONSE_REMOTE_SDP_WRITTEN_MONO_MS=", proc.stdout)
+        print("MSL_A_DRY_RUN_BOTH_MODES_REACH_FINAL_SUMMARY=true")
+
+    def test_variant_a_mode_switch_preserves_baseline_branch(self) -> None:
+        env = os.environ.copy()
+        env["MSL_DRY_RUN"] = "YES"
+        baseline = subprocess.run(["bash", str(RUNNER)], cwd=ROOT, env=env, text=True, capture_output=True, timeout=10, check=False)
+        env["MSL_VARIANT_A"] = "YES"
+        variant = subprocess.run(["bash", str(RUNNER)], cwd=ROOT, env=env, text=True, capture_output=True, timeout=10, check=False)
+        self.assertEqual(baseline.returncode, 0, baseline.stderr)
+        self.assertEqual(variant.returncode, 0, variant.stderr)
+        real = (
+            "MSL_A_VARIANT_MODE=NO" in baseline.stdout
+            and "MSL_A_ENABLED=false" in baseline.stdout
+            and "MSL_A_DEFERRED_HOLDER_LOG=true" not in baseline.stdout
+        )
+        mutated = (
+            "MSL_A_VARIANT_MODE=YES" in variant.stdout
+            and "MSL_A_DEFERRED_HOLDER_LOG=true" in variant.stdout
+        )
+        self.assertTrue(real)
+        self.assertTrue(mutated)
+        print(f"MSL_A_BASELINE_PATH_UNCHANGED=true REAL={str(real).lower()} MUTATED={str(mutated).lower()}")
+
+    def test_variant_a_static_safety_contract(self) -> None:
+        self.assertIn('MSL_VARIANT_A=${MSL_VARIANT_A:-NO}', self.runner)
+        self.assertIn("MSL_A_DEFERRED_HOLDER_LOG=true", self.runner)
+        self.assertIn("SECOND_MEDIA_SESSION=false", self.runner)
+        self.assertIn("AUTOMATIC_PROTOCOL_RETRY=false", self.runner)
+        variant_region = self.runner.split('if variant_a == "YES":', 1)[1].split('elif variant_a != "NO":', 1)[0]
+        for forbidden in ("SIGUSR1", "open_door", "gate_action", "MSL_LIVE_RUN=YES"):
+            self.assertNotIn(forbidden, variant_region)
+        self.assertNotIn("timeout --signal=TERM --kill-after=5s \"$MEDIA_STARTUP_OUTER_TIMEOUT\" \"$CANDIDATE_WRAPPER\"", variant_region)
+        print("MSL_A_NO_NEW_SESSION_PATH=true")
+        print("MSL_A_NO_DOOR_GATE_PATH=true")
+        print("MSL_A_NO_RETRY_ADDED=true")
+        print("MSL_A_ORDERING_CONSTRAINT_PRESERVED=true CONSTRAINT=offer_sdp_exists_before_single_cloud_p2p_request")
 
     def test_dry_run_has_zero_real_ha_or_comelit_interaction(self) -> None:
         env = os.environ.copy()
