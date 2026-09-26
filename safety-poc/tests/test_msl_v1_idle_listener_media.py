@@ -317,8 +317,9 @@ class MslV1IdleListenerMediaTests(unittest.TestCase):
             "MSL_B_B00_IDLE_MEDIA_REQUEST_RECEIVED_MONO_MS",
             "MSL_B_B01_RTPC_MEDIA_OPEN_SEQUENCE_STARTED_MONO_MS",
             "MSL_B_B02_RTPC_MEDIA_OPEN_CONTROL_READY_MONO_MS",
-            "MSL_B_B03_INITIAL_001A_SENT_MONO_MS",
-            "MSL_B_B04_STRUCTURAL_ACK_MEDIA_ACCEPTED_MONO_MS",
+            "MSL_B_B03A_001A_QUEUED_MONO_MS",
+            "MSL_B_B03B_001A_TX_COMPLETED_MONO_MS",
+            "MSL_B_B04_DEVICE_ACK_OBSERVED_MONO_MS",
         )
         values: list[int] = []
         for key in stage_keys:

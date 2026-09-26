@@ -101,6 +101,24 @@ static gboolean msl_b_device_ack_001a_observed = FALSE;
 static gboolean msl_b_receive_path_registered = FALSE;
 static guint8 msl_b_idle_001a_body[40];
 static guint msl_b_idle_001a_body_len = 0;
+static guint msl_b_post_001a_frame_count = 0;
+static guint msl_b_post_001a_same_request_id_count = 0;
+static guint msl_b_post_001a_body32_count = 0;
+static guint msl_b_post_001a_1800_count = 0;
+static guint msl_b_ack_request_id_match_count = 0;
+static guint msl_b_ack_header_match_count = 0;
+static guint msl_b_ack_address_role_match_count = 0;
+static guint msl_b_ack_exact_match_count = 0;
+static guint msl_b_device_0008_count = 0;
+static guint msl_b_device_000a_count = 0;
+static guint msl_b_device_response_count = 0;
+static guint msl_b_rtpc_open_response_count = 0;
+static guint msl_b_ack_reject_wrong_request_id = 0;
+static guint msl_b_ack_reject_wrong_length = 0;
+static guint msl_b_ack_reject_wrong_prefix = 0;
+static guint msl_b_ack_reject_wrong_flags = 0;
+static guint msl_b_ack_reject_address_role = 0;
+static guint msl_b_ack_reject_other = 0;
 
 static gboolean r42_queue_media_channel_close(void);
 
@@ -155,12 +173,17 @@ msl_b_load_clock_base(void)
 static void
 msl_b_print_clock_marker(const char *name)
 {
-    gint64 now = g_get_monotonic_time() / 1000;
+    gint64 now_us = g_get_monotonic_time();
+    gint64 base_us;
+    gint64 delta_us;
 
     msl_b_load_clock_base();
     if (!msl_b_clock_base_valid)
         return;
-    printf("MSL_B_%s_MONO_MS=%lld\n", name, (long long)MAX((gint64)0, now - msl_b_clock_base_value));
+    base_us = msl_b_clock_base_value * 1000;
+    delta_us = MAX((gint64)0, now_us - base_us);
+    printf("MSL_B_%s_MONO_US=%lld\n", name, (long long)delta_us);
+    printf("MSL_B_%s_MONO_MS=%lld\n", name, (long long)(delta_us / 1000));
     fflush(stdout);
 }
 
@@ -207,34 +230,116 @@ msl_b_print_reuse_counters(void)
     printf("MSL_B_SPS_COUNT=%llu\n", (unsigned long long)p116_video_rtp.sps_count);
     printf("RESIDUAL_MEDIA_CHANNELS=%u\n", r42_media_channel_id == 0u ? 0u : 1u);
     printf("MSL_B_TUNNEL_PRESERVED=%s\n", pseudotcp_open ? "true" : "false");
+    printf("MSL_B_POST_001A_FRAME_COUNT=%u\n", msl_b_post_001a_frame_count);
+    printf("MSL_B_POST_001A_SAME_REQUEST_ID_COUNT=%u\n", msl_b_post_001a_same_request_id_count);
+    printf("MSL_B_POST_001A_BODY32_COUNT=%u\n", msl_b_post_001a_body32_count);
+    printf("MSL_B_POST_001A_1800_COUNT=%u\n", msl_b_post_001a_1800_count);
+    printf("MSL_B_ACK_REQUEST_ID_MATCH_COUNT=%u\n", msl_b_ack_request_id_match_count);
+    printf("MSL_B_ACK_HEADER_MATCH_COUNT=%u\n", msl_b_ack_header_match_count);
+    printf("MSL_B_ACK_ADDRESS_ROLE_MATCH_COUNT=%u\n", msl_b_ack_address_role_match_count);
+    printf("MSL_B_ACK_EXACT_MATCH_COUNT=%u\n", msl_b_ack_exact_match_count);
+    printf("MSL_B_DEVICE_0008_COUNT=%u\n", msl_b_device_0008_count);
+    printf("MSL_B_DEVICE_000A_COUNT=%u\n", msl_b_device_000a_count);
+    printf("MSL_B_DEVICE_RESPONSE_COUNT=%u\n", msl_b_device_response_count);
+    printf("MSL_B_RTPC_OPEN_RESPONSE_COUNT=%u\n", msl_b_rtpc_open_response_count);
+    printf("ACK_REJECT_WRONG_REQUEST_ID=%u\n", msl_b_ack_reject_wrong_request_id);
+    printf("ACK_REJECT_WRONG_LENGTH=%u\n", msl_b_ack_reject_wrong_length);
+    printf("ACK_REJECT_WRONG_PREFIX=%u\n", msl_b_ack_reject_wrong_prefix);
+    printf("ACK_REJECT_WRONG_FLAGS=%u\n", msl_b_ack_reject_wrong_flags);
+    printf("ACK_REJECT_ADDRESS_ROLE=%u\n", msl_b_ack_reject_address_role);
+    printf("ACK_REJECT_OTHER=%u\n", msl_b_ack_reject_other);
     fflush(stdout);
 }
 
 static gboolean
 msl_b_ack_matches_source(const guint8 *body, guint body_len,
-                         const guint8 *source, guint source_len)
+                         const guint8 *source, guint source_len,
+                         gboolean count_reject)
 {
     guint first;
     guint second;
 
-    if (!body || !source || body_len != 32u || source_len < 20u)
+    if (!body || !source || source_len < 20u) {
+        if (count_reject)
+            msl_b_ack_reject_other++;
         return FALSE;
+    }
+    if (body_len != 32u) {
+        if (count_reject)
+            msl_b_ack_reject_wrong_length++;
+        return FALSE;
+    }
     if (read_le16(body + 0u) != 0x1800u ||
+        body[6] != 0x00u || body[7] != 0x00u) {
+        if (count_reject)
+            msl_b_ack_reject_wrong_prefix++;
+        return FALSE;
+    }
+    msl_b_ack_header_match_count++;
+    if (
         body[6] != 0x00u || body[7] != 0x00u ||
         body[8] != 0xffu || body[9] != 0xffu ||
-        body[10] != 0xffu || body[11] != 0xffu)
+        body[10] != 0xffu || body[11] != 0xffu) {
+        if (count_reject)
+            msl_b_ack_reject_wrong_flags++;
         return FALSE;
+    }
 
     first = source_len - 20u;
     second = source_len - 10u;
-    if (source[first + 9u] != 0x00u || source[second + 9u] != 0x00u)
+    if (source[first + 9u] != 0x00u || source[second + 9u] != 0x00u) {
+        if (count_reject)
+            msl_b_ack_reject_other++;
         return FALSE;
+    }
 
-    return
-        memcmp(body + 12u, source + second, 9u) == 0 &&
+    if (memcmp(body + 12u, source + second, 9u) == 0 &&
         body[21] == 0x00u &&
         memcmp(body + 22u, source + first, 9u) == 0 &&
-        body[31] == 0x00u;
+        body[31] == 0x00u) {
+        msl_b_ack_address_role_match_count++;
+        msl_b_ack_exact_match_count++;
+        return TRUE;
+    }
+
+    if (count_reject)
+        msl_b_ack_reject_address_role++;
+    return FALSE;
+}
+
+static void
+msl_b_note_post_001a_frame(guint32 request_id, const guint8 *body, guint body_len)
+{
+    guint16 prefix = 0u;
+    guint16 action = 0u;
+
+    if (!msl_b_wait_device_ack_001a)
+        return;
+
+    msl_b_post_001a_frame_count++;
+    if (request_id == v4_ctpp_channel_id) {
+        msl_b_post_001a_same_request_id_count++;
+        msl_b_ack_request_id_match_count++;
+    }
+    if (body_len == 32u)
+        msl_b_post_001a_body32_count++;
+    if (body && body_len >= 2u) {
+        prefix = read_le16(body + 0u);
+        if (prefix == 0x1800u)
+            msl_b_post_001a_1800_count++;
+    }
+    if (body && body_len >= 8u) {
+        action = read_le16(body + 6u);
+        if (prefix == 0x1840u && action == 0x0008u)
+            msl_b_device_0008_count++;
+        if (prefix == 0x1840u && action == 0x000au)
+            msl_b_device_000a_count++;
+        if (prefix == 0x1800u && action == 0x0000u)
+            msl_b_device_response_count++;
+    }
+    if (request_id == 0u && body && body_len >= 12u &&
+        read_le16(body + 0u) == 0xabcdu && read_le16(body + 2u) == 2u)
+        msl_b_rtpc_open_response_count++;
 }
 
 static gboolean
@@ -368,8 +473,6 @@ msl_b_queue_idle_self_activation(void)
 
     msl_b_idle_state = MSL_B_IDLE_STATE_SELF_ACTIVATION_TX;
     printf("MSL_B_INITIAL_001A_STRUCTURED_FROM_SESSION_STATE=true\n");
-    msl_b_print_clock_marker("B03_INITIAL_001A_SENT");
-    msl_b_print_clock_marker("T13_INITIAL_001A_SENT");
     fflush(stdout);
     memcpy(msl_b_idle_001a_body, body, sizeof(body));
     msl_b_idle_001a_body_len = sizeof(body);
@@ -381,6 +484,7 @@ msl_b_queue_idle_self_activation(void)
         msl_b_idle_state = MSL_B_IDLE_STATE_FAILED;
         return FALSE;
     }
+    msl_b_print_clock_marker("B03A_001A_QUEUED");
     memset(body, 0, sizeof(body));
     return p12_flush_tx();
 }
@@ -424,15 +528,23 @@ msl_b_activate_idle_media_after_ack(void)
 static gboolean
 msl_b_handle_device_ack_001a(guint32 request_id, const guint8 *body, guint body_len)
 {
-    if (!msl_b_wait_device_ack_001a || request_id != v4_ctpp_channel_id)
+    if (!msl_b_wait_device_ack_001a)
         return FALSE;
+
+    msl_b_note_post_001a_frame(request_id, body, body_len);
+    if (request_id != v4_ctpp_channel_id) {
+        msl_b_ack_reject_wrong_request_id++;
+        return FALSE;
+    }
     if (!msl_b_ack_matches_source(body, body_len,
                                   msl_b_idle_001a_body,
-                                  msl_b_idle_001a_body_len))
+                                  msl_b_idle_001a_body_len,
+                                  TRUE))
         return FALSE;
 
     msl_b_wait_device_ack_001a = FALSE;
     msl_b_device_ack_001a_observed = TRUE;
+    msl_b_print_clock_marker("B04_DEVICE_ACK_OBSERVED");
     printf("MSL_B_DEVICE_ACK_001A_OBSERVED=PASS\n");
     fflush(stdout);
     (void)msl_b_activate_idle_media_after_ack();
@@ -515,6 +627,8 @@ TX_COMPLETION_OPEN_REPLACEMENT = """        case P12_TX_R42_MEDIA_CHANNEL_OPEN:
             break;
 
         case P12_TX_MSL_B_IDLE_SELF_ACTIVATION:
+            msl_b_print_clock_marker("B03B_001A_TX_COMPLETED");
+            msl_b_print_clock_marker("T13_INITIAL_001A_SENT");
             (void)msl_b_arm_device_ack_wait();
             break;"""
 
@@ -691,11 +805,15 @@ def _assert_gates(candidate: str) -> None:
         "B00_IDLE_MEDIA_REQUEST_RECEIVED",
         "B01_RTPC_MEDIA_OPEN_SEQUENCE_STARTED",
         "B02_RTPC_MEDIA_OPEN_CONTROL_READY",
-        "B03_INITIAL_001A_SENT",
-        "B04_STRUCTURAL_ACK_MEDIA_ACCEPTED",
+        "B03A_001A_QUEUED",
+        "B03B_001A_TX_COMPLETED",
+        "B04_DEVICE_ACK_OBSERVED",
         "B05_FIRST_AUDIO_RTP",
         "B06_FIRST_VIDEO_RTP",
         "B07_FIRST_USABLE_SPS_PPS_IDR_RECOVERY_POINT",
+        "MSL_B_POST_001A_FRAME_COUNT",
+        "MSL_B_ACK_EXACT_MATCH_COUNT",
+        "ACK_REJECT_ADDRESS_ROLE",
         "MSL_B_RING_COLLISION_FAIL_CLOSED=true",
         "MSL_B_DUPLICATE_START_REJECTED=true",
         "MSL_B_SECOND_UPSTREAM_SESSION=false",
