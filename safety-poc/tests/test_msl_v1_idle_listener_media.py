@@ -186,6 +186,44 @@ class MslV1IdleListenerMediaTests(unittest.TestCase):
         ):
             self.assertIn(marker, self.runner)
 
+    def test_runner_uses_offline_chroot_not_docker(self) -> None:
+        for forbidden in (
+            "docker run",
+            "command -v docker",
+            "MSL_B_DOCKER_PRESENT=false",
+            "ALPINE_IMAGE",
+            "APK_CLOSURE",
+            "apk add",
+        ):
+            self.assertNotIn(forbidden, self.runner)
+        for marker in (
+            "MSL_B_SELFTEST=${MSL_B_SELFTEST:-NO}",
+            "MSL_B_ALPINE_DOWNLOAD=SKIPPED_OFFLINE",
+            "timeout 900 chroot",
+            "MSL_B_MUSL_INTERPRETER_GATE=",
+            "NO_GLIBC_DEPENDENCY=",
+            "NO_NEW_RUNTIME_DEPENDENCY=",
+            "LIB_IDENTICAL=",
+            "LD_LIBRARY_PATH=\"$MSL_B_BUILD_ROOTFS/lib:$MSL_B_BUILD_ROOTFS/usr/lib\"",
+        ):
+            self.assertIn(marker, self.runner)
+        print("MSL_B_DOCKER_REQUIRED=false REAL=chroot_build MUTATED=docker_token_scan")
+
+    def test_runner_selftest_is_no_live_interaction(self) -> None:
+        for marker in (
+            "MSL_B_SELFTEST_COMPLETED=",
+            "MSL_B_SELFTEST_BUILD_RC=0",
+            "MSL_B_SELFTEST_BINARY_SHA256=",
+            "MSL_B_SELFTEST_HA_INTERACTION=$MSL_B_HA_INTERACTION",
+            "MSL_B_SELFTEST_COMELIT_INTERACTION=$MSL_B_COMELIT_INTERACTION",
+            "MSL_B_SELFTEST_CANDIDATE_EXECUTED=false",
+            "[ \"$MSL_B_SELFTEST\" = YES ] && [ \"$MSL_B_LIVE_RUN\" = YES ]",
+            "run_selftest",
+        ):
+            self.assertIn(marker, self.runner)
+        self.assertIn("[ \"$MSL_B_LIVE_RUN\" = YES ]; then", self.runner)
+        print("MSL_B_SELFTEST_MODE=YES REAL=no_live_stub_path MUTATED=marker_scan")
+
     def test_bound_invariant_falsifiable_and_udp_sink_present(self) -> None:
         real = re.search(r"MEDIA_OBSERVATION_SECONDS=\$\{MEDIA_OBSERVATION_SECONDS:-(\d+)\}", self.runner).group(1)
         mutated = self.runner.replace("MEDIA_OBSERVATION_SECONDS=${MEDIA_OBSERVATION_SECONDS:-20}", "MEDIA_OBSERVATION_SECONDS=${MEDIA_OBSERVATION_SECONDS:-100}")

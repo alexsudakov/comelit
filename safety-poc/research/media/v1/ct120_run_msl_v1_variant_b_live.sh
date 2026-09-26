@@ -9,6 +9,7 @@ MSL_B_EXPECTED_COMMIT_SHA=${MSL_B_EXPECTED_COMMIT_SHA:-}
 MSL_B_EXPECTED_GENERATED_SOURCE_SHA=${MSL_B_EXPECTED_GENERATED_SOURCE_SHA:-}
 MSL_B_LIVE_RUN=${MSL_B_LIVE_RUN:-NO}
 MSL_B_DRY_RUN=${MSL_B_DRY_RUN:-NO}
+MSL_B_SELFTEST=${MSL_B_SELFTEST:-NO}
 MSL_B_ATTEMPT_LEDGER=${MSL_B_ATTEMPT_LEDGER:-}
 HA_WEBHOOK_URL=${HA_WEBHOOK_URL:-http://192.168.1.108:8123/api/webhook/comelit-ha-ring-test-control-v1}
 BASE_WRAPPER=/usr/local/sbin/comelit-p2p-cloud-probe
@@ -19,8 +20,8 @@ TRANSFORM_REL=safety-poc/research/media/v1/entrance_msl_v1_idle_listener_media_t
 RUNNER_REL=safety-poc/research/media/v1/ct120_run_msl_v1_variant_b_live.sh
 BASELINE_RUNNER_REL=safety-poc/research/media/v1/ct120_run_msl_v1_baseline_live.sh
 EXPECTED_BASE_SOURCE_SHA=5827d9fd043b85fc0c59a31661a1a125c6b239771e2a70c3e5afdd95f1a03c73
-APK_CLOSURE=${APK_CLOSURE:-/home/hermes/musl-apk-closure-p80}
-ALPINE_IMAGE=${ALPINE_IMAGE:-alpine:3.24.1}
+OFFLINE_ROOTFS=${OFFLINE_ROOTFS:-}
+ALPINE_VERSION=3.24.1
 EXPECTED_INTERPRETER=/lib/ld-musl-x86_64.so.1
 EXPECTED_NEEDED=libc.musl-x86_64.so.1,libglib-2.0.so.0,libgobject-2.0.so.0,libnice.so.10
 VIDEO_RTP_PORT=17899
@@ -55,6 +56,9 @@ LISTENER_PID=""
 VIDEO_SINK_PID=""
 AUDIO_SINK_PID=""
 MSL_B_CAMPAIGN_STOPPED_FAIL_CLOSED=false
+MSL_B_BUILD_ROOTFS=""
+MSL_B_OUTPUT=""
+MSL_B_CANDIDATE_BINARY_SHA256=""
 
 msl_b_mono_ms() {
     python3 - <<'PY'
@@ -150,6 +154,153 @@ status_stopped() {
     [ "$(json_scalar "$file" listener_ready)" = false ]
 }
 
+msl_b_rootfs_library_realpath() {
+    local rootfs="$1"
+    local needed="$2"
+    local rootfs_real
+    local rootfs_lib
+    local lib_real
+    rootfs_real="$(readlink -f "$rootfs" 2>/dev/null || true)"
+    [ -n "$rootfs_real" ] && [ -d "$rootfs_real" ] || return 1
+    rootfs_lib="$(
+        find "$rootfs/lib" "$rootfs/usr/lib" -name "$needed" \( -type f -o -type l \) -print -quit 2>/dev/null || true
+    )"
+    [ -n "$rootfs_lib" ] || return 1
+    lib_real="$(readlink -f "$rootfs_lib" 2>/dev/null || true)"
+    [ -n "$lib_real" ] && [ -f "$lib_real" ] || return 1
+    case "$lib_real" in
+        "$rootfs_real"/*) printf '%s\n' "$lib_real" ;;
+        *) return 1 ;;
+    esac
+}
+
+msl_b_select_rootfs() {
+    if [ -n "$OFFLINE_ROOTFS" ]; then
+        MSL_B_BUILD_ROOTFS="$OFFLINE_ROOTFS"
+    else
+        MSL_B_BUILD_ROOTFS="$(
+            find /root -maxdepth 2 -path '/root/comelit-p80-haos-build-*/rootfs' -type d \
+                -exec test -x '{}/usr/bin/gcc' ';' \
+                -exec test -x '{}/usr/bin/pkg-config' ';' \
+                -exec test -e '{}/lib/ld-musl-x86_64.so.1' ';' \
+                -printf '%T@ %p\n' 2>/dev/null |
+            sort -nr |
+            awk 'NR == 1 {print $2}'
+        )"
+    fi
+    [ -n "$MSL_B_BUILD_ROOTFS" ] || fail "MSL_B_OFFLINE_ROOTFS=ABSENT"
+    [ -x "$MSL_B_BUILD_ROOTFS/usr/bin/gcc" ] || fail "MSL_B_OFFLINE_ROOTFS_GCC=ABSENT"
+    [ -x "$MSL_B_BUILD_ROOTFS/usr/bin/pkg-config" ] || fail "MSL_B_OFFLINE_ROOTFS_PKG_CONFIG=ABSENT"
+    [ -e "$MSL_B_BUILD_ROOTFS/lib/ld-musl-x86_64.so.1" ] || fail "MSL_B_OFFLINE_ROOTFS_MUSL_LOADER=ABSENT"
+    [ "$(cat "$MSL_B_BUILD_ROOTFS/etc/alpine-release" 2>/dev/null || true)" = "$ALPINE_VERSION" ] || fail "MSL_B_ALPINE_VERSION_GATE=FAIL"
+}
+
+msl_b_build_candidate() {
+    local source_a="$RUN_ROOT/msl-b-a.c"
+    local source_b="$RUN_ROOT/msl-b-b.c"
+    local meta="$RUN_ROOT/build-meta.txt"
+    local chroot_dir="/msl-b-build-$$"
+    local source_a_sha
+    local source_b_sha
+    local build_rc
+    local interpreter
+    local needed
+    local rootfs_lib
+    local packaged
+    local lib_identical=PASS
+    local no_glibc_dependency
+    local no_new_runtime_dependency
+    local musl_interpreter_gate
+
+    echo "=== BUILD EPHEMERAL VARIANT B LISTENER ==="
+    MSL_B_OUTPUT="$RUN_ROOT/$CANDIDATE_NAME"
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$REPO/safety-poc/research/media/v1" \
+        python3 "$REPO/$TRANSFORM_REL" --source "$REPO/$SOURCE_REL" --output "$source_a"
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$REPO/safety-poc/research/media/v1" \
+        python3 "$REPO/$TRANSFORM_REL" --source "$REPO/$SOURCE_REL" --output "$source_b"
+    source_a_sha="$(sha256sum "$source_a" | awk '{print $1}')"
+    source_b_sha="$(sha256sum "$source_b" | awk '{print $1}')"
+    echo "MSL_B_GENERATED_SOURCE_SHA256_A=$source_a_sha"
+    echo "MSL_B_GENERATED_SOURCE_SHA256_B=$source_b_sha"
+    cmp "$source_a" "$source_b" >/dev/null 2>&1 || fail "MSL_B_TRANSFORM_DETERMINISTIC=FAIL"
+    [ "$source_a_sha" = "$MSL_B_EXPECTED_GENERATED_SOURCE_SHA" ] || fail "MSL_B_GENERATED_SOURCE_SHA_GATE=FAIL"
+    [ "$FAIL" -eq 0 ] || return 1
+
+    msl_b_select_rootfs
+    echo "MSL_B_OFFLINE_ROOTFS=$MSL_B_BUILD_ROOTFS"
+    echo "MSL_B_ALPINE_DOWNLOAD=SKIPPED_OFFLINE"
+    install -d -m 700 "$MSL_B_BUILD_ROOTFS$chroot_dir/src" "$MSL_B_BUILD_ROOTFS$chroot_dir/out"
+    install -m 600 "$source_a" "$MSL_B_BUILD_ROOTFS$chroot_dir/src/msl-b-a.c"
+
+    set +e
+    timeout 900 chroot "$MSL_B_BUILD_ROOTFS" /bin/sh -eu -c "
+      cd '$chroot_dir'
+      cc -O2 -g -Wall -Wextra -Wl,--as-needed \
+        -o out/$CANDIDATE_NAME \
+        src/msl-b-a.c \
+        \$(pkg-config --cflags --libs nice glib-2.0 gio-2.0 gobject-2.0)
+      chmod 755 out/$CANDIDATE_NAME
+      INTERPRETER=\"\$(readelf -l out/$CANDIDATE_NAME | sed -n 's@.*Requesting program interpreter: \(.*\)]@\1@p')\"
+      NEEDED=\"\$(readelf -d out/$CANDIDATE_NAME | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' | sort | paste -sd, -)\"
+      BUILD_ID=\"\$(readelf -n out/$CANDIDATE_NAME | sed -n 's/^.*Build ID: //p' | head -1)\"
+      {
+        echo \"alpine_version=\$(cat /etc/alpine-release)\"
+        echo \"cc_version=\$(cc --version | head -1)\"
+        echo \"libnice_version=\$(pkg-config --modversion nice)\"
+        echo \"glib_version=\$(pkg-config --modversion glib-2.0)\"
+        echo \"gobject_version=\$(pkg-config --modversion gobject-2.0)\"
+        echo \"cflags=-O2 -g -Wall -Wextra -Wl,--as-needed\"
+        echo \"interpreter=\$INTERPRETER\"
+        echo \"needed_sorted=\$NEEDED\"
+        echo \"elf_build_id=\$BUILD_ID\"
+        echo \"candidate_executed=false\"
+      } > out/build-meta.txt
+    " | tee "$RUN_ROOT/build.log"
+    build_rc=${PIPESTATUS[0]}
+    set -u -o pipefail
+    echo "MSL_B_BUILD_RC=$build_rc"
+    [ "$build_rc" -eq 0 ] || return 1
+
+    install -m 700 "$MSL_B_BUILD_ROOTFS$chroot_dir/out/$CANDIDATE_NAME" "$MSL_B_OUTPUT"
+    install -m 600 "$MSL_B_BUILD_ROOTFS$chroot_dir/out/build-meta.txt" "$meta"
+    rm -rf "$MSL_B_BUILD_ROOTFS$chroot_dir"
+    MSL_B_CANDIDATE_BINARY_SHA256="$(sha256sum "$MSL_B_OUTPUT" | awk '{print $1}')"
+    interpreter="$(sed -n 's/^interpreter=//p' "$meta")"
+    needed="$(sed -n 's/^needed_sorted=//p' "$meta")"
+    echo "MSL_B_MUSL_INTERPRETER=$interpreter"
+    echo "MSL_B_NEEDED_SORTED=$needed"
+    [ "$interpreter" = "$EXPECTED_INTERPRETER" ] && musl_interpreter_gate=PASS || musl_interpreter_gate=FAIL
+    [ "$needed" = "$EXPECTED_NEEDED" ] && no_new_runtime_dependency=PASS || no_new_runtime_dependency=FAIL
+    case ",$needed," in
+        *,libc.so.6,*) no_glibc_dependency=FAIL ;;
+        *) no_glibc_dependency=PASS ;;
+    esac
+    [ "$musl_interpreter_gate" = PASS ] || fail "MSL_B_MUSL_INTERPRETER_GATE=FAIL"
+    [ "$no_new_runtime_dependency" = PASS ] || fail "MSL_B_NEEDED_GATE=FAIL"
+    [ "$no_glibc_dependency" = PASS ] || fail "MSL_B_GLIBC_DEPENDENCY=FAIL"
+    for needed_lib in libglib-2.0.so.0 libgobject-2.0.so.0 libnice.so.10; do
+        packaged="$REPO/custom_components/comelit/native/lib/$needed_lib"
+        rootfs_lib="$(msl_b_rootfs_library_realpath "$MSL_B_BUILD_ROOTFS" "$needed_lib" || true)"
+        if [ ! -f "$packaged" ]; then
+            lib_identical=FAIL
+            fail "MSL_B_LIB_IDENTICAL=FAIL lib=$needed_lib reason=packaged_absent"
+        elif [ -z "$rootfs_lib" ]; then
+            lib_identical=FAIL
+            fail "MSL_B_LIB_IDENTICAL=FAIL lib=$needed_lib reason=rootfs_lib_unresolved"
+        elif ! cmp -s "$packaged" "$rootfs_lib"; then
+            lib_identical=FAIL
+            fail "MSL_B_LIB_IDENTICAL=FAIL lib=$needed_lib reason=content_mismatch"
+        fi
+    done
+    echo "MSL_B_MUSL_INTERPRETER_GATE=$musl_interpreter_gate"
+    echo "NO_GLIBC_DEPENDENCY=$no_glibc_dependency"
+    echo "NO_NEW_RUNTIME_DEPENDENCY=$no_new_runtime_dependency"
+    echo "LIB_IDENTICAL=$lib_identical"
+    echo "MSL_B_CANDIDATE_BINARY_SHA256=$MSL_B_CANDIDATE_BINARY_SHA256"
+    echo "MSL_B_SELFTEST_BINARY_SHA256=$MSL_B_CANDIDATE_BINARY_SHA256"
+    [ "$FAIL" -eq 0 ] || return 1
+}
+
 msl_b_start_udp_sink() {
     local port="$1"
     local count_file="$2"
@@ -206,7 +357,7 @@ PY
     exit 0
 fi
 
-if [ "$MSL_B_DRY_RUN" != YES ] && [ "$MSL_B_LIVE_RUN" != YES ]; then
+if [ "$MSL_B_DRY_RUN" != YES ] && [ "$MSL_B_LIVE_RUN" != YES ] && [ "$MSL_B_SELFTEST" != YES ]; then
     echo "MSL_B_OFFLINE_SAFE_REFUSAL=true"
     echo "LIVE_INVOCATIONS=0"
     echo "MSL_B_RUN_CLASSIFICATION=NOT_RUN"
@@ -370,6 +521,24 @@ run_dry_run() {
     rm -rf "$RUN_ROOT"
 }
 
+run_selftest() {
+    local dry_rc
+    msl_b_build_candidate || return 1
+    MSL_B_DRY_RUN=YES
+    run_dry_run
+    dry_rc=$?
+    echo "MSL_B_SELFTEST_COMPLETED=$([ "$dry_rc" -eq 0 ] && printf true || printf false)"
+    echo "MSL_B_SELFTEST_BUILD_RC=0"
+    echo "MSL_B_SELFTEST_BINARY_SHA256=$MSL_B_CANDIDATE_BINARY_SHA256"
+    echo "MSL_B_SELFTEST_HA_INTERACTION=$MSL_B_HA_INTERACTION"
+    echo "MSL_B_SELFTEST_COMELIT_INTERACTION=$MSL_B_COMELIT_INTERACTION"
+    echo "MSL_B_SELFTEST_CANDIDATE_EXECUTED=false"
+    [ "$dry_rc" -eq 0 ] || return "$dry_rc"
+    [ "$MSL_B_HA_INTERACTION" -eq 0 ] || return 1
+    [ "$MSL_B_COMELIT_INTERACTION" -eq 0 ] || return 1
+    [ "$LIVE_INVOCATIONS" -eq 0 ] || return 1
+}
+
 on_exit() {
     rc=$?
     stop_pid "$LISTENER_PID"
@@ -395,8 +564,10 @@ on_exit() {
 trap on_exit EXIT
 trap 'exit 130' INT TERM HUP
 
-if [ "$MSL_B_DRY_RUN" = YES ] && [ "$MSL_B_LIVE_RUN" = YES ]; then
-    echo "MSL_B_DRY_RUN_LIVE_RUN_CONFLICT=true"
+if { [ "$MSL_B_DRY_RUN" = YES ] && [ "$MSL_B_LIVE_RUN" = YES ]; } ||
+   { [ "$MSL_B_SELFTEST" = YES ] && [ "$MSL_B_LIVE_RUN" = YES ]; } ||
+   { [ "$MSL_B_SELFTEST" = YES ] && [ "$MSL_B_DRY_RUN" = YES ]; }; then
+    echo "MSL_B_MODE_CONFLICT=true"
     echo "LIVE_INVOCATIONS=0"
     exit 2
 fi
@@ -409,8 +580,10 @@ fi
 
 [ -n "$MSL_B_EXPECTED_COMMIT_SHA" ] || fail "MSL_B_EXPECTED_COMMIT_SHA_REQUIRED=true"
 [ -n "$MSL_B_EXPECTED_GENERATED_SOURCE_SHA" ] || fail "MSL_B_EXPECTED_GENERATED_SOURCE_SHA_REQUIRED=true"
-[ -n "$MSL_B_ATTEMPT_LEDGER" ] || fail "MSL_B_ATTEMPT_LEDGER_REQUIRED=true"
-if [ -n "$MSL_B_ATTEMPT_LEDGER" ]; then
+if [ "$MSL_B_LIVE_RUN" = YES ]; then
+    [ -n "$MSL_B_ATTEMPT_LEDGER" ] || fail "MSL_B_ATTEMPT_LEDGER_REQUIRED=true"
+fi
+if [ "$MSL_B_LIVE_RUN" = YES ] && [ -n "$MSL_B_ATTEMPT_LEDGER" ]; then
     if [ ! -f "$MSL_B_ATTEMPT_LEDGER" ]; then
         fail "MSL_B_ATTEMPT_LEDGER=ABSENT"
     else
@@ -429,7 +602,7 @@ if [ "${EUID}" -ne 0 ]; then
     exit 1
 fi
 
-for command in git python3 curl sha256sum timeout awk grep bash chmod install readelf cmp stat; do
+for command in git python3 curl sha256sum timeout awk grep bash chmod install readelf cmp stat chroot find readlink sort paste sed; do
     command -v "$command" >/dev/null 2>&1 || fail "MSL_B_MISSING_COMMAND=$command"
 done
 
@@ -464,70 +637,18 @@ cmp "$RUN_ROOT/runner.sh" "$REPO/$RUNNER_REL" >/dev/null 2>&1 || fail "MSL_B_RUN
 echo "P78_GATE_DECISION=substituted REASON=research_branch_pins_CT120_clone_commit_generated_source_runner_transform_and_base_wrapper"
 [ "$FAIL" -eq 0 ] || exit 1
 
+if [ "$MSL_B_SELFTEST" = YES ]; then
+    trap - EXIT
+    run_selftest
+    exit "$?"
+fi
+
 install -d -m 700 "$RUN_DIR"
 rm -f "$START_FILE" "$STOP_FILE"
 msl_b_mono_ms > "$CLOCK_BASE_FILE"
 chmod 600 "$CLOCK_BASE_FILE"
 
-echo "=== BUILD EPHEMERAL VARIANT B LISTENER ==="
-MSL_B_OUTPUT="$RUN_ROOT/$CANDIDATE_NAME"
-SOURCE_A="$RUN_ROOT/msl-b-a.c"
-SOURCE_B="$RUN_ROOT/msl-b-b.c"
-META="$RUN_ROOT/build-meta.txt"
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$REPO/safety-poc/research/media/v1" \
-    python3 "$REPO/$TRANSFORM_REL" --source "$REPO/$SOURCE_REL" --output "$SOURCE_A"
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$REPO/safety-poc/research/media/v1" \
-    python3 "$REPO/$TRANSFORM_REL" --source "$REPO/$SOURCE_REL" --output "$SOURCE_B"
-source_a_sha="$(sha256sum "$SOURCE_A" | awk '{print $1}')"
-source_b_sha="$(sha256sum "$SOURCE_B" | awk '{print $1}')"
-echo "MSL_B_GENERATED_SOURCE_SHA256_A=$source_a_sha"
-echo "MSL_B_GENERATED_SOURCE_SHA256_B=$source_b_sha"
-cmp "$SOURCE_A" "$SOURCE_B" >/dev/null 2>&1 || fail "MSL_B_TRANSFORM_DETERMINISTIC=FAIL"
-[ "$source_a_sha" = "$MSL_B_EXPECTED_GENERATED_SOURCE_SHA" ] || fail "MSL_B_GENERATED_SOURCE_SHA_GATE=FAIL"
-[ "$FAIL" -eq 0 ] || exit 1
-[ -d "$APK_CLOSURE" ] || fail "MSL_B_APK_CLOSURE_PRESENT=false"
-command -v docker >/dev/null 2>&1 || fail "MSL_B_DOCKER_PRESENT=false"
-[ "$FAIL" -eq 0 ] || exit 1
-cat > "$RUN_ROOT/build.sh" <<'EOS'
-set -eu
-apk add --no-network --allow-untrusted /pkgs/*.apk >/dev/null
-cc -O2 -g -Wall -Wextra -Wl,--as-needed \
-    -o /w/comelit-msl-v1-variant-b-listener \
-    /w/msl-b-a.c \
-    $(pkg-config --cflags --libs nice glib-2.0 gio-2.0 gobject-2.0)
-chmod 755 /w/comelit-msl-v1-variant-b-listener
-readelf -l /w/comelit-msl-v1-variant-b-listener \
-    | sed -n 's@.*Requesting program interpreter: \(.*\)]@interpreter=\1@p' \
-    > /w/build-meta.txt
-readelf -d /w/comelit-msl-v1-variant-b-listener \
-    | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' \
-    | sort \
-    | paste -sd, - \
-    | sed 's/^/needed_sorted=/' \
-    >> /w/build-meta.txt
-EOS
-chmod 700 "$RUN_ROOT/build.sh"
-set +e
-timeout 900 docker run --rm --network none \
-    --security-opt apparmor=unconfined \
-    -v "$RUN_ROOT":/w \
-    -v "$APK_CLOSURE":/pkgs:ro \
-    "$ALPINE_IMAGE" \
-    /bin/sh /w/build.sh | tee "$RUN_ROOT/build.log"
-build_rc=${PIPESTATUS[0]}
-set -u -o pipefail
-echo "MSL_B_BUILD_RC=$build_rc"
-[ "$build_rc" -eq 0 ] || exit 1
-mv "$RUN_ROOT/comelit-msl-v1-variant-b-listener" "$MSL_B_OUTPUT"
-chmod 700 "$MSL_B_OUTPUT"
-interpreter="$(awk -F= '$1=="interpreter"{print $2}' "$META")"
-needed="$(awk -F= '$1=="needed_sorted"{print $2}' "$META")"
-echo "MSL_B_MUSL_INTERPRETER=$interpreter"
-echo "MSL_B_NEEDED_SORTED=$needed"
-[ "$interpreter" = "$EXPECTED_INTERPRETER" ] || fail "MSL_B_MUSL_INTERPRETER_GATE=FAIL"
-[ "$needed" = "$EXPECTED_NEEDED" ] || fail "MSL_B_NEEDED_GATE=FAIL"
-echo "MSL_B_CANDIDATE_BINARY_SHA256=$(sha256sum "$MSL_B_OUTPUT" | awk '{print $1}')"
-[ "$FAIL" -eq 0 ] || exit 1
+msl_b_build_candidate || exit 1
 
 echo "=== STOP HA LISTENER BEFORE RESEARCH LISTENER ==="
 STATUS_BEFORE="$RUN_ROOT/listener-status-before.json"
@@ -552,7 +673,9 @@ echo "MSL_B_CONTINUATION_EVIDENCE_SOURCE=INDEPENDENT_UDP_SINK_OR_EXPLICIT_ZERO"
 
 echo "=== RUN RESEARCH LISTENER AND ONE IDLE MEDIA CONTROL ==="
 LIVE_INVOCATIONS=1
-MSL_B_CLOCK_BASE_FILE="$CLOCK_BASE_FILE" "$MSL_B_OUTPUT" > "$SESSION_LOG" 2>&1 &
+LD_LIBRARY_PATH="$MSL_B_BUILD_ROOTFS/lib:$MSL_B_BUILD_ROOTFS/usr/lib" \
+MSL_B_CLOCK_BASE_FILE="$CLOCK_BASE_FILE" \
+"$MSL_B_BUILD_ROOTFS/lib/ld-musl-x86_64.so.1" "$MSL_B_OUTPUT" > "$SESSION_LOG" 2>&1 &
 LISTENER_PID=$!
 for _poll in $(seq 1 "$LISTENER_READY_WAIT_SECONDS"); do
     if grep -q "V4_RING_LISTENER_READY=true" "$SESSION_LOG"; then
