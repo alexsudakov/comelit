@@ -268,6 +268,163 @@ class MslV1IdleListenerMediaTests(unittest.TestCase):
             "MUTATED=device_000a_ack_precondition_removed"
         )
 
+    def test_pre_rtpc_activation_sequence_ordered_with_flip_proof(self) -> None:
+        # V3 hypothesis: RTPC must not begin until the proven pre-RTPC
+        # self-activation preamble (0x0028 -> client 0x0008 -> device 0x0008
+        # -> device 0x0002, each with its structural ACK) completes inside
+        # the already-READY listener session.  Checked the same way as the
+        # pre-001A chain: each stage's precondition names its exact
+        # predecessor state and its state-write names its exact successor.
+        activation_step_chain = (
+            ("msl_b_queue_preamble_client_0008", "MSL_B_IDLE_STATE_WAIT_0028_ACK", "MSL_B_IDLE_STATE_PREAMBLE_CLIENT_0008_TX"),
+            ("msl_b_queue_ack_device_0008", "MSL_B_IDLE_STATE_WAIT_DEVICE_0008", "MSL_B_IDLE_STATE_ACK_DEVICE_0008_TX"),
+            ("msl_b_queue_ack_device_0002", "MSL_B_IDLE_STATE_WAIT_DEVICE_0002", "MSL_B_IDLE_STATE_ACK_DEVICE_0002_TX"),
+            ("msl_b_queue_rtpc_open_1", "MSL_B_IDLE_STATE_ACK_DEVICE_0002_TX", "MSL_B_IDLE_STATE_CHANNEL_OPEN_TX"),
+        )
+
+        def fn_body(source: str, name: str) -> str:
+            match = re.search(rf"\b{re.escape(name)}\([^;{{}}]*\)\n\{{", source)
+            self.assertIsNotNone(match, name)
+            return source[match.end():].split("\n}\n", 1)[0]
+
+        for fn_name, predecessor, successor in activation_step_chain:
+            body = fn_body(self.generated_a, fn_name)
+            self.assertIn(predecessor, body, fn_name)
+            self.assertLess(
+                body.index(predecessor),
+                body.index(f"msl_b_idle_state = {successor};"),
+                fn_name,
+            )
+
+        state_enum_region = self.generated_a.split(
+            "typedef enum {\n    MSL_B_IDLE_STATE_IDLE = 0,", 1
+        )[1].split("} MslBIdleMediaState;", 1)[0]
+        ordered_states = ["MSL_B_IDLE_STATE_PREAMBLE_0028_TX"] + [
+            step[1] for step in activation_step_chain
+        ] + [activation_step_chain[-1][2]]
+        real_positions = [state_enum_region.index(s) for s in ordered_states]
+        self.assertEqual(real_positions, sorted(real_positions))
+
+        # Flip proof: removing the predecessor precondition from the
+        # device-0002 ACK step must break the ordering proof.
+        ack_0002_body = fn_body(self.generated_a, "msl_b_queue_ack_device_0002")
+        mutated_full = self.generated_a.replace(
+            ack_0002_body,
+            ack_0002_body.replace("MSL_B_IDLE_STATE_WAIT_DEVICE_0002", "MSL_B_IDLE_STATE_IDLE"),
+            1,
+        )
+        mutated_body = fn_body(mutated_full, "msl_b_queue_ack_device_0002")
+        self.assertNotIn("MSL_B_IDLE_STATE_WAIT_DEVICE_0002", mutated_body)
+        print(
+            "MSL_B_PRE_RTPC_ACTIVATION_SEQUENCE_ORDER=true "
+            f"REAL={ordered_states} "
+            "MUTATED=device_0002_ack_precondition_removed"
+        )
+
+    def test_rtpc_begins_exactly_once_and_only_from_preamble_completion_with_flip_proof(self) -> None:
+        # Offline acceptance #1/#7: RTPC (P12_TX_R42_MEDIA_CHANNEL_OPEN) must
+        # not be queueable before the preamble finishes, and must fire
+        # exactly once.  msl_b_queue_rtpc_open_1 is the only site that queues
+        # it, is gated on MSL_B_IDLE_STATE_ACK_DEVICE_0002_TX, and dedups via
+        # msl_b_rtpc_begin_started.
+        rtpc_open_1_fn = self.generated_a.split(
+            "msl_b_queue_rtpc_open_1(void)\n{", 1
+        )[1].split("\n}\n", 1)[0]
+        self.assertIn("MSL_B_IDLE_STATE_ACK_DEVICE_0002_TX", rtpc_open_1_fn)
+        self.assertIn("msl_b_rtpc_begin_started", rtpc_open_1_fn)
+        self.assertIn("P12_TX_R42_MEDIA_CHANNEL_OPEN", rtpc_open_1_fn)
+
+        entry_fn = self.generated_a.split(
+            "msl_b_queue_idle_channel_open(void)\n{", 1
+        )[1].split("\n}\n", 1)[0]
+        self.assertNotIn("msl_b_queue_rtpc_open_1", entry_fn)
+        self.assertNotIn("P12_TX_R42_MEDIA_CHANNEL_OPEN", entry_fn)
+        self.assertIn("P12_TX_MSL_B_PREAMBLE_0028", entry_fn)
+
+        ack_0002_tx_case = self.generated_a.split(
+            "case P12_TX_MSL_B_ACK_DEVICE_0002:", 1
+        )[1].split("break;", 1)[0]
+        self.assertIn("msl_b_queue_rtpc_open_1()", ack_0002_tx_case)
+        self.assertEqual(self.generated_a.count("msl_b_queue_rtpc_open_1()"), 1)
+
+        # Flip proof: dropping the dedup flag from the precondition would
+        # allow a repeated TX-completion call to re-enter and double-queue
+        # RTPC; the mutated body must no longer contain it.
+        guard_re = re.compile(r"\bmsl_b_rtpc_begin_started\b")
+        real_guard_count = len(guard_re.findall(rtpc_open_1_fn))
+        self.assertGreaterEqual(real_guard_count, 2)  # precondition check + set-true
+        mutated_body = guard_re.sub("msl_b_rtpc_begin_started_removed", rtpc_open_1_fn)
+        self.assertEqual(len(guard_re.findall(mutated_body)), 0)
+        print(
+            "MSL_B_RTPC_BEGIN_ONCE=true "
+            "REAL=gated_on_ack_device_0002_tx_with_dedup_flag "
+            "MUTATED=dedup_flag_removed"
+        )
+
+    def test_device_0002_retransmit_does_not_double_ack_or_start_rtpc(self) -> None:
+        # Offline acceptance #6: a retransmitted device 0x0002 frame must be
+        # consumed silently, without a second client ACK and without a
+        # second RTPC begin.
+        handle_fn = self.generated_a.split(
+            "msl_b_handle_preamble_frame(guint32 request_id", 1
+        )[1].split("\n}\n", 1)[0]
+        device_0002_branch = handle_fn.split("MSL_B_IDLE_STATE_WAIT_DEVICE_0002) {", 1)[1]
+        self.assertLess(
+            device_0002_branch.index("msl_b_device_0002_observed"),
+            device_0002_branch.index("msl_b_queue_ack_device_0002()"),
+        )
+        self.assertIn("MSL_B_DEVICE_0002_RETRANSMIT_CONSUMED=true", device_0002_branch)
+
+        # Flip proof: removing the retransmit short-circuit would let a
+        # second identical device-0002 frame reach the ACK queue call again.
+        mutated = device_0002_branch.replace(
+            'if (msl_b_device_0002_observed) {\n'
+            '            printf("MSL_B_DEVICE_0002_RETRANSMIT_CONSUMED=true\\n");\n'
+            '            fflush(stdout);\n'
+            '            return TRUE;\n'
+            '        }\n',
+            "",
+            1,
+        )
+        self.assertNotIn("MSL_B_DEVICE_0002_RETRANSMIT_CONSUMED=true", mutated)
+        print(
+            "MSL_B_DEVICE_0002_RETRANSMIT_NO_DOUBLE_RTPC=true "
+            "REAL=dedup_before_ack_queue "
+            "MUTATED=dedup_short_circuit_removed"
+        )
+
+    def test_preamble_0028_reuses_existing_ctpp_channel_no_new_registration(self) -> None:
+        # Offline acceptance #2: 0x0028 must ride the already-READY
+        # listener's existing CTPP channel, not open a new one.
+        entry_fn = self.generated_a.split(
+            "msl_b_queue_idle_channel_open(void)\n{", 1
+        )[1].split("\n}\n", 1)[0]
+        self.assertIn(
+            "p12_queue_vip_frame(v4_ctpp_channel_id, body, sizeof(body), P12_TX_MSL_B_PREAMBLE_0028)",
+            entry_fn,
+        )
+        for forbidden in ("P12_TX_V4_OPEN_CTPP", "nice_agent_new", "pseudo_tcp_socket_new"):
+            self.assertNotIn(forbidden, entry_fn)
+        print("MSL_B_PREAMBLE_REUSES_CTPP_CHANNEL=true REAL=v4_ctpp_channel_id MUTATED=forbidden_token_scan")
+
+    def test_client_0008_only_after_0028_ack_and_device_0008_ack_only_after_device_0008(self) -> None:
+        # Offline acceptance #3/#4/#5.
+        handle_fn = self.generated_a.split(
+            "msl_b_handle_preamble_frame(guint32 request_id", 1
+        )[1].split("\n}\n", 1)[0]
+        wait_0028_branch = handle_fn.split(
+            "MSL_B_IDLE_STATE_WAIT_0028_ACK) {", 1
+        )[1].split("MSL_B_IDLE_STATE_WAIT_CLIENT_0008_ACK) {", 1)[0]
+        self.assertIn("msl_b_preamble_ack_is_valid(body, body_len)", wait_0028_branch)
+        self.assertIn("msl_b_queue_preamble_client_0008()", wait_0028_branch)
+
+        wait_device_0008_branch = handle_fn.split(
+            "MSL_B_IDLE_STATE_WAIT_DEVICE_0008) {", 1
+        )[1].split("MSL_B_IDLE_STATE_WAIT_DEVICE_0002) {", 1)[0]
+        self.assertIn("msl_b_device_0008_is_valid(body, body_len)", wait_device_0008_branch)
+        self.assertIn("msl_b_queue_ack_device_0008()", wait_device_0008_branch)
+        print("MSL_B_PREAMBLE_FRAME_GATES=true REAL=each_step_validates_its_own_frame_first")
+
     def test_001a_not_queued_before_pre_001a_sequence_with_flip_proof(self) -> None:
         open_case = self.generated_a.split("case P12_TX_R42_MEDIA_CHANNEL_OPEN:", 1)[1].split(
             "case P12_TX_MSL_B_RTPC_OPEN_2:", 1

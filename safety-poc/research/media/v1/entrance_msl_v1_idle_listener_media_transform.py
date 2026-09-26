@@ -56,6 +56,10 @@ ENUM_ANCHOR = """    P12_TX_R42_MEDIA_CHANNEL_OPEN,
 ENUM_REPLACEMENT = """    P12_TX_R42_MEDIA_CHANNEL_OPEN,
     P12_TX_R42_MEDIA_CHANNEL_CLOSE,
 
+    P12_TX_MSL_B_PREAMBLE_0028,
+    P12_TX_MSL_B_PREAMBLE_CLIENT_0008,
+    P12_TX_MSL_B_ACK_DEVICE_0008,
+    P12_TX_MSL_B_ACK_DEVICE_0002,
     P12_TX_MSL_B_RTPC_OPEN_2,
     P12_TX_MSL_B_RTPC_CLIENT_RESPONSE,
     P12_TX_MSL_B_RTPC_CLIENT_000A,
@@ -73,6 +77,24 @@ OVERLAY = r'''
 /* MSL_V1_IDLE_LISTENER_MEDIA_BEGIN */
 typedef enum {
     MSL_B_IDLE_STATE_IDLE = 0,
+    /* MSL_B_PRE_RTPC_ACTIVATION_SEQUENCE_BEGIN: reuses
+     * entrance_self_activation_signaling_transform.py (0x0028 self-activation
+     * and client 0x0008 video event),
+     * entrance_device_video_ack_observation_transform.py (device 0x0008 and
+     * its client ACK), and entrance_p95_wait_device_0002_before_rtpc_transform.py
+     * (device 0x0002 and its client ACK) -- rebound to this overlay's own
+     * already-READY listener session instead of those transforms' own
+     * one-shot signaling probe.  RTPC (below) may only begin after this
+     * sequence's last stage transmits successfully. */
+    MSL_B_IDLE_STATE_PREAMBLE_0028_TX,
+    MSL_B_IDLE_STATE_WAIT_0028_ACK,
+    MSL_B_IDLE_STATE_PREAMBLE_CLIENT_0008_TX,
+    MSL_B_IDLE_STATE_WAIT_CLIENT_0008_ACK,
+    MSL_B_IDLE_STATE_WAIT_DEVICE_0008,
+    MSL_B_IDLE_STATE_ACK_DEVICE_0008_TX,
+    MSL_B_IDLE_STATE_WAIT_DEVICE_0002,
+    MSL_B_IDLE_STATE_ACK_DEVICE_0002_TX,
+    /* MSL_B_PRE_RTPC_ACTIVATION_SEQUENCE_END */
     MSL_B_IDLE_STATE_CHANNEL_OPEN_TX,
     /* MSL_B_PRE_001A_SEQUENCE_BEGIN: reuses entrance_rtpc_control_media_runtime_transform.py
      * (P76) open/response/000a wire builders and
@@ -162,6 +184,19 @@ static guint msl_b_ack_reject_wrong_prefix = 0;
 static guint msl_b_ack_reject_wrong_flags = 0;
 static guint msl_b_ack_reject_address_role = 0;
 static guint msl_b_ack_reject_other = 0;
+
+/* MSL_B_PRE_RTPC_ACTIVATION_STATE_BEGIN: local session state for the reused
+ * entrance 0x0028/0x0008/0x0002 preamble primitives, generated the same way
+ * the pre-001A block above generates its own sequence/role state -- each
+ * value is derived from the previous one at runtime, never a literal
+ * capture value. */
+static guint32 msl_b_seq_0028 = 0;
+static guint32 msl_b_seq_client_0008 = 0;
+static guint32 msl_b_seq_device_0008_ack = 0;
+static guint32 msl_b_seq_device_0002_ack = 0;
+static gboolean msl_b_device_0002_observed = FALSE;
+static gboolean msl_b_rtpc_begin_started = FALSE;
+/* MSL_B_PRE_RTPC_ACTIVATION_STATE_END */
 
 static gboolean r42_queue_media_channel_close(void);
 
@@ -571,12 +606,173 @@ msl_b_store_device_000a_roles(const guint8 *body, guint body_len)
 }
 /* MSL_B_PRE_001A_PRIMITIVES_END */
 
+/* MSL_B_PRE_RTPC_ACTIVATION_PRIMITIVES_BEGIN: byte-for-byte reuse of the
+ * proven entrance self-activation/video-event/device-video-ack/device-0002
+ * wire-format primitives below, rebound to this overlay's own
+ * already-registered v4_ctpp_channel_id instead of the unrelated
+ * entrance_signal_stage state machine those transforms were originally
+ * written against.  Each function below corresponds 1:1 to one upstream
+ * primitive:
+ *
+ * build_preamble_0028 == entrance_signal_queue_self_activation's body build
+ *     (entrance_self_activation_signaling_transform.py:149-185)
+ * preamble_ack_is_valid == entrance_signal_body_is_ack
+ *     (entrance_self_activation_signaling_transform.py:100-114; this same
+ *     generic device-ACK shape acks both the 0x0028 self-activation and the
+ *     client 0x0008 video event, per that transform's own two WAIT_*_ACK
+ *     stages sharing one predicate)
+ * build_preamble_client_0008 == entrance_signal_queue_video_event's body
+ *     build (entrance_self_activation_signaling_transform.py:226-248)
+ * device_0008_is_valid == entrance_signal_body_is_device_video
+ *     (entrance_self_activation_signaling_transform.py:117-132)
+ * build_structural_ack == entrance_signal_queue_device_video_ack's body
+ *     build (entrance_device_video_ack_observation_transform.py:222-243),
+ *     reused unmodified for the device-0002 ACK too since
+ *     p95_queue_device_0002_ack's body
+ *     (entrance_p95_wait_device_0002_before_rtpc_transform.py:208-226) is the
+ *     identical shape with only the sequence value differing
+ * device_0002_is_valid == p95_device_0002_is_valid, minus its own
+ *     request_id check (already filtered by the caller below)
+ *     (entrance_p95_wait_device_0002_before_rtpc_transform.py:170-187)
+ */
+static guint
+msl_b_build_preamble_0028(guint32 sequence, guint8 out[72])
+{
+    memset(out, 0, 72);
+    write_le16(out + 0, 0x18C0);
+    write_le32(out + 2, sequence);
+    out[6] = 0x00;
+    out[7] = 0x28;
+    out[8] = 0x00;
+    out[9] = 0x01;
+
+    memcpy(out + 10, V4_FULL_ADDRESS, 9);
+    out[19] = 0x00;
+    memcpy(out + 20, V4_ENTRANCE, 8);
+    out[28] = 0x00;
+    out[29] = 0x00;
+
+    out[30] = 0x01;
+    out[31] = 0x20;
+    out[32] = 0x05;
+    out[33] = 0x80;
+    out[34] = 0x31;
+    out[35] = 0x18;
+
+    memcpy(out + 36, V4_FULL_ADDRESS, 9);
+    out[45] = 0x00;
+    out[46] = 0x49;
+    out[47] = 0x49;
+    memset(out + 48, 0xff, 4);
+    memcpy(out + 52, V4_FULL_ADDRESS, 9);
+    out[61] = 0x00;
+    memcpy(out + 62, V4_ENTRANCE, 8);
+    out[70] = 0x00;
+    out[71] = 0x00;
+    return 72u;
+}
+
+static gboolean
+msl_b_preamble_ack_is_valid(const guint8 *body, guint body_len)
+{
+    return
+        body != NULL &&
+        body_len == 32u &&
+        read_le16(body + 0) == 0x1800u &&
+        body[6] == 0x00u && body[7] == 0x00u &&
+        body[8] == 0xffu && body[9] == 0xffu &&
+        body[10] == 0xffu && body[11] == 0xffu &&
+        memcmp(body + 12, V4_ENTRANCE, 8) == 0 &&
+        body[20] == 0x00u && body[21] == 0x00u &&
+        memcmp(body + 22, V4_FULL_ADDRESS, 9) == 0 &&
+        body[31] == 0x00u;
+}
+
+static guint
+msl_b_build_preamble_client_0008(guint32 sequence, guint8 out[40])
+{
+    memset(out, 0, 40);
+    write_le16(out + 0, 0x1840);
+    write_le32(out + 2, sequence);
+    out[6] = 0x00;
+    out[7] = 0x08;
+    out[8] = 0x00;
+    out[9] = 0x03;
+
+    out[10] = 0x49;
+    out[11] = 0x00;
+    out[12] = 0x27;
+    out[13] = 0x00;
+    out[14] = 0x00;
+    out[15] = 0x00;
+    memset(out + 16, 0xff, 4);
+    memcpy(out + 20, V4_FULL_ADDRESS, 9);
+    out[29] = 0x00;
+    memcpy(out + 30, V4_ENTRANCE, 8);
+    out[38] = 0x00;
+    out[39] = 0x00;
+    return 40u;
+}
+
+static gboolean
+msl_b_device_0008_is_valid(const guint8 *body, guint body_len)
+{
+    return
+        body != NULL &&
+        body_len == 40u &&
+        read_le16(body + 0) == 0x1840u &&
+        body[6] == 0x00u && body[7] == 0x08u &&
+        body[8] == 0x00u && body[9] == 0x03u &&
+        body[16] == 0xffu && body[17] == 0xffu &&
+        body[18] == 0xffu && body[19] == 0xffu &&
+        memcmp(body + 20, V4_ENTRANCE, 8) == 0 &&
+        body[28] == 0x00u && body[29] == 0x00u &&
+        memcmp(body + 30, V4_FULL_ADDRESS, 9) == 0 &&
+        body[39] == 0x00u;
+}
+
+static guint
+msl_b_build_structural_ack(guint32 sequence, guint8 out[32])
+{
+    memset(out, 0, 32);
+    write_le16(out + 0, 0x1800u);
+    write_le32(out + 2, sequence);
+    out[6] = 0x00u;
+    out[7] = 0x00u;
+    memset(out + 8, 0xff, 4);
+    memcpy(out + 12, V4_FULL_ADDRESS, 9);
+    out[21] = 0x00u;
+    memcpy(out + 22, V4_ENTRANCE, 8);
+    out[30] = 0x00u;
+    out[31] = 0x00u;
+    return 32u;
+}
+
+static gboolean
+msl_b_device_0002_is_valid(const guint8 *body, guint body_len)
+{
+    return
+        body != NULL &&
+        body_len == 36u &&
+        read_le16(body + 0) == 0x1840u &&
+        body[6] == 0x00u && body[7] == 0x02u &&
+        body[8] == 0x00u && body[9] == 0x0cu &&
+        body[10] == 0x00u && body[11] == 0x00u &&
+        body[12] == 0xffu && body[13] == 0xffu &&
+        body[14] == 0xffu && body[15] == 0xffu &&
+        memcmp(body + 16u, V4_ENTRANCE, 8u) == 0 &&
+        body[24] == 0x00u && body[25] == 0x00u &&
+        memcmp(body + 26u, V4_FULL_ADDRESS, 9u) == 0 &&
+        body[35] == 0x00u;
+}
+/* MSL_B_PRE_RTPC_ACTIVATION_PRIMITIVES_END */
+
+static gboolean msl_b_queue_rtpc_open_1(void);
+
 static gboolean
 msl_b_queue_idle_channel_open(void)
 {
-    guint8 body[15];
-    guint16 seed;
-    guint16 channel_id;
+    guint8 body[72];
 
     if (r42_media_channel_id != 0u ||
         (r42_media_stage != R42_MEDIA_IDLE && r42_media_stage != R42_MEDIA_CLOSED) ||
@@ -598,6 +794,171 @@ msl_b_queue_idle_channel_open(void)
         return FALSE;
     }
 
+    msl_b_seq_0028 = g_random_int();
+    msl_b_build_preamble_0028(msl_b_seq_0028, body);
+
+    msl_b_idle_state = MSL_B_IDLE_STATE_PREAMBLE_0028_TX;
+    msl_b_media_session_count++;
+    printf("MSL_B_IDLE_MEDIA_REQUEST_ACCEPTED=true\n");
+    printf("MSL_B_SECOND_UPSTREAM_SESSION=false\n");
+    msl_b_print_clock_marker("B00_IDLE_MEDIA_REQUEST_RECEIVED");
+    msl_b_print_clock_marker("T00_IDLE_MEDIA_REQUEST_ACCEPTED");
+    msl_b_print_clock_marker("V3_0028_QUEUED");
+    fflush(stdout);
+    if (!p12_queue_vip_frame(v4_ctpp_channel_id, body, sizeof(body), P12_TX_MSL_B_PREAMBLE_0028)) {
+        msl_b_idle_state = MSL_B_IDLE_STATE_FAILED;
+        return FALSE;
+    }
+    return p12_flush_tx();
+}
+
+/* MSL_B_PRE_RTPC_ACTIVATION_ORCHESTRATION_BEGIN
+ *
+ * Proven order reused from entrance_self_activation_signaling_transform.py,
+ * entrance_device_video_ack_observation_transform.py, and
+ * entrance_p95_wait_device_0002_before_rtpc_transform.py's own composed
+ * docstring ("device 0x0008 ACK completion -> wait device 0x0002 -> queue
+ * exactly one structural client 0x1800 ACK -> ACK TX completion -> begin the
+ * existing RTPC sequence"), preceded by the 0x0028/client-0x0008 exchange
+ * from entrance_self_activation_signaling_transform.py's own registration-
+ * armed one-shot state machine.  Every step here fires strictly after the
+ * previous one's TX completion or matching inbound frame; RTPC OPEN #1
+ * (msl_b_queue_rtpc_open_1, declared above and defined below) is reachable
+ * only from the last stage, MSL_B_IDLE_STATE_ACK_DEVICE_0002_TX.
+ */
+static gboolean
+msl_b_queue_preamble_client_0008(void)
+{
+    guint8 body[40];
+
+    if (msl_b_idle_state != MSL_B_IDLE_STATE_WAIT_0028_ACK || p12_tx_pending)
+        return FALSE;
+
+    msl_b_seq_client_0008 = msl_b_seq_0028 + 0x00010000u;
+    msl_b_build_preamble_client_0008(msl_b_seq_client_0008, body);
+
+    msl_b_idle_state = MSL_B_IDLE_STATE_PREAMBLE_CLIENT_0008_TX;
+    if (!p12_queue_vip_frame(v4_ctpp_channel_id, body, sizeof(body), P12_TX_MSL_B_PREAMBLE_CLIENT_0008)) {
+        msl_b_idle_state = MSL_B_IDLE_STATE_FAILED;
+        return FALSE;
+    }
+    msl_b_print_clock_marker("V3_CLIENT_0008_QUEUED");
+    return p12_flush_tx();
+}
+
+static gboolean
+msl_b_queue_ack_device_0008(void)
+{
+    guint8 body[32];
+
+    if (msl_b_idle_state != MSL_B_IDLE_STATE_WAIT_DEVICE_0008 || p12_tx_pending)
+        return FALSE;
+
+    msl_b_seq_device_0008_ack = msl_b_seq_client_0008 + 0x01010000u;
+    msl_b_build_structural_ack(msl_b_seq_device_0008_ack, body);
+
+    msl_b_idle_state = MSL_B_IDLE_STATE_ACK_DEVICE_0008_TX;
+    if (!p12_queue_vip_frame(v4_ctpp_channel_id, body, sizeof(body), P12_TX_MSL_B_ACK_DEVICE_0008)) {
+        msl_b_idle_state = MSL_B_IDLE_STATE_FAILED;
+        return FALSE;
+    }
+    return p12_flush_tx();
+}
+
+static gboolean
+msl_b_queue_ack_device_0002(void)
+{
+    guint8 body[32];
+
+    if (msl_b_idle_state != MSL_B_IDLE_STATE_WAIT_DEVICE_0002 || p12_tx_pending)
+        return FALSE;
+
+    msl_b_seq_device_0002_ack = msl_b_seq_device_0008_ack + 0x01000000u;
+    msl_b_build_structural_ack(msl_b_seq_device_0002_ack, body);
+
+    msl_b_idle_state = MSL_B_IDLE_STATE_ACK_DEVICE_0002_TX;
+    if (!p12_queue_vip_frame(v4_ctpp_channel_id, body, sizeof(body), P12_TX_MSL_B_ACK_DEVICE_0002)) {
+        msl_b_idle_state = MSL_B_IDLE_STATE_FAILED;
+        return FALSE;
+    }
+    return p12_flush_tx();
+}
+
+/* Reuse of entrance_signal_stage's own WAIT_SELF_ACK/WAIT_VIDEO_ACK/
+ * WAIT_DEVICE_VIDEO dispatch (entrance_self_activation_signaling_transform.py:
+ * 463-493) plus P95's device-0002 retransmit dedup
+ * (entrance_p95_wait_device_0002_before_rtpc_transform.py:255-285), rebound
+ * to this overlay's msl_b_idle_state instead of entrance_signal_stage. */
+static gboolean
+msl_b_handle_preamble_frame(guint32 request_id, const guint8 *body, guint body_len)
+{
+    if (request_id != v4_ctpp_channel_id)
+        return FALSE;
+
+    if (msl_b_idle_state == MSL_B_IDLE_STATE_WAIT_0028_ACK) {
+        if (!msl_b_preamble_ack_is_valid(body, body_len))
+            return FALSE;
+        msl_b_print_clock_marker("V3_0028_ACK_OBSERVED");
+        (void)msl_b_queue_preamble_client_0008();
+        return TRUE;
+    }
+
+    if (msl_b_idle_state == MSL_B_IDLE_STATE_WAIT_CLIENT_0008_ACK) {
+        if (!msl_b_preamble_ack_is_valid(body, body_len))
+            return FALSE;
+        msl_b_idle_state = MSL_B_IDLE_STATE_WAIT_DEVICE_0008;
+        msl_b_print_clock_marker("V3_CLIENT_0008_ACK_OBSERVED");
+        return TRUE;
+    }
+
+    if (msl_b_idle_state == MSL_B_IDLE_STATE_WAIT_DEVICE_0008) {
+        if (!msl_b_device_0008_is_valid(body, body_len))
+            return FALSE;
+        msl_b_print_clock_marker("V3_DEVICE_0008_OBSERVED");
+        (void)msl_b_queue_ack_device_0008();
+        return TRUE;
+    }
+
+    if (msl_b_idle_state == MSL_B_IDLE_STATE_WAIT_DEVICE_0002) {
+        if (!msl_b_device_0002_is_valid(body, body_len))
+            return FALSE;
+        if (msl_b_device_0002_observed) {
+            printf("MSL_B_DEVICE_0002_RETRANSMIT_CONSUMED=true\n");
+            fflush(stdout);
+            return TRUE;
+        }
+        msl_b_device_0002_observed = TRUE;
+        msl_b_print_clock_marker("V3_DEVICE_0002_OBSERVED");
+        (void)msl_b_queue_ack_device_0002();
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+static gboolean
+msl_b_queue_rtpc_open_1(void)
+{
+    guint8 body[15];
+    guint16 seed;
+    guint16 channel_id;
+
+    if (msl_b_idle_state != MSL_B_IDLE_STATE_ACK_DEVICE_0002_TX ||
+        r42_media_channel_id != 0u ||
+        !msl_b_ready_now() || p12_tx_pending)
+        return FALSE;
+    if (msl_b_rtpc_begin_started) {
+        printf("MSL_B_RTPC_BEGIN_DOUBLE_START=true\n");
+        fflush(stdout);
+        return FALSE;
+    }
+    if (g_r35_session.call_transaction_alive || r42_media_stage == R42_MEDIA_ACTIVE) {
+        printf("MSL_B_RING_COLLISION_FAIL_CLOSED=true\n");
+        msl_b_ring_collision_rejected_count++;
+        fflush(stdout);
+        return FALSE;
+    }
+
     seed = (guint16)(g_random_int() & 0x7fffu);
     channel_id = v4_allocate_channel_id(seed);
     if (channel_id == 0u)
@@ -605,23 +966,14 @@ msl_b_queue_idle_channel_open(void)
 
     r42_media_channel_id = channel_id;
     msl_b_rtpc_target_1 = channel_id;
-    memset(body, 0, sizeof(body));
-    write_le16(body + 0, 0xABCD);
-    write_le16(body + 2, 1);
-    write_le32(body + 4, 7);
-    memcpy(body + 8, "RTPC", 4);
-    write_le16(body + 12, channel_id);
-    body[14] = 1;
+    msl_b_build_rtpc_open(channel_id, body);
 
+    msl_b_rtpc_begin_started = TRUE;
     r42_media_stage = R42_MEDIA_CHANNEL_OPEN_TX;
     msl_b_idle_state = MSL_B_IDLE_STATE_CHANNEL_OPEN_TX;
-    msl_b_media_session_count++;
-    printf("MSL_B_IDLE_MEDIA_REQUEST_ACCEPTED=true\n");
     printf("MSL_B_MEDIA_CHANNEL_ALLOCATED=true\n");
-    printf("MSL_B_SECOND_UPSTREAM_SESSION=false\n");
-    msl_b_print_clock_marker("B00_IDLE_MEDIA_REQUEST_RECEIVED");
     msl_b_print_clock_marker("B01_RTPC_MEDIA_OPEN_SEQUENCE_STARTED");
-    msl_b_print_clock_marker("T00_IDLE_MEDIA_REQUEST_ACCEPTED");
+    msl_b_print_clock_marker("V3_RTPC_BEGIN");
     fflush(stdout);
     if (!p12_queue_vip_frame(0, body, sizeof(body), P12_TX_R42_MEDIA_CHANNEL_OPEN)) {
         msl_b_idle_state = MSL_B_IDLE_STATE_FAILED;
@@ -630,6 +982,7 @@ msl_b_queue_idle_channel_open(void)
     }
     return p12_flush_tx();
 }
+/* MSL_B_PRE_RTPC_ACTIVATION_ORCHESTRATION_END */
 
 /* MSL_B_PRE_001A_SEQUENCE_ORCHESTRATION_BEGIN
  *
@@ -990,7 +1343,39 @@ TX_COMPLETION_OPEN_ANCHOR = """        case P12_TX_R42_MEDIA_CHANNEL_OPEN:
                 fflush(stdout);
             }
             break;"""
-TX_COMPLETION_OPEN_REPLACEMENT = """        case P12_TX_R42_MEDIA_CHANNEL_OPEN:
+TX_COMPLETION_OPEN_REPLACEMENT = """        case P12_TX_MSL_B_PREAMBLE_0028:
+            msl_b_idle_state = MSL_B_IDLE_STATE_WAIT_0028_ACK;
+            msl_b_print_clock_marker("V3_0028_TX_COMPLETED");
+            printf("MSL_B_PREAMBLE_0028_SENT=true\\n");
+            fflush(stdout);
+            break;
+
+        case P12_TX_MSL_B_PREAMBLE_CLIENT_0008:
+            msl_b_idle_state = MSL_B_IDLE_STATE_WAIT_CLIENT_0008_ACK;
+            msl_b_print_clock_marker("V3_CLIENT_0008_TX_COMPLETED");
+            printf("MSL_B_PREAMBLE_CLIENT_0008_SENT=true\\n");
+            fflush(stdout);
+            break;
+
+        case P12_TX_MSL_B_ACK_DEVICE_0008:
+            msl_b_idle_state = MSL_B_IDLE_STATE_WAIT_DEVICE_0002;
+            msl_b_print_clock_marker("V3_DEVICE_0008_ACK_TX_COMPLETED");
+            printf("MSL_B_ACK_DEVICE_0008_SENT=true\\n");
+            fflush(stdout);
+            break;
+
+        case P12_TX_MSL_B_ACK_DEVICE_0002:
+            msl_b_print_clock_marker("V3_DEVICE_0002_ACK_TX_COMPLETED");
+            printf("MSL_B_ACK_DEVICE_0002_SENT=true\\n");
+            fflush(stdout);
+            if (!msl_b_queue_rtpc_open_1()) {
+                msl_b_idle_state = MSL_B_IDLE_STATE_FAILED;
+                printf("MSL_B_RTPC_OPEN_1_QUEUE=FAIL\\n");
+                fflush(stdout);
+            }
+            break;
+
+        case P12_TX_R42_MEDIA_CHANNEL_OPEN:
             printf("R42_MEDIA_CHANNEL_OPEN_SENT=true\\n");
             fflush(stdout);
             if (msl_b_idle_state == MSL_B_IDLE_STATE_CHANNEL_OPEN_TX) {
@@ -1106,7 +1491,12 @@ H264_RECOVERY_REPLACEMENT = """        if (nal_type == 5u && stream->first_keyfr
 
 DEVICE_ACK_HOOK_ANCHOR = """            if (r42_media_stage == R42_MEDIA_CHANNEL_CLOSE_WAIT) {
 """
-DEVICE_ACK_HOOK_REPLACEMENT = """            if (msl_b_handle_rtpc_control_frame(request_id, body, body_len)) {
+DEVICE_ACK_HOOK_REPLACEMENT = """            if (msl_b_handle_preamble_frame(request_id, body, body_len)) {
+                p12_consume_post_ack(frame_len);
+                continue;
+            }
+
+            if (msl_b_handle_rtpc_control_frame(request_id, body, body_len)) {
                 p12_consume_post_ack(frame_len);
                 continue;
             }
@@ -1264,6 +1654,34 @@ def _assert_gates(candidate: str) -> None:
         "P12_TX_MSL_B_RTPC_CLIENT_RESPONSE",
         "P12_TX_MSL_B_RTPC_CLIENT_000A",
         "P12_TX_MSL_B_DEVICE_000A_ACK",
+        "msl_b_build_preamble_0028",
+        "msl_b_preamble_ack_is_valid",
+        "msl_b_build_preamble_client_0008",
+        "msl_b_device_0008_is_valid",
+        "msl_b_build_structural_ack",
+        "msl_b_device_0002_is_valid",
+        "msl_b_queue_preamble_client_0008",
+        "msl_b_queue_ack_device_0008",
+        "msl_b_queue_ack_device_0002",
+        "msl_b_handle_preamble_frame",
+        "msl_b_queue_rtpc_open_1",
+        "P12_TX_MSL_B_PREAMBLE_0028",
+        "P12_TX_MSL_B_PREAMBLE_CLIENT_0008",
+        "P12_TX_MSL_B_ACK_DEVICE_0008",
+        "P12_TX_MSL_B_ACK_DEVICE_0002",
+        "V3_0028_QUEUED",
+        "V3_0028_TX_COMPLETED",
+        "V3_0028_ACK_OBSERVED",
+        "V3_CLIENT_0008_QUEUED",
+        "V3_CLIENT_0008_TX_COMPLETED",
+        "V3_CLIENT_0008_ACK_OBSERVED",
+        "V3_DEVICE_0008_OBSERVED",
+        "V3_DEVICE_0008_ACK_TX_COMPLETED",
+        "V3_DEVICE_0002_OBSERVED",
+        "V3_DEVICE_0002_ACK_TX_COMPLETED",
+        "V3_RTPC_BEGIN",
+        "MSL_B_DEVICE_0002_RETRANSMIT_CONSUMED=true",
+        "MSL_B_RTPC_BEGIN_DOUBLE_START=true",
     ):
         if required not in candidate:
             raise RuntimeError(f"MSL_B_REQUIRED_GATE=FAIL needle={required}")
@@ -1406,6 +1824,117 @@ def _assert_gates(candidate: str) -> None:
     # sequence, re-asserted here for the ordering proof.
     if "msl_b_register_receive_path()" in device_000a_cycle_fn:
         raise RuntimeError("MSL_B_RX_AFTER_ACK_GATE=FAIL reason=receive_path_registered_too_early")
+
+    # MSL_B_PRE_RTPC_ACTIVATION_SEQUENCE_ORDER_GATE: prove the runtime order
+    # of the reused entrance 0x0028/0x0008/0x0002 preamble -- 0x0028 ->
+    # structural ACK -> client 0x0008 -> structural ACK -> device 0x0008 ->
+    # client ACK -> device 0x0002 -> client ACK -- via the same
+    # predecessor-state/successor-state dependency-chain technique used for
+    # the pre-001A gate above, and that RTPC OPEN #1 is reachable only from
+    # the last stage.
+    activation_state_enum_region = candidate.split(
+        "typedef enum {\n    MSL_B_IDLE_STATE_IDLE = 0,", 1
+    )[1].split("} MslBIdleMediaState;", 1)[0]
+    ordered_activation_states = (
+        "MSL_B_IDLE_STATE_PREAMBLE_0028_TX",
+        "MSL_B_IDLE_STATE_WAIT_0028_ACK",
+        "MSL_B_IDLE_STATE_PREAMBLE_CLIENT_0008_TX",
+        "MSL_B_IDLE_STATE_WAIT_CLIENT_0008_ACK",
+        "MSL_B_IDLE_STATE_WAIT_DEVICE_0008",
+        "MSL_B_IDLE_STATE_ACK_DEVICE_0008_TX",
+        "MSL_B_IDLE_STATE_WAIT_DEVICE_0002",
+        "MSL_B_IDLE_STATE_ACK_DEVICE_0002_TX",
+        "MSL_B_IDLE_STATE_CHANNEL_OPEN_TX",
+    )
+    activation_state_positions = [
+        activation_state_enum_region.index(state) for state in ordered_activation_states
+    ]
+    if activation_state_positions != sorted(activation_state_positions):
+        raise RuntimeError(
+            "MSL_B_PRE_RTPC_ACTIVATION_SEQUENCE_ORDER_GATE=FAIL reason=state_enum_out_of_order"
+        )
+
+    activation_step_chain = (
+        ("msl_b_queue_preamble_client_0008", "MSL_B_IDLE_STATE_WAIT_0028_ACK", "MSL_B_IDLE_STATE_PREAMBLE_CLIENT_0008_TX"),
+        ("msl_b_queue_ack_device_0008", "MSL_B_IDLE_STATE_WAIT_DEVICE_0008", "MSL_B_IDLE_STATE_ACK_DEVICE_0008_TX"),
+        ("msl_b_queue_ack_device_0002", "MSL_B_IDLE_STATE_WAIT_DEVICE_0002", "MSL_B_IDLE_STATE_ACK_DEVICE_0002_TX"),
+        ("msl_b_queue_rtpc_open_1", "MSL_B_IDLE_STATE_ACK_DEVICE_0002_TX", "MSL_B_IDLE_STATE_CHANNEL_OPEN_TX"),
+    )
+    for fn_name, predecessor, successor in activation_step_chain:
+        body = _fn_body(fn_name)
+        if predecessor not in body:
+            raise RuntimeError(
+                f"MSL_B_PRE_RTPC_ACTIVATION_SEQUENCE_ORDER_GATE=FAIL fn={fn_name} reason=missing_precondition:{predecessor}"
+            )
+        if f"msl_b_idle_state = {successor};" not in body:
+            raise RuntimeError(
+                f"MSL_B_PRE_RTPC_ACTIVATION_SEQUENCE_ORDER_GATE=FAIL fn={fn_name} reason=missing_successor:{successor}"
+            )
+        if body.index(predecessor) > body.index(f"msl_b_idle_state = {successor};"):
+            raise RuntimeError(
+                f"MSL_B_PRE_RTPC_ACTIVATION_SEQUENCE_ORDER_GATE=FAIL fn={fn_name} reason=precondition_after_transition"
+            )
+
+    preamble_frame_fn = _fn_body("msl_b_handle_preamble_frame")
+    preamble_wait_order = (
+        "MSL_B_IDLE_STATE_WAIT_0028_ACK",
+        "MSL_B_IDLE_STATE_WAIT_CLIENT_0008_ACK",
+        "MSL_B_IDLE_STATE_WAIT_DEVICE_0008",
+        "MSL_B_IDLE_STATE_WAIT_DEVICE_0002",
+    )
+    preamble_wait_positions = [preamble_frame_fn.index(state) for state in preamble_wait_order]
+    if preamble_wait_positions != sorted(preamble_wait_positions):
+        raise RuntimeError(
+            "MSL_B_PRE_RTPC_ACTIVATION_SEQUENCE_ORDER_GATE=FAIL fn=msl_b_handle_preamble_frame reason=wait_states_out_of_order"
+        )
+    for forward_call in (
+        "msl_b_queue_preamble_client_0008",
+        "msl_b_queue_ack_device_0008",
+        "msl_b_queue_ack_device_0002",
+    ):
+        if forward_call not in preamble_frame_fn:
+            raise RuntimeError(
+                f"MSL_B_PRE_RTPC_ACTIVATION_SEQUENCE_ORDER_GATE=FAIL fn=msl_b_handle_preamble_frame reason=missing_forward_call:{forward_call}"
+            )
+
+    # MSL_B_DEVICE_0002_RETRANSMIT_NO_DOUBLE_RTPC_GATE: a retransmitted
+    # device 0x0002 must be consumed without a second ACK or a second RTPC
+    # begin -- the dedup check must precede the ACK-queue call, exactly like
+    # P95's own retransmit branch.
+    device_0002_branch = preamble_frame_fn.split(
+        "MSL_B_IDLE_STATE_WAIT_DEVICE_0002) {", 1
+    )[1]
+    if device_0002_branch.index("msl_b_device_0002_observed") > device_0002_branch.index(
+        "msl_b_queue_ack_device_0002()"
+    ):
+        raise RuntimeError(
+            "MSL_B_DEVICE_0002_RETRANSMIT_NO_DOUBLE_RTPC_GATE=FAIL reason=dedup_check_after_ack_queue"
+        )
+
+    # MSL_B_RTPC_BEGIN_ONCE_GATE: msl_b_queue_rtpc_open_1 -- which queues
+    # P12_TX_R42_MEDIA_CHANNEL_OPEN, the actual RTPC-begin transition -- must
+    # only be callable once (msl_b_rtpc_begin_started dedup) and its only
+    # caller must be the post-preamble ACK_DEVICE_0002 TX completion, not the
+    # preamble entry point itself.
+    rtpc_open_1_fn = _fn_body("msl_b_queue_rtpc_open_1")
+    if "msl_b_rtpc_begin_started" not in rtpc_open_1_fn:
+        raise RuntimeError("MSL_B_RTPC_BEGIN_ONCE_GATE=FAIL reason=missing_dedup_flag")
+    if candidate.count("msl_b_queue_rtpc_open_1()") != 1:
+        raise RuntimeError("MSL_B_RTPC_BEGIN_ONCE_GATE=FAIL reason=unexpected_call_count")
+    channel_open_entry_fn = candidate.split(
+        "msl_b_queue_idle_channel_open(void)\n{", 1
+    )[1].split("\n}\n", 1)[0]
+    if "msl_b_queue_rtpc_open_1" in channel_open_entry_fn:
+        raise RuntimeError(
+            "MSL_B_RTPC_BEGIN_ONCE_GATE=FAIL reason=entry_point_still_calls_rtpc_open_1_directly"
+        )
+    ack_device_0002_tx_case = candidate.split(
+        "case P12_TX_MSL_B_ACK_DEVICE_0002:", 1
+    )[1].split("break;", 1)[0]
+    if "msl_b_queue_rtpc_open_1()" not in ack_device_0002_tx_case:
+        raise RuntimeError(
+            "MSL_B_RTPC_BEGIN_ONCE_GATE=FAIL reason=not_called_from_ack_device_0002_tx_completion"
+        )
 
 
 def report() -> str:
