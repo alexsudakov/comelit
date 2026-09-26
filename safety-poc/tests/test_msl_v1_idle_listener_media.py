@@ -124,6 +124,23 @@ class MslV1IdleListenerMediaTests(unittest.TestCase):
         )[0]
         self.assertIn("r42_finish_media_channel_close()", close_case)
 
+    def test_r42_close_helper_declared_before_overlay_call(self) -> None:
+        proto = self.generated_a.index("static gboolean r42_queue_media_channel_close(void);")
+        call = self.generated_a.index("return r42_queue_media_channel_close() && p12_flush_tx();")
+        definition = self.generated_a.index("r42_queue_media_channel_close(void)\n{")
+        self.assertLess(proto, call)
+        self.assertLess(call, definition)
+        mutated = self.generated_a.replace(
+            "static gboolean r42_queue_media_channel_close(void);\n\n",
+            "",
+            1,
+        )
+        self.assertNotIn(
+            "static gboolean r42_queue_media_channel_close(void);",
+            mutated[:call],
+        )
+        print("MSL_B_R42_CLOSE_DECLARATION_ORDER=true REAL=prototype_before_call MUTATED=prototype_removed")
+
     def test_reuse_counters_are_derived_with_flip_proof(self) -> None:
         proofs: list[str] = []
         for counter in COUNTERS:
@@ -217,6 +234,9 @@ class MslV1IdleListenerMediaTests(unittest.TestCase):
             "MSL_B_SELFTEST_HA_INTERACTION=$MSL_B_HA_INTERACTION",
             "MSL_B_SELFTEST_COMELIT_INTERACTION=$MSL_B_COMELIT_INTERACTION",
             "MSL_B_SELFTEST_CANDIDATE_EXECUTED=false",
+            "MSL_B_BUILD_DIAGNOSTICS_TAIL_BEGIN",
+            "MSL_B_BUILD_DIAGNOSTICS_TAIL_END",
+            "MSL_B_SELFTEST_BUILD_RC=$MSL_B_LAST_BUILD_RC",
             "[ \"$MSL_B_SELFTEST\" = YES ] && [ \"$MSL_B_LIVE_RUN\" = YES ]",
             "run_selftest",
         ):

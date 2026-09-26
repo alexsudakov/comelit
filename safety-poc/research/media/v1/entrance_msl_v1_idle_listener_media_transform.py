@@ -85,6 +85,8 @@ static gboolean msl_b_media_rx_inactive_after_close = FALSE;
 static gboolean msl_b_start_control_consumed = FALSE;
 static gboolean msl_b_stop_control_consumed = FALSE;
 
+static gboolean r42_queue_media_channel_close(void);
+
 static void
 msl_b_print_clock_marker(const char *name)
 {
@@ -440,6 +442,7 @@ def _assert_gates(candidate: str) -> None:
     for required in (
         'MSL_B_START_FILE RUN_DIR "/msl-b-start-idle-media"',
         'MSL_B_STOP_FILE  RUN_DIR "/msl-b-stop-idle-media"',
+        "static gboolean r42_queue_media_channel_close(void);",
         "msl_b_ready_now",
         "msl_b_queue_idle_channel_open",
         "msl_b_queue_idle_self_activation",
@@ -452,6 +455,11 @@ def _assert_gates(candidate: str) -> None:
             raise RuntimeError(f"MSL_B_REQUIRED_GATE=FAIL needle={required}")
     if candidate.count("P12_TX_MSL_B_IDLE_SELF_ACTIVATION") != 3:
         raise RuntimeError("MSL_B_SELF_ACTIVATION_TX_KIND_GATE=FAIL")
+    close_proto = candidate.index("static gboolean r42_queue_media_channel_close(void);")
+    close_call = candidate.index("return r42_queue_media_channel_close() && p12_flush_tx();")
+    close_definition = candidate.index("r42_queue_media_channel_close(void)\n{")
+    if not (close_proto < close_call < close_definition):
+        raise RuntimeError("MSL_B_R42_CLOSE_DECLARATION_ORDER_GATE=FAIL")
 
 
 def report() -> str:

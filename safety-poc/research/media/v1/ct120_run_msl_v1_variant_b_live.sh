@@ -59,6 +59,7 @@ MSL_B_CAMPAIGN_STOPPED_FAIL_CLOSED=false
 MSL_B_BUILD_ROOTFS=""
 MSL_B_OUTPUT=""
 MSL_B_CANDIDATE_BINARY_SHA256=""
+MSL_B_LAST_BUILD_RC=NOT_REACHED
 
 msl_b_mono_ms() {
     python3 - <<'PY'
@@ -258,8 +259,14 @@ msl_b_build_candidate() {
     " | tee "$RUN_ROOT/build.log"
     build_rc=${PIPESTATUS[0]}
     set -u -o pipefail
+    MSL_B_LAST_BUILD_RC="$build_rc"
     echo "MSL_B_BUILD_RC=$build_rc"
-    [ "$build_rc" -eq 0 ] || return 1
+    if [ "$build_rc" -ne 0 ]; then
+        echo "MSL_B_BUILD_DIAGNOSTICS_TAIL_BEGIN"
+        tail -n 80 "$RUN_ROOT/build.log" 2>/dev/null || true
+        echo "MSL_B_BUILD_DIAGNOSTICS_TAIL_END"
+        return 1
+    fi
 
     install -m 700 "$MSL_B_BUILD_ROOTFS$chroot_dir/out/$CANDIDATE_NAME" "$MSL_B_OUTPUT"
     install -m 600 "$MSL_B_BUILD_ROOTFS$chroot_dir/out/build-meta.txt" "$meta"
@@ -523,7 +530,14 @@ run_dry_run() {
 
 run_selftest() {
     local dry_rc
-    msl_b_build_candidate || return 1
+    if ! msl_b_build_candidate; then
+        echo "MSL_B_SELFTEST_COMPLETED=false"
+        echo "MSL_B_SELFTEST_BUILD_RC=$MSL_B_LAST_BUILD_RC"
+        echo "MSL_B_SELFTEST_HA_INTERACTION=$MSL_B_HA_INTERACTION"
+        echo "MSL_B_SELFTEST_COMELIT_INTERACTION=$MSL_B_COMELIT_INTERACTION"
+        echo "MSL_B_SELFTEST_CANDIDATE_EXECUTED=false"
+        return 1
+    fi
     MSL_B_DRY_RUN=YES
     run_dry_run
     dry_rc=$?
@@ -602,7 +616,7 @@ if [ "${EUID}" -ne 0 ]; then
     exit 1
 fi
 
-for command in git python3 curl sha256sum timeout awk grep bash chmod install readelf cmp stat chroot find readlink sort paste sed; do
+for command in git python3 curl sha256sum timeout awk grep bash chmod install readelf cmp stat chroot find readlink sort paste sed tail; do
     command -v "$command" >/dev/null 2>&1 || fail "MSL_B_MISSING_COMMAND=$command"
 done
 
