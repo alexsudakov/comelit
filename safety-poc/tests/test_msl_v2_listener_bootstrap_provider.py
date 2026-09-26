@@ -46,7 +46,8 @@ def extract_bootstrap_cap_sources() -> tuple[str, str, str]:
     if not default_match:
         raise AssertionError("MSL_B_BOOTSTRAP_MAX default assignment missing or widened")
     gate_match = re.search(
-        r'if \[ "\$MSL_B_LIVE_RUN" = YES \] && \[ -n "\$MSL_B_BOOTSTRAP_LEDGER" \]; then\n.*?\nfi\n',
+        r'if \[ "\$MSL_B_LIVE_RUN" = YES \] && \[ "\$MSL_B_BOOTSTRAP_ONLY" = YES \] '
+        r'&& \[ -n "\$MSL_B_BOOTSTRAP_LEDGER" \]; then\n.*?\nfi\n',
         text,
         re.S,
     )
@@ -435,24 +436,34 @@ class MslV2BootstrapCapTests(unittest.TestCase):
         cls.runner = RUNNER.read_text(encoding="utf-8")
         cls.functions_src, cls.default_src, cls.gate_src = extract_bootstrap_cap_sources()
 
-    def run_gate(self, ledger_value: str, bootstrap_max: str | None) -> tuple[bool, str, str]:
+    def run_gate(
+        self,
+        ledger_value: str,
+        bootstrap_max: str | None,
+        bootstrap_only: str = "YES",
+        gate_src: str | None = None,
+    ) -> tuple[bool, str, str]:
         with tempfile.TemporaryDirectory() as tmp:
             ledger = Path(tmp) / "bootstrap.ledger"
             ledger.write_text(f"{ledger_value}\n", encoding="utf-8")
             script = (
                 "set -u -o pipefail\n"
                 "FAIL=0\n"
+                # Mirrors the runner's own top-of-file default (outside the
+                # extracted gate block, so not part of the REAL/MUTATED diff).
+                "MSL_B_BOOTSTRAP_MAX_EFFECTIVE=NOT_REACHED\n"
                 + self.functions_src
                 + "\n"
                 + self.default_src
                 + "\n"
-                + self.gate_src
+                + (gate_src if gate_src is not None else self.gate_src)
                 + 'echo "GATE_FAIL=$FAIL"\n'
                 + 'echo "GATE_EFFECTIVE=$MSL_B_BOOTSTRAP_MAX_EFFECTIVE"\n'
                 + 'echo "GATE_LEDGER_VALUE=${bootstrap_ledger_value:-UNSET}"\n'
             )
             env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
             env["MSL_B_LIVE_RUN"] = "YES"
+            env["MSL_B_BOOTSTRAP_ONLY"] = bootstrap_only
             env["MSL_B_BOOTSTRAP_LEDGER"] = str(ledger)
             if bootstrap_max is not None:
                 env["MSL_B_BOOTSTRAP_MAX"] = bootstrap_max
@@ -528,6 +539,82 @@ class MslV2BootstrapCapTests(unittest.TestCase):
         )
         self.assertNotIn("MSL_B_BOOTSTRAP_MAX", attempt_gate.group(0))
         print("MSL_B_MEDIA_ATTEMPT_CAP_15_UNAFFECTED=true REAL=literal_15_unchanged MUTATED=n/a")
+
+    def test_media_mode_runs_with_bootstrap_counter_at_cap(self) -> None:
+        # A media attempt (MSL_B_BOOTSTRAP_ONLY != YES) must never consult the
+        # bootstrap-only cap: it must pass even with the bootstrap ledger
+        # already sitting at (or over) MSL_B_BOOTSTRAP_MAX, and must never
+        # touch bootstrap_ledger_value / MSL_B_BOOTSTRAP_MAX_EFFECTIVE.
+        failed, effective, ledger_value = self.run_gate("2", None, bootstrap_only="NO")
+        self.assertFalse(failed)
+        self.assertEqual(effective, "NOT_REACHED")
+        self.assertEqual(ledger_value, "UNSET")
+        failed, effective, ledger_value = self.run_gate("99", "2", bootstrap_only="NO")
+        self.assertFalse(failed)
+        self.assertEqual(effective, "NOT_REACHED")
+        self.assertEqual(ledger_value, "UNSET")
+        print(
+            "MSL_B_MEDIA_MODE_BOOTSTRAP_CAP_NOT_CONSULTED=true "
+            "REAL=bootstrap_ledger_at_99_cap_2_media_mode_passes MUTATED=n/a"
+        )
+
+    def test_bootstrap_only_scoping_flip_proof(self) -> None:
+        # Same ledger-at-cap scenario as above (bootstrap ledger value "2"
+        # sitting at the default cap of 2), but re-run against a MUTATED gate
+        # with the "$MSL_B_BOOTSTRAP_ONLY" = YES scoping condition stripped
+        # back out (i.e. CHILD A CORRECTIVE-4's actual bug): the mutated
+        # version must wrongly consult the bootstrap-only cap machinery for a
+        # media attempt (MSL_B_BOOTSTRAP_ONLY=NO), reaching the at-cap
+        # refusal branch of ledger_value_or_fail, whereas the real, scoped
+        # gate never even looks at the ledger for a media attempt.
+        _, real_effective, real_ledger_value = self.run_gate("2", None, bootstrap_only="NO")
+        self.assertEqual(real_effective, "NOT_REACHED")
+        self.assertEqual(real_ledger_value, "UNSET")
+
+        real_condition = (
+            'if [ "$MSL_B_LIVE_RUN" = YES ] && [ "$MSL_B_BOOTSTRAP_ONLY" = YES ] '
+            '&& [ -n "$MSL_B_BOOTSTRAP_LEDGER" ]; then'
+        )
+        mutated_condition = 'if [ "$MSL_B_LIVE_RUN" = YES ] && [ -n "$MSL_B_BOOTSTRAP_LEDGER" ]; then'
+        self.assertIn(real_condition, self.gate_src)
+        mutated_gate = self.gate_src.replace(real_condition, mutated_condition, 1)
+        self.assertNotEqual(mutated_gate, self.gate_src)
+
+        _, mutated_effective, mutated_ledger_value = self.run_gate(
+            "2", None, bootstrap_only="NO", gate_src=mutated_gate
+        )
+        self.assertEqual(mutated_effective, "2")
+        self.assertNotEqual(mutated_ledger_value, "UNSET")
+        print(
+            "MSL_B_BOOTSTRAP_ONLY_SCOPING_FLIP_PROOF=true "
+            f"REAL=media_mode_cap_untouched(effective={real_effective},ledger={real_ledger_value}) "
+            f"MUTATED=media_mode_hits_cap_refusal(effective={mutated_effective},ledger={mutated_ledger_value})"
+        )
+
+    def test_neither_mode_increments_the_others_counter(self) -> None:
+        ledger_increment_src = re.search(r"^ledger_increment\(\) \{.*?^\}", self.runner, re.S | re.M)
+        self.assertIsNotNone(ledger_increment_src, "ledger_increment function missing")
+        bootstrap_only_block = re.search(
+            r'if \[ "\$MSL_B_BOOTSTRAP_ONLY" = YES \]; then\n(.*?)\nfi\n',
+            self.runner,
+            re.S,
+        )
+        self.assertIsNotNone(bootstrap_only_block, "bootstrap-only completion block missing")
+        self.assertIn(
+            'ledger_increment "$MSL_B_BOOTSTRAP_LEDGER" "$bootstrap_ledger_value"',
+            bootstrap_only_block.group(1),
+        )
+        self.assertNotIn("MSL_B_ATTEMPT_LEDGER", bootstrap_only_block.group(1))
+        after_bootstrap_only_block = self.runner[bootstrap_only_block.end():]
+        self.assertIn(
+            'ledger_increment "$MSL_B_ATTEMPT_LEDGER" "$attempt_ledger_value"',
+            after_bootstrap_only_block,
+        )
+        self.assertNotIn(
+            'ledger_increment "$MSL_B_BOOTSTRAP_LEDGER"',
+            after_bootstrap_only_block,
+        )
+        print("MSL_B_LEDGER_COUNTERS_INDEPENDENT=true REAL=each_ledger_incremented_once MUTATED=cross_increment_scan")
 
 
 if __name__ == "__main__":

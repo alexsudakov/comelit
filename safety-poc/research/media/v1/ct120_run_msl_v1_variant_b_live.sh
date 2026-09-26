@@ -69,6 +69,7 @@ MSL_B_LAST_BUILD_RC=NOT_REACHED
 MSL_B_BOOTSTRAP_PROVIDER=""
 MSL_B_BOOTSTRAP_CHECKS_USED=NOT_REACHED
 MSL_B_BOOTSTRAP_MAX_EFFECTIVE=NOT_REACHED
+MSL_B_ATTEMPT_CHECKS_USED=NOT_REACHED
 MSL_B_BOOTSTRAP_RESULT=false
 MSL_B_BOOTSTRAP_CLOUD_REQUEST_COUNT=0
 
@@ -430,8 +431,17 @@ print_final_block() {
     echo "LIVE_INVOCATIONS=$LIVE_INVOCATIONS"
     echo "MSL_B_START_REFERENCE=MSL_B_B00_IDLE_MEDIA_REQUEST_RECEIVED"
     echo "MSL_B_BOOTSTRAP_MAX_EFFECTIVE=$MSL_B_BOOTSTRAP_MAX_EFFECTIVE"
-    echo "BOOTSTRAP_ONLY_LIVE_CHECKS_USED=$MSL_B_BOOTSTRAP_CHECKS_USED/$MSL_B_BOOTSTRAP_MAX_EFFECTIVE"
     echo "MSL_B_BOOTSTRAP_ONLY_MODE=$MSL_B_BOOTSTRAP_ONLY"
+    case "$MSL_B_BOOTSTRAP_ONLY" in
+        YES)
+            echo "BOOTSTRAP_ONLY_LIVE_CHECKS_USED=$MSL_B_BOOTSTRAP_CHECKS_USED/$MSL_B_BOOTSTRAP_MAX_EFFECTIVE"
+            echo "LIVE_MEDIA_ATTEMPTS_USED=N/A"
+            ;;
+        *)
+            echo "BOOTSTRAP_ONLY_LIVE_CHECKS_USED=N/A"
+            echo "LIVE_MEDIA_ATTEMPTS_USED=$MSL_B_ATTEMPT_CHECKS_USED/15"
+            ;;
+    esac
     echo "MSL_B_BOOTSTRAP_RESULT=$MSL_B_BOOTSTRAP_RESULT"
     echo "MSL_B_BOOTSTRAP_CLOUD_REQUEST_COUNT=$MSL_B_BOOTSTRAP_CLOUD_REQUEST_COUNT"
     echo "SETUP_MARGIN_SECONDS=$SETUP_MARGIN_SECONDS"
@@ -1358,12 +1368,15 @@ fi
 [ -n "$MSL_B_EXPECTED_COMMIT_SHA" ] || fail "MSL_B_EXPECTED_COMMIT_SHA_REQUIRED=true"
 [ -n "$MSL_B_EXPECTED_GENERATED_SOURCE_SHA" ] || fail "MSL_B_EXPECTED_GENERATED_SOURCE_SHA_REQUIRED=true"
 if [ "$MSL_B_LIVE_RUN" = YES ]; then
-    [ -n "$MSL_B_BOOTSTRAP_LEDGER" ] || fail "MSL_B_BOOTSTRAP_LEDGER_REQUIRED=true"
-    if [ "$MSL_B_BOOTSTRAP_ONLY" != YES ]; then
-        [ -n "$MSL_B_ATTEMPT_LEDGER" ] || fail "MSL_B_ATTEMPT_LEDGER_REQUIRED=true"
-    fi
+    case "$MSL_B_BOOTSTRAP_ONLY" in
+        YES) [ -n "$MSL_B_BOOTSTRAP_LEDGER" ] || fail "MSL_B_BOOTSTRAP_LEDGER_REQUIRED=true" ;;
+        *) [ -n "$MSL_B_ATTEMPT_LEDGER" ] || fail "MSL_B_ATTEMPT_LEDGER_REQUIRED=true" ;;
+    esac
 fi
-if [ "$MSL_B_LIVE_RUN" = YES ] && [ -n "$MSL_B_BOOTSTRAP_LEDGER" ]; then
+# The bootstrap-only cap governs bootstrap-only checks alone: a media attempt's
+# own internal bootstrap is part of that attempt and is governed by the
+# media-attempt ledger below, never by MSL_B_BOOTSTRAP_MAX/MSL_B_BOOTSTRAP_LEDGER.
+if [ "$MSL_B_LIVE_RUN" = YES ] && [ "$MSL_B_BOOTSTRAP_ONLY" = YES ] && [ -n "$MSL_B_BOOTSTRAP_LEDGER" ]; then
     if MSL_B_BOOTSTRAP_MAX_EFFECTIVE="$(bootstrap_max_or_fail "$MSL_B_BOOTSTRAP_MAX")"; then
         bootstrap_ledger_value="$(ledger_value_or_fail "$MSL_B_BOOTSTRAP_LEDGER" MSL_B_BOOTSTRAP_LEDGER "$MSL_B_BOOTSTRAP_MAX_EFFECTIVE" || printf NOT_REACHED)"
         [ "$bootstrap_ledger_value" != NOT_REACHED ] && MSL_B_BOOTSTRAP_CHECKS_USED="$bootstrap_ledger_value"
@@ -1468,10 +1481,12 @@ grep -q "V4_RING_LISTENER_READY=true" "$SESSION_LOG" && {
     echo "MSL_B_RESEARCH_LISTENER_READY=true"
 } || fail "MSL_B_RESEARCH_LISTENER_READY=FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
-ledger_increment "$MSL_B_BOOTSTRAP_LEDGER" "$bootstrap_ledger_value"
-MSL_B_BOOTSTRAP_CHECKS_USED="$((bootstrap_ledger_value + 1))"
 
 if [ "$MSL_B_BOOTSTRAP_ONLY" = YES ]; then
+    # Only a bootstrap-only run increments/reports the bootstrap-only ledger;
+    # a media attempt's internal bootstrap is scored on the media ledger only.
+    ledger_increment "$MSL_B_BOOTSTRAP_LEDGER" "$bootstrap_ledger_value"
+    MSL_B_BOOTSTRAP_CHECKS_USED="$((bootstrap_ledger_value + 1))"
     [ ! -e "$START_FILE" ] || fail "MSL_B_BOOTSTRAP_ONLY_START_CONTROL_ABSENT=false"
     install -m 600 /dev/null "$RUN_DIR/stop"
     stop_pid "$LISTENER_PID"
@@ -1485,6 +1500,7 @@ if [ "$MSL_B_BOOTSTRAP_ONLY" = YES ]; then
 fi
 
 ledger_increment "$MSL_B_ATTEMPT_LEDGER" "$attempt_ledger_value"
+MSL_B_ATTEMPT_CHECKS_USED="$((attempt_ledger_value + 1))"
 
 VIDEO_SINK_PID="$(msl_b_start_udp_sink "$VIDEO_RTP_PORT" "$RUN_ROOT/video.count" "$MEDIA_STARTUP_OUTER_TIMEOUT")"
 AUDIO_SINK_PID="$(msl_b_start_udp_sink "$AUDIO_RTP_PORT" "$RUN_ROOT/audio.count" "$MEDIA_STARTUP_OUTER_TIMEOUT")"

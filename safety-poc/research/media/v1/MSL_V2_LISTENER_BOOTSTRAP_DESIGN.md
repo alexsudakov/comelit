@@ -131,6 +131,20 @@ silently widened cap, and the effective value is reported as
 `MSL_B_DRY_RUN=YES` or `MSL_B_SELFTEST=YES` is a mode conflict and refused
 before the live boundary (`MSL_B_MODE_CONFLICT=true`).
 
+The bootstrap-only ledger requirement and its cap check are both scoped to
+`MSL_B_BOOTSTRAP_ONLY=YES` only. A media attempt (`MSL_B_BOOTSTRAP_ONLY` unset
+or `NO`) performs its own bootstrap as an inseparable part of that attempt, so
+that bootstrap is scored solely against the 15-attempt media ledger
+(`MSL_B_ATTEMPT_LEDGER`); the runner never consults
+`MSL_B_BOOTSTRAP_LEDGER`/`MSL_B_BOOTSTRAP_MAX` in media mode, even if the
+launcher passes `MSL_B_BOOTSTRAP_LEDGER` through for observability, and never
+increments it there. Symmetrically, a bootstrap-only run never touches
+`MSL_B_ATTEMPT_LEDGER`. The final block reports the two budgets separately
+and unambiguously: `MSL_B_BOOTSTRAP_ONLY_MODE`, `BOOTSTRAP_ONLY_LIVE_CHECKS_USED`
+(the bootstrap-only ledger/cap, `N/A` outside bootstrap-only mode), and
+`LIVE_MEDIA_ATTEMPTS_USED` (the media-attempt ledger out of 15, `N/A` in
+bootstrap-only mode).
+
 ## 5. `MSL_B_OLD_5S_INTERVAL` must be derived, not asserted
 
 The historical result (`MSL_V1_MEDIA_STARTUP_LATENCY_RESULT.md` section 2) is
