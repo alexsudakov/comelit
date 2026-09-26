@@ -100,12 +100,17 @@ attempt, but:
   after `MSL_B_RESEARCH_LISTENER_READY=true` is observed;
 - never touches the media UDP sinks or `MEDIA_OBSERVATION_SECONDS`.
 
-This is gated by its own ledger, `MSL_B_BOOTSTRAP_LEDGER` (cap `2`,
-independent of `MSL_B_ATTEMPT_LEDGER`, cap `15`), so a bootstrap-only check can
-never consume budget from the media-attempt ledger and vice versa
-(`ledger_value_or_fail` is the single fail-closed implementation shared by
-both — malformed or non-numeric contents, or a value at/over the cap, refuses
-before any live interaction). `MSL_B_BOOTSTRAP_ONLY=YES` combined with
+This is gated by its own ledger, `MSL_B_BOOTSTRAP_LEDGER` (cap
+`MSL_B_BOOTSTRAP_MAX`, default `2`, independent of `MSL_B_ATTEMPT_LEDGER`, cap
+`15`), so a bootstrap-only check can never consume budget from the
+media-attempt ledger and vice versa (`ledger_value_or_fail` is the single
+fail-closed implementation shared by both — malformed or non-numeric
+contents, or a value at/over the cap, refuses before any live interaction).
+`MSL_B_BOOTSTRAP_MAX` lets the operator raise the authorized bootstrap-only
+budget explicitly; a non-numeric, empty, zero, or negative value is a
+fail-closed configuration error (`MSL_B_BOOTSTRAP_MAX_INVALID=...`), never a
+silently widened cap, and the effective value is reported as
+`MSL_B_BOOTSTRAP_MAX_EFFECTIVE`. `MSL_B_BOOTSTRAP_ONLY=YES` combined with
 `MSL_B_DRY_RUN=YES` or `MSL_B_SELFTEST=YES` is a mode conflict and refused
 before the live boundary (`MSL_B_MODE_CONFLICT=true`).
 

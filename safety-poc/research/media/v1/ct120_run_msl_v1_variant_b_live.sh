@@ -13,6 +13,7 @@ MSL_B_SELFTEST=${MSL_B_SELFTEST:-NO}
 MSL_B_BOOTSTRAP_ONLY=${MSL_B_BOOTSTRAP_ONLY:-NO}
 MSL_B_ATTEMPT_LEDGER=${MSL_B_ATTEMPT_LEDGER:-}
 MSL_B_BOOTSTRAP_LEDGER=${MSL_B_BOOTSTRAP_LEDGER:-}
+MSL_B_BOOTSTRAP_MAX=${MSL_B_BOOTSTRAP_MAX-2}
 HA_WEBHOOK_URL=${HA_WEBHOOK_URL:-http://192.168.1.108:8123/api/webhook/comelit-ha-ring-test-control-v1}
 OAUTH_STATUS=${OAUTH_STATUS:-/usr/local/sbin/comelit-oauth-status}
 BASE_WRAPPER=/usr/local/sbin/comelit-p2p-cloud-probe
@@ -67,6 +68,7 @@ MSL_B_CANDIDATE_BINARY_SHA256=""
 MSL_B_LAST_BUILD_RC=NOT_REACHED
 MSL_B_BOOTSTRAP_PROVIDER=""
 MSL_B_BOOTSTRAP_CHECKS_USED=NOT_REACHED
+MSL_B_BOOTSTRAP_MAX_EFFECTIVE=NOT_REACHED
 MSL_B_BOOTSTRAP_RESULT=false
 MSL_B_BOOTSTRAP_CLOUD_REQUEST_COUNT=0
 
@@ -427,7 +429,8 @@ print_final_block() {
     echo "=== COMELIT MSL V1 VARIANT B FINAL ==="
     echo "LIVE_INVOCATIONS=$LIVE_INVOCATIONS"
     echo "MSL_B_START_REFERENCE=MSL_B_B00_IDLE_MEDIA_REQUEST_RECEIVED"
-    echo "BOOTSTRAP_ONLY_LIVE_CHECKS_USED=$MSL_B_BOOTSTRAP_CHECKS_USED/2"
+    echo "MSL_B_BOOTSTRAP_MAX_EFFECTIVE=$MSL_B_BOOTSTRAP_MAX_EFFECTIVE"
+    echo "BOOTSTRAP_ONLY_LIVE_CHECKS_USED=$MSL_B_BOOTSTRAP_CHECKS_USED/$MSL_B_BOOTSTRAP_MAX_EFFECTIVE"
     echo "MSL_B_BOOTSTRAP_ONLY_MODE=$MSL_B_BOOTSTRAP_ONLY"
     echo "MSL_B_BOOTSTRAP_RESULT=$MSL_B_BOOTSTRAP_RESULT"
     echo "MSL_B_BOOTSTRAP_CLOUD_REQUEST_COUNT=$MSL_B_BOOTSTRAP_CLOUD_REQUEST_COUNT"
@@ -522,6 +525,17 @@ ledger_value_or_fail() {
         return 1
     fi
     printf '%s\n' "$value"
+}
+
+bootstrap_max_or_fail() {
+    local raw="$1"
+    case "$raw" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+    [ "$raw" -ge 1 ] || return 1
+    printf '%s\n' "$raw"
 }
 
 ledger_increment() {
@@ -1014,6 +1028,7 @@ run_dry_run() {
     MSL_B_BOOTSTRAP_RESULT=true
     MSL_B_BOOTSTRAP_CLOUD_REQUEST_COUNT=1
     MSL_B_BOOTSTRAP_CHECKS_USED=0
+    MSL_B_BOOTSTRAP_MAX_EFFECTIVE="$MSL_B_BOOTSTRAP_MAX"
     restore_listener || return 91
     MSL_B_DRY_RUN_COMPLETED=true
     MSL_B_DRY_RUN_REACHED_FINAL_SUMMARY=true
@@ -1096,8 +1111,13 @@ if [ "$MSL_B_LIVE_RUN" = YES ]; then
     fi
 fi
 if [ "$MSL_B_LIVE_RUN" = YES ] && [ -n "$MSL_B_BOOTSTRAP_LEDGER" ]; then
-    bootstrap_ledger_value="$(ledger_value_or_fail "$MSL_B_BOOTSTRAP_LEDGER" MSL_B_BOOTSTRAP_LEDGER 2 || printf NOT_REACHED)"
-    [ "$bootstrap_ledger_value" != NOT_REACHED ] && MSL_B_BOOTSTRAP_CHECKS_USED="$bootstrap_ledger_value"
+    if MSL_B_BOOTSTRAP_MAX_EFFECTIVE="$(bootstrap_max_or_fail "$MSL_B_BOOTSTRAP_MAX")"; then
+        bootstrap_ledger_value="$(ledger_value_or_fail "$MSL_B_BOOTSTRAP_LEDGER" MSL_B_BOOTSTRAP_LEDGER "$MSL_B_BOOTSTRAP_MAX_EFFECTIVE" || printf NOT_REACHED)"
+        [ "$bootstrap_ledger_value" != NOT_REACHED ] && MSL_B_BOOTSTRAP_CHECKS_USED="$bootstrap_ledger_value"
+    else
+        fail "MSL_B_BOOTSTRAP_MAX_INVALID=$MSL_B_BOOTSTRAP_MAX"
+        MSL_B_BOOTSTRAP_MAX_EFFECTIVE=NOT_REACHED
+    fi
 fi
 if [ "$MSL_B_LIVE_RUN" = YES ] && [ "$MSL_B_BOOTSTRAP_ONLY" != YES ] && [ -n "$MSL_B_ATTEMPT_LEDGER" ]; then
     attempt_ledger_value="$(ledger_value_or_fail "$MSL_B_ATTEMPT_LEDGER" MSL_B_ATTEMPT_LEDGER 15 || printf NOT_REACHED)"

@@ -34,6 +34,27 @@ def extract_old_5s_interval_functions() -> str:
     return match.group(1) + "\n\n" + match.group(2)
 
 
+def extract_bootstrap_cap_sources() -> tuple[str, str, str]:
+    text = RUNNER.read_text(encoding="utf-8")
+    functions = []
+    for name in ("fail", "ledger_value_or_fail", "bootstrap_max_or_fail"):
+        match = re.search(rf"^{name}\(\) \{{.*?^\}}", text, re.S | re.M)
+        if not match:
+            raise AssertionError(f"{name} function missing")
+        functions.append(match.group(0))
+    default_match = re.search(r"^MSL_B_BOOTSTRAP_MAX=\$\{MSL_B_BOOTSTRAP_MAX-2\}$", text, re.M)
+    if not default_match:
+        raise AssertionError("MSL_B_BOOTSTRAP_MAX default assignment missing or widened")
+    gate_match = re.search(
+        r'if \[ "\$MSL_B_LIVE_RUN" = YES \] && \[ -n "\$MSL_B_BOOTSTRAP_LEDGER" \]; then\n.*?\nfi\n',
+        text,
+        re.S,
+    )
+    if not gate_match:
+        raise AssertionError("bootstrap cap gate block missing")
+    return "\n\n".join(functions), default_match.group(0), gate_match.group(0)
+
+
 VALID_OFFER = b"\r\n".join(
     (
         b"v=0",
@@ -177,7 +198,8 @@ class MslV2ListenerBootstrapProviderTests(unittest.TestCase):
         for marker in (
             "MSL_B_BOOTSTRAP_ONLY=${MSL_B_BOOTSTRAP_ONLY:-NO}",
             "MSL_B_BOOTSTRAP_LEDGER=${MSL_B_BOOTSTRAP_LEDGER:-}",
-            "ledger_value_or_fail \"$MSL_B_BOOTSTRAP_LEDGER\" MSL_B_BOOTSTRAP_LEDGER 2",
+            "MSL_B_BOOTSTRAP_MAX=${MSL_B_BOOTSTRAP_MAX-2}",
+            "ledger_value_or_fail \"$MSL_B_BOOTSTRAP_LEDGER\" MSL_B_BOOTSTRAP_LEDGER \"$MSL_B_BOOTSTRAP_MAX_EFFECTIVE\"",
             "ledger_value_or_fail \"$MSL_B_ATTEMPT_LEDGER\" MSL_B_ATTEMPT_LEDGER 15",
             "[ \"$MSL_B_BOOTSTRAP_ONLY\" = YES ]",
             "[ ! -e \"$START_FILE\" ] || fail \"MSL_B_BOOTSTRAP_ONLY_START_CONTROL_ABSENT=false\"",
@@ -336,6 +358,111 @@ class MslV2Old5sIntervalDerivationTests(unittest.TestCase):
         self.assertGreater(real, 0)
         self.assertNotEqual(real, mutated)
         print("MSL_B_OLD_5S_INTERVAL_THRESHOLD_DERIVED=true REAL=delta_ge_4000 MUTATED=threshold_removed")
+
+
+class MslV2BootstrapCapTests(unittest.TestCase):
+    """MSL_B_BOOTSTRAP_MAX must gate the bootstrap-only ledger without ever
+    silently widening on invalid input, and must not affect the independent
+    media-attempt ledger cap (15)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.runner = RUNNER.read_text(encoding="utf-8")
+        cls.functions_src, cls.default_src, cls.gate_src = extract_bootstrap_cap_sources()
+
+    def run_gate(self, ledger_value: str, bootstrap_max: str | None) -> tuple[bool, str, str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = Path(tmp) / "bootstrap.ledger"
+            ledger.write_text(f"{ledger_value}\n", encoding="utf-8")
+            script = (
+                "set -u -o pipefail\n"
+                "FAIL=0\n"
+                + self.functions_src
+                + "\n"
+                + self.default_src
+                + "\n"
+                + self.gate_src
+                + 'echo "GATE_FAIL=$FAIL"\n'
+                + 'echo "GATE_EFFECTIVE=$MSL_B_BOOTSTRAP_MAX_EFFECTIVE"\n'
+                + 'echo "GATE_LEDGER_VALUE=${bootstrap_ledger_value:-UNSET}"\n'
+            )
+            env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+            env["MSL_B_LIVE_RUN"] = "YES"
+            env["MSL_B_BOOTSTRAP_LEDGER"] = str(ledger)
+            if bootstrap_max is not None:
+                env["MSL_B_BOOTSTRAP_MAX"] = bootstrap_max
+            proc = subprocess.run(
+                ["bash", "-c", script],
+                text=True,
+                capture_output=True,
+                env=env,
+                timeout=5,
+                check=False,
+            )
+            fail_line = next(line for line in proc.stdout.splitlines() if line.startswith("GATE_FAIL="))
+            effective_line = next(line for line in proc.stdout.splitlines() if line.startswith("GATE_EFFECTIVE="))
+            ledger_value_line = next(
+                line for line in proc.stdout.splitlines() if line.startswith("GATE_LEDGER_VALUE=")
+            )
+            failed = fail_line == "GATE_FAIL=1"
+            return failed, effective_line.split("=", 1)[1], ledger_value_line.split("=", 1)[1]
+
+    def test_default_cap_is_two(self) -> None:
+        failed, effective, ledger_value = self.run_gate("1", None)
+        self.assertFalse(failed)
+        self.assertEqual(effective, "2")
+        self.assertEqual(ledger_value, "1")
+        failed, effective, _ = self.run_gate("2", None)
+        self.assertEqual(effective, "2")
+        print("MSL_B_BOOTSTRAP_MAX_DEFAULT_IS_TWO=true REAL=unset_env MUTATED=n/a")
+
+    def test_custom_cap_three_accepts_two_refuses_three(self) -> None:
+        failed, effective, ledger_value = self.run_gate("2", "3")
+        self.assertFalse(failed)
+        self.assertEqual(effective, "3")
+        self.assertEqual(ledger_value, "2")
+        failed, effective, ledger_value = self.run_gate("3", "3")
+        self.assertEqual(effective, "3")
+        self.assertNotEqual(ledger_value, "3")
+        print("MSL_B_BOOTSTRAP_MAX_RAISED_CAP_HONORED=true REAL=MSL_B_BOOTSTRAP_MAX=3 MUTATED=default_cap_2")
+
+    def test_invalid_cap_values_fail_closed(self) -> None:
+        for invalid in ("0", "-1", "abc", ""):
+            failed, effective, ledger_value = self.run_gate("0", invalid)
+            self.assertTrue(failed, f"MSL_B_BOOTSTRAP_MAX={invalid!r} must fail closed")
+            self.assertEqual(effective, "NOT_REACHED")
+            self.assertEqual(ledger_value, "UNSET")
+        print(
+            "MSL_B_BOOTSTRAP_MAX_INVALID_FAILS_CLOSED=true "
+            "REAL=0,-1,abc,empty_all_refused MUTATED=cap_never_widened"
+        )
+
+    def test_cap_flip_proof_is_real(self) -> None:
+        real = self.gate_src.count('"$MSL_B_BOOTSTRAP_MAX_EFFECTIVE"')
+        mutated = self.gate_src.replace(
+            '"$MSL_B_BOOTSTRAP_MAX_EFFECTIVE"', '"2"', 1
+        ).count('"$MSL_B_BOOTSTRAP_MAX_EFFECTIVE"')
+        self.assertGreater(real, 0)
+        self.assertNotEqual(real, mutated)
+        print(
+            "MSL_B_BOOTSTRAP_MAX_CAP_WIRED=true "
+            f"REAL={real}_effective_cap_uses MUTATED={mutated}_after_hardcoding_2"
+        )
+
+    def test_media_attempt_ledger_cap_15_unaffected(self) -> None:
+        attempt_gate = re.search(
+            r'if \[ "\$MSL_B_LIVE_RUN" = YES \] && \[ "\$MSL_B_BOOTSTRAP_ONLY" != YES \] '
+            r'&& \[ -n "\$MSL_B_ATTEMPT_LEDGER" \]; then\n.*?\nfi\n',
+            self.runner,
+            re.S,
+        )
+        self.assertIsNotNone(attempt_gate, "media-attempt ledger gate block missing")
+        self.assertIn(
+            "ledger_value_or_fail \"$MSL_B_ATTEMPT_LEDGER\" MSL_B_ATTEMPT_LEDGER 15",
+            attempt_gate.group(0),
+        )
+        self.assertNotIn("MSL_B_BOOTSTRAP_MAX", attempt_gate.group(0))
+        print("MSL_B_MEDIA_ATTEMPT_CAP_15_UNAFFECTED=true REAL=literal_15_unchanged MUTATED=n/a")
 
 
 if __name__ == "__main__":
