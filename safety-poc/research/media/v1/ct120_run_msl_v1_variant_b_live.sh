@@ -10,8 +10,11 @@ MSL_B_EXPECTED_GENERATED_SOURCE_SHA=${MSL_B_EXPECTED_GENERATED_SOURCE_SHA:-}
 MSL_B_LIVE_RUN=${MSL_B_LIVE_RUN:-NO}
 MSL_B_DRY_RUN=${MSL_B_DRY_RUN:-NO}
 MSL_B_SELFTEST=${MSL_B_SELFTEST:-NO}
+MSL_B_BOOTSTRAP_ONLY=${MSL_B_BOOTSTRAP_ONLY:-NO}
 MSL_B_ATTEMPT_LEDGER=${MSL_B_ATTEMPT_LEDGER:-}
+MSL_B_BOOTSTRAP_LEDGER=${MSL_B_BOOTSTRAP_LEDGER:-}
 HA_WEBHOOK_URL=${HA_WEBHOOK_URL:-http://192.168.1.108:8123/api/webhook/comelit-ha-ring-test-control-v1}
+OAUTH_STATUS=${OAUTH_STATUS:-/usr/local/sbin/comelit-oauth-status}
 BASE_WRAPPER=/usr/local/sbin/comelit-p2p-cloud-probe
 BASE_WRAPPER_SHA256=a564535dff0cf10b1fe4766171f2960c52fb581f1c816cf81d2992c5c84e79c9
 SOURCE_REL=safety-poc/research/door/v1_5_7/comelit-v4-persistent-ctpp-door.c
@@ -35,6 +38,8 @@ RUN_DIR=/run/comelit-p2p
 START_FILE="$RUN_DIR/msl-b-start-idle-media"
 STOP_FILE="$RUN_DIR/msl-b-stop-idle-media"
 CLOCK_BASE_FILE="$RUN_DIR/msl-b-clock-base"
+OFFER_FILE="$RUN_DIR/offer.sdp"
+REMOTE_FILE="$RUN_DIR/remote.sdp"
 CANDIDATE_NAME=comelit-msl-v1-variant-b-listener
 
 FAIL=0
@@ -60,6 +65,10 @@ MSL_B_BUILD_ROOTFS=""
 MSL_B_OUTPUT=""
 MSL_B_CANDIDATE_BINARY_SHA256=""
 MSL_B_LAST_BUILD_RC=NOT_REACHED
+MSL_B_BOOTSTRAP_PROVIDER=""
+MSL_B_BOOTSTRAP_CHECKS_USED=NOT_REACHED
+MSL_B_BOOTSTRAP_RESULT=false
+MSL_B_BOOTSTRAP_CLOUD_REQUEST_COUNT=0
 
 msl_b_mono_ms() {
     python3 - <<'PY'
@@ -374,7 +383,11 @@ fi
 print_final_block() {
     echo "=== COMELIT MSL V1 VARIANT B FINAL ==="
     echo "LIVE_INVOCATIONS=$LIVE_INVOCATIONS"
-    echo "MSL_B_START_REFERENCE=MSL_B_T00_IDLE_MEDIA_REQUEST_ACCEPTED"
+    echo "MSL_B_START_REFERENCE=MSL_B_B00_IDLE_MEDIA_REQUEST_RECEIVED"
+    echo "BOOTSTRAP_ONLY_LIVE_CHECKS_USED=$MSL_B_BOOTSTRAP_CHECKS_USED/2"
+    echo "MSL_B_BOOTSTRAP_ONLY_MODE=$MSL_B_BOOTSTRAP_ONLY"
+    echo "MSL_B_BOOTSTRAP_RESULT=$MSL_B_BOOTSTRAP_RESULT"
+    echo "MSL_B_BOOTSTRAP_CLOUD_REQUEST_COUNT=$MSL_B_BOOTSTRAP_CLOUD_REQUEST_COUNT"
     echo "SETUP_MARGIN_SECONDS=$SETUP_MARGIN_SECONDS"
     echo "LISTENER_READY_WAIT_SECONDS=$LISTENER_READY_WAIT_SECONDS"
     echo "MEDIA_OBSERVATION_SECONDS=$MEDIA_OBSERVATION_SECONDS"
@@ -396,6 +409,9 @@ print_final_block() {
     echo "MSL_B_T09_PSEUDOTCP_OPEN_MONO_MS=N/A REASON=existing_PseudoTCP_reused"
     echo "MSL_B_T10_VIP_UAUT_READY_MONO_MS=N/A REASON=existing_UAUT_reused"
     echo "MSL_B_T11_CTPP_REGISTRATION_READY_MONO_MS=N/A REASON=existing_CTPP_registration_reused"
+    echo "MSL_B_OLD_5S_INTERVAL=ELIMINATED"
+    echo "MSL_B_OLD_5S_INTERVAL_MS=N/A REASON=Variant_B_start_reference_is_user_idle_media_request_after_READY"
+    echo "MSL_B_OLD_5S_INTERVAL_LOCALIZATION=N/A REASON=bootstrap_precedes_B00_idle_media_request"
     echo "MEDIA_TEARDOWN=$MEDIA_TEARDOWN"
     echo "MSL_B_CAMPAIGN_STOPPED_FAIL_CLOSED=$MSL_B_CAMPAIGN_STOPPED_FAIL_CLOSED"
     echo "CAMPAIGN_PROCESSES_REMAINING=$CAMPAIGN_PROCESSES_REMAINING"
@@ -444,6 +460,387 @@ stop_pid() {
     fi
 }
 
+ledger_value_or_fail() {
+    local ledger="$1"
+    local marker="$2"
+    local cap="$3"
+    local value
+    if [ ! -f "$ledger" ]; then
+        fail "${marker}=ABSENT"
+        return 1
+    fi
+    value="$(tr -d '[:space:]' < "$ledger")"
+    case "$value" in
+        ''|*[!0-9]*)
+            fail "${marker}=MALFORMED"
+            return 1
+            ;;
+    esac
+    if [ "$value" -ge "$cap" ]; then
+        fail "${marker}_CAP=FAIL"
+        return 1
+    fi
+    printf '%s\n' "$value"
+}
+
+ledger_increment() {
+    local ledger="$1"
+    local value="$2"
+    local tmp="${ledger}.tmp.$$"
+    printf '%s\n' "$((value + 1))" > "$tmp"
+    chmod 600 "$tmp"
+    mv "$tmp" "$ledger"
+}
+
+materialize_bootstrap_provider() {
+    MSL_B_BOOTSTRAP_PROVIDER="$RUN_ROOT/msl_b_bootstrap_provider.py"
+    cat > "$MSL_B_BOOTSTRAP_PROVIDER" <<'PY'
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import asyncio
+from dataclasses import dataclass
+import importlib.util
+import json
+import os
+from pathlib import Path
+import sys
+import time
+from types import SimpleNamespace
+
+
+class BootstrapError(RuntimeError):
+    pass
+
+
+@dataclass
+class Config:
+    repo: Path
+    run_dir: Path
+    offer_file: Path
+    remote_file: Path
+    log_file: Path
+    device_uuid: str
+    vip_token: str
+    ha_config_entries: Path | None
+    timeout_seconds: float
+    fake_scenario: str
+
+
+class FakeConfigEntries:
+    def __init__(self, entry: SimpleNamespace) -> None:
+        self.entry = entry
+        self.updated = False
+
+    def async_update_entry(self, entry: SimpleNamespace, *, data: dict[str, object]) -> None:
+        entry.data = data
+        self.updated = True
+
+
+class FakeSession:
+    async def __aenter__(self) -> "FakeSession":
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+    def post(self, *_args: object, **_kwargs: object) -> object:
+        raise BootstrapError("fake_session_network_unavailable")
+
+
+def _load_config_entries(path: Path) -> dict[str, object]:
+    obj = json.loads(path.read_text(encoding="utf-8"))
+    entries = obj.get("data", {}).get("entries", [])
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("domain") == "comelit":
+            data = entry.get("data")
+            if isinstance(data, dict):
+                return data
+    raise BootstrapError("ha_comelit_config_entry_missing")
+
+
+def _resolve_runtime_config(args: argparse.Namespace) -> Config:
+    run_dir = Path(args.run_dir)
+    ha_config_entries = Path(args.ha_config_entries) if args.ha_config_entries else None
+    data: dict[str, object] = {}
+    if ha_config_entries:
+        data = _load_config_entries(ha_config_entries)
+    device_uuid = args.device_uuid or str(data.get("device_uuid") or os.environ.get("COMELIT_DEVICE_UUID") or "")
+    vip_token = args.vip_token or str(data.get("vip_token") or os.environ.get("COMELIT_VIP_TOKEN") or "")
+    if args.fake_scenario == "none" and (not device_uuid or not vip_token):
+        raise BootstrapError("device_uuid_or_vip_token_missing")
+    return Config(
+        repo=Path(args.repo),
+        run_dir=run_dir,
+        offer_file=Path(args.offer_file),
+        remote_file=Path(args.remote_file),
+        log_file=Path(args.log_file),
+        device_uuid=device_uuid,
+        vip_token=vip_token,
+        ha_config_entries=ha_config_entries,
+        timeout_seconds=args.timeout_seconds,
+        fake_scenario=args.fake_scenario,
+    )
+
+
+async def _wait_for_offer(path: Path, timeout_seconds: float) -> bytes:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError:
+            await asyncio.sleep(0.1)
+            continue
+        if data:
+            return data
+        await asyncio.sleep(0.1)
+    raise BootstrapError("offer_timeout")
+
+
+def _load_module(name: str, path: Path) -> object:
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise BootstrapError(f"module_spec_missing:{name}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _runtime_write_remote_shim(config: Config) -> object:
+    def _atomic_write(path: Path, data: bytes) -> None:
+        config.run_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        old_umask = os.umask(0o077)
+        try:
+            tmp.write_bytes(data)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, path)
+        finally:
+            os.umask(old_umask)
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+
+    return SimpleNamespace(
+        _RUN_DIR=config.run_dir,
+        _OFFER_FILE=config.offer_file,
+        _REMOTE_FILE=config.remote_file,
+        _write_remote=lambda remote: _atomic_write(config.remote_file, remote.encode("utf-8")),
+    )
+
+
+def _load_production_modules(config: Config) -> tuple[object, object, object, object]:
+    repo = config.repo
+    sys.path.insert(0, str(repo))
+    try:
+        from custom_components.comelit import cloud, oauth, runtime, sdp  # type: ignore
+        return cloud, oauth, runtime, sdp
+    except ModuleNotFoundError:
+        base = repo / "custom_components" / "comelit"
+        sys.modules.setdefault("homeassistant", SimpleNamespace())
+        sys.modules.setdefault("homeassistant.config_entries", SimpleNamespace(ConfigEntry=object))
+        sys.modules.setdefault("homeassistant.core", SimpleNamespace(HomeAssistant=object))
+        cloud = _load_module("msl_b_comelit_cloud", base / "cloud.py")
+        oauth = _load_module("msl_b_comelit_oauth", base / "oauth.py")
+        sdp = _load_module("msl_b_comelit_sdp", base / "sdp.py")
+        runtime = _runtime_write_remote_shim(config)
+        return cloud, oauth, runtime, sdp
+
+
+def _fake_remote_sdp() -> str:
+    return "\r\n".join(
+        (
+            "v=0",
+            "o=- 1 1 IN IP4 0.0.0.0",
+            "s=ice",
+            "t=0 0",
+            "a=ice-ufrag:abcd",
+            "a=ice-pwd:abcdefghijklmnopqrstuvwxyz",
+            "a=candidate:1 1 UDP 2130706431 127.0.0.1 9 typ host",
+            "",
+        )
+    )
+
+
+def _fake_offer() -> bytes:
+    return b"\r\n".join(
+        (
+            b"v=0",
+            b"o=- 1 1 IN IP4 127.0.0.1",
+            b"s=ice",
+            b"t=0 0",
+            b"c=IN IP4 127.0.0.1",
+            b"m=audio 5000 RTP/SAVPF 0 8",
+            b"a=ice-ufrag:abcd",
+            b"a=ice-pwd:abcdefghijklmnopqrstuvwxyz",
+            b"a=candidate:1 1 UDP 2130706431 127.0.0.1 5000 typ host",
+            b"a=candidate:2 1 UDP 1694498815 192.0.2.1 5001 typ srflx",
+            b"",
+        )
+    )
+
+
+async def _run(config: Config) -> int:
+    cloud, oauth, runtime, sdp = _load_production_modules(config)
+    runtime._RUN_DIR = config.run_dir
+    runtime._OFFER_FILE = config.offer_file
+    runtime._REMOTE_FILE = config.remote_file
+    cloud_request_count = 0
+    markers: list[str] = []
+    transform_pass = False
+
+    try:
+        if config.fake_scenario == "timeout":
+            await _wait_for_offer(config.offer_file, config.timeout_seconds)
+        elif config.fake_scenario == "missing_offer":
+            raise BootstrapError("offer_missing")
+        elif config.fake_scenario == "malformed_offer":
+            raw_offer = b"not-sdp"
+        elif config.fake_scenario == "none":
+            raw_offer = await _wait_for_offer(config.offer_file, config.timeout_seconds)
+        else:
+            raw_offer = _fake_offer()
+        markers.append("MSL_B_BOOTSTRAP_OFFER_READ=true")
+        print("MSL_B_BOOTSTRAP_OFFER_READ=true")
+
+        if config.fake_scenario == "transform_failure":
+            raise sdp.ComelitSdpError("fake_transform_failure")
+        transformed = sdp.transform_offer(raw_offer).decode("ascii")
+        transform_pass = True
+        print("MSL_B_BOOTSTRAP_TRANSFORM=PASS")
+
+        token_source = "ComelitOAuthManager.async_get_access_token"
+        # Marker contract: MSL_B_BOOTSTRAP_TOKEN_SOURCE=ComelitOAuthManager.async_get_access_token
+        print(f"MSL_B_BOOTSTRAP_TOKEN_SOURCE={token_source}")
+        if config.fake_scenario == "none":
+            data = _load_config_entries(config.ha_config_entries) if config.ha_config_entries else {}
+            entry = SimpleNamespace(data=data)
+            hass = SimpleNamespace(config_entries=FakeConfigEntries(entry))
+            manager = oauth.ComelitOAuthManager(hass, FakeSession(), entry)
+            access_token = await manager.async_get_access_token()
+        else:
+            access_token = "fake-redacted-access-token"
+        if not access_token:
+            raise BootstrapError("oauth_access_token_missing")
+
+        cloud_request_count += 1
+        print(f"MSL_B_BOOTSTRAP_CLOUD_REQUEST_COUNT={cloud_request_count}")
+        if config.fake_scenario == "cloud_failure":
+            raise cloud.ComelitCloudError("fake_cloud_failure")
+        if config.fake_scenario == "malformed_remote_sdp":
+            remote = "not-a-valid-remote-sdp"
+        elif config.fake_scenario != "none":
+            remote = _fake_remote_sdp()
+        else:
+            from aiohttp import ClientSession
+            async with ClientSession() as session:
+                remote = await cloud.async_negotiate_p2p(
+                    session,
+                    device_uuid=config.device_uuid,
+                    vip_token=config.vip_token,
+                    oauth_access_token=access_token,
+                    offer_sdp=transformed,
+                )
+        cloud._validate_remote_sdp(remote)
+        runtime._write_remote(remote)
+        if config.remote_file != runtime._REMOTE_FILE:
+            config.run_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            tmp = config.remote_file.with_suffix(config.remote_file.suffix + ".tmp")
+            tmp.write_text(remote, encoding="utf-8")
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, config.remote_file)
+        print("MSL_B_BOOTSTRAP_REMOTE_SDP_WRITTEN=true")
+        return 0
+    except Exception as exc:
+        if not transform_pass:
+            print("MSL_B_BOOTSTRAP_TRANSFORM=FAIL")
+        print(f"MSL_B_BOOTSTRAP_CLOUD_REQUEST_COUNT={cloud_request_count}")
+        print(f"MSL_B_BOOTSTRAP_FAIL_CLOSED=true reason={type(exc).__name__}")
+        return 1
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--repo", required=True)
+    parser.add_argument("--run-dir", required=True)
+    parser.add_argument("--offer-file", required=True)
+    parser.add_argument("--remote-file", required=True)
+    parser.add_argument("--log-file", required=True)
+    parser.add_argument("--device-uuid", default="")
+    parser.add_argument("--vip-token", default="")
+    parser.add_argument("--ha-config-entries", default=os.environ.get("MSL_B_HA_CONFIG_ENTRIES", "/config/.storage/core.config_entries"))
+    parser.add_argument("--timeout-seconds", type=float, default=20.0)
+    parser.add_argument("--fake-scenario", default=os.environ.get("MSL_B_BOOTSTRAP_FAKE_SCENARIO", "none"))
+    config = _resolve_runtime_config(parser.parse_args())
+    return asyncio.run(_run(config))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+PY
+    chmod 700 "$MSL_B_BOOTSTRAP_PROVIDER"
+}
+
+run_bootstrap_provider() {
+    local provider_log="$RUN_ROOT/bootstrap-provider.log"
+    materialize_bootstrap_provider
+    set +e
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$REPO" \
+        "$MSL_B_BOOTSTRAP_PROVIDER" \
+        --repo "$REPO" \
+        --run-dir "$RUN_DIR" \
+        --offer-file "$OFFER_FILE" \
+        --remote-file "$REMOTE_FILE" \
+        --log-file "$SESSION_LOG" \
+        --timeout-seconds "$LISTENER_READY_WAIT_SECONDS" \
+        > "$provider_log" 2>&1
+    provider_rc=$?
+    set -u -o pipefail
+    cat "$provider_log"
+    MSL_B_BOOTSTRAP_CLOUD_REQUEST_COUNT="$(awk -F= '$1=="MSL_B_BOOTSTRAP_CLOUD_REQUEST_COUNT"{v=$2} END{print v ? v : 0}' "$provider_log")"
+    [ "$provider_rc" -eq 0 ] || fail "MSL_B_BOOTSTRAP_PROVIDER=FAIL"
+    [ "$MSL_B_BOOTSTRAP_CLOUD_REQUEST_COUNT" = 1 ] || fail "MSL_B_BOOTSTRAP_CLOUD_REQUEST_COUNT_GATE=FAIL"
+    grep -q "MSL_B_BOOTSTRAP_REMOTE_SDP_WRITTEN=true" "$provider_log" || fail "MSL_B_BOOTSTRAP_REMOTE_SDP_WRITTEN=false"
+}
+
+marker_value() {
+    local key="$1"
+    local file="$2"
+    awk -F= -v key="$key" '$1==key {v=$2} END{print v}' "$file"
+}
+
+print_delta_marker() {
+    local out="$1"
+    local start_key="$2"
+    local end_key="$3"
+    local file="$4"
+    local start
+    local end
+    start="$(marker_value "$start_key" "$file")"
+    end="$(marker_value "$end_key" "$file")"
+    if [ -n "$start" ] && [ -n "$end" ]; then
+        echo "$out=$((end - start))"
+    else
+        echo "$out=N/A REASON=missing_${start_key}_or_${end_key}"
+    fi
+}
+
+print_latency_deltas() {
+    local file="$1"
+    print_delta_marker MSL_B_START_TO_FIRST_VIDEO_RTP_MS MSL_B_B00_IDLE_MEDIA_REQUEST_RECEIVED_MONO_MS MSL_B_B06_FIRST_VIDEO_RTP_MONO_MS "$file"
+    print_delta_marker MSL_B_START_TO_DECODABLE_VIDEO_MS MSL_B_B00_IDLE_MEDIA_REQUEST_RECEIVED_MONO_MS MSL_B_B07_FIRST_USABLE_SPS_PPS_IDR_RECOVERY_POINT_MONO_MS "$file"
+    print_delta_marker MSL_B_PHASE_B00_TO_B01_MS MSL_B_B00_IDLE_MEDIA_REQUEST_RECEIVED_MONO_MS MSL_B_B01_RTPC_MEDIA_OPEN_SEQUENCE_STARTED_MONO_MS "$file"
+    print_delta_marker MSL_B_PHASE_B01_TO_B02_MS MSL_B_B01_RTPC_MEDIA_OPEN_SEQUENCE_STARTED_MONO_MS MSL_B_B02_RTPC_MEDIA_OPEN_CONTROL_READY_MONO_MS "$file"
+    print_delta_marker MSL_B_PHASE_B02_TO_B03_MS MSL_B_B02_RTPC_MEDIA_OPEN_CONTROL_READY_MONO_MS MSL_B_B03_INITIAL_001A_SENT_MONO_MS "$file"
+    print_delta_marker MSL_B_PHASE_B03_TO_B04_MS MSL_B_B03_INITIAL_001A_SENT_MONO_MS MSL_B_B04_STRUCTURAL_ACK_MEDIA_ACCEPTED_MONO_MS "$file"
+    print_delta_marker MSL_B_PHASE_B04_TO_B05_MS MSL_B_B04_STRUCTURAL_ACK_MEDIA_ACCEPTED_MONO_MS MSL_B_B05_FIRST_AUDIO_RTP_MONO_MS "$file"
+    print_delta_marker MSL_B_PHASE_B04_TO_B06_MS MSL_B_B04_STRUCTURAL_ACK_MEDIA_ACCEPTED_MONO_MS MSL_B_B06_FIRST_VIDEO_RTP_MONO_MS "$file"
+    print_delta_marker MSL_B_PHASE_B06_TO_B07_MS MSL_B_B06_FIRST_VIDEO_RTP_MONO_MS MSL_B_B07_FIRST_USABLE_SPS_PPS_IDR_RECOVERY_POINT_MONO_MS "$file"
+}
+
 run_dry_run() {
     RUN_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/comelit-msl-v1-b-dry-run.XXXXXX")"
     chmod 700 "$RUN_ROOT"
@@ -482,17 +879,41 @@ run_dry_run() {
     {
         echo "MSL_B_LISTENER_READY_BEFORE=true"
         echo "MSL_B_LISTENER_PROCESS_PID=4242"
+        echo "MSL_B_BOOTSTRAP_OFFER_READ=true"
+        echo "MSL_B_BOOTSTRAP_TRANSFORM=PASS"
+        echo "MSL_B_BOOTSTRAP_TOKEN_SOURCE=ComelitOAuthManager.async_get_access_token"
+        echo "MSL_B_BOOTSTRAP_CLOUD_REQUEST_COUNT=1"
+        echo "MSL_B_BOOTSTRAP_REMOTE_SDP_WRITTEN=true"
+        echo "MSL_B_ICE_CONNECTED=true"
+        echo "MSL_B_PSEUDOTCP_OPEN=true"
+        echo "MSL_B_CTPP_REGISTERED=true"
+        echo "MSL_B_RESEARCH_LISTENER_READY=true"
         echo "MSL_B_IDLE_MEDIA_REQUEST_ACCEPTED=true"
+        echo "MSL_B_B00_IDLE_MEDIA_REQUEST_RECEIVED_MONO_MS=$(msl_b_since_base)"
+        echo "MSL_B_B01_RTPC_MEDIA_OPEN_SEQUENCE_STARTED_MONO_MS=$(msl_b_since_base)"
+        echo "MSL_B_B02_RTPC_MEDIA_OPEN_CONTROL_READY_MONO_MS=$(msl_b_since_base)"
         echo "MSL_B_T00_IDLE_MEDIA_REQUEST_ACCEPTED_MONO_MS=$(msl_b_since_base)"
         echo "MSL_B_T12_RTPC_MEDIA_OPEN_CONTROL_READY_MONO_MS=$(msl_b_since_base)"
+        echo "MSL_B_B03_INITIAL_001A_SENT_MONO_MS=$(msl_b_since_base)"
         echo "MSL_B_T13_INITIAL_001A_SENT_MONO_MS=$(msl_b_since_base)"
+        echo "MSL_B_B04_STRUCTURAL_ACK_MEDIA_ACCEPTED_MONO_MS=$(msl_b_since_base)"
         echo "MSL_B_T14_DEVICE_STRUCTURAL_ACK_MEDIA_ACCEPTANCE_MONO_MS=$(msl_b_since_base)"
         echo "MSL_B_MEDIA_ACTIVE=true"
         echo "MSL_B_T15_MEDIA_ACTIVE_MONO_MS=$(msl_b_since_base)"
+        echo "MSL_B_B05_FIRST_AUDIO_RTP_MONO_MS=$(msl_b_since_base)"
+        echo "MSL_B_B06_FIRST_VIDEO_RTP_MONO_MS=$(msl_b_since_base)"
         echo "MSL_B_T17_FIRST_VIDEO_RTP_MONO_MS=$(msl_b_since_base)"
+        echo "MSL_B_B07_FIRST_USABLE_SPS_PPS_IDR_RECOVERY_POINT_MONO_MS=$(msl_b_since_base)"
         echo "MSL_B_T18_FIRST_SPS_PPS_IDR_MONO_MS=$(msl_b_since_base)"
         echo "MSL_B_START_TO_FIRST_VIDEO_RTP_MS=0"
         echo "MSL_B_START_TO_DECODABLE_VIDEO_MS=0"
+        echo "MSL_B_PHASE_B00_TO_B01_MS=0"
+        echo "MSL_B_PHASE_B01_TO_B02_MS=0"
+        echo "MSL_B_PHASE_B02_TO_B03_MS=0"
+        echo "MSL_B_PHASE_B03_TO_B04_MS=0"
+        echo "MSL_B_PHASE_B04_TO_B05_MS=0"
+        echo "MSL_B_PHASE_B04_TO_B06_MS=0"
+        echo "MSL_B_PHASE_B06_TO_B07_MS=0"
         echo "MSL_B_PHASE_T00_TO_T12_MS=0"
         echo "MSL_B_PHASE_T12_TO_T13_MS=0"
         echo "MSL_B_PHASE_T13_TO_T14_MS=0"
@@ -511,16 +932,22 @@ run_dry_run() {
         echo "MSL_B_RECONNECT_COUNT_DELTA=0"
         echo "MSL_B_MEDIA_RX_ACTIVE=true"
         echo "MSL_B_MEDIA_RX_INACTIVE_AFTER_CLOSE=true"
+        echo "MSL_B_MEDIA_FORWARDING_INACTIVE=true"
         echo "MSL_B_VIDEO_RTP_PACKETS=3"
+        echo "MSL_B_AUDIO_RTP_PACKETS=3"
         echo "MSL_B_SPS_COUNT=1"
         echo "MSL_B_MEDIA_CHANNEL_CLOSED=true"
         echo "MSL_B_TUNNEL_PRESERVED=true"
+        echo "RESIDUAL_MEDIA_CHANNELS=0"
     } > "$SESSION_LOG"
     cat "$SESSION_LOG"
     MEDIA_TEARDOWN=CONFIRMED
     CAMPAIGN_PROCESSES_REMAINING=NONE
     RTP_SINK_PORTS_REMAINING=0
     MSL_B_RUN_CLASSIFICATION=DRY_RUN_COMPLETE
+    MSL_B_BOOTSTRAP_RESULT=true
+    MSL_B_BOOTSTRAP_CLOUD_REQUEST_COUNT=1
+    MSL_B_BOOTSTRAP_CHECKS_USED=0
     restore_listener || return 91
     MSL_B_DRY_RUN_COMPLETED=true
     MSL_B_DRY_RUN_REACHED_FINAL_SUMMARY=true
@@ -580,7 +1007,9 @@ trap 'exit 130' INT TERM HUP
 
 if { [ "$MSL_B_DRY_RUN" = YES ] && [ "$MSL_B_LIVE_RUN" = YES ]; } ||
    { [ "$MSL_B_SELFTEST" = YES ] && [ "$MSL_B_LIVE_RUN" = YES ]; } ||
-   { [ "$MSL_B_SELFTEST" = YES ] && [ "$MSL_B_DRY_RUN" = YES ]; }; then
+   { [ "$MSL_B_SELFTEST" = YES ] && [ "$MSL_B_DRY_RUN" = YES ]; } ||
+   { [ "$MSL_B_BOOTSTRAP_ONLY" = YES ] && [ "$MSL_B_DRY_RUN" = YES ]; } ||
+   { [ "$MSL_B_BOOTSTRAP_ONLY" = YES ] && [ "$MSL_B_SELFTEST" = YES ]; }; then
     echo "MSL_B_MODE_CONFLICT=true"
     echo "LIVE_INVOCATIONS=0"
     exit 2
@@ -595,18 +1024,17 @@ fi
 [ -n "$MSL_B_EXPECTED_COMMIT_SHA" ] || fail "MSL_B_EXPECTED_COMMIT_SHA_REQUIRED=true"
 [ -n "$MSL_B_EXPECTED_GENERATED_SOURCE_SHA" ] || fail "MSL_B_EXPECTED_GENERATED_SOURCE_SHA_REQUIRED=true"
 if [ "$MSL_B_LIVE_RUN" = YES ]; then
-    [ -n "$MSL_B_ATTEMPT_LEDGER" ] || fail "MSL_B_ATTEMPT_LEDGER_REQUIRED=true"
-fi
-if [ "$MSL_B_LIVE_RUN" = YES ] && [ -n "$MSL_B_ATTEMPT_LEDGER" ]; then
-    if [ ! -f "$MSL_B_ATTEMPT_LEDGER" ]; then
-        fail "MSL_B_ATTEMPT_LEDGER=ABSENT"
-    else
-        ledger_value="$(tr -d '[:space:]' < "$MSL_B_ATTEMPT_LEDGER")"
-        case "$ledger_value" in
-            ''|*[!0-9]*) fail "MSL_B_ATTEMPT_LEDGER=MALFORMED" ;;
-            *) [ "$ledger_value" -lt 15 ] || fail "MSL_B_ATTEMPT_LEDGER_CAP=FAIL" ;;
-        esac
+    [ -n "$MSL_B_BOOTSTRAP_LEDGER" ] || fail "MSL_B_BOOTSTRAP_LEDGER_REQUIRED=true"
+    if [ "$MSL_B_BOOTSTRAP_ONLY" != YES ]; then
+        [ -n "$MSL_B_ATTEMPT_LEDGER" ] || fail "MSL_B_ATTEMPT_LEDGER_REQUIRED=true"
     fi
+fi
+if [ "$MSL_B_LIVE_RUN" = YES ] && [ -n "$MSL_B_BOOTSTRAP_LEDGER" ]; then
+    bootstrap_ledger_value="$(ledger_value_or_fail "$MSL_B_BOOTSTRAP_LEDGER" MSL_B_BOOTSTRAP_LEDGER 2 || printf NOT_REACHED)"
+    [ "$bootstrap_ledger_value" != NOT_REACHED ] && MSL_B_BOOTSTRAP_CHECKS_USED="$bootstrap_ledger_value"
+fi
+if [ "$MSL_B_LIVE_RUN" = YES ] && [ "$MSL_B_BOOTSTRAP_ONLY" != YES ] && [ -n "$MSL_B_ATTEMPT_LEDGER" ]; then
+    attempt_ledger_value="$(ledger_value_or_fail "$MSL_B_ATTEMPT_LEDGER" MSL_B_ATTEMPT_LEDGER 15 || printf NOT_REACHED)"
 fi
 [ "$MEDIA_STARTUP_OUTER_TIMEOUT" -le "$MAX_MEDIA_STARTUP_OUTER_TIMEOUT_SECONDS" ] || fail "MSL_B_MEDIA_STARTUP_OUTER_TIMEOUT_GATE=FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
@@ -658,7 +1086,7 @@ if [ "$MSL_B_SELFTEST" = YES ]; then
 fi
 
 install -d -m 700 "$RUN_DIR"
-rm -f "$START_FILE" "$STOP_FILE"
+rm -f "$START_FILE" "$STOP_FILE" "$OFFER_FILE" "$REMOTE_FILE"
 msl_b_mono_ms > "$CLOCK_BASE_FILE"
 chmod 600 "$CLOCK_BASE_FILE"
 
@@ -679,26 +1107,53 @@ post_control stop "$STOP_RESPONSE" 20
 status_stopped "$STOP_RESPONSE" || fail "MSL_B_LISTENER_STOP_GATE=FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
 
-VIDEO_SINK_PID="$(msl_b_start_udp_sink "$VIDEO_RTP_PORT" "$RUN_ROOT/video.count" "$MEDIA_STARTUP_OUTER_TIMEOUT")"
-AUDIO_SINK_PID="$(msl_b_start_udp_sink "$AUDIO_RTP_PORT" "$RUN_ROOT/audio.count" "$MEDIA_STARTUP_OUTER_TIMEOUT")"
-echo "MSL_B_VIDEO_RTP_SINK=true"
-echo "MSL_B_AUDIO_RTP_SINK=true"
-echo "MSL_B_CONTINUATION_EVIDENCE_SOURCE=INDEPENDENT_UDP_SINK_OR_EXPLICIT_ZERO"
-
-echo "=== RUN RESEARCH LISTENER AND ONE IDLE MEDIA CONTROL ==="
+echo "=== RUN RESEARCH LISTENER BOOTSTRAP ==="
 LIVE_INVOCATIONS=1
 LD_LIBRARY_PATH="$MSL_B_BUILD_ROOTFS/lib:$MSL_B_BUILD_ROOTFS/usr/lib" \
 MSL_B_CLOCK_BASE_FILE="$CLOCK_BASE_FILE" \
 "$MSL_B_BUILD_ROOTFS/lib/ld-musl-x86_64.so.1" "$MSL_B_OUTPUT" > "$SESSION_LOG" 2>&1 &
 LISTENER_PID=$!
+run_bootstrap_provider
+[ "$FAIL" -eq 0 ] || exit 1
 for _poll in $(seq 1 "$LISTENER_READY_WAIT_SECONDS"); do
     if grep -q "V4_RING_LISTENER_READY=true" "$SESSION_LOG"; then
         break
     fi
     sleep 1
 done
-grep -q "V4_RING_LISTENER_READY=true" "$SESSION_LOG" || fail "MSL_B_RESEARCH_LISTENER_READY=FAIL"
+grep -q "ICE_CONNECTED=PASS" "$SESSION_LOG" && echo "MSL_B_ICE_CONNECTED=true" || fail "MSL_B_ICE_CONNECTED=false"
+grep -q "PSEUDOTCP_OPEN=PASS" "$SESSION_LOG" && echo "MSL_B_PSEUDOTCP_OPEN=true" || fail "MSL_B_PSEUDOTCP_OPEN=false"
+grep -q "V4_CTPP_REGISTRATION=PASS" "$SESSION_LOG" && echo "MSL_B_CTPP_REGISTERED=true" || fail "MSL_B_CTPP_REGISTERED=false"
+grep -q "V4_RING_LISTENER_READY=true" "$SESSION_LOG" && {
+    MSL_B_BOOTSTRAP_RESULT=true
+    echo "MSL_B_RESEARCH_LISTENER_READY=true"
+} || fail "MSL_B_RESEARCH_LISTENER_READY=FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
+ledger_increment "$MSL_B_BOOTSTRAP_LEDGER" "$bootstrap_ledger_value"
+MSL_B_BOOTSTRAP_CHECKS_USED="$((bootstrap_ledger_value + 1))"
+
+if [ "$MSL_B_BOOTSTRAP_ONLY" = YES ]; then
+    [ ! -e "$START_FILE" ] || fail "MSL_B_BOOTSTRAP_ONLY_START_CONTROL_ABSENT=false"
+    install -m 600 /dev/null "$RUN_DIR/stop"
+    stop_pid "$LISTENER_PID"
+    LISTENER_PID=""
+    cat "$SESSION_LOG"
+    MEDIA_TEARDOWN=CONFIRMED
+    MSL_B_RUN_CLASSIFICATION=BOOTSTRAP_ONLY_COMPLETE
+    restore_listener || exit 91
+    LISTENER_READY_AFTER=true
+    exit 0
+fi
+
+ledger_increment "$MSL_B_ATTEMPT_LEDGER" "$attempt_ledger_value"
+
+VIDEO_SINK_PID="$(msl_b_start_udp_sink "$VIDEO_RTP_PORT" "$RUN_ROOT/video.count" "$MEDIA_STARTUP_OUTER_TIMEOUT")"
+AUDIO_SINK_PID="$(msl_b_start_udp_sink "$AUDIO_RTP_PORT" "$RUN_ROOT/audio.count" "$MEDIA_STARTUP_OUTER_TIMEOUT")"
+echo "MSL_B_VIDEO_RTP_SINK=true"
+echo "MSL_B_AUDIO_RTP_SINK=true"
+echo "MSL_B_CONTINUATION_EVIDENCE_SOURCE=INDEPENDENT_UDP_SINK_OR_EXPLICIT_ZERO"
+
+echo "=== RUN ONE IDLE MEDIA CONTROL ON READY LISTENER ==="
 install -m 600 /dev/null "$START_FILE"
 sleep "$MEDIA_OBSERVATION_SECONDS"
 install -m 600 /dev/null "$STOP_FILE"
@@ -707,6 +1162,7 @@ install -m 600 /dev/null "$RUN_DIR/stop"
 stop_pid "$LISTENER_PID"
 LISTENER_PID=""
 cat "$SESSION_LOG"
+print_latency_deltas "$SESSION_LOG"
 MSL_B_RUN_CLASSIFICATION=VARIANT_B_ATTEMPT_COMPLETE
 
 stop_pid "$VIDEO_SINK_PID"

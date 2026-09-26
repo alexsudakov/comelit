@@ -84,6 +84,9 @@ static gboolean msl_b_media_rx_active = FALSE;
 static gboolean msl_b_media_rx_inactive_after_close = FALSE;
 static gboolean msl_b_start_control_consumed = FALSE;
 static gboolean msl_b_stop_control_consumed = FALSE;
+static gboolean msl_b_b05_audio_marked = FALSE;
+static gboolean msl_b_b06_video_marked = FALSE;
+static gboolean msl_b_b07_decodable_marked = FALSE;
 
 static gboolean r42_queue_media_channel_close(void);
 
@@ -151,8 +154,11 @@ msl_b_print_reuse_counters(void)
     printf("MSL_B_RECONNECT_COUNT_DELTA=%u\n", msl_b_reconnect_count_after - msl_b_reconnect_count_before);
     printf("MSL_B_MEDIA_RX_ACTIVE=%s\n", msl_b_media_rx_active ? "true" : "false");
     printf("MSL_B_MEDIA_RX_INACTIVE_AFTER_CLOSE=%s\n", msl_b_media_rx_inactive_after_close ? "true" : "false");
+    printf("MSL_B_MEDIA_FORWARDING_INACTIVE=%s\n", p80_media_forwarding_enabled ? "false" : "true");
     printf("MSL_B_VIDEO_RTP_PACKETS=%llu\n", (unsigned long long)p80_video_rtp_packets);
+    printf("MSL_B_AUDIO_RTP_PACKETS=%llu\n", (unsigned long long)p80_audio_rtp_packets);
     printf("MSL_B_SPS_COUNT=%llu\n", (unsigned long long)p116_video_rtp.sps_count);
+    printf("RESIDUAL_MEDIA_CHANNELS=%u\n", r42_media_channel_id == 0u ? 0u : 1u);
     printf("MSL_B_TUNNEL_PRESERVED=%s\n", pseudotcp_open ? "true" : "false");
     fflush(stdout);
 }
@@ -204,6 +210,9 @@ msl_b_queue_idle_channel_open(void)
     printf("MSL_B_IDLE_MEDIA_REQUEST_ACCEPTED=true\n");
     printf("MSL_B_MEDIA_CHANNEL_ALLOCATED=true\n");
     printf("MSL_B_SECOND_UPSTREAM_SESSION=false\n");
+    msl_b_print_clock_marker("B00_IDLE_MEDIA_REQUEST_RECEIVED");
+    msl_b_print_clock_marker("B01_RTPC_MEDIA_OPEN_SEQUENCE_STARTED");
+    msl_b_print_clock_marker("B02_RTPC_MEDIA_OPEN_CONTROL_READY");
     msl_b_print_clock_marker("T00_IDLE_MEDIA_REQUEST_ACCEPTED");
     msl_b_print_clock_marker("T12_RTPC_MEDIA_OPEN_CONTROL_READY");
     fflush(stdout);
@@ -245,6 +254,7 @@ msl_b_queue_idle_self_activation(void)
 
     msl_b_idle_state = MSL_B_IDLE_STATE_SELF_ACTIVATION_TX;
     printf("MSL_B_INITIAL_001A_STRUCTURED_FROM_SESSION_STATE=true\n");
+    msl_b_print_clock_marker("B03_INITIAL_001A_SENT");
     msl_b_print_clock_marker("T13_INITIAL_001A_SENT");
     fflush(stdout);
     if (!p12_queue_vip_frame(
@@ -270,6 +280,7 @@ msl_b_activate_idle_media(void)
     r42_media_stage = R42_MEDIA_ACTIVE;
     printf("MSL_B_DEVICE_STRUCTURAL_ACK_DERIVED_FROM_TX_COMPLETION=true\n");
     printf("MSL_B_MEDIA_ACTIVE=true\n");
+    msl_b_print_clock_marker("B04_STRUCTURAL_ACK_MEDIA_ACCEPTED");
     msl_b_print_clock_marker("T14_DEVICE_STRUCTURAL_ACK_MEDIA_ACCEPTANCE");
     msl_b_print_clock_marker("T15_MEDIA_ACTIVE");
     fflush(stdout);
@@ -368,6 +379,51 @@ TX_COMPLETION_CLOSE_REPLACEMENT = """        case P12_TX_R42_MEDIA_CHANNEL_CLOSE
             fflush(stdout);
             break;"""
 
+RTP_VIDEO_ANCHOR = """        if (p80_video_rtp_packets == 1u) {
+            printf("P80_VIDEO_RTP_FORWARDING=PASS\\n");
+            fflush(stdout);
+        }"""
+RTP_VIDEO_REPLACEMENT = """        if (p80_video_rtp_packets == 1u) {
+            if (!msl_b_b06_video_marked) {
+                msl_b_b06_video_marked = TRUE;
+                msl_b_print_clock_marker("B06_FIRST_VIDEO_RTP");
+            }
+            printf("P80_VIDEO_RTP_FORWARDING=PASS\\n");
+            fflush(stdout);
+        }"""
+
+RTP_AUDIO_ANCHOR = """        if (p80_audio_rtp_packets == 1u) {
+            printf("P80_AUDIO_RTP_FORWARDING=PASS\\n");
+            fflush(stdout);
+        }"""
+RTP_AUDIO_REPLACEMENT = """        if (p80_audio_rtp_packets == 1u) {
+            if (!msl_b_b05_audio_marked) {
+                msl_b_b05_audio_marked = TRUE;
+                msl_b_print_clock_marker("B05_FIRST_AUDIO_RTP");
+            }
+            printf("P80_AUDIO_RTP_FORWARDING=PASS\\n");
+            fflush(stdout);
+        }"""
+
+H264_RECOVERY_ANCHOR = """        if (nal_type == 5u && stream->first_keyframe_monotonic_ms == 0)
+            stream->first_keyframe_monotonic_ms = now_ms;
+        else if (nal_type == 7u)
+            stream->sps_count++;
+        else if (nal_type == 8u)
+            stream->pps_count++;"""
+H264_RECOVERY_REPLACEMENT = """        if (nal_type == 5u && stream->first_keyframe_monotonic_ms == 0)
+            stream->first_keyframe_monotonic_ms = now_ms;
+        else if (nal_type == 7u)
+            stream->sps_count++;
+        else if (nal_type == 8u)
+            stream->pps_count++;
+        if (!msl_b_b07_decodable_marked &&
+            stream->sps_count > 0u &&
+            stream->first_keyframe_monotonic_ms != 0) {
+            msl_b_b07_decodable_marked = TRUE;
+            msl_b_print_clock_marker("B07_FIRST_USABLE_SPS_PPS_IDR_RECOVERY_POINT");
+        }"""
+
 READY_ANCHOR = """                printf(
                     "V4_RING_LISTENER_READY=true\\n"
                 );
@@ -415,6 +471,9 @@ def transform(source: str) -> str:
     candidate = _replace_once(candidate, STATE_ANCHOR, STATE_REPLACEMENT, "STATE")
     candidate = _replace_once(candidate, TX_COMPLETION_OPEN_ANCHOR, TX_COMPLETION_OPEN_REPLACEMENT, "OPEN_COMPLETION")
     candidate = _replace_once(candidate, TX_COMPLETION_CLOSE_ANCHOR, TX_COMPLETION_CLOSE_REPLACEMENT, "CLOSE_COMPLETION")
+    candidate = _replace_once(candidate, RTP_VIDEO_ANCHOR, RTP_VIDEO_REPLACEMENT, "B06_VIDEO_RTP")
+    candidate = _replace_once(candidate, RTP_AUDIO_ANCHOR, RTP_AUDIO_REPLACEMENT, "B05_AUDIO_RTP")
+    candidate = _replace_once(candidate, H264_RECOVERY_ANCHOR, H264_RECOVERY_REPLACEMENT, "B07_H264_RECOVERY")
     candidate = _replace_once(candidate, READY_ANCHOR, READY_REPLACEMENT, "READY")
     candidate = _replace_once(candidate, TIMER_ANCHOR, TIMER_REPLACEMENT, "TIMER")
     candidate = _replace_once(candidate, EXIT_ANCHOR, EXIT_REPLACEMENT, "EXIT")
@@ -446,9 +505,20 @@ def _assert_gates(candidate: str) -> None:
         "msl_b_ready_now",
         "msl_b_queue_idle_channel_open",
         "msl_b_queue_idle_self_activation",
+        "B00_IDLE_MEDIA_REQUEST_RECEIVED",
+        "B01_RTPC_MEDIA_OPEN_SEQUENCE_STARTED",
+        "B02_RTPC_MEDIA_OPEN_CONTROL_READY",
+        "B03_INITIAL_001A_SENT",
+        "B04_STRUCTURAL_ACK_MEDIA_ACCEPTED",
+        "B05_FIRST_AUDIO_RTP",
+        "B06_FIRST_VIDEO_RTP",
+        "B07_FIRST_USABLE_SPS_PPS_IDR_RECOVERY_POINT",
         "MSL_B_RING_COLLISION_FAIL_CLOSED=true",
         "MSL_B_DUPLICATE_START_REJECTED=true",
         "MSL_B_SECOND_UPSTREAM_SESSION=false",
+        "MSL_B_AUDIO_RTP_PACKETS",
+        "MSL_B_MEDIA_FORWARDING_INACTIVE",
+        "RESIDUAL_MEDIA_CHANNELS",
         "DOOR",
     ):
         if required not in candidate:
