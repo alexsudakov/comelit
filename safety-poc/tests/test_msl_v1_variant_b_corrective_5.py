@@ -134,10 +134,13 @@ class MslBForwardStageArmedTests(unittest.TestCase):
         cls.generated = msl_b.transform(cls.base)
 
     def test_activate_and_close_reuse_shared_primitive(self) -> None:
-        activate_fn = self.generated.split("msl_b_activate_idle_media(void)\n{", 1)[1].split("\n}\n", 1)[0]
+        activate_fn = self.generated.split("msl_b_activate_idle_media_after_ack(void)\n{", 1)[1].split("\n}\n", 1)[0]
+        tx_case = self.generated.split("case P12_TX_MSL_B_IDLE_SELF_ACTIVATION:", 1)[1].split("break;", 1)[0]
         close_fn = self.generated.split("msl_b_queue_idle_close(void)\n{", 1)[1].split("\n}\n", 1)[0]
 
         self.assertIn("r42_listener_rtp_arm(1);", activate_fn)
+        self.assertIn("msl_b_arm_device_ack_wait()", tx_case)
+        self.assertNotIn("r42_listener_rtp_arm(1);", tx_case)
         self.assertIn("r42_listener_rtp_arm(0);", close_fn)
         # The primitive is reused, not redefined by the overlay.
         self.assertEqual(self.generated.count("static void\nr42_listener_rtp_arm(int armed)"), 1)

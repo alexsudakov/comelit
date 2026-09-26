@@ -98,6 +98,12 @@ msl_b_mark() {
     printf 'MSL_B_%s_MONO_MS=%s\n' "$1" "$(msl_b_since_base)"
 }
 
+MSL_B_DRY_RUN_CLOCK_MS=0
+msl_b_dry_mark() {
+    MSL_B_DRY_RUN_CLOCK_MS=$((MSL_B_DRY_RUN_CLOCK_MS + 10))
+    printf 'MSL_B_%s_MONO_MS=%s\n' "$1" "$MSL_B_DRY_RUN_CLOCK_MS"
+}
+
 fail() {
     echo "$1"
     FAIL=1
@@ -1237,37 +1243,22 @@ run_dry_run() {
         echo "MSL_B_CTPP_REGISTERED=true"
         echo "MSL_B_RESEARCH_LISTENER_READY=true"
         echo "MSL_B_IDLE_MEDIA_REQUEST_ACCEPTED=true"
-        echo "MSL_B_B00_IDLE_MEDIA_REQUEST_RECEIVED_MONO_MS=$(msl_b_since_base)"
-        echo "MSL_B_B01_RTPC_MEDIA_OPEN_SEQUENCE_STARTED_MONO_MS=$(msl_b_since_base)"
-        echo "MSL_B_B02_RTPC_MEDIA_OPEN_CONTROL_READY_MONO_MS=$(msl_b_since_base)"
-        echo "MSL_B_T00_IDLE_MEDIA_REQUEST_ACCEPTED_MONO_MS=$(msl_b_since_base)"
-        echo "MSL_B_T12_RTPC_MEDIA_OPEN_CONTROL_READY_MONO_MS=$(msl_b_since_base)"
-        echo "MSL_B_B03_INITIAL_001A_SENT_MONO_MS=$(msl_b_since_base)"
-        echo "MSL_B_T13_INITIAL_001A_SENT_MONO_MS=$(msl_b_since_base)"
-        echo "MSL_B_B04_STRUCTURAL_ACK_MEDIA_ACCEPTED_MONO_MS=$(msl_b_since_base)"
-        echo "MSL_B_T14_DEVICE_STRUCTURAL_ACK_MEDIA_ACCEPTANCE_MONO_MS=$(msl_b_since_base)"
+        msl_b_dry_mark B00_IDLE_MEDIA_REQUEST_RECEIVED
+        msl_b_dry_mark B01_RTPC_MEDIA_OPEN_SEQUENCE_STARTED
+        msl_b_dry_mark B02_RTPC_MEDIA_OPEN_CONTROL_READY
+        msl_b_dry_mark T00_IDLE_MEDIA_REQUEST_ACCEPTED
+        msl_b_dry_mark T12_RTPC_MEDIA_OPEN_CONTROL_READY
+        msl_b_dry_mark B03_INITIAL_001A_SENT
+        msl_b_dry_mark T13_INITIAL_001A_SENT
+        msl_b_dry_mark B04_STRUCTURAL_ACK_MEDIA_ACCEPTED
+        msl_b_dry_mark T14_DEVICE_STRUCTURAL_ACK_MEDIA_ACCEPTANCE
         echo "MSL_B_MEDIA_ACTIVE=true"
-        echo "MSL_B_T15_MEDIA_ACTIVE_MONO_MS=$(msl_b_since_base)"
-        echo "MSL_B_B05_FIRST_AUDIO_RTP_MONO_MS=$(msl_b_since_base)"
-        echo "MSL_B_B06_FIRST_VIDEO_RTP_MONO_MS=$(msl_b_since_base)"
-        echo "MSL_B_T17_FIRST_VIDEO_RTP_MONO_MS=$(msl_b_since_base)"
-        echo "MSL_B_B07_FIRST_USABLE_SPS_PPS_IDR_RECOVERY_POINT_MONO_MS=$(msl_b_since_base)"
-        echo "MSL_B_T18_FIRST_SPS_PPS_IDR_MONO_MS=$(msl_b_since_base)"
-        echo "MSL_B_START_TO_FIRST_VIDEO_RTP_MS=0"
-        echo "MSL_B_START_TO_DECODABLE_VIDEO_MS=0"
-        echo "MSL_B_PHASE_B00_TO_B01_MS=0"
-        echo "MSL_B_PHASE_B01_TO_B02_MS=0"
-        echo "MSL_B_PHASE_B02_TO_B03_MS=0"
-        echo "MSL_B_PHASE_B03_TO_B04_MS=0"
-        echo "MSL_B_PHASE_B04_TO_B05_MS=0"
-        echo "MSL_B_PHASE_B04_TO_B06_MS=0"
-        echo "MSL_B_PHASE_B06_TO_B07_MS=0"
-        echo "MSL_B_PHASE_T00_TO_T12_MS=0"
-        echo "MSL_B_PHASE_T12_TO_T13_MS=0"
-        echo "MSL_B_PHASE_T13_TO_T14_MS=0"
-        echo "MSL_B_PHASE_T14_TO_T15_MS=0"
-        echo "MSL_B_PHASE_T15_TO_T17_MS=0"
-        echo "MSL_B_PHASE_T17_TO_T18_MS=0"
+        msl_b_dry_mark T15_MEDIA_ACTIVE
+        msl_b_dry_mark B05_FIRST_AUDIO_RTP
+        msl_b_dry_mark B06_FIRST_VIDEO_RTP
+        msl_b_dry_mark T17_FIRST_VIDEO_RTP
+        msl_b_dry_mark B07_FIRST_USABLE_SPS_PPS_IDR_RECOVERY_POINT
+        msl_b_dry_mark T18_FIRST_SPS_PPS_IDR
         echo "MSL_B_CLOUD_NEGOTIATION_COUNT=0"
         echo "MSL_B_ICE_BOOTSTRAP_COUNT=0"
         echo "MSL_B_PSEUDOTCP_OPEN_COUNT=0"

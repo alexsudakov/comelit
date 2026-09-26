@@ -154,11 +154,56 @@ class MslV1IdleListenerMediaTests(unittest.TestCase):
         activation_case = self.generated_a.split("case P12_TX_MSL_B_IDLE_SELF_ACTIVATION:", 1)[1].split(
             "case P12_TX_R35_MEDIA_OPEN:", 1
         )[0]
-        self.assertIn("msl_b_activate_idle_media()", activation_case)
+        self.assertIn("msl_b_arm_device_ack_wait()", activation_case)
+        self.assertNotIn("msl_b_activate_idle_media", activation_case)
         close_case = self.generated_a.split("case P12_TX_R42_MEDIA_CHANNEL_CLOSE:", 1)[1].split(
             "case P12_TX_R54_INVITE_ACK:", 1
         )[0]
         self.assertIn("r42_finish_media_channel_close()", close_case)
+
+    def test_idle_media_active_is_gated_on_structural_ack_with_flip_proof(self) -> None:
+        tx_case = self.generated_a.split("case P12_TX_MSL_B_IDLE_SELF_ACTIVATION:", 1)[1].split("break;", 1)[0]
+        ack_handler = self.generated_a.split("msl_b_handle_device_ack_001a(guint32 request_id", 1)[1].split(
+            "\n}\n", 1
+        )[0]
+        self.assertIn("msl_b_arm_device_ack_wait()", tx_case)
+        self.assertNotIn("MSL_B_MEDIA_ACTIVE=true", tx_case)
+        self.assertIn("msl_b_ack_matches_source", ack_handler)
+        self.assertIn("msl_b_activate_idle_media_after_ack()", ack_handler)
+        self.assertIn("MSL_B_DEVICE_STRUCTURAL_ACK_DERIVED_FROM_TX_COMPLETION=false", self.generated_a)
+
+        mutated = self.generated_a.replace(
+            "(void)msl_b_arm_device_ack_wait();", "printf(\"MSL_B_MEDIA_ACTIVE=true\\n\");", 1
+        )
+        mutated_case = mutated.split("case P12_TX_MSL_B_IDLE_SELF_ACTIVATION:", 1)[1].split("break;", 1)[0]
+        self.assertIn("MSL_B_MEDIA_ACTIVE=true", mutated_case)
+        print(
+            "MSL_B_ACK_GATED_MEDIA_ACTIVE=true "
+            "REAL=tx_completion_arms_ack_wait "
+            "MUTATED=tx_completion_reports_media_active"
+        )
+
+    def test_receive_path_registered_before_media_active_with_flip_proof(self) -> None:
+        activation = self.generated_a.split("msl_b_activate_idle_media_after_ack(void)\n{", 1)[1].split(
+            "\n}\n", 1
+        )[0]
+        register_idx = activation.index("msl_b_register_receive_path()")
+        arm_idx = activation.index("r42_listener_rtp_arm(1);")
+        active_idx = activation.index('printf("MSL_B_MEDIA_ACTIVE=true\\n");')
+        self.assertLess(register_idx, arm_idx)
+        self.assertLess(arm_idx, active_idx)
+        self.assertIn("p80_loopback_socket(&p80_video_rtp_target, P80_VIDEO_RTP_PORT)", self.generated_a)
+        self.assertIn("p80_loopback_socket(&p80_audio_rtp_target, P80_AUDIO_RTP_PORT)", self.generated_a)
+
+        mutated_activation = activation.replace(
+            "msl_b_register_receive_path()", "msl_b_register_receive_path_MUTATED()", 1
+        )
+        self.assertNotIn("msl_b_register_receive_path()", mutated_activation)
+        print(
+            "MSL_B_RECEIVE_PATH_REGISTERED_BEFORE_MEDIA_ACTIVE=true "
+            f"REAL=register:{register_idx}<arm:{arm_idx}<active:{active_idx} "
+            "MUTATED=registration_call_removed"
+        )
 
     def test_r42_close_helper_declared_before_overlay_call(self) -> None:
         proto = self.generated_a.index("static gboolean r42_queue_media_channel_close(void);")
@@ -254,6 +299,43 @@ class MslV1IdleListenerMediaTests(unittest.TestCase):
         print("MSL_B_DRY_RUN_REACHED_FINAL_SUMMARY=true")
         print("MSL_B_DRY_RUN_COMELIT_INTERACTION=0")
         print("MSL_B_DRY_RUN_HA_INTERACTION=0")
+
+    def test_runner_dry_run_clock_markers_advance_with_flip_proof(self) -> None:
+        env = os.environ.copy()
+        env["MSL_B_DRY_RUN"] = "YES"
+        proc = subprocess.run(
+            ["bash", str(RUNNER)],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        stage_keys = (
+            "MSL_B_B00_IDLE_MEDIA_REQUEST_RECEIVED_MONO_MS",
+            "MSL_B_B01_RTPC_MEDIA_OPEN_SEQUENCE_STARTED_MONO_MS",
+            "MSL_B_B02_RTPC_MEDIA_OPEN_CONTROL_READY_MONO_MS",
+            "MSL_B_B03_INITIAL_001A_SENT_MONO_MS",
+            "MSL_B_B04_STRUCTURAL_ACK_MEDIA_ACCEPTED_MONO_MS",
+        )
+        values: list[int] = []
+        for key in stage_keys:
+            match = re.search(rf"^{re.escape(key)}=(\d+)$", proc.stdout, re.M)
+            self.assertIsNotNone(match, key)
+            values.append(int(match.group(1)))
+        self.assertEqual(len(values), len(set(values)))
+        self.assertEqual(values, sorted(values))
+
+        mutated = values[:]
+        mutated[1] = mutated[0]
+        self.assertNotEqual(len(mutated), len(set(mutated)))
+        print(
+            "MSL_B_CLOCK_MONOTONIC_VALUES_ADVANCE=true "
+            f"REAL={dict(zip(stage_keys, values))} "
+            f"MUTATED={dict(zip(stage_keys, mutated))}"
+        )
 
     def test_runner_provenance_and_budget_gates(self) -> None:
         for marker in (

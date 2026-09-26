@@ -96,6 +96,11 @@ static gboolean msl_b_stop_control_consumed = FALSE;
 static gboolean msl_b_b05_audio_marked = FALSE;
 static gboolean msl_b_b06_video_marked = FALSE;
 static gboolean msl_b_b07_decodable_marked = FALSE;
+static gboolean msl_b_wait_device_ack_001a = FALSE;
+static gboolean msl_b_device_ack_001a_observed = FALSE;
+static gboolean msl_b_receive_path_registered = FALSE;
+static guint8 msl_b_idle_001a_body[40];
+static guint msl_b_idle_001a_body_len = 0;
 
 static gboolean r42_queue_media_channel_close(void);
 
@@ -206,6 +211,75 @@ msl_b_print_reuse_counters(void)
 }
 
 static gboolean
+msl_b_ack_matches_source(const guint8 *body, guint body_len,
+                         const guint8 *source, guint source_len)
+{
+    guint first;
+    guint second;
+
+    if (!body || !source || body_len != 32u || source_len < 20u)
+        return FALSE;
+    if (read_le16(body + 0u) != 0x1800u ||
+        body[6] != 0x00u || body[7] != 0x00u ||
+        body[8] != 0xffu || body[9] != 0xffu ||
+        body[10] != 0xffu || body[11] != 0xffu)
+        return FALSE;
+
+    first = source_len - 20u;
+    second = source_len - 10u;
+    if (source[first + 9u] != 0x00u || source[second + 9u] != 0x00u)
+        return FALSE;
+
+    return
+        memcmp(body + 12u, source + second, 9u) == 0 &&
+        body[21] == 0x00u &&
+        memcmp(body + 22u, source + first, 9u) == 0 &&
+        body[31] == 0x00u;
+}
+
+static gboolean
+msl_b_register_receive_path(void)
+{
+    if (!p80_video_target_ready) {
+        p80_video_rtp_fd = p80_loopback_socket(&p80_video_rtp_target, P80_VIDEO_RTP_PORT);
+        if (p80_video_rtp_fd < 0) {
+            fprintf(stderr, "MSL_B_RTP_FORWARD_SOCKET=FAIL media=video\n");
+            return FALSE;
+        }
+        p80_video_target_ready = TRUE;
+    }
+    if (!p80_audio_target_ready) {
+        p80_audio_rtp_fd = p80_loopback_socket(&p80_audio_rtp_target, P80_AUDIO_RTP_PORT);
+        if (p80_audio_rtp_fd < 0) {
+            fprintf(stderr, "MSL_B_RTP_FORWARD_SOCKET=FAIL media=audio\n");
+            return FALSE;
+        }
+        p80_audio_target_ready = TRUE;
+    }
+
+    msl_b_receive_path_registered = TRUE;
+    printf("MSL_B_RECEIVE_PATH_REGISTERED_BEFORE_MEDIA_ACTIVE=true\n");
+    fflush(stdout);
+    return TRUE;
+}
+
+static void
+msl_b_dispose_receive_path(void)
+{
+    if (p80_video_rtp_fd >= 0) {
+        close(p80_video_rtp_fd);
+        p80_video_rtp_fd = -1;
+    }
+    if (p80_audio_rtp_fd >= 0) {
+        close(p80_audio_rtp_fd);
+        p80_audio_rtp_fd = -1;
+    }
+    p80_video_target_ready = FALSE;
+    p80_audio_target_ready = FALSE;
+    msl_b_receive_path_registered = FALSE;
+}
+
+static gboolean
 msl_b_queue_idle_channel_open(void)
 {
     guint8 body[15];
@@ -254,9 +328,7 @@ msl_b_queue_idle_channel_open(void)
     printf("MSL_B_SECOND_UPSTREAM_SESSION=false\n");
     msl_b_print_clock_marker("B00_IDLE_MEDIA_REQUEST_RECEIVED");
     msl_b_print_clock_marker("B01_RTPC_MEDIA_OPEN_SEQUENCE_STARTED");
-    msl_b_print_clock_marker("B02_RTPC_MEDIA_OPEN_CONTROL_READY");
     msl_b_print_clock_marker("T00_IDLE_MEDIA_REQUEST_ACCEPTED");
-    msl_b_print_clock_marker("T12_RTPC_MEDIA_OPEN_CONTROL_READY");
     fflush(stdout);
     if (!p12_queue_vip_frame(0, body, sizeof(body), P12_TX_R42_MEDIA_CHANNEL_OPEN)) {
         msl_b_idle_state = MSL_B_IDLE_STATE_FAILED;
@@ -299,6 +371,8 @@ msl_b_queue_idle_self_activation(void)
     msl_b_print_clock_marker("B03_INITIAL_001A_SENT");
     msl_b_print_clock_marker("T13_INITIAL_001A_SENT");
     fflush(stdout);
+    memcpy(msl_b_idle_001a_body, body, sizeof(body));
+    msl_b_idle_001a_body_len = sizeof(body);
     if (!p12_queue_vip_frame(
             v4_ctpp_channel_id,
             body,
@@ -311,21 +385,58 @@ msl_b_queue_idle_self_activation(void)
     return p12_flush_tx();
 }
 
-static void
-msl_b_activate_idle_media(void)
+static gboolean
+msl_b_arm_device_ack_wait(void)
 {
     if (msl_b_idle_state != MSL_B_IDLE_STATE_SELF_ACTIVATION_TX)
-        return;
+        return FALSE;
+    msl_b_wait_device_ack_001a = TRUE;
+    msl_b_device_ack_001a_observed = FALSE;
+    printf("MSL_B_DEVICE_ACK_001A_GATE_ARMED=true\n");
+    fflush(stdout);
+    return TRUE;
+}
+
+static gboolean
+msl_b_activate_idle_media_after_ack(void)
+{
+    if (msl_b_idle_state != MSL_B_IDLE_STATE_SELF_ACTIVATION_TX ||
+        !msl_b_device_ack_001a_observed)
+        return FALSE;
+    if (!msl_b_register_receive_path()) {
+        msl_b_idle_state = MSL_B_IDLE_STATE_FAILED;
+        r42_media_stage = R42_MEDIA_FAILED;
+        return FALSE;
+    }
     r42_listener_rtp_arm(1);
     msl_b_media_rx_active = TRUE;
     msl_b_idle_state = MSL_B_IDLE_STATE_ACTIVE;
     r42_media_stage = R42_MEDIA_ACTIVE;
-    printf("MSL_B_DEVICE_STRUCTURAL_ACK_DERIVED_FROM_TX_COMPLETION=true\n");
+    printf("MSL_B_DEVICE_STRUCTURAL_ACK_DERIVED_FROM_TX_COMPLETION=false\n");
     printf("MSL_B_MEDIA_ACTIVE=true\n");
     msl_b_print_clock_marker("B04_STRUCTURAL_ACK_MEDIA_ACCEPTED");
     msl_b_print_clock_marker("T14_DEVICE_STRUCTURAL_ACK_MEDIA_ACCEPTANCE");
     msl_b_print_clock_marker("T15_MEDIA_ACTIVE");
     fflush(stdout);
+    return TRUE;
+}
+
+static gboolean
+msl_b_handle_device_ack_001a(guint32 request_id, const guint8 *body, guint body_len)
+{
+    if (!msl_b_wait_device_ack_001a || request_id != v4_ctpp_channel_id)
+        return FALSE;
+    if (!msl_b_ack_matches_source(body, body_len,
+                                  msl_b_idle_001a_body,
+                                  msl_b_idle_001a_body_len))
+        return FALSE;
+
+    msl_b_wait_device_ack_001a = FALSE;
+    msl_b_device_ack_001a_observed = TRUE;
+    printf("MSL_B_DEVICE_ACK_001A_OBSERVED=PASS\n");
+    fflush(stdout);
+    (void)msl_b_activate_idle_media_after_ack();
+    return TRUE;
 }
 
 static gboolean
@@ -342,6 +453,7 @@ msl_b_queue_idle_close(void)
         return TRUE;
     }
     r42_listener_rtp_arm(0);
+    msl_b_dispose_receive_path();
     msl_b_media_rx_active = FALSE;
     msl_b_media_rx_inactive_after_close = TRUE;
     msl_b_idle_state = MSL_B_IDLE_STATE_CLOSE_TX;
@@ -388,6 +500,8 @@ TX_COMPLETION_OPEN_REPLACEMENT = """        case P12_TX_R42_MEDIA_CHANNEL_OPEN:
             printf("R42_MEDIA_CHANNEL_OPEN_SENT=true\\n");
             fflush(stdout);
             if (msl_b_idle_state == MSL_B_IDLE_STATE_CHANNEL_OPEN_TX) {
+                msl_b_print_clock_marker("B02_RTPC_MEDIA_OPEN_CONTROL_READY");
+                msl_b_print_clock_marker("T12_RTPC_MEDIA_OPEN_CONTROL_READY");
                 if (!msl_b_queue_idle_self_activation()) {
                     msl_b_idle_state = MSL_B_IDLE_STATE_FAILED;
                     printf("MSL_B_IDLE_SELF_ACTIVATION_QUEUE=FAIL\\n");
@@ -401,7 +515,7 @@ TX_COMPLETION_OPEN_REPLACEMENT = """        case P12_TX_R42_MEDIA_CHANNEL_OPEN:
             break;
 
         case P12_TX_MSL_B_IDLE_SELF_ACTIVATION:
-            msl_b_activate_idle_media();
+            (void)msl_b_arm_device_ack_wait();
             break;"""
 
 TX_COMPLETION_CLOSE_ANCHOR = """        case P12_TX_R42_MEDIA_CHANNEL_CLOSE:
@@ -466,6 +580,16 @@ H264_RECOVERY_REPLACEMENT = """        if (nal_type == 5u && stream->first_keyfr
             msl_b_print_clock_marker("B07_FIRST_USABLE_SPS_PPS_IDR_RECOVERY_POINT");
         }"""
 
+DEVICE_ACK_HOOK_ANCHOR = """            if (r42_media_stage == R42_MEDIA_CHANNEL_CLOSE_WAIT) {
+"""
+DEVICE_ACK_HOOK_REPLACEMENT = """            if (msl_b_handle_device_ack_001a(request_id, body, body_len)) {
+                p12_consume_post_ack(frame_len);
+                continue;
+            }
+
+            if (r42_media_stage == R42_MEDIA_CHANNEL_CLOSE_WAIT) {
+"""
+
 READY_ANCHOR = """                printf(
                     "V4_RING_LISTENER_READY=true\\n"
                 );
@@ -516,6 +640,7 @@ def transform(source: str) -> str:
     candidate = _replace_once(candidate, RTP_VIDEO_ANCHOR, RTP_VIDEO_REPLACEMENT, "B06_VIDEO_RTP")
     candidate = _replace_once(candidate, RTP_AUDIO_ANCHOR, RTP_AUDIO_REPLACEMENT, "B05_AUDIO_RTP")
     candidate = _replace_once(candidate, H264_RECOVERY_ANCHOR, H264_RECOVERY_REPLACEMENT, "B07_H264_RECOVERY")
+    candidate = _replace_once(candidate, DEVICE_ACK_HOOK_ANCHOR, DEVICE_ACK_HOOK_REPLACEMENT, "DEVICE_ACK_HOOK")
     candidate = _replace_once(candidate, READY_ANCHOR, READY_REPLACEMENT, "READY")
     candidate = _replace_once(candidate, TIMER_ANCHOR, TIMER_REPLACEMENT, "TIMER")
     candidate = _replace_once(candidate, EXIT_ANCHOR, EXIT_REPLACEMENT, "EXIT")
@@ -553,6 +678,14 @@ def _assert_gates(candidate: str) -> None:
         "msl_b_ready_now",
         "msl_b_queue_idle_channel_open",
         "msl_b_queue_idle_self_activation",
+        "msl_b_arm_device_ack_wait",
+        "msl_b_handle_device_ack_001a",
+        "msl_b_ack_matches_source",
+        "msl_b_register_receive_path",
+        "MSL_B_DEVICE_ACK_001A_GATE_ARMED=true",
+        "MSL_B_DEVICE_ACK_001A_OBSERVED=PASS",
+        "MSL_B_DEVICE_STRUCTURAL_ACK_DERIVED_FROM_TX_COMPLETION=false",
+        "MSL_B_RECEIVE_PATH_REGISTERED_BEFORE_MEDIA_ACTIVE=true",
         "r42_listener_rtp_arm(1);",
         "r42_listener_rtp_arm(0);",
         "B00_IDLE_MEDIA_REQUEST_RECEIVED",
@@ -575,6 +708,24 @@ def _assert_gates(candidate: str) -> None:
             raise RuntimeError(f"MSL_B_REQUIRED_GATE=FAIL needle={required}")
     if candidate.count("P12_TX_MSL_B_IDLE_SELF_ACTIVATION") != 3:
         raise RuntimeError("MSL_B_SELF_ACTIVATION_TX_KIND_GATE=FAIL")
+    tx_case = candidate.split("case P12_TX_MSL_B_IDLE_SELF_ACTIVATION:", 1)[1].split("break;", 1)[0]
+    if "msl_b_arm_device_ack_wait()" not in tx_case or "msl_b_activate_idle_media" in tx_case:
+        raise RuntimeError("MSL_B_SELF_ACTIVATION_ACK_WAIT_GATE=FAIL")
+    ack_handler = candidate.split("msl_b_handle_device_ack_001a(guint32 request_id", 1)[1].split("\n}\n", 1)[0]
+    if "msl_b_activate_idle_media_after_ack()" not in ack_handler:
+        raise RuntimeError("MSL_B_ACK_ACTIVATION_GATE=FAIL")
+    activation = candidate.split("msl_b_activate_idle_media_after_ack(void)\n{", 1)[1].split("\n}\n", 1)[0]
+    if not (
+        activation.index("msl_b_register_receive_path()") <
+        activation.index("r42_listener_rtp_arm(1);") <
+        activation.index('printf("MSL_B_MEDIA_ACTIVE=true\\n");')
+    ):
+        raise RuntimeError("MSL_B_RECEIVE_REGISTER_BEFORE_ACTIVE_GATE=FAIL")
+    receive_hook = candidate.split("msl_b_handle_device_ack_001a(request_id, body, body_len)", 1)[1].split(
+        "R42_CAPABILITIES_DIAGNOSTICS_BEGIN", 1
+    )[0]
+    if "p12_consume_post_ack(frame_len);" not in receive_hook:
+        raise RuntimeError("MSL_B_DEVICE_ACK_CONSUME_GATE=FAIL")
     close_proto = candidate.index("static gboolean r42_queue_media_channel_close(void);")
     close_call = candidate.index("return r42_queue_media_channel_close() && p12_flush_tx();")
     close_definition = candidate.index("r42_queue_media_channel_close(void)\n{")
