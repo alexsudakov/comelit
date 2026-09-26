@@ -32,10 +32,27 @@ inside Home Assistant's own process or venv. It:
    (`transform_offer`).
 3. Obtains an OAuth access token via the **real**
    `custom_components/comelit/oauth.py` (`ComelitOAuthManager.async_get_access_token`),
-   the same class production uses, instantiated in-process with a session
-   backed by HA's persisted config entry data. The token is used immediately,
-   in memory, and is never written to a file, printed, logged, or embedded in
-   any marker.
+   the same class production uses, instantiated in-process with a synthetic
+   `ConfigEntry.data` built from CT120's existing research credential store,
+   `/root/.config/comelit/secrets.env` — the same file every other research
+   media runner on CT120 already treats as its credential source
+   (`ct120_run_p105_entrance_media_live.sh`, `ct120_run_p95_device_0002_live.sh`,
+   `ct120_run_pseudotcp_open_probe.sh`, and the native listener binaries
+   themselves via `P12_SECRETS_FILE`), read with the same `KEY=VALUE` parser
+   `research/ring/v4_2/comelit_cloud_probe.py:read_env()` already uses against
+   it (loaded by file path and reused, not reimplemented). `device_uuid`,
+   `vip_token`, and the OAuth token material come from that single file's
+   `COMELIT_DUUID`, `COMELIT_VIP_TOKEN`, and `COMELIT_OAUTH_ACCESS_TOKEN` (plus
+   optional `COMELIT_OAUTH_REFRESH_TOKEN`/`COMELIT_OAUTH_EXPIRES_AT`/
+   `COMELIT_OAUTH_SCOPE`) entries — never from HAOS's `/config/.storage`,
+   which does not exist on the bare CT120 research chroot. The token is used
+   immediately, in memory, and is never written to a file, printed, logged, or
+   embedded in any marker; only the mechanism name is reported
+   (`MSL_B_BOOTSTRAP_CONFIG_SOURCE=ct120_secrets_env`). A missing file or a
+   missing individual field fails closed with a bounded
+   `MSL_B_BOOTSTRAP_CONFIG_MISSING=<field>` marker plus
+   `MSL_B_BOOTSTRAP_FAIL_CLOSED=true reason=ConfigMissingError` — never a raw
+   traceback.
 4. Negotiates cloud P2P **exactly once** with the **real**
    `custom_components/comelit/cloud.py` (`async_negotiate_p2p`,
    `_validate_remote_sdp`).
@@ -172,10 +189,19 @@ outside the derivation function.
 | cloud failure | `cloud.ComelitCloudError` propagated after exactly one request | 1 |
 | malformed remote SDP | `cloud._validate_remote_sdp` raises | 1 |
 | timeout waiting for offer | `BootstrapError("offer_timeout")` | 0 |
+| secrets file absent | `ConfigMissingError("secrets_file")` before any offer/cloud step | 0 |
+| a required secrets field absent (`device_uuid`/`vip_token`/`oauth_access_token`) | `ConfigMissingError(<field>)` before any offer/cloud step | 0 |
 
 Every path above prints `MSL_B_BOOTSTRAP_FAIL_CLOSED=true reason=<ExceptionType>`
-and returns a non-zero exit code; none of them retry. The runner treats a
-non-zero provider exit, a cloud request count other than `1`, or a missing
+and returns a non-zero exit code; none of them retry. The two config-resolution
+rows also print `MSL_B_BOOTSTRAP_CONFIG_MISSING=<field>` — this is raised and
+caught in `main()`, before `_run()`'s own try/except even starts, specifically
+so a missing/incomplete credential source never surfaces as a raw Python
+traceback (the failure mode this child's corrective closed:
+`_resolve_runtime_config` used to call `/config/.storage/core.config_entries`,
+a path that only exists under HAOS, and crashed CT120 with an unhandled
+`FileNotFoundError` before printing anything). The runner treats a non-zero
+provider exit, a cloud request count other than `1`, or a missing
 `MSL_B_BOOTSTRAP_REMOTE_SDP_WRITTEN=true` marker as a hard failure
 (`run_bootstrap_provider`), which aborts before the research listener is ever
 handed the media-attempt ledger.

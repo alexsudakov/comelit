@@ -558,7 +558,6 @@ import asyncio
 from dataclasses import dataclass
 import importlib
 import importlib.util
-import json
 import os
 from pathlib import Path
 import sys
@@ -571,6 +570,18 @@ class BootstrapError(RuntimeError):
     pass
 
 
+class ConfigMissingError(BootstrapError):
+    def __init__(self, field: str) -> None:
+        super().__init__(f"config_missing:{field}")
+        self.field = field
+
+
+_CONFIG_SOURCE_NAME = "ct120_secrets_env"
+_DEFAULT_SECRETS_FILE = Path("/root/.config/comelit/secrets.env")
+_SECRETS_PROBE_REL = Path("safety-poc/research/ring/v4_2/comelit_cloud_probe.py")
+_SCENARIOS_REQUIRING_CREDENTIALS = ("none", "secrets_env_success")
+
+
 @dataclass
 class Config:
     repo: Path
@@ -580,7 +591,11 @@ class Config:
     log_file: Path
     device_uuid: str
     vip_token: str
-    ha_config_entries: Path | None
+    oauth_access_token: str
+    oauth_refresh_token: str
+    oauth_expires_at: str
+    oauth_scope: str
+    config_source: Path
     timeout_seconds: float
     fake_scenario: str
 
@@ -606,36 +621,65 @@ class FakeSession:
         raise BootstrapError("fake_session_network_unavailable")
 
 
-def _load_config_entries(path: Path) -> dict[str, object]:
-    obj = json.loads(path.read_text(encoding="utf-8"))
-    entries = obj.get("data", {}).get("entries", [])
-    for entry in entries:
-        if isinstance(entry, dict) and entry.get("domain") == "comelit":
-            data = entry.get("data")
-            if isinstance(data, dict):
-                return data
-    raise BootstrapError("ha_comelit_config_entry_missing")
+def _load_secrets_probe_module(repo: Path) -> object:
+    # Reuses the parser this repo's existing CT120 research cloud probe already
+    # uses against the same file every research media path treats as the
+    # credential source of truth (research/ring/v4_2/comelit_cloud_probe.py:
+    # read_env), instead of a second hand-rolled KEY=VALUE parser, and instead
+    # of the HAOS-only /config/.storage/core.config_entries path that does not
+    # exist on the bare CT120 research chroot.
+    return _load_module("msl_b_bootstrap_secrets_probe", repo / _SECRETS_PROBE_REL)
+
+
+def _read_secrets_env(repo: Path, config_source: Path) -> dict[str, str]:
+    probe = _load_secrets_probe_module(repo)
+    probe.SECRETS = config_source
+    try:
+        return probe.read_env()
+    except FileNotFoundError:
+        raise ConfigMissingError("secrets_file") from None
 
 
 def _resolve_runtime_config(args: argparse.Namespace) -> Config:
+    repo = Path(args.repo)
     run_dir = Path(args.run_dir)
-    ha_config_entries = Path(args.ha_config_entries) if args.ha_config_entries else None
-    data: dict[str, object] = {}
-    if ha_config_entries:
-        data = _load_config_entries(ha_config_entries)
-    device_uuid = args.device_uuid or str(data.get("device_uuid") or os.environ.get("COMELIT_DEVICE_UUID") or "")
-    vip_token = args.vip_token or str(data.get("vip_token") or os.environ.get("COMELIT_VIP_TOKEN") or "")
-    if args.fake_scenario == "none" and (not device_uuid or not vip_token):
-        raise BootstrapError("device_uuid_or_vip_token_missing")
+    config_source = Path(args.config_source)
+    device_uuid = args.device_uuid
+    vip_token = args.vip_token
+    oauth_access_token = args.oauth_access_token
+    oauth_refresh_token = ""
+    oauth_expires_at = ""
+    oauth_scope = ""
+
+    needs_credentials = args.fake_scenario in _SCENARIOS_REQUIRING_CREDENTIALS
+    if needs_credentials and not (device_uuid and vip_token and oauth_access_token):
+        secrets = _read_secrets_env(repo, config_source)
+        device_uuid = device_uuid or secrets.get("COMELIT_DUUID", "")
+        vip_token = vip_token or secrets.get("COMELIT_VIP_TOKEN", "")
+        oauth_access_token = oauth_access_token or secrets.get("COMELIT_OAUTH_ACCESS_TOKEN", "")
+        oauth_refresh_token = secrets.get("COMELIT_OAUTH_REFRESH_TOKEN", "")
+        oauth_expires_at = secrets.get("COMELIT_OAUTH_EXPIRES_AT", "")
+        oauth_scope = secrets.get("COMELIT_OAUTH_SCOPE", "")
+    if needs_credentials:
+        if not device_uuid:
+            raise ConfigMissingError("device_uuid")
+        if not vip_token:
+            raise ConfigMissingError("vip_token")
+        if not oauth_access_token:
+            raise ConfigMissingError("oauth_access_token")
     return Config(
-        repo=Path(args.repo),
+        repo=repo,
         run_dir=run_dir,
         offer_file=Path(args.offer_file),
         remote_file=Path(args.remote_file),
         log_file=Path(args.log_file),
         device_uuid=device_uuid,
         vip_token=vip_token,
-        ha_config_entries=ha_config_entries,
+        oauth_access_token=oauth_access_token,
+        oauth_refresh_token=oauth_refresh_token,
+        oauth_expires_at=oauth_expires_at,
+        oauth_scope=oauth_scope,
+        config_source=config_source,
         timeout_seconds=args.timeout_seconds,
         fake_scenario=args.fake_scenario,
     )
@@ -698,7 +742,7 @@ def _ensure_stub_module(name: str, build) -> None:
         sys.modules[name] = build()
 
 
-def _load_production_modules(config: Config) -> tuple[object, object, object]:
+def _load_production_modules(config: Config) -> tuple[object, object, object, object]:
     # oauth.py/cloud.py are HA integration files: they assume aiohttp and the
     # homeassistant package are on sys.path.  This provider runs as a bare
     # python3 process on CT120 (not inside HA's venv), so those are stubbed
@@ -725,11 +769,11 @@ def _load_production_modules(config: Config) -> tuple[object, object, object]:
     # dotted name) lets oauth.py's `from .const import ...` resolve via
     # sys.modules without ever executing custom_components/comelit/__init__.py
     # (which imports voluptuous and is irrelevant to the bootstrap).
-    _load_module("custom_components.comelit.const", component_dir / "const.py")
+    const = _load_module("custom_components.comelit.const", component_dir / "const.py")
     sdp = _load_module("custom_components.comelit.sdp", component_dir / "sdp.py")
     cloud = _load_module("custom_components.comelit.cloud", component_dir / "cloud.py")
     oauth = _load_module("custom_components.comelit.oauth", component_dir / "oauth.py")
-    return cloud, oauth, sdp
+    return cloud, oauth, sdp, const
 
 
 def _fake_remote_sdp() -> str:
@@ -766,7 +810,7 @@ def _fake_offer() -> bytes:
 
 
 async def _run(config: Config) -> int:
-    cloud, oauth, sdp = _load_production_modules(config)
+    cloud, oauth, sdp, const = _load_production_modules(config)
     runtime = _runtime_write_remote_shim(config)
     cloud_request_count = 0
     markers: list[str] = []
@@ -795,9 +839,15 @@ async def _run(config: Config) -> int:
         token_source = "ComelitOAuthManager.async_get_access_token"
         # Marker contract: MSL_B_BOOTSTRAP_TOKEN_SOURCE=ComelitOAuthManager.async_get_access_token
         print(f"MSL_B_BOOTSTRAP_TOKEN_SOURCE={token_source}")
-        if config.fake_scenario == "none":
-            data = _load_config_entries(config.ha_config_entries) if config.ha_config_entries else {}
-            entry = SimpleNamespace(data=data)
+        if config.fake_scenario in _SCENARIOS_REQUIRING_CREDENTIALS:
+            entry_data: dict[str, object] = {const.CONF_OAUTH_ACCESS_TOKEN: config.oauth_access_token}
+            if config.oauth_refresh_token:
+                entry_data[const.CONF_OAUTH_REFRESH_TOKEN] = config.oauth_refresh_token
+            if config.oauth_expires_at:
+                entry_data[const.CONF_OAUTH_EXPIRES_AT] = config.oauth_expires_at
+            if config.oauth_scope:
+                entry_data[const.CONF_OAUTH_SCOPE] = config.oauth_scope
+            entry = SimpleNamespace(data=entry_data)
             hass = SimpleNamespace(config_entries=FakeConfigEntries(entry))
             manager = oauth.ComelitOAuthManager(hass, FakeSession(), entry)
             access_token = await manager.async_get_access_token()
@@ -851,10 +901,23 @@ def main() -> int:
     parser.add_argument("--log-file", required=True)
     parser.add_argument("--device-uuid", default="")
     parser.add_argument("--vip-token", default="")
-    parser.add_argument("--ha-config-entries", default=os.environ.get("MSL_B_HA_CONFIG_ENTRIES", "/config/.storage/core.config_entries"))
+    parser.add_argument("--oauth-access-token", default="")
+    parser.add_argument(
+        "--config-source",
+        default=os.environ.get("MSL_B_BOOTSTRAP_CONFIG_SOURCE", str(_DEFAULT_SECRETS_FILE)),
+    )
     parser.add_argument("--timeout-seconds", type=float, default=20.0)
     parser.add_argument("--fake-scenario", default=os.environ.get("MSL_B_BOOTSTRAP_FAKE_SCENARIO", "none"))
-    config = _resolve_runtime_config(parser.parse_args())
+    args = parser.parse_args()
+    print(f"MSL_B_BOOTSTRAP_CONFIG_SOURCE={_CONFIG_SOURCE_NAME}")
+    try:
+        config = _resolve_runtime_config(args)
+    except Exception as exc:
+        if isinstance(exc, ConfigMissingError):
+            print(f"MSL_B_BOOTSTRAP_CONFIG_MISSING={exc.field}")
+        print("MSL_B_BOOTSTRAP_CLOUD_REQUEST_COUNT=0")
+        print(f"MSL_B_BOOTSTRAP_FAIL_CLOSED=true reason={type(exc).__name__}")
+        return 1
     return asyncio.run(_run(config))
 
 

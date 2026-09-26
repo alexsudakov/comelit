@@ -78,7 +78,14 @@ class MslV2ListenerBootstrapProviderTests(unittest.TestCase):
         cls.runner = RUNNER.read_text(encoding="utf-8")
         cls.provider_source = extract_provider()
 
-    def run_provider(self, scenario: str, *, write_offer: bool = True) -> subprocess.CompletedProcess[str]:
+    def run_provider(
+        self,
+        scenario: str,
+        *,
+        write_offer: bool = True,
+        config_source: Path | None = None,
+        extra_args: tuple[str, ...] = (),
+    ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             provider = root / "provider.py"
@@ -92,25 +99,27 @@ class MslV2ListenerBootstrapProviderTests(unittest.TestCase):
                 offer.write_bytes(VALID_OFFER)
             env = os.environ.copy()
             env["MSL_B_BOOTSTRAP_FAKE_SCENARIO"] = scenario
+            args = [
+                "python3",
+                str(provider),
+                "--repo",
+                str(ROOT),
+                "--run-dir",
+                str(run_dir),
+                "--offer-file",
+                str(offer),
+                "--remote-file",
+                str(remote),
+                "--log-file",
+                str(log),
+                "--timeout-seconds",
+                "0.1",
+                "--config-source",
+                str(config_source) if config_source is not None else str(root / "absent-secrets.env"),
+            ]
+            args.extend(extra_args)
             return subprocess.run(
-                [
-                    "python3",
-                    str(provider),
-                    "--repo",
-                    str(ROOT),
-                    "--run-dir",
-                    str(run_dir),
-                    "--offer-file",
-                    str(offer),
-                    "--remote-file",
-                    str(remote),
-                    "--log-file",
-                    str(log),
-                    "--timeout-seconds",
-                    "0.1",
-                    "--ha-config-entries",
-                    "",
-                ],
+                args,
                 text=True,
                 capture_output=True,
                 env=env,
@@ -193,6 +202,62 @@ class MslV2ListenerBootstrapProviderTests(unittest.TestCase):
         proc = self.run_provider("timeout", write_offer=False)
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("MSL_B_BOOTSTRAP_FAIL_CLOSED=true", proc.stdout)
+
+    def test_config_source_marker_always_reported(self) -> None:
+        proc = self.run_provider("success")
+        self.assertIn("MSL_B_BOOTSTRAP_CONFIG_SOURCE=ct120_secrets_env", proc.stdout)
+
+    def test_missing_secrets_file_fails_closed_not_traceback(self) -> None:
+        proc = self.run_provider("secrets_env_success", write_offer=False)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("MSL_B_BOOTSTRAP_CONFIG_SOURCE=ct120_secrets_env", proc.stdout)
+        self.assertIn("MSL_B_BOOTSTRAP_CONFIG_MISSING=secrets_file", proc.stdout)
+        self.assertIn("MSL_B_BOOTSTRAP_FAIL_CLOSED=true reason=ConfigMissingError", proc.stdout)
+        self.assertIn("MSL_B_BOOTSTRAP_CLOUD_REQUEST_COUNT=0", proc.stdout)
+        self.assertNotIn("Traceback", proc.stdout)
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def test_missing_single_credential_field_fails_closed_with_field_name(self) -> None:
+        with tempfile.TemporaryDirectory() as secrets_dir:
+            secrets_file = Path(secrets_dir) / "secrets.env"
+            secrets_file.write_text(
+                "COMELIT_DUUID=deadbeef-test-uuid\n"
+                "COMELIT_VIP_TOKEN=0123456789abcdef0123456789abcdef\n",
+                encoding="utf-8",
+            )
+            proc = self.run_provider("secrets_env_success", write_offer=False, config_source=secrets_file)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("MSL_B_BOOTSTRAP_CONFIG_MISSING=oauth_access_token", proc.stdout)
+        self.assertIn("MSL_B_BOOTSTRAP_FAIL_CLOSED=true reason=ConfigMissingError", proc.stdout)
+        self.assertNotIn("Traceback", proc.stdout)
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def test_secrets_env_success_end_to_end_emits_markers_without_token_leak(self) -> None:
+        secret_device_uuid = "deadbeef-secret-device-uuid"
+        secret_vip_token = "0123456789abcdef0123456789abcdef"
+        secret_access_token = "SUPER-SECRET-ACCESS-TOKEN-VALUE-MUST-NEVER-BE-PRINTED"
+        with tempfile.TemporaryDirectory() as secrets_dir:
+            secrets_file = Path(secrets_dir) / "secrets.env"
+            secrets_file.write_text(
+                f"COMELIT_DUUID={secret_device_uuid}\n"
+                f"COMELIT_VIP_TOKEN={secret_vip_token}\n"
+                f"COMELIT_OAUTH_ACCESS_TOKEN={secret_access_token}\n",
+                encoding="utf-8",
+            )
+            proc = self.run_provider("secrets_env_success", write_offer=False, config_source=secrets_file)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        for marker in (
+            "MSL_B_BOOTSTRAP_CONFIG_SOURCE=ct120_secrets_env",
+            "MSL_B_BOOTSTRAP_OFFER_READ=true",
+            "MSL_B_BOOTSTRAP_TRANSFORM=PASS",
+            "MSL_B_BOOTSTRAP_TOKEN_SOURCE=ComelitOAuthManager.async_get_access_token",
+            "MSL_B_BOOTSTRAP_CLOUD_REQUEST_COUNT=1",
+            "MSL_B_BOOTSTRAP_REMOTE_SDP_WRITTEN=true",
+        ):
+            self.assertIn(marker, proc.stdout)
+        for secret in (secret_device_uuid, secret_vip_token, secret_access_token):
+            self.assertNotIn(secret, proc.stdout)
+            self.assertNotIn(secret, proc.stderr)
 
     def test_runner_bootstrap_only_and_ledger_independence(self) -> None:
         for marker in (
