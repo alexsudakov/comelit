@@ -251,8 +251,19 @@ def _make_injected_packet(template: _RtpPacket, sequence: int, payload: bytes) -
 
 
 class H264RecoveryRewriter:
-    def __init__(self, *, payload_type: int = H264_PAYLOAD_TYPE) -> None:
+    def __init__(
+        self,
+        *,
+        payload_type: int = H264_PAYLOAD_TYPE,
+        on_decodable_frame: Callable[[], None] | None = None,
+    ) -> None:
         self._payload_type = payload_type
+        # Diagnostic-only: fired at most once, the first time an access unit
+        # is observed with SPS+PPS already seen before its IDR slice NAL
+        # (i.e. the first frame a decoder could actually decode). Never
+        # consulted by the rewrite/injection logic below.
+        self._on_decodable_frame = on_decodable_frame
+        self._decodable_frame_signaled = False
         self._sequence_offsets: dict[int, int] = {}
         self._access_units: dict[int, _AccessUnitState] = {}
         self.input_packets = 0
@@ -325,6 +336,15 @@ class H264RecoveryRewriter:
                 au.seen_recovery_point_sei = True
             return False
         if nal_type == 5:
+            if (
+                not self._decodable_frame_signaled
+                and not au.seen_idr
+                and au.seen_sps
+                and au.seen_pps
+            ):
+                self._decodable_frame_signaled = True
+                if self._on_decodable_frame is not None:
+                    self._on_decodable_frame()
             au.seen_vcl = True
             au.seen_idr = True
             self.idr_count = _inc(self.idr_count)
@@ -493,12 +513,13 @@ class H264RecoveryRtpShim:
         host: str = "127.0.0.1",
         endpoint_factory: Callable[..., Awaitable[tuple[asyncio.DatagramTransport, Any]]]
         | None = None,
+        on_decodable_frame: Callable[[], None] | None = None,
     ) -> None:
         self._host = host
         self._input_port = input_port
         self._output_port = output_port
         self._endpoint_factory = endpoint_factory
-        self._rewriter = H264RecoveryRewriter()
+        self._rewriter = H264RecoveryRewriter(on_decodable_frame=on_decodable_frame)
         self._input_transport: asyncio.DatagramTransport | None = None
         self._output_transport: asyncio.DatagramTransport | None = None
         self._protocol: RecoveryRtpShimProtocol | None = None

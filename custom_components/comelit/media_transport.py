@@ -14,6 +14,21 @@ from homeassistant.core import HomeAssistant
 
 from .cloud import ComelitCloudError, async_negotiate_p2p
 from .h264_recovery import H264RecoveryRtpShim
+from .latency_timeline import (
+    CameraRequestLatencyTimeline,
+    T04_TRANSPORT_START_BEGIN,
+    T05_ICE_GATHER_DONE,
+    T06_CLOUD_NEGOTIATE_BEGIN,
+    T07_REMOTE_SDP_READY,
+    T08_ICE_CONNECTED,
+    T09_PSEUDOTCP_OPEN,
+    T11_CTPP_READY,
+    T12_SELF_ACTIVATION_SENT,
+    T13_RTPC_READY,
+    T14_MEDIA_ACTIVE,
+    T15_FIRST_VIDEO_RTP,
+    T16_FIRST_DECODABLE_FRAME,
+)
 from .media_diagnostics import MediaProgressDiagnostics
 from .oauth import ComelitOAuthError, ComelitOAuthManager
 from .sdp import ComelitSdpError, transform_offer
@@ -91,6 +106,22 @@ _MEDIA_NATIVE_PROTOCOL_MARKER_PREFIXES = (
     "REFRESH_",
 )
 _MEDIA_STATUS_NOTIFY_MIN_INTERVAL_SECONDS = 1.0
+
+# Diagnostic-only: exact native stdout marker lines observed in existing live
+# evidence (safety-poc/research/media/v1/P116_R30H_D_REPEAT_001A_LIVE_PROOF_RESULT.md)
+# and confirmed present verbatim in the pinned native binary's string table,
+# mapped to the first-observation latency boundary they stamp. Never used to
+# drive control flow; only to timestamp an already-happening event.
+_NATIVE_MARKER_LATENCY_BOUNDARIES = {
+    "ICE_GATHER=PASS": T05_ICE_GATHER_DONE,
+    "ICE_CONNECTED=PASS": T08_ICE_CONNECTED,
+    "PSEUDOTCP_OPEN=PASS": T09_PSEUDOTCP_OPEN,
+    "P78_CTPP_REGISTERED_REUSED=true": T11_CTPP_READY,
+    "ENTRANCE_SELF_ACTIVATION_SENT=PASS": T12_SELF_ACTIVATION_SENT,
+    "P78_RTPC_SIGNALING_RESULT=PASS": T13_RTPC_READY,
+    "P80_MEDIA_ACTIVE=true": T14_MEDIA_ACTIVE,
+    "P80_VIDEO_RTP_FORWARDING=PASS": T15_FIRST_VIDEO_RTP,
+}
 
 _LOCAL_RTP_SDP = f"""v=0\r
 o=- 0 0 IN IP4 127.0.0.1\r
@@ -266,6 +297,7 @@ class ComelitEntranceMediaTransport:
         self._status_listeners: set[Callable[[], None]] = set()
         self._status_notify_handle: asyncio.TimerHandle | None = None
         self._last_status_notify_monotonic: float | None = None
+        self._latency_timeline: CameraRequestLatencyTimeline | None = None
 
     @property
     def active(self) -> bool:
@@ -368,6 +400,17 @@ class ComelitEntranceMediaTransport:
     def last_native_failure_markers(self) -> list[str]:
         return list(self._last_native_failure_markers)
 
+    def set_latency_timeline(
+        self, timeline: CameraRequestLatencyTimeline | None
+    ) -> None:
+        """Bind (or clear) the bounded diagnostic timeline for the next cold start.
+
+        Diagnostic-only: never read by any lifecycle/safety decision here.
+        Cleared in :meth:`async_stop` so it never leaks into an unrelated
+        later session sharing this same transport instance.
+        """
+        self._latency_timeline = timeline
+
     def async_add_status_listener(self, callback: Callable[[], None]) -> Callable[[], None]:
         """Register a bounded diagnostics status listener and return its remover."""
         self._status_listeners.add(callback)
@@ -437,6 +480,23 @@ class ComelitEntranceMediaTransport:
                     :-_MEDIA_NATIVE_PROTOCOL_MARKER_LIMIT
                 ]
 
+    def _observe_latency_marker(self, line: str) -> None:
+        timeline = self._latency_timeline
+        if timeline is None:
+            return
+        boundary = _NATIVE_MARKER_LATENCY_BOUNDARIES.get(line)
+        if boundary is not None:
+            timeline.mark(boundary, asyncio.get_running_loop().time())
+            return
+        if line.startswith("P80_VIDEO_RTP_PACKETS="):
+            # Parsed directly from this line rather than read from
+            # self._progress: this runs before the existing
+            # self._progress.update_marker(line) call below, so the
+            # counter has not advanced for this line yet.
+            raw_count = line[len("P80_VIDEO_RTP_PACKETS=") :]
+            if raw_count.isdigit() and int(raw_count) > 0:
+                timeline.mark(T15_FIRST_VIDEO_RTP, asyncio.get_running_loop().time())
+
     def _capture_native_failure(self, returncode: int) -> None:
         self._last_native_exit_code = returncode
         self._last_native_failure_markers = list(self._native_marker_tail)
@@ -480,6 +540,11 @@ class ComelitEntranceMediaTransport:
         self._video_forwarding.clear()
         self._audio_forwarding.clear()
         self._video_recovery_shim = None
+        timeline = self._latency_timeline
+        if timeline is not None:
+            timeline.mark(
+                T04_TRANSPORT_START_BEGIN, asyncio.get_running_loop().time()
+            )
         self._task = self._entry.async_create_background_task(
             self._hass,
             self._async_run_once(),
@@ -576,11 +641,22 @@ class ComelitEntranceMediaTransport:
         await self._async_stop_video_recovery_shim()
         await self._hass.async_add_executor_job(_remove_helper_secret)
         await self._hass.async_add_executor_job(_remove_local_sdp)
+        self._latency_timeline = None
 
     async def _async_start_video_recovery_shim(self) -> None:
+        timeline = self._latency_timeline
+        on_decodable_frame = None
+        if timeline is not None:
+
+            def on_decodable_frame() -> None:
+                timeline.mark(
+                    T16_FIRST_DECODABLE_FRAME, asyncio.get_running_loop().time()
+                )
+
         shim = H264RecoveryRtpShim(
             input_port=MEDIA_VIDEO_RTP_PORT,
             output_port=MEDIA_VIDEO_HA_RTP_PORT,
+            on_decodable_frame=on_decodable_frame,
         )
         self._video_recovery_shim = shim
         try:
@@ -683,6 +759,11 @@ class ComelitEntranceMediaTransport:
             raw_offer = await self._hass.async_add_executor_job(_read_offer)
             comelit_offer = transform_offer(raw_offer).decode("ascii")
             oauth_access_token = await self._oauth.async_get_access_token()
+            timeline = self._latency_timeline
+            if timeline is not None:
+                timeline.mark(
+                    T06_CLOUD_NEGOTIATE_BEGIN, asyncio.get_running_loop().time()
+                )
             # No generic automatic retry here. The media lifecycle owns one
             # bootstrap attempt; token refresh is handled before this call by
             # ComelitOAuthManager according to persisted expiry metadata.
@@ -694,6 +775,10 @@ class ComelitEntranceMediaTransport:
                 offer_sdp=comelit_offer,
             )
             await self._hass.async_add_executor_job(_write_remote, remote)
+            if timeline is not None:
+                timeline.mark(
+                    T07_REMOTE_SDP_READY, asyncio.get_running_loop().time()
+                )
 
             active_wait = asyncio.create_task(self._media_active.wait())
             process_wait = asyncio.create_task(process.wait())
@@ -759,6 +844,7 @@ class ComelitEntranceMediaTransport:
                 return
             line = raw.decode("utf-8", errors="replace").strip()
             self._remember_native_marker(line)
+            self._observe_latency_marker(line)
 
             if line == "ICE_GATHER=PASS":
                 self._offer_ready.set()

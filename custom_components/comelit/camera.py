@@ -35,7 +35,20 @@ from .const import (
     ENTRANCE_CAMERA_ENTITY_ID,
     ENTRANCE_CAMERA_UNIQUE_ID,
 )
-from .media_session import MEDIA_PHASE_ERROR, ComelitMediaSessionManager
+from .latency_timeline import (
+    CameraRequestLatencyTimeline,
+    T00_CAMERA_REQUEST,
+    T01_LEASE_ACQUIRE_BEGIN,
+    T17_HA_STREAM_READY,
+    T18_HLS_PROVIDER_PRESENT,
+    T19_HLS_FIRST_PART,
+    T20_HLS_FIRST_COMPLETE_SEGMENT,
+)
+from .media_session import (
+    MEDIA_PHASE_ERROR,
+    MEDIA_PHASE_INACTIVE,
+    ComelitMediaSessionManager,
+)
 from .media_transport import ComelitEntranceMediaTransport
 from .ring_media import HAStreamMediaProvider
 
@@ -300,6 +313,7 @@ class ComelitEntranceCamera(Camera):
         self._hls_http_probe_task: asyncio.Task[None] | None = None
         self._hls_http_probe_done = False
         self._hls_http_probe_result: dict[str, Any] | None = None
+        self._latency_timeline: CameraRequestLatencyTimeline | None = None
         self.entity_id = ENTRANCE_CAMERA_ENTITY_ID
 
     @property
@@ -563,6 +577,32 @@ class ComelitEntranceCamera(Camera):
             diagnostics["hls_first_part_has_keyframe"] = None
         return diagnostics
 
+    def _async_handle_stream_update(self) -> None:
+        """HA Stream's own update callback: the bounded HLS latency observer."""
+        self._record_hls_latency_boundaries()
+        self.async_write_ha_state()
+
+    def _record_hls_latency_boundaries(self) -> None:
+        timeline = self._latency_timeline
+        if timeline is None or timeline.emitted:
+            return
+        diagnostics = self._hls_runtime_diagnostics()
+        loop = asyncio.get_running_loop()
+        if diagnostics.get("hls_provider_present"):
+            timeline.mark(T18_HLS_PROVIDER_PRESENT, loop.time())
+        if diagnostics.get("hls_first_part_bytes") is not None:
+            timeline.mark(T19_HLS_FIRST_PART, loop.time())
+        if diagnostics.get("hls_first_segment_complete"):
+            timeline.mark(T20_HLS_FIRST_COMPLETE_SEGMENT, loop.time())
+        if timeline.is_complete():
+            self._emit_latency_log(timeline)
+
+    def _emit_latency_log(self, timeline: CameraRequestLatencyTimeline) -> None:
+        if timeline.emitted:
+            return
+        timeline.mark_emitted()
+        _LOGGER.info("%s", timeline.log_line())
+
     def _log_hls_runtime_diagnostics_if_changed(self) -> None:
         payload = self._hls_runtime_diagnostics()
         active_transport = self._camera_view_transport or self._transport
@@ -652,6 +692,9 @@ class ComelitEntranceCamera(Camera):
 
     async def _async_acquire_camera_view_media(self) -> None:
         """Acquire one camera-view lease, preferring an inbound Ring transaction."""
+        timeline = self._latency_timeline
+        if timeline is not None:
+            timeline.mark(T01_LEASE_ACQUIRE_BEGIN, asyncio.get_running_loop().time())
         async with self._camera_view_lock:
             if self._camera_view_owner is not None:
                 if self._camera_view_owner.active:
@@ -682,12 +725,28 @@ class ComelitEntranceCamera(Camera):
                 )
                 return
 
+            # Diagnostic-only: only attach the timeline when this call is
+            # actually about to cold-bootstrap the on-demand transport (phase
+            # is INACTIVE), so an unrelated reused-session or synthetic-ring
+            # acquire sharing this same manager/transport never has its
+            # native markers mis-attributed to this request's timeline.
+            bootstrap_timeline = (
+                timeline
+                if timeline is not None
+                and self._manager.phase == MEDIA_PHASE_INACTIVE
+                else None
+            )
+            if bootstrap_timeline is not None:
+                self._manager.set_latency_timeline(bootstrap_timeline)
+                self._transport.set_latency_timeline(bootstrap_timeline)
+            acquire_failed = False
             try:
                 await self._manager.async_acquire(
                     panel="entrance",
                     reason=_CAMERA_VIEW_LEASE_REASON,
                 )
             except ComelitMediaSessionError as exc:
+                acquire_failed = True
                 # A Ring can win the race after the claimed check above. The
                 # on-demand manager rejects attached media before pausing the
                 # listener or sending any network request, so joining the now
@@ -715,6 +774,14 @@ class ComelitEntranceCamera(Camera):
                     )
                     return
                 raise
+            finally:
+                if bootstrap_timeline is not None:
+                    self._manager.set_latency_timeline(None)
+                    if acquire_failed:
+                        # On success the transport's background reader task
+                        # keeps consuming markers past this point (T15/T16
+                        # arrive later), so only clear it here on failure.
+                        self._transport.set_latency_timeline(None)
 
             await self._async_bind_camera_view(
                 self._manager,
@@ -724,6 +791,9 @@ class ComelitEntranceCamera(Camera):
             )
 
     async def _async_release_camera_view_media(self) -> None:
+        timeline = self._latency_timeline
+        if timeline is not None and not timeline.emitted:
+            self._emit_latency_log(timeline)
         async with self._camera_view_lock:
             owner = self._camera_view_owner
             provider = self._camera_view_provider
@@ -785,6 +855,10 @@ class ComelitEntranceCamera(Camera):
             if self.stream is not None:
                 await self._async_reset_stream()
 
+            timeline = CameraRequestLatencyTimeline()
+            timeline.mark(T00_CAMERA_REQUEST, asyncio.get_running_loop().time())
+            self._latency_timeline = timeline
+
             await self._async_acquire_camera_view_media()
             try:
                 provider = self._camera_view_provider
@@ -797,7 +871,8 @@ class ComelitEntranceCamera(Camera):
                     raise HomeAssistantError(
                         "Comelit live-view media source did not become ready"
                     )
-                stream.set_update_callback(self.async_write_ha_state)
+                timeline.mark(T17_HA_STREAM_READY, asyncio.get_running_loop().time())
+                stream.set_update_callback(self._async_handle_stream_update)
                 self.stream = stream
                 self._reset_hls_http_probe_state()
                 self._last_hls_diagnostics_signature = None

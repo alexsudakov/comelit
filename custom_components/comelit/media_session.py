@@ -6,6 +6,14 @@ from datetime import UTC, datetime, timedelta
 import math
 from typing import Any, Protocol
 
+# Literal boundary keys duplicated from latency_timeline.py rather than
+# imported: this module is loaded standalone (no package context) by some
+# existing tests, and it previously had zero intra-package imports. A
+# CameraRequestLatencyTimeline.mark() call only needs the string value, not
+# the constant object, so no import is required here.
+_T02_LISTENER_PAUSE_REQUESTED = "T02_LISTENER_PAUSE_REQUESTED"
+_T03_LISTENER_PAUSED_CONFIRMED = "T03_LISTENER_PAUSED_CONFIRMED"
+
 MEDIA_SESSION_HARD_LIMIT_SECONDS = 600
 MEDIA_TRANSPORT_WATCH_INTERVAL_SECONDS = 0.5
 MEDIA_PHASE_INACTIVE = "inactive"
@@ -103,6 +111,7 @@ class ComelitMediaSessionManager:
         self._watchdog_task: asyncio.Task[None] | None = None
         self._last_error: str | None = None
         self._status_listeners: set[Callable[[], None]] = set()
+        self._latency_timeline: Any | None = None
 
     @property
     def phase(self) -> str:
@@ -144,6 +153,13 @@ class ComelitMediaSessionManager:
             "last_error": self._last_error,
             "listener_paused": self._listener.media_paused,
         }
+
+    def set_latency_timeline(self, timeline: Any | None) -> None:
+        """Bind (or clear) the bounded diagnostic timeline for the next acquire only.
+
+        Diagnostic-only: never read by any lifecycle/safety decision here.
+        """
+        self._latency_timeline = timeline
 
     def async_add_status_listener(self, callback: Callable[[], None]) -> Callable[[], None]:
         """Register an in-process entity status listener and return its remover."""
@@ -189,10 +205,21 @@ class ComelitMediaSessionManager:
             self._last_error = None
             self._set_phase(MEDIA_PHASE_STARTING)
 
+            timeline = self._latency_timeline
             try:
+                if timeline is not None:
+                    timeline.mark(
+                        _T02_LISTENER_PAUSE_REQUESTED,
+                        asyncio.get_running_loop().time(),
+                    )
                 await self._listener.async_pause_for_media()
                 if not self._listener.media_paused:
                     raise ComelitMediaSessionError("listener_pause_not_confirmed")
+                if timeline is not None:
+                    timeline.mark(
+                        _T03_LISTENER_PAUSED_CONFIRMED,
+                        asyncio.get_running_loop().time(),
+                    )
 
                 await self._transport.async_start(panel)
                 if not self._transport.active:
