@@ -129,7 +129,10 @@ class MiniAppSessionView(_MiniAppView):
         except TelegramAuthenticationError as exc:
             raise web.HTTPUnauthorized from exc
 
-        token, session = self.controller.sessions.create(identity.user_id)
+        token, session = self.controller.sessions.create(
+            identity.user_id,
+            settings.bot_id,
+        )
         response = _json_response(
             {
                 "authenticated": True,
