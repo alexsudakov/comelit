@@ -39,10 +39,10 @@ from .latency_timeline import (
     CameraRequestLatencyTimeline,
     T00_CAMERA_REQUEST,
     T01_LEASE_ACQUIRE_BEGIN,
-    T17_HA_STREAM_READY,
-    T18_HLS_PROVIDER_PRESENT,
-    T19_HLS_FIRST_PART,
-    T20_HLS_FIRST_COMPLETE_SEGMENT,
+    T18_HA_STREAM_READY,
+    T19_HLS_PROVIDER_PRESENT,
+    T20_HLS_FIRST_PART,
+    T21_HLS_FIRST_COMPLETE_SEGMENT,
 )
 from .media_session import (
     MEDIA_PHASE_ERROR,
@@ -589,11 +589,11 @@ class ComelitEntranceCamera(Camera):
         diagnostics = self._hls_runtime_diagnostics()
         loop = asyncio.get_running_loop()
         if diagnostics.get("hls_provider_present"):
-            timeline.mark(T18_HLS_PROVIDER_PRESENT, loop.time())
+            timeline.mark(T19_HLS_PROVIDER_PRESENT, loop.time())
         if diagnostics.get("hls_first_part_bytes") is not None:
-            timeline.mark(T19_HLS_FIRST_PART, loop.time())
+            timeline.mark(T20_HLS_FIRST_PART, loop.time())
         if diagnostics.get("hls_first_segment_complete"):
-            timeline.mark(T20_HLS_FIRST_COMPLETE_SEGMENT, loop.time())
+            timeline.mark(T21_HLS_FIRST_COMPLETE_SEGMENT, loop.time())
         if timeline.is_complete():
             self._emit_latency_log(timeline)
 
@@ -871,7 +871,7 @@ class ComelitEntranceCamera(Camera):
                     raise HomeAssistantError(
                         "Comelit live-view media source did not become ready"
                     )
-                timeline.mark(T17_HA_STREAM_READY, asyncio.get_running_loop().time())
+                timeline.mark(T18_HA_STREAM_READY, asyncio.get_running_loop().time())
                 stream.set_update_callback(self._async_handle_stream_update)
                 self.stream = stream
                 self._reset_hls_http_probe_state()

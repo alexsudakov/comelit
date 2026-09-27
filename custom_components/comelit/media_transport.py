@@ -22,12 +22,14 @@ from .latency_timeline import (
     T07_REMOTE_SDP_READY,
     T08_ICE_CONNECTED,
     T09_PSEUDOTCP_OPEN,
-    T11_CTPP_READY,
+    T10_CTPP_READY,
+    T11_SIGNALING_ARMED,
     T12_SELF_ACTIVATION_SENT,
-    T13_RTPC_READY,
-    T14_MEDIA_ACTIVE,
-    T15_FIRST_VIDEO_RTP,
-    T16_FIRST_DECODABLE_FRAME,
+    T13_RTPC_BEGIN,
+    T14_RTPC_CONTROL_COMPLETE,
+    T15_MEDIA_ACTIVE,
+    T16_FIRST_VIDEO_RTP,
+    T17_FIRST_DECODABLE_FRAME,
 )
 from .media_diagnostics import MediaProgressDiagnostics
 from .oauth import ComelitOAuthError, ComelitOAuthManager
@@ -112,15 +114,22 @@ _MEDIA_STATUS_NOTIFY_MIN_INTERVAL_SECONDS = 1.0
 # and confirmed present verbatim in the pinned native binary's string table,
 # mapped to the first-observation latency boundary they stamp. Never used to
 # drive control flow; only to timestamp an already-happening event.
+#
+# V4_CTPP_REGISTRATION=PASS (inside p12_tx_completed's P12_TX_V4_ACK_PAIR
+# case) is the true CTPP registration completion. P78_CTPP_REGISTERED_REUSED
+# is printed later, inside p78_begin_rtpc_control(), and marks the start of
+# the RTPC control stage, not CTPP readiness.
 _NATIVE_MARKER_LATENCY_BOUNDARIES = {
     "ICE_GATHER=PASS": T05_ICE_GATHER_DONE,
     "ICE_CONNECTED=PASS": T08_ICE_CONNECTED,
     "PSEUDOTCP_OPEN=PASS": T09_PSEUDOTCP_OPEN,
-    "P78_CTPP_REGISTERED_REUSED=true": T11_CTPP_READY,
+    "V4_CTPP_REGISTRATION=PASS": T10_CTPP_READY,
+    "ENTRANCE_SIGNALING_ARMED=true": T11_SIGNALING_ARMED,
     "ENTRANCE_SELF_ACTIVATION_SENT=PASS": T12_SELF_ACTIVATION_SENT,
-    "P78_RTPC_SIGNALING_RESULT=PASS": T13_RTPC_READY,
-    "P80_MEDIA_ACTIVE=true": T14_MEDIA_ACTIVE,
-    "P80_VIDEO_RTP_FORWARDING=PASS": T15_FIRST_VIDEO_RTP,
+    "P78_CTPP_REGISTERED_REUSED=true": T13_RTPC_BEGIN,
+    "P78_RTPC_SIGNALING_RESULT=PASS": T14_RTPC_CONTROL_COMPLETE,
+    "P80_MEDIA_ACTIVE=true": T15_MEDIA_ACTIVE,
+    "P80_VIDEO_RTP_FORWARDING=PASS": T16_FIRST_VIDEO_RTP,
 }
 
 _LOCAL_RTP_SDP = f"""v=0\r
@@ -495,7 +504,7 @@ class ComelitEntranceMediaTransport:
             # counter has not advanced for this line yet.
             raw_count = line[len("P80_VIDEO_RTP_PACKETS=") :]
             if raw_count.isdigit() and int(raw_count) > 0:
-                timeline.mark(T15_FIRST_VIDEO_RTP, asyncio.get_running_loop().time())
+                timeline.mark(T16_FIRST_VIDEO_RTP, asyncio.get_running_loop().time())
 
     def _capture_native_failure(self, returncode: int) -> None:
         self._last_native_exit_code = returncode
@@ -650,7 +659,7 @@ class ComelitEntranceMediaTransport:
 
             def on_decodable_frame() -> None:
                 timeline.mark(
-                    T16_FIRST_DECODABLE_FRAME, asyncio.get_running_loop().time()
+                    T17_FIRST_DECODABLE_FRAME, asyncio.get_running_loop().time()
                 )
 
         shim = H264RecoveryRtpShim(

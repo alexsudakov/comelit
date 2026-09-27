@@ -16,8 +16,8 @@ ROOT = Path(__file__).resolve().parents[2]
 MEDIA = ROOT / "safety-poc" / "research" / "media" / "v1"
 SOURCE = ROOT / "safety-poc" / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-ctpp-door.c"
 TRANSFORM = MEDIA / "entrance_p116_r27_repeat_001a_transform.py"
-EXPECTED_GENERATED_SOURCE_SHA = "a923576b493ee94faeb6ec7eb5ece3faaddce951408b05deb24a1952beb31394"
-RUNNER_EXPECTED_SOURCE_SHA = "a923576b493ee94faeb6ec7eb5ece3faaddce951408b05deb24a1952beb31394"
+EXPECTED_GENERATED_SOURCE_SHA = "a422264be5f00f453278155c069144720b3149c8b957f0a3ed5488357977fb93"
+RUNNER_EXPECTED_SOURCE_SHA = "a422264be5f00f453278155c069144720b3149c8b957f0a3ed5488357977fb93"
 RUNNER_HISTORICAL_PRE_R30D_SOURCE_SHA = "62e0023521cef0e4178248beb78408f89752d108d9d009c388ff153d94195368"
 
 # This is an explicit source-local declaration-order gate for R27-added code in

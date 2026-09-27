@@ -5,12 +5,25 @@ import ast
 import asyncio
 import importlib.util
 from pathlib import Path
+import shutil
 import struct
+import subprocess
 import sys
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 COMPONENT = ROOT / "custom_components" / "comelit"
+MEDIA_DIR = ROOT / "safety-poc" / "research" / "media" / "v1"
+DOOR_SOURCE = (
+    ROOT
+    / "safety-poc"
+    / "research"
+    / "door"
+    / "v1_5_7"
+    / "comelit-v4-persistent-ctpp-door.c"
+)
+SETTLE_TRANSFORM = MEDIA_DIR / "entrance_device_video_ack_observation_transform.py"
 
 
 def _load(name: str, path: Path):
@@ -28,6 +41,73 @@ h264_recovery = _load("comelit_h264_recovery_p117", COMPONENT / "h264_recovery.p
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_mvp1_local_sdp_readiness_corrective as transport_fixture  # noqa: E402
 
+sys.path.insert(0, str(MEDIA_DIR))
+from entrance_p116_r65_production_media_refresh_transform import (  # noqa: E402
+    transform as r65_transform,
+)
+
+EXPECTED_BOUNDARIES = (
+    "T00_CAMERA_REQUEST",
+    "T01_LEASE_ACQUIRE_BEGIN",
+    "T02_LISTENER_PAUSE_REQUESTED",
+    "T03_LISTENER_PAUSED_CONFIRMED",
+    "T04_TRANSPORT_START_BEGIN",
+    "T05_ICE_GATHER_DONE",
+    "T06_CLOUD_NEGOTIATE_BEGIN",
+    "T07_REMOTE_SDP_READY",
+    "T08_ICE_CONNECTED",
+    "T09_PSEUDOTCP_OPEN",
+    "T10_CTPP_READY",
+    "T11_SIGNALING_ARMED",
+    "T12_SELF_ACTIVATION_SENT",
+    "T13_RTPC_BEGIN",
+    "T14_RTPC_CONTROL_COMPLETE",
+    "T15_MEDIA_ACTIVE",
+    "T16_FIRST_VIDEO_RTP",
+    "T17_FIRST_DECODABLE_FRAME",
+    "T18_HA_STREAM_READY",
+    "T19_HLS_PROVIDER_PRESENT",
+    "T20_HLS_FIRST_PART",
+    "T21_HLS_FIRST_COMPLETE_SEGMENT",
+)
+
+EXPECTED_FIELD_ORDER = (
+    "CAMERA_REQUEST_TO_LISTENER_PAUSED_MS",
+    "LISTENER_PAUSED_TO_TRANSPORT_START_MS",
+    "TRANSPORT_START_TO_CLOUD_NEGOTIATE_MS",
+    "CLOUD_NEGOTIATE_TO_REMOTE_SDP_MS",
+    "REMOTE_SDP_TO_ICE_CONNECTED_MS",
+    "TRANSPORT_START_TO_ICE_CONNECTED_MS",
+    "ICE_CONNECTED_TO_PSEUDOTCP_OPEN_MS",
+    "PSEUDOTCP_OPEN_TO_CTPP_READY_MS",
+    "ICE_CONNECTED_TO_CTPP_READY_MS",
+    "CTPP_READY_TO_SIGNALING_ARMED_MS",
+    "SIGNALING_ARMED_TO_SELF_ACTIVATION_MS",
+    "SELF_ACTIVATION_TO_RTPC_BEGIN_MS",
+    "RTPC_BEGIN_TO_RTPC_COMPLETE_MS",
+    "RTPC_COMPLETE_TO_FIRST_VIDEO_RTP_MS",
+    "FIRST_VIDEO_RTP_TO_DECODABLE_FRAME_MS",
+    "DECODABLE_FRAME_TO_HLS_FIRST_PART_MS",
+    "HLS_FIRST_PART_TO_FIRST_COMPLETE_SEGMENT_MS",
+    "CAMERA_REQUEST_TO_FIRST_VIDEO_RTP_MS",
+    "CAMERA_REQUEST_TO_FIRST_DECODABLE_FRAME_MS",
+    "CAMERA_REQUEST_TO_FIRST_HLS_PART_MS",
+    "CAMERA_REQUEST_TO_FIRST_HLS_SEGMENT_MS",
+)
+
+EXPECTED_NATIVE_MARKER_MAP = {
+    "ICE_GATHER=PASS": "T05_ICE_GATHER_DONE",
+    "ICE_CONNECTED=PASS": "T08_ICE_CONNECTED",
+    "PSEUDOTCP_OPEN=PASS": "T09_PSEUDOTCP_OPEN",
+    "V4_CTPP_REGISTRATION=PASS": "T10_CTPP_READY",
+    "ENTRANCE_SIGNALING_ARMED=true": "T11_SIGNALING_ARMED",
+    "ENTRANCE_SELF_ACTIVATION_SENT=PASS": "T12_SELF_ACTIVATION_SENT",
+    "P78_CTPP_REGISTERED_REUSED=true": "T13_RTPC_BEGIN",
+    "P78_RTPC_SIGNALING_RESULT=PASS": "T14_RTPC_CONTROL_COMPLETE",
+    "P80_MEDIA_ACTIVE=true": "T15_MEDIA_ACTIVE",
+    "P80_VIDEO_RTP_FORWARDING=PASS": "T16_FIRST_VIDEO_RTP",
+}
+
 
 def _function_source(tree: ast.AST, source: str, name: str) -> str:
     node = next(
@@ -38,17 +118,59 @@ def _function_source(tree: ast.AST, source: str, name: str) -> str:
     return ast.get_source_segment(source, node) or ""
 
 
+def _generate_head_source() -> str:
+    return r65_transform(DOOR_SOURCE.read_text(encoding="utf-8"), include_p116=True)
+
+
+def _generate_base_source() -> str:
+    """Reproduce the generated production source as it stood before this
+    round's settle-value edit, by running the full R65 transform chain
+    against a scratch copy of research/media/v1 with only
+    entrance_device_video_ack_observation_transform.py reverted to the
+    version committed at HEAD (this worktree's uncommitted change is the
+    only local diff on that file)."""
+    base_text = subprocess.run(
+        ["git", "show", f"HEAD:{SETTLE_TRANSFORM.relative_to(ROOT)}"],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ).stdout
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_media = Path(tmp) / "media_v1"
+        shutil.copytree(MEDIA_DIR, tmp_media)
+        (tmp_media / SETTLE_TRANSFORM.name).write_text(base_text, encoding="utf-8")
+        script = (
+            "import sys; sys.path.insert(0, sys.argv[1]);"
+            "from entrance_p116_r65_production_media_refresh_transform import transform;"
+            "from pathlib import Path;"
+            "sys.stdout.write(transform(Path(sys.argv[2]).read_text(encoding='utf-8'), include_p116=True))"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(tmp_media), str(DOOR_SOURCE)],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return result.stdout
+
+
 class CameraRequestLatencyTimelineTests(unittest.TestCase):
-    def test_bounded_key_set_has_twenty_boundaries(self) -> None:
-        self.assertEqual(latency_timeline.MAX_BOUNDARIES, 20)
+    def test_bounded_key_set_has_exactly_the_frozen_boundaries(self) -> None:
+        self.assertEqual(latency_timeline.MAX_BOUNDARIES, 22)
+        self.assertEqual(latency_timeline._BOUNDARY_KEYS, frozenset(EXPECTED_BOUNDARIES))
+        for name in EXPECTED_BOUNDARIES:
+            self.assertEqual(getattr(latency_timeline, name), name)
 
     def test_mark_records_only_first_observation(self) -> None:
         timeline = latency_timeline.CameraRequestLatencyTimeline()
         timeline.mark(latency_timeline.T00_CAMERA_REQUEST, 10.0)
         timeline.mark(latency_timeline.T00_CAMERA_REQUEST, 999.0)
-        timeline.mark(latency_timeline.T14_MEDIA_ACTIVE, 12.0)
+        timeline.mark(latency_timeline.T15_MEDIA_ACTIVE, 12.0)
         fields = timeline.summary_fields()
-        # T00 stayed at 10.0, T14 at 12.0 => derived 2000ms is unaffected by
+        # T00 stayed at 10.0, T15 at 12.0 => derived 2000ms is unaffected by
         # the later, ignored 999.0 write.
         self.assertEqual(fields["CAMERA_REQUEST_TO_FIRST_VIDEO_RTP_MS"], "N_A")
 
@@ -65,33 +187,12 @@ class CameraRequestLatencyTimelineTests(unittest.TestCase):
 
     def test_full_timeline_computes_exact_integer_millisecond_offsets(self) -> None:
         timeline = latency_timeline.CameraRequestLatencyTimeline()
-        boundaries = [
-            latency_timeline.T00_CAMERA_REQUEST,
-            latency_timeline.T01_LEASE_ACQUIRE_BEGIN,
-            latency_timeline.T02_LISTENER_PAUSE_REQUESTED,
-            latency_timeline.T03_LISTENER_PAUSED_CONFIRMED,
-            latency_timeline.T04_TRANSPORT_START_BEGIN,
-            latency_timeline.T05_ICE_GATHER_DONE,
-            latency_timeline.T06_CLOUD_NEGOTIATE_BEGIN,
-            latency_timeline.T07_REMOTE_SDP_READY,
-            latency_timeline.T08_ICE_CONNECTED,
-            latency_timeline.T09_PSEUDOTCP_OPEN,
-            latency_timeline.T11_CTPP_READY,
-            latency_timeline.T12_SELF_ACTIVATION_SENT,
-            latency_timeline.T13_RTPC_READY,
-            latency_timeline.T14_MEDIA_ACTIVE,
-            latency_timeline.T15_FIRST_VIDEO_RTP,
-            latency_timeline.T16_FIRST_DECODABLE_FRAME,
-            latency_timeline.T17_HA_STREAM_READY,
-            latency_timeline.T18_HLS_PROVIDER_PRESENT,
-            latency_timeline.T19_HLS_FIRST_PART,
-            latency_timeline.T20_HLS_FIRST_COMPLETE_SEGMENT,
-        ]
+        boundaries = [getattr(latency_timeline, name) for name in EXPECTED_BOUNDARIES]
         for index, boundary in enumerate(boundaries):
             timeline.mark(boundary, 100.0 + index * 0.5)
         fields = timeline.summary_fields()
         self.assertEqual(fields["CAMERA_REQUEST_TO_LISTENER_PAUSED_MS"], "1500")
-        self.assertEqual(fields["CAMERA_REQUEST_TO_FIRST_HLS_SEGMENT_MS"], "9500")
+        self.assertEqual(fields["CAMERA_REQUEST_TO_FIRST_HLS_SEGMENT_MS"], "10500")
         self.assertEqual(fields["FIRST_VIDEO_RTP_TO_DECODABLE_FRAME_MS"], "500")
         self.assertTrue(timeline.is_complete())
         self.assertFalse(timeline.emitted)
@@ -104,6 +205,24 @@ class CameraRequestLatencyTimelineTests(unittest.TestCase):
         self.assertTrue(line.startswith("COMELIT_CAMERA_E2E_LATENCY "))
         for name, _, _ in latency_timeline._DERIVED_FIELDS:
             self.assertIn(f"{name}=N_A", line)
+
+    def test_emitted_field_list_matches_exact_order_with_twentyone_fields(self) -> None:
+        field_names = tuple(name for name, _, _ in latency_timeline._DERIVED_FIELDS)
+        self.assertEqual(field_names, EXPECTED_FIELD_ORDER)
+        self.assertEqual(len(EXPECTED_FIELD_ORDER), 21)
+        timeline = latency_timeline.CameraRequestLatencyTimeline()
+        line = timeline.log_line()
+        body = line[len("COMELIT_CAMERA_E2E_LATENCY "):]
+        emitted_order = tuple(pair.split("=", 1)[0] for pair in body.split(" "))
+        self.assertEqual(emitted_order, EXPECTED_FIELD_ORDER)
+
+    def test_new_field_reports_n_a_when_only_one_endpoint_observed(self) -> None:
+        timeline = latency_timeline.CameraRequestLatencyTimeline()
+        timeline.mark(latency_timeline.T10_CTPP_READY, 5.0)
+        # T11_SIGNALING_ARMED never observed: the new
+        # CTPP_READY_TO_SIGNALING_ARMED_MS field must be N_A, never estimated.
+        fields = timeline.summary_fields()
+        self.assertEqual(fields["CTPP_READY_TO_SIGNALING_ARMED_MS"], "N_A")
 
     def test_negative_delta_from_out_of_order_marks_is_n_a(self) -> None:
         timeline = latency_timeline.CameraRequestLatencyTimeline()
@@ -190,25 +309,47 @@ class MediaTransportLatencyMarkerObservationTests(unittest.IsolatedAsyncioTestCa
         self.transport._observe_latency_marker("ICE_GATHER=PASS")
         self.assertFalse(self.timeline.has(latency_timeline.T05_ICE_GATHER_DONE))
 
-    async def test_each_mapped_native_marker_line_stamps_its_boundary(self) -> None:
-        expected = {
-            "ICE_GATHER=PASS": latency_timeline.T05_ICE_GATHER_DONE,
-            "ICE_CONNECTED=PASS": latency_timeline.T08_ICE_CONNECTED,
-            "PSEUDOTCP_OPEN=PASS": latency_timeline.T09_PSEUDOTCP_OPEN,
-            "P78_CTPP_REGISTERED_REUSED=true": latency_timeline.T11_CTPP_READY,
-            "ENTRANCE_SELF_ACTIVATION_SENT=PASS": latency_timeline.T12_SELF_ACTIVATION_SENT,
-            "P78_RTPC_SIGNALING_RESULT=PASS": latency_timeline.T13_RTPC_READY,
-            "P80_MEDIA_ACTIVE=true": latency_timeline.T14_MEDIA_ACTIVE,
-            "P80_VIDEO_RTP_FORWARDING=PASS": latency_timeline.T15_FIRST_VIDEO_RTP,
+    async def test_native_marker_map_matches_frozen_taxonomy(self) -> None:
+        actual = {
+            line: boundary_value
+            for line, boundary_value in self.media_transport._NATIVE_MARKER_LATENCY_BOUNDARIES.items()
         }
+        expected = {
+            line: getattr(latency_timeline, name)
+            for line, name in EXPECTED_NATIVE_MARKER_MAP.items()
+        }
+        self.assertEqual(actual, expected)
+
+    def _mapped_marker_cases(self):
+        for line, name in EXPECTED_NATIVE_MARKER_MAP.items():
+            yield line, getattr(latency_timeline, name)
+
+    async def test_each_mapped_native_marker_line_stamps_its_boundary(self) -> None:
+        for line, boundary in self._mapped_marker_cases():
+            with self.subTest(line=line):
+                timeline = latency_timeline.CameraRequestLatencyTimeline()
+                self.transport._latency_timeline = timeline
+                self.transport._observe_latency_marker(line)
+                self.assertTrue(timeline.has(boundary), line)
+
+    async def test_true_ctpp_registration_marker_is_v4_ctpp_registration(self) -> None:
+        # The taxonomy correction this round exists for: T10_CTPP_READY binds
+        # to V4_CTPP_REGISTRATION=PASS (the real registration completion
+        # inside p12_tx_completed's P12_TX_V4_ACK_PAIR case), not to
+        # P78_CTPP_REGISTERED_REUSED=true (which only marks the start of the
+        # later RTPC control stage, inside p78_begin_rtpc_control()).
         self.assertEqual(
-            dict(self.media_transport._NATIVE_MARKER_LATENCY_BOUNDARIES), expected
+            self.media_transport._NATIVE_MARKER_LATENCY_BOUNDARIES[
+                "V4_CTPP_REGISTRATION=PASS"
+            ],
+            latency_timeline.T10_CTPP_READY,
         )
-        for line, boundary in expected.items():
-            timeline = latency_timeline.CameraRequestLatencyTimeline()
-            self.transport._latency_timeline = timeline
-            self.transport._observe_latency_marker(line)
-            self.assertTrue(timeline.has(boundary), line)
+        self.assertEqual(
+            self.media_transport._NATIVE_MARKER_LATENCY_BOUNDARIES[
+                "P78_CTPP_REGISTERED_REUSED=true"
+            ],
+            latency_timeline.T13_RTPC_BEGIN,
+        )
 
     async def test_unrelated_marker_line_stamps_nothing(self) -> None:
         self.transport._observe_latency_marker("P80_AUDIO_RTP_FORWARDING=PASS")
@@ -217,11 +358,154 @@ class MediaTransportLatencyMarkerObservationTests(unittest.IsolatedAsyncioTestCa
             [],
         )
 
-    async def test_first_positive_video_rtp_packet_count_stamps_t15(self) -> None:
+    async def test_first_positive_video_rtp_packet_count_stamps_t16(self) -> None:
         self.transport._observe_latency_marker("P80_VIDEO_RTP_PACKETS=0")
-        self.assertFalse(self.timeline.has(latency_timeline.T15_FIRST_VIDEO_RTP))
+        self.assertFalse(self.timeline.has(latency_timeline.T16_FIRST_VIDEO_RTP))
         self.transport._observe_latency_marker("P80_VIDEO_RTP_PACKETS=1")
-        self.assertTrue(self.timeline.has(latency_timeline.T15_FIRST_VIDEO_RTP))
+        self.assertTrue(self.timeline.has(latency_timeline.T16_FIRST_VIDEO_RTP))
+
+
+class NativeMarkerGeneratedSourceObservabilityTests(unittest.TestCase):
+    """A marker the generated production source never prints would be
+    silently unobservable; prove every mapped marker literal actually
+    appears, verbatim, in the real R65-generated production source."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.generated_source = _generate_head_source()
+
+    def test_every_native_marker_key_appears_verbatim_in_generated_source(self) -> None:
+        media_transport = transport_fixture.media_transport
+        for line in media_transport._NATIVE_MARKER_LATENCY_BOUNDARIES:
+            with self.subTest(line=line):
+                self.assertIn(f'"{line}\\n"', self.generated_source, line)
+
+    def test_video_rtp_packets_prefix_appears_in_generated_source(self) -> None:
+        self.assertIn('"P80_VIDEO_RTP_PACKETS=', self.generated_source)
+
+
+class SettleCandidateGateTests(unittest.TestCase):
+    """PART 2: prove the one-token ENTRANCE_SIGNAL_SETTLE_MS 4000 -> 1000
+    change, isolated from everything else in the generated source."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.generated_source = _generate_head_source()
+        cls.transform_text = SETTLE_TRANSFORM.read_text(encoding="utf-8")
+
+    def test_exactly_one_settle_define_at_1000_in_generated_source(self) -> None:
+        self.assertEqual(
+            self.generated_source.count("#define ENTRANCE_SIGNAL_SETTLE_MS 1000"), 1
+        )
+
+    def test_zero_occurrences_of_the_old_4000_settle_define(self) -> None:
+        self.assertEqual(
+            self.generated_source.count("#define ENTRANCE_SIGNAL_SETTLE_MS 4000"), 0
+        )
+
+    def test_timer_call_site_still_uses_the_settle_macro(self) -> None:
+        self.assertIn("g_timeout_add(", self.generated_source)
+        self.assertIn("ENTRANCE_SIGNAL_SETTLE_MS", self.generated_source)
+        # The callback definition ("entrance_signal_start_cb(gpointer data)")
+        # comes first; the actual g_timeout_add(...) call site passing the
+        # bare function name as a callback pointer comes after it.
+        callback_index = self.generated_source.index(
+            "entrance_signal_start_cb,", self.generated_source.index(
+                "entrance_signal_start_cb(gpointer data)"
+            )
+        )
+        timer_start = self.generated_source.rindex("g_timeout_add(", 0, callback_index)
+        timer_call = self.generated_source[timer_start:callback_index]
+        self.assertIn("ENTRANCE_SIGNAL_SETTLE_MS", timer_call)
+
+    def test_transform_replacement_block_contains_exactly_one_settle_literal(self) -> None:
+        # SETTLE_REPLACEMENT_COUNT=1 invariant: only the state_replacement
+        # text block (the block that becomes generated production source) is
+        # touched. The state_anchor block above it must still read 4000,
+        # since that text matches the *input* the lower overlay produces.
+        anchor_start = self.transform_text.index("state_anchor = ")
+        replacement_start = self.transform_text.index(
+            "state_replacement = ", anchor_start
+        )
+        replacement_end = self.transform_text.index(
+            "\n    source = _replace_once(source, state_anchor, state_replacement",
+            replacement_start,
+        )
+        anchor_block = self.transform_text[anchor_start:replacement_start]
+        replacement_block = self.transform_text[replacement_start:replacement_end]
+
+        settle_replacement_count = replacement_block.count(
+            "#define ENTRANCE_SIGNAL_SETTLE_MS 1000"
+        )
+        self.assertEqual(settle_replacement_count, 1)
+        self.assertEqual(
+            replacement_block.count("#define ENTRANCE_SIGNAL_SETTLE_MS 4000"), 0
+        )
+        self.assertEqual(anchor_block.count("#define ENTRANCE_SIGNAL_SETTLE_MS 4000"), 1)
+        self.assertEqual(anchor_block.count("#define ENTRANCE_SIGNAL_SETTLE_MS 1000"), 0)
+
+    def test_no_other_settle_define_copies_were_touched(self) -> None:
+        # The two superseded copies of this same literal, overridden by this
+        # overlay, must still read 4000 in their own source files (they never
+        # reach the generated production source, but must not be silently
+        # edited either).
+        for other in (
+            "entrance_media_observation_transform.py",
+            "entrance_self_activation_signaling_transform.py",
+        ):
+            text = (MEDIA_DIR / other).read_text(encoding="utf-8")
+            self.assertIn("#define ENTRANCE_SIGNAL_SETTLE_MS 4000", text, other)
+
+
+class SettleCandidateNegativeGuardTests(unittest.TestCase):
+    """Machine-checked negative guard: the settle change introduces no other
+    textual delta in the generated production source."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.head_source = _generate_head_source()
+        cls.base_source = _generate_base_source()
+
+    def test_generated_source_diff_is_exactly_one_line(self) -> None:
+        head_lines = self.head_source.splitlines()
+        base_lines = self.base_source.splitlines()
+        self.assertEqual(len(head_lines), len(base_lines))
+        differing = [
+            (index, base, head)
+            for index, (base, head) in enumerate(zip(base_lines, head_lines))
+            if base != head
+        ]
+        self.assertEqual(len(differing), 1, differing)
+        _, base_line, head_line = differing[0]
+        self.assertEqual(base_line, "#define ENTRANCE_SIGNAL_SETTLE_MS 4000")
+        self.assertEqual(head_line, "#define ENTRANCE_SIGNAL_SETTLE_MS 1000")
+
+    def test_no_door_gate_retry_timeout_ice_pseudotcp_ctpp_rtpc_delta(self) -> None:
+        head_lines = set(self.head_source.splitlines())
+        base_lines = set(self.base_source.splitlines())
+        only_in_head = head_lines - base_lines
+        only_in_base = base_lines - head_lines
+        self.assertEqual(only_in_base, {"#define ENTRANCE_SIGNAL_SETTLE_MS 4000"})
+        self.assertEqual(only_in_head, {"#define ENTRANCE_SIGNAL_SETTLE_MS 1000"})
+        forbidden_substrings = (
+            "v4_door",
+            "V4_DOOR",
+            "DOOR_WRITE",
+            "GATE_ACTION",
+            "gate_action",
+            "RETRY",
+            "retry",
+            "TIMEOUT",
+            "timeout",
+            "nice_agent_new",
+            "pseudo_tcp_socket_new",
+            "PSEUDOTCP_",
+            "CTPP_",
+            "RTPC_",
+        )
+        for forbidden in forbidden_substrings:
+            self.assertNotIn(forbidden, only_in_head, forbidden)
+            self.assertNotIn(forbidden, only_in_base, forbidden)
 
 
 class MediaTransportEndToEndBootstrapLatencyTests(
@@ -265,8 +549,10 @@ class MediaTransportEndToEndBootstrapLatencyTests(
         await asyncio.wait_for(asyncio.sleep(0.01), timeout=1)
         process.feed_line("ICE_CONNECTED=PASS")
         process.feed_line("PSEUDOTCP_OPEN=PASS")
-        process.feed_line("P78_CTPP_REGISTERED_REUSED=true")
+        process.feed_line("V4_CTPP_REGISTRATION=PASS")
+        process.feed_line("ENTRANCE_SIGNALING_ARMED=true")
         process.feed_line("ENTRANCE_SELF_ACTIVATION_SENT=PASS")
+        process.feed_line("P78_CTPP_REGISTERED_REUSED=true")
         process.feed_line("P78_RTPC_SIGNALING_RESULT=PASS")
         scenario.release_active.set()
         await asyncio.wait_for(scenario.active_sent.wait(), timeout=1)
@@ -283,11 +569,13 @@ class MediaTransportEndToEndBootstrapLatencyTests(
             latency_timeline.T07_REMOTE_SDP_READY,
             latency_timeline.T08_ICE_CONNECTED,
             latency_timeline.T09_PSEUDOTCP_OPEN,
-            latency_timeline.T11_CTPP_READY,
+            latency_timeline.T10_CTPP_READY,
+            latency_timeline.T11_SIGNALING_ARMED,
             latency_timeline.T12_SELF_ACTIVATION_SENT,
-            latency_timeline.T13_RTPC_READY,
-            latency_timeline.T14_MEDIA_ACTIVE,
-            latency_timeline.T15_FIRST_VIDEO_RTP,
+            latency_timeline.T13_RTPC_BEGIN,
+            latency_timeline.T14_RTPC_CONTROL_COMPLETE,
+            latency_timeline.T15_MEDIA_ACTIVE,
+            latency_timeline.T16_FIRST_VIDEO_RTP,
         ):
             self.assertTrue(timeline.has(boundary), boundary)
 
@@ -391,7 +679,7 @@ class CameraLatencyWiringStructuralTests(unittest.TestCase):
             create_stream.index("timeline.mark(T00_CAMERA_REQUEST"),
             create_stream.index("await self._async_acquire_camera_view_media()"),
         )
-        self.assertIn("timeline.mark(T17_HA_STREAM_READY", create_stream)
+        self.assertIn("timeline.mark(T18_HA_STREAM_READY", create_stream)
         self.assertIn(
             "stream.set_update_callback(self._async_handle_stream_update)",
             create_stream,
@@ -409,9 +697,9 @@ class CameraLatencyWiringStructuralTests(unittest.TestCase):
         recorder = _function_source(
             self.tree, self.camera, "_record_hls_latency_boundaries"
         )
-        self.assertIn("T18_HLS_PROVIDER_PRESENT", recorder)
-        self.assertIn("T19_HLS_FIRST_PART", recorder)
-        self.assertIn("T20_HLS_FIRST_COMPLETE_SEGMENT", recorder)
+        self.assertIn("T19_HLS_PROVIDER_PRESENT", recorder)
+        self.assertIn("T20_HLS_FIRST_PART", recorder)
+        self.assertIn("T21_HLS_FIRST_COMPLETE_SEGMENT", recorder)
         self.assertIn("_hls_runtime_diagnostics()", recorder)
         self.assertNotIn("_CAMERA_VIEW_MONITOR_INTERVAL_SECONDS", recorder)
 
@@ -433,7 +721,7 @@ class CameraLatencyWiringStructuralTests(unittest.TestCase):
         shim_start = _function_source(
             transport_tree, transport_source, "_async_start_video_recovery_shim"
         )
-        self.assertIn("T16_FIRST_DECODABLE_FRAME", shim_start)
+        self.assertIn("T17_FIRST_DECODABLE_FRAME", shim_start)
         self.assertIn("on_decodable_frame=on_decodable_frame", shim_start)
 
 

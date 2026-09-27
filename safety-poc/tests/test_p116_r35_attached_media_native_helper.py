@@ -33,7 +33,7 @@ import entrance_p116_r30b_call_transaction_model as r30b  # noqa: E402
 import entrance_p116_r34_attached_media_helper_model as r34  # noqa: E402
 import entrance_p116_r35_attached_media_native_transform as r35  # noqa: E402
 
-CANONICAL_INCLUDE_P116_DIGEST = "1c89d61de4372d96b25f6894862741244753c107a3a9b9e04817250b3bea55b2"
+CANONICAL_INCLUDE_P116_DIGEST = "42e621171684a66827e8a2b9c8e22b9f3798448476d864c15c6f28312666f018"
 
 
 def parse_markers(stdout: str) -> dict[str, str]:
