@@ -102,7 +102,7 @@ class MiniAppSessionView(_MiniAppView):
 
     async def post(self, request: web.Request) -> web.Response:
         self._require_configured()
-        body = await request.read()
+        body = await request.content.read(MAX_AUTH_BODY_BYTES + 1)
         if len(body) > MAX_AUTH_BODY_BYTES:
             raise web.HTTPRequestEntityTooLarge(
                 max_size=MAX_AUTH_BODY_BYTES,
