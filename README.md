@@ -11,7 +11,7 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.6.1**. This patch keeps the embedded Telegram Mini App architecture from 1.6.0 and adds same-origin bundled `hls.js` playback for Telegram WebViews that do not reliably play Home Assistant HLS natively. Door/Gate, authentication, the HLS capability proxy, and Comelit media ownership are unchanged. Details are recorded in `docs/releases/1.6.1-miniapp-hls-playback.md`.
+Current stable release: **1.6.2**. This patch keeps the 1.6.1 bundled HLS playback fix and prevents expired/restarted Telegram Mini App sessions from entering Home Assistant's global raised-401/IP-ban path. The WebView now stops polling when its integration-owned session is no longer valid and asks the user to reopen the Mini App. Door/Gate, camera transport and Telegram signature validation are unchanged. Details are recorded in `docs/releases/1.6.2-miniapp-session-ban-fix.md`.
 
 ## Home Assistant Custom Card
 
