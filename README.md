@@ -11,7 +11,7 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.5.20**. This release freezes the live-validated entrance-camera cold-start improvements and their diagnostic boundaries. On the reference installation, the measured cold path from an explicit camera request to the first decodable frame improved from 11.219 s to 6.858 s. This is a reference measurement, not a universal latency guarantee. The accepted startup baseline and deferred experiments are recorded in `docs/releases/1.5.20-camera-startup-stabilization.md`.
+Current stable release: **1.6.0**. This release adds the opt-in embedded Telegram Mini App directly inside `custom_components/comelit`, while retaining the 1.5.20 live-validated entrance-camera startup baseline and all existing Door/media safety invariants. The Mini App is disabled by default and introduces no standalone gateway, Home Assistant Long-Lived Access Token, or Telegram bot token dependency. Release details and rollout boundaries are recorded in `docs/releases/1.6.0-embedded-telegram-miniapp.md`; the accepted camera-startup baseline remains documented in `docs/releases/1.5.20-camera-startup-stabilization.md`.
 
 ## Home Assistant Custom Card
 
