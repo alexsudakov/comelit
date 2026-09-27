@@ -4,7 +4,7 @@ from http import HTTPStatus
 import json
 from urllib.parse import urljoin
 
-from aiohttp import web
+from aiohttp import ClientError, web
 
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
@@ -331,6 +331,8 @@ class MiniAppMediaView(_MiniAppView):
                 return response
         except TimeoutError as exc:
             raise web.HTTPGatewayTimeout from exc
+        except ClientError as exc:
+            raise web.HTTPBadGateway from exc
 
 
 def async_register_miniapp_views(
