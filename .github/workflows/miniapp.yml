@@ -1,0 +1,57 @@
+name: miniapp
+
+on:
+  pull_request:
+    paths:
+      - "miniapp/**"
+      - "custom_components/comelit/frontend/comelit-card.js"
+      - "docs/miniapp-architecture.md"
+      - ".github/workflows/miniapp.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "miniapp/**"
+      - "custom_components/comelit/frontend/comelit-card.js"
+      - "docs/miniapp-architecture.md"
+      - ".github/workflows/miniapp.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Mini App dependencies
+        run: python -m pip install -r miniapp/requirements-dev.txt
+
+      - name: Run Mini App tests
+        working-directory: miniapp
+        env:
+          PYTHONPATH: .
+        run: pytest -q
+
+      - name: Compile Mini App Python
+        run: python -m compileall -q miniapp/app miniapp/tests
+
+      - name: Parse Mini App adapter
+        run: node --check miniapp/app/static/miniapp.js
+
+      - name: Parse shared bundled Comelit card
+        run: node --check custom_components/comelit/frontend/comelit-card.js
+
+      - name: Assert one shared card asset
+        run: |
+          grep -F 'src="/assets/comelit-card.js"' miniapp/app/static/index.html
+          grep -F '<comelit-card id="comelitCard">' miniapp/app/static/index.html
+          test ! -e miniapp/app/static/comelit-card.js
