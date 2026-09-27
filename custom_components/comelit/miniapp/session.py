@@ -18,6 +18,7 @@ class MiniAppSession:
     """In-memory authenticated Mini App session."""
 
     user_id: int
+    bot_id: int
     issued_at: int
     expires_at: int
     action_nonce: str
@@ -64,12 +65,12 @@ class MiniAppSessionStore:
         for token, _session in oldest[:remove_count]:
             self._sessions.pop(token, None)
 
-    def create(self, user_id: int, *, now: int | None = None) -> tuple[str, MiniAppSession]:
-        current = int(time.time()) if now is None else int(now)
+    def create(\n        self,\n        user_id: int,\n        bot_id: int,\n        *,\n        now: int | None = None,\n    ) -> tuple[str, MiniAppSession]:\n        current = int(time.time()) if now is None else int(now)
         self._purge(current)
         token = self._new_session_token()
         session = MiniAppSession(
             user_id=user_id,
+            bot_id=bot_id,
             issued_at=current,
             expires_at=current + self._ttl_seconds,
             action_nonce=self._new_action_nonce(),
