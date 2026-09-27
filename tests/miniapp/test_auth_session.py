@@ -134,11 +134,12 @@ def test_expired_and_disallowed_init_data_fail_closed():
 
 def test_action_nonce_is_one_shot_and_rotates_before_action():
     store = session_mod.MiniAppSessionStore(ttl_seconds=900)
-    token, created = store.create(USER_ID, now=NOW)
+    token, created = store.create(USER_ID, BOT_ID, now=NOW)
     first_nonce = created.action_nonce
 
     consumed = store.consume_action_nonce(token, first_nonce, now=NOW + 1)
     assert consumed.user_id == USER_ID
+    assert consumed.bot_id == BOT_ID
     assert consumed.action_nonce != first_nonce
 
     with pytest.raises(session_mod.MiniAppSessionError):
@@ -147,7 +148,14 @@ def test_action_nonce_is_one_shot_and_rotates_before_action():
 
 def test_session_expires_without_persistence():
     store = session_mod.MiniAppSessionStore(ttl_seconds=10)
-    token, _created = store.create(USER_ID, now=NOW)
+    token, _created = store.create(USER_ID, BOT_ID, now=NOW)
     assert store.get(token, now=NOW + 9).user_id == USER_ID
     with pytest.raises(session_mod.MiniAppSessionError):
         store.get(token, now=NOW + 10)
+
+
+def test_session_carries_bot_identity():
+    store = session_mod.MiniAppSessionStore(ttl_seconds=900)
+    token, created = store.create(USER_ID, BOT_ID, now=NOW)
+    assert created.bot_id == BOT_ID
+    assert store.get(token, now=NOW + 1).bot_id == BOT_ID
