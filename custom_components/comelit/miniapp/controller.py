@@ -26,7 +26,13 @@ from ..const import (
     MAIN_ENTRANCE_UNIQUE_ID,
     MAIN_GATE_UNIQUE_ID,
 )
-from .session import (\n    MiniAppMediaGrantStore,\n    MiniAppSession,\n    MiniAppSessionError,\n    MiniAppSessionStore,\n)\n
+from .session import (
+    MiniAppMediaGrantStore,
+    MiniAppSession,
+    MiniAppSessionError,
+    MiniAppSessionStore,
+)
+
 
 INTERCOM_UNIQUE_IDS = frozenset(
     {
