@@ -54,8 +54,13 @@ def test_door_path_is_semantic_one_shot():
     assert "Never retry the Door action" in host
 
 
-def test_camera_uses_home_assistant_stream_api():
+def test_camera_uses_home_assistant_stream_api_behind_session_proxy():
     controller = _read("custom_components/comelit/miniapp/controller.py")
+    views = _read("custom_components/comelit/miniapp/views.py")
+    host = _read("custom_components/comelit/frontend/miniapp/host.js")
     assert "async_request_stream" in controller
     assert "HLS_PROVIDER" in controller
+    assert "/api/comelit/miniapp/media/" in controller
+    assert "MiniAppMediaView" in views
     assert "stream_camera" not in controller
+    assert "/api/hls/" not in host
