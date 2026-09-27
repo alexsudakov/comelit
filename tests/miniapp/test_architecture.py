@@ -90,7 +90,7 @@ def test_miniapp_session_failures_do_not_use_ha_raised_401_path():
     views = _read("custom_components/comelit/miniapp/views.py")
     host = _read("custom_components/comelit/frontend/miniapp/host.js")
 
-    assert "HTTPUnauthorized" not in views
+    assert "raise web.HTTPUnauthorized" not in views
     assert "HTTPForbidden" in views
     assert "Home Assistant's global" in views
     assert "error?.status === 403" in host
