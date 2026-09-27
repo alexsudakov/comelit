@@ -141,7 +141,11 @@ class ComelitMiniAppController:
 
     def session_is_allowed(self, session: MiniAppSession) -> bool:
         settings = self.settings
-        return settings.configured and session.user_id in settings.allowed_user_ids
+        return (
+            settings.configured
+            and settings.bot_id == session.bot_id
+            and session.user_id in settings.allowed_user_ids
+        )
 
     def _resolve_surveillance_label_id(self) -> str | None:
         requested = self.settings.surveillance_label
