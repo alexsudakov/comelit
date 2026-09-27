@@ -14,6 +14,7 @@ DATA_ATTACHED_MEDIA_PROVIDERS = "attached_media_providers"
 DATA_ATTACHED_MEDIA_SESSIONS = "attached_media_sessions"
 DATA_RING_MEDIA = "ring_media"
 DATA_SYNTHETIC_RING_MEDIA = "synthetic_ring_media"
+DATA_MINIAPP = "miniapp_controller"
 
 CONF_DEVICE_UUID = "device_uuid"
 CONF_VIP_TOKEN = "vip_token"
@@ -21,6 +22,11 @@ CONF_OAUTH_ACCESS_TOKEN = "oauth_access_token"
 CONF_OAUTH_REFRESH_TOKEN = "oauth_refresh_token"
 CONF_OAUTH_EXPIRES_AT = "oauth_expires_at"
 CONF_OAUTH_SCOPE = "oauth_scope"
+
+CONF_MINIAPP_ENABLED = "miniapp_enabled"
+CONF_MINIAPP_BOT_ID = "miniapp_bot_id"
+CONF_MINIAPP_ALLOWED_USER_IDS = "miniapp_allowed_user_ids"
+CONF_MINIAPP_SURVEILLANCE_LABEL = "miniapp_surveillance_label"
 
 # Transitional bridge keys retained only for migration compatibility.
 CONF_BRIDGE_URL = "bridge_url"

@@ -1,81 +1,59 @@
 # Comelit Telegram Mini App architecture
 
-Status: implementation baseline  
+Status: embedded implementation baseline  
 Date: 2026-09-27  
 Repository: `alexsudakov/comelit`
 
 ## 1. Ownership boundary
 
-The Telegram Mini App is a Comelit product surface and lives entirely in this repository.
+The Telegram Mini App is a Comelit product surface and lives entirely inside the
+Home Assistant custom integration.
 
-`llm-home-assistant-stack` is not a Mini App code or runtime dependency.
+Production runtime:
 
-The Home Assistant integration remains the sole owner of Comelit protocol, Ring, Door and media semantics. The Mini App talks to Home Assistant and does not implement the Comelit cloud/P2P protocol.
+```text
+Telegram Mini App
+        |
+        | HTTPS
+        v
+Home Assistant HTTP server
+        |
+        v
+custom_components/comelit
+        |
+        +-- Mini App auth/session/views
+        +-- shared comelit-card.js
+        +-- HA state / registry / services / camera stream
+        |
+        v
+Comelit runtime
+```
+
+There is no standalone Comelit application server, FastAPI service, Docker
+runtime, Home Assistant Long-Lived Access Token, or Home Assistant REST/WebSocket
+client in the Mini App path.
+
+`llm-home-assistant-stack`, CT120 and CT123 are not production dependencies for
+the Mini App.
 
 ## 2. One UI artifact
 
-The Mini App reuses:
+Both Lovelace and Telegram reuse:
 
 ```text
 custom_components/comelit/frontend/comelit-card.js
 ```
 
-The same `custom:comelit-card` therefore owns the presentation and interaction semantics in both contexts.
-
-The two hosts differ only in the adapter supplied to the card:
+Telegram hosts the same custom element from:
 
 ```text
-                     comelit-card.js
-                           |
-              +------------+------------+
-              |                         |
-        Lovelace host              Telegram host
-              |                         |
-        native hass object        hass-compatible adapter
-                                        |
-                                Mini App gateway
-                                        |
-                               Home Assistant API
+custom_components/comelit/frontend/miniapp/index.html
+custom_components/comelit/frontend/miniapp/host.js
+custom_components/comelit/frontend/miniapp/styles.css
 ```
 
-No separate HTML implementation of Door/Ring/panel behavior is maintained.
-
-## 3. Home Assistant authentication
-
-The gateway uses a Home Assistant Long-Lived Access Token from:
-
-```text
-COMELIT_MINIAPP_HA_TOKEN
-```
-
-The token is process configuration / deployment secret material.
-
-It MUST NOT be:
-
-- rendered into HTML or JavaScript;
-- returned by health/bootstrap endpoints;
-- logged;
-- stored in a browser cookie;
-- committed to Git.
-
-The browser authenticates only to the Mini App gateway. The gateway attaches `Authorization: Bearer <token>` to server-side Home Assistant HTTP requests and sends the token in the Home Assistant WebSocket authentication message.
-
-## 4. Telegram identity
-
-The WebView sends raw `Telegram.WebApp.initData` to the gateway.
-
-The gateway:
-
-1. validates the Telegram HMAC server-side;
-2. checks bounded `auth_date`;
-3. checks a server-side Telegram user allowlist;
-4. returns a short-lived signed HttpOnly session cookie.
-
-`initDataUnsafe` is never an authorization source.
-
-## 5. Narrow hass adapter
-
-The Mini App adapter implements only the subset already consumed by the shared card:
+The Telegram host implements only the narrow `hass` surface already consumed
+by the shared card:
 
 ```text
 hass.states
@@ -85,68 +63,245 @@ hass.callService(button, press, ...)
 window.loadCardHelpers().createCardElement(picture-entity)
 ```
 
-The browser does not receive a general Home Assistant API proxy.
+The host adapter does not expose a general Home Assistant API.
 
-### 5.1 State and registry filtering
+## 3. Home Assistant HTTP boundary
 
-The gateway exposes only:
+The integration registers public Home Assistant views under:
 
-- known stable Comelit unique IDs required by the card;
-- optionally configured surveillance `camera.*` entities.
+```text
+/api/comelit/miniapp
+/api/comelit/miniapp/session
+/api/comelit/miniapp/bootstrap
+/api/comelit/miniapp/state
+/api/comelit/miniapp/door/{entrance|gate}
+/api/comelit/miniapp/camera/{entity_id}/stream
+```
 
-Only card-required state attributes are serialized.
+The index and session-establishment endpoints are intentionally reachable
+without Home Assistant user authentication because Telegram users do not have a
+Home Assistant access token.
 
-The label registry is currently returned empty because the Mini App surveillance set is an explicit server-side camera allowlist. Lovelace label discovery remains unchanged.
+All state, Door and camera endpoints enforce the integration-owned Mini App
+session.
 
-## 6. Door/Gate safety
+Static assets continue to use the existing Comelit static prefix:
 
-The Mini App action boundary resolves current entities through Home Assistant's entity registry and accepts only:
+```text
+/api/comelit/frontend/...
+```
+
+## 4. Telegram authentication without a bot token
+
+The browser sends raw `Telegram.WebApp.initData`.
+
+The integration validates the `signature` field using Telegram's production
+Ed25519 public key and the bot ID according to Telegram's documented
+third-party validation algorithm:
+
+https://core.telegram.org/bots/webapps#validating-data-for-third-party-use
+
+The production Telegram public key is pinned in code:
+
+```text
+e7bf03a2fa4602af4580703d88dda5bb59f32ed8b02a56c187fe7d34caed242d
+```
+
+Validation also requires:
+
+- bounded `auth_date`;
+- valid Telegram user JSON;
+- server-side Telegram user allowlist.
+
+`initDataUnsafe` is never an authorization source.
+
+The Comelit integration therefore does not require the Telegram bot token.
+
+## 5. Short-lived in-memory sessions
+
+After successful Telegram validation, the integration creates:
+
+- a random opaque session token;
+- a 15-minute in-memory session;
+- one current random Door action nonce.
+
+The browser receives only the session token in a cookie:
+
+```text
+HttpOnly
+Secure
+SameSite=Strict
+Path=/api/comelit/miniapp
+```
+
+Sessions are intentionally not persisted. Home Assistant restart invalidates
+them; Telegram can establish a new session from fresh `initData`.
+
+Removing a Telegram user from the current allowlist invalidates that user's
+existing session on the next protected request.
+
+## 6. Home Assistant access
+
+Because Mini App code executes inside `custom_components/comelit`, it uses
+Home Assistant objects directly:
+
+```text
+hass.states
+entity_registry
+label_registry
+hass.services
+camera async_request_stream
+```
+
+There is no HA Long-Lived Access Token.
+
+The browser receives only the filtered states and registry metadata required by
+the Comelit card.
+
+## 7. Surveillance cameras
+
+The integration option `miniapp_surveillance_label` accepts a Home Assistant
+label ID or label name.
+
+Only `camera.*` registry entries carrying that label are added to the Telegram
+Mini App surveillance surface.
+
+The intercom entrance camera is selected independently by its stable Comelit
+unique ID and is not duplicated in the surveillance list.
+
+## 8. Door/Gate safety
+
+The browser does not choose an arbitrary Home Assistant entity for actuation.
+
+The shared card's selected button entity is mapped client-side back to one of
+two semantic routes:
+
+```text
+POST /api/comelit/miniapp/door/entrance
+POST /api/comelit/miniapp/door/gate
+```
+
+The server independently resolves the current entity ID from these stable
+Comelit unique IDs:
 
 ```text
 comelit_main_entrance_open_door
 comelit_main_gate_open_door
 ```
 
-One accepted Mini App request results in exactly one:
+Before invoking the service, the embedded boundary requires the current entity
+to be available and to report `standard_press_allowed=true`.
+
+One accepted request performs exactly one:
 
 ```text
-POST /api/services/button/press
+hass.services.async_call(
+    "button",
+    "press",
+    {"entity_id": ...},
+    blocking=True,
+)
 ```
 
 There is no automatic retry.
 
-The existing card remains responsible for availability gating using current button state attributes and call context. The backend repeats the stable-unique-ID allowlist check so a manipulated browser cannot press an arbitrary Home Assistant entity.
+The Mini App host also explicitly never retries an action request after a
+failure.
 
-An HTTP/service success means only that the command was accepted by the software path. It is not physical Door proof.
+### 8.1 One-time action nonce
 
-## 7. Camera path
+Each authenticated session owns one current action nonce.
 
-The shared card still asks `loadCardHelpers().createCardElement` for a `picture-entity`.
+A Door request must include it. The server consumes and rotates the nonce
+**before** awaiting the Home Assistant service call.
 
-In Telegram, the host adapter supplies a minimal compatible camera viewer. It asks the gateway for an MJPEG stream.
+Consequences:
 
-The gateway:
+- replaying the same HTTP request cannot invoke a second Door operation;
+- a network timeout after an ambiguous operation does not trigger an automatic
+  retry;
+- a later explicit user click can use the newly issued nonce.
 
-1. validates that the camera is the Comelit entrance camera or an explicit surveillance allowlist entry;
-2. requests Home Assistant `stream_camera` information over the authenticated WebSocket API;
-3. proxies the returned MJPEG path with the server-side HA token.
+A successful software call never asserts the physical Door effect.
 
-The Long-Lived Access Token is therefore not embedded in the camera URL visible to the browser.
+## 9. Camera lifecycle
 
-Viewer lifecycle follows DOM lifecycle:
+The Mini App does not implement a second camera transport and does not proxy the
+Home Assistant token.
 
-- removing a surveillance viewer closes its browser stream;
-- the existing Custom Card keeps an explicitly opened intercom viewer mounted across tab switches, so that behavior is preserved in Mini App mode too.
+After validating the requested camera against the embedded allowlist, the
+integration calls Home Assistant's normal camera stream API:
 
-## 8. Deployment boundary
+```text
+async_request_stream(hass, entity_id, HLS_PROVIDER)
+```
 
-This implementation adds code only. It does not:
+Home Assistant returns the normal HA Stream HLS capability path.
 
-- deploy a Mini App service;
-- create or rotate a Home Assistant token;
-- configure BotFather;
-- change the existing HomeAI bot;
-- modify production Home Assistant;
-- perform a Door/Gate action.
+For `camera.comelit_entrance`, this enters the existing
+`ComelitEntranceCamera.async_create_stream()` lifecycle:
 
-Those are separate deployment/acceptance steps.
+```text
+explicit Mini App viewer
+-> HA camera stream request
+-> attached Ring reuse when present
+   otherwise bounded on-demand Comelit media
+-> HA Stream / HLS
+-> viewer removed or HLS becomes idle
+-> existing camera-view cleanup
+```
+
+The HA Stream URL contains only the stream's random access capability token. It
+does not contain a Home Assistant Long-Lived Access Token.
+
+The Mini App host provides a small `picture-entity` compatibility element
+using an HTML5 `video` element. Native HLS support in the target Telegram
+WebViews is a deployment acceptance item; if a target WebView lacks native HLS,
+a bundled HLS player can be added without changing the backend architecture.
+
+## 10. Home Assistant options
+
+The Comelit Options Flow contains:
+
+```text
+Enable Telegram Mini App
+Telegram bot ID
+Allowed Telegram user IDs
+Home Assistant camera label
+```
+
+No Telegram bot token and no Home Assistant token are stored.
+
+The Mini App route is fail-closed until:
+
+- Mini App is enabled;
+- bot ID is valid;
+- at least one allowed Telegram user ID is configured.
+
+## 11. External HTTPS
+
+Telegram still requires the Mini App URL to be reachable by the Telegram
+WebView over HTTPS in production.
+
+The target URL is the Home Assistant URL itself, for example:
+
+```text
+https://<external-home-assistant-host>/api/comelit/miniapp
+```
+
+The external HTTPS mechanism is an installation concern (for example Home
+Assistant Cloud or a reverse proxy), not a separate Comelit application
+runtime.
+
+## 12. Deployment boundary
+
+Repository implementation does not by itself:
+
+- enable the Mini App option;
+- configure Telegram BotFather;
+- publish or change an external Home Assistant URL;
+- restart production Home Assistant;
+- invoke Door/Gate;
+- open a production camera session.
+
+Those remain explicit deployment and acceptance steps.

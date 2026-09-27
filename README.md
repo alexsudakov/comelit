@@ -64,9 +64,22 @@ On a new authoritative `ringing` event, the card focuses the «Домофон» 
 
 ## Telegram Mini App
 
-The repository also contains a Telegram Mini App host under `miniapp/`. It reuses the exact bundled `custom:comelit-card` rather than maintaining a second intercom UI.
+The Telegram Mini App is embedded directly in `custom_components/comelit` and
+reuses the exact bundled `custom:comelit-card`; there is no second intercom UI
+and no standalone gateway process.
 
-The Mini App gateway keeps both Telegram bot credentials and the Home Assistant Long-Lived Access Token server-side. The browser receives only a narrow, filtered Home Assistant surface required by the shared card. Door/Gate actions retain the existing one-shot safety contract: one explicit click maps to one Home Assistant `button.press`, with no automatic retry.
+Telegram `initData` is validated inside Home Assistant with Telegram's public
+Ed25519 key plus the configured bot ID and Telegram user allowlist. The
+integration then uses direct Home Assistant state/registry/service access, so no
+Home Assistant Long-Lived Access Token is required.
+
+Door/Gate retains the production one-shot contract: the browser can address only
+semantic `entrance` / `gate` endpoints, each request requires a one-time
+action nonce, and one accepted request maps to exactly one existing Comelit
+`button.press` with no automatic retry.
+
+Camera viewing uses Home Assistant's normal HLS stream API, so
+`camera.comelit_entrance` keeps its existing camera-owned media lifecycle.
 
 Architecture and deployment boundary: `docs/miniapp-architecture.md`.
 

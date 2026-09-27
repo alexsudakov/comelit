@@ -59,3 +59,33 @@ ha-card {
 .fatal-error {
   color: var(--error-color);
 }
+
+miniapp-picture-entity {
+  display: block;
+}
+
+.miniapp-video-shell {
+  overflow: hidden;
+  border-radius: 12px;
+  background: #000;
+  min-height: 120px;
+}
+
+.miniapp-video {
+  display: block;
+  width: 100%;
+  min-height: 120px;
+  background: #000;
+}
+
+.miniapp-video-label {
+  padding: 8px 10px;
+  background: var(--card-background-color);
+  color: var(--primary-text-color);
+}
+
+.miniapp-video-error {
+  padding: 16px;
+  color: var(--error-color);
+  background: var(--secondary-background-color);
+}

@@ -35,6 +35,7 @@ from .const import (
     DATA_MEDIA_PROVIDERS,
     DATA_MEDIA_SESSIONS,
     DATA_MEDIA_TRANSPORTS,
+    DATA_MINIAPP,
     DATA_RING_MEDIA,
     DATA_RUNTIMES,
     DATA_SYNTHETIC_RING_MEDIA,
@@ -48,6 +49,7 @@ from .const import (
     SUPPORTED_DOORS,
 )
 from .media_session import ComelitMediaSessionManager
+from .miniapp import ComelitMiniAppController, async_register_miniapp_views
 from .media_transport import ComelitEntranceMediaTransport
 from .oauth import ComelitOAuthManager
 from .ring_media import HAStreamMediaProvider, RingMediaCoordinator
@@ -73,6 +75,11 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             )
         ]
     )
+
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    miniapp = ComelitMiniAppController(hass, _FRONTEND_DIR)
+    domain_data[DATA_MINIAPP] = miniapp
+    async_register_miniapp_views(hass, miniapp)
 
     async def handle_open_door(call: ServiceCall) -> dict[str, object]:
         domain_data = hass.data.get(DOMAIN, {})
@@ -143,6 +150,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up direct Ring/Door runtime and optional legacy bridge client."""
     session = async_get_clientsession(hass)
     domain_data = hass.data.setdefault(DOMAIN, {})
+    miniapp: ComelitMiniAppController | None = domain_data.get(DATA_MINIAPP)
+    if miniapp is not None:
+        miniapp.set_entry(entry)
 
     has_bridge = all(
         entry.data.get(key) for key in (CONF_BRIDGE_URL, CONF_SHARED_SECRET)
@@ -285,6 +295,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     attached_transports = domain_data.get(DATA_ATTACHED_MEDIA_TRANSPORTS, {})
     ring_media_lifecycles = domain_data.get(DATA_RING_MEDIA, {})
     synthetic_lifecycles = domain_data.get(DATA_SYNTHETIC_RING_MEDIA, {})
+    miniapp: ComelitMiniAppController | None = domain_data.get(DATA_MINIAPP)
+    if miniapp is not None:
+        miniapp.clear_entry(entry)
 
     runtime = runtimes.pop(entry.entry_id, None)
     supervisor = supervisors.pop(entry.entry_id, None)
