@@ -38,19 +38,23 @@ BUILD_META = MEDIA_DIR / "p119_remote_sdp_l1_gather_diag_production_media_build_
 FROZEN_P117_BUILD_META = MEDIA_DIR / "p117_settle1000_production_media_build_meta.txt"
 FROZEN_R65_BUILD_META = MEDIA_DIR / "p116_r65_production_media_build_meta.txt"
 PRE_R65_BUILD_META = MEDIA_DIR / "p116_media_telemetry_build_meta.txt"
-EXPECTED_MUSL_SHA256 = "ff16db0d809135cf5cdf6be4bfe8133fd77b3f41871b6c8f46eea765064537fb"
+EXPECTED_MUSL_SHA256 = "095051f42b7e6393c48fce51eaef73665e722fc852f263beed1b5c433308b0e0"
 EXPECTED_RUN3_GLIBC_SHA256 = "94063498a35a886dc4cb735c3e629a5097b965224cb3354192723d30e70c16ac"
 # PACKAGED_NATIVE_SOURCE_SHA256 is the source identity actually baked into
-# the still-unrebuilt EXPECTED_MUSL_SHA256 binary (unchanged this round --
+# the packaged EXPECTED_MUSL_SHA256 binary (the P119 rebuild pair: both moved
+# together in the finalisation step, so the packaged pair is consistent again;
+# the P117 pair remains recorded as the frozen superseded one). Historically:
 # it is still R65's own, untouched output). HEAD_P116_SOURCE_SHA256 is what
 # regenerating HEAD's canonical candidate produces right now: the new P119
 # transform (entrance_p119_remote_sdp_l1_gather_diag_transform.py), composed
-# on top of the still-frozen R65 output, ahead of the packaged binary until
-# the orchestrator rebuilds.
-PACKAGED_NATIVE_SOURCE_SHA256 = "4448e8368bd6275a2cd398c35ef171d012f315d2bb5bd05daf2e33a13d4c0001"
+# on top of the still-frozen R65 output. Since the orchestrator rebuild they
+# describe the same pair again, exactly as in the P117 round.
+PACKAGED_NATIVE_SOURCE_SHA256 = "2f8137e988437c779a0f3bb1c9904c81cbe2d13641efa2e6a070054116dd43ed"
 HEAD_P116_SOURCE_SHA256 = "2f8137e988437c779a0f3bb1c9904c81cbe2d13641efa2e6a070054116dd43ed"
-SUPERSEDED_P117_BINARY_SHA256 = EXPECTED_MUSL_SHA256
-SUPERSEDED_P117_SOURCE_SHA256 = PACKAGED_NATIVE_SOURCE_SHA256
+# The P117 pair is now a historical record: these must stay literal values so
+# they keep describing the artifact P117 actually built, not the current pins.
+SUPERSEDED_P117_BINARY_SHA256 = "ff16db0d809135cf5cdf6be4bfe8133fd77b3f41871b6c8f46eea765064537fb"
+SUPERSEDED_P117_SOURCE_SHA256 = "4448e8368bd6275a2cd398c35ef171d012f315d2bb5bd05daf2e33a13d4c0001"
 SUPERSEDED_R65_BINARY_SHA256 = "76218861c72e9a2b87283df6c5c7e0b03a4d7fb11bee4364f59be1513acd6129"
 SUPERSEDED_R65_SOURCE_SHA256 = "4fc6188c6231b94682205973b6a6f628ca005e8b7c3a04efbd8056c5a608c58c"
 PRE_R65_PACKAGED_BINARY_SHA256 = "a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8"
@@ -221,19 +225,21 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         self.assertEqual(actual, EXPECTED_MUSL_SHA256)
         self.assertEqual(_transport_sha_pin(self.transport_source), EXPECTED_MUSL_SHA256)
         self.assertEqual(meta["NATIVE_BINARY_SHA256"], EXPECTED_MUSL_SHA256)
-        # P119 changed the generated *source* only; no rebuild happened, so
-        # unlike every prior round this build-meta records no fresh build_a/
-        # build_b evidence -- only the orchestrator's musl rebuild can
-        # produce that, and it is explicitly flagged as still pending.
-        self.assertNotIn("build_a_sha256", meta)
-        self.assertNotIn("build_b_sha256", meta)
-        self.assertEqual(meta["binary_rebuild_pending_orchestrator"], "true")
+        # P119 changed the generated source and the orchestrator rebuilt the
+        # packaged artifact, so this build-meta now carries the same fresh
+        # two-build evidence every prior round carried.
+        self.assertEqual(meta["binary_rebuild_pending_orchestrator"], "false")
+        self.assertEqual(meta["build_a_sha256"], EXPECTED_MUSL_SHA256)
+        self.assertEqual(meta["build_b_sha256"], EXPECTED_MUSL_SHA256)
+        self.assertEqual(meta["reproducible_binary_cmp_gate"], "PASS")
+        self.assertEqual(meta["CONTROL_BUILD_REPRODUCES_CURRENT_BINARY"], "true")
+        self.assertEqual(meta["NATIVE_BINARY_SIZE"], "297408")
         self.assertEqual(meta["superseded_native_binary_sha256"], SUPERSEDED_P117_BINARY_SHA256)
         # The frozen P117 record documents the artifact it actually built and
         # verified with two independent builds; it must not be rewritten.
-        self.assertEqual(frozen_p117_meta["NATIVE_BINARY_SHA256"], EXPECTED_MUSL_SHA256)
-        self.assertEqual(frozen_p117_meta["build_a_sha256"], EXPECTED_MUSL_SHA256)
-        self.assertEqual(frozen_p117_meta["build_b_sha256"], EXPECTED_MUSL_SHA256)
+        self.assertEqual(frozen_p117_meta["NATIVE_BINARY_SHA256"], SUPERSEDED_P117_BINARY_SHA256)
+        self.assertEqual(frozen_p117_meta["build_a_sha256"], SUPERSEDED_P117_BINARY_SHA256)
+        self.assertEqual(frozen_p117_meta["build_b_sha256"], SUPERSEDED_P117_BINARY_SHA256)
         self.assertEqual(frozen_p117_meta["superseded_native_binary_sha256"], SUPERSEDED_R65_BINARY_SHA256)
         # The frozen R65 record documents the artifact it built -- exactly the
         # pair the P117 round superseded -- and must not be rewritten.
@@ -250,17 +256,21 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         self.assertNotEqual(actual, PRE_R30E_PACKAGED_BINARY_SHA256)
         self.assertNotEqual(actual, EXPECTED_RUN3_GLIBC_SHA256)
 
-    def test_new_diagnostic_markers_are_not_yet_in_the_unrebuilt_binary(self) -> None:
-        # Makes binary_rebuild_pending_orchestrator=true a verifiable fact,
-        # not just a label: the currently packaged ELF genuinely predates
-        # the P119 source markers, because it has not been rebuilt.
+    def test_p119_diagnostic_markers_are_present_in_the_packaged_binary(self) -> None:
+        # The finalisation step rebuilt the packaged ELF from the P119 source,
+        # so the new diagnostic markers are now part of the shipped bytes.
         for marker in (
             b"G0_NATIVE_PROCESS_START_MONOTONIC_MS=",
             b"G1_NICE_AGENT_READY_MONOTONIC_MS=",
+            b"G2_GATHER_CALL_MONOTONIC_MS=",
+            b"G3_FIRST_HOST_CANDIDATE_MONOTONIC_MS=",
+            b"G4_FIRST_SRFLX_CANDIDATE_MONOTONIC_MS=",
+            b"G5_GATHER_DONE_MONOTONIC_MS=",
+            b"G6_OFFER_WRITTEN_MONOTONIC_MS=",
             b"RSP_VISIBLE_MONOTONIC_MS=",
             b"RSP_LOADED_MONOTONIC_MS=",
         ):
-            self.assertNotIn(marker, self.binary_blob)
+            self.assertIn(marker, self.binary_blob)
 
     def test_packaged_binary_is_musl_elf_with_exact_needed_set(self) -> None:
         interpreter = self.elf.interpreter()
@@ -295,7 +305,7 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         for marker in markers:
             self.assertIn(marker, self.binary_blob)
 
-    def test_current_head_source_identity_is_separate_from_packaged_native_provenance(self) -> None:
+    def test_current_head_source_identity_matches_packaged_native_provenance(self) -> None:
         sys.path.insert(0, str(MEDIA_DIR))
         # P119 is now the canonical generator for HEAD's candidate (it
         # composes R65, which composes P106+P116 below it, unchanged), so
@@ -317,23 +327,24 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         native_rebuild_required = head_sha != PACKAGED_NATIVE_SOURCE_SHA256
         current_packaged_matches_head = head_sha == PACKAGED_NATIVE_SOURCE_SHA256
         self.assertEqual(head_sha, HEAD_P116_SOURCE_SHA256)
-        # Unlike every prior round, HEAD's source and the packaged binary's
-        # source are genuinely different right now: this round is
-        # source-only, pending the orchestrator's rebuild.
-        self.assertNotEqual(head_sha, PACKAGED_NATIVE_SOURCE_SHA256)
+        # The orchestrator rebuilt the packaged artifact from this source, so
+        # HEAD's source identity and the packaged binary's source identity are
+        # the same pair again (as in the P117 round) rather than separated by a
+        # pending rebuild.
+        self.assertEqual(head_sha, PACKAGED_NATIVE_SOURCE_SHA256)
         self.assertEqual(meta["GENERATED_SOURCE_SHA256"], HEAD_P116_SOURCE_SHA256)
         self.assertEqual(meta["superseded_generated_source_sha256"], SUPERSEDED_P117_SOURCE_SHA256)
-        self.assertEqual(meta["binary_rebuild_pending_orchestrator"], "true")
+        self.assertEqual(meta["binary_rebuild_pending_orchestrator"], "false")
         # The frozen P117 record must keep documenting exactly the source it
         # actually built (what this round supersedes), never the current pin.
         self.assertEqual(frozen_p117_meta["GENERATED_SOURCE_SHA256"], SUPERSEDED_P117_SOURCE_SHA256)
         self.assertNotEqual(head_sha, SUPERSEDED_R65_SOURCE_SHA256)
         self.assertNotEqual(head_sha, PRE_R65_PACKAGED_SOURCE_SHA256)
         self.assertNotEqual(head_sha, PRE_R30E_PACKAGED_SOURCE_SHA256)
-        self.assertEqual(f"NATIVE_REBUILD_REQUIRED={str(native_rebuild_required).lower()}", "NATIVE_REBUILD_REQUIRED=true")
+        self.assertEqual(f"NATIVE_REBUILD_REQUIRED={str(native_rebuild_required).lower()}", "NATIVE_REBUILD_REQUIRED=false")
         self.assertEqual(
             f"CURRENT_PACKAGED_BINARY_MATCHES_HEAD_SOURCE={str(current_packaged_matches_head).lower()}",
-            "CURRENT_PACKAGED_BINARY_MATCHES_HEAD_SOURCE=false",
+            "CURRENT_PACKAGED_BINARY_MATCHES_HEAD_SOURCE=true",
         )
 
     def test_packaged_and_head_digest_pins_fail_on_byte_flip(self) -> None:

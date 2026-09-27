@@ -20,7 +20,7 @@ import entrance_p80_ha_media_runtime_transform as p80
 SOURCE = SAFETY / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-ctpp-door.c"
 TRANSPORT = COMPONENT / "media_transport.py"
 BINARY = COMPONENT / "native" / "comelit-media"
-EXPECTED_SHA256 = "ff16db0d809135cf5cdf6be4bfe8133fd77b3f41871b6c8f46eea765064537fb"
+EXPECTED_SHA256 = "095051f42b7e6393c48fce51eaef73665e722fc852f263beed1b5c433308b0e0"
 
 VIDEO_MARKERS = (
     "P116_VIDEO_COUNT",
