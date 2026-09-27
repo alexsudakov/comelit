@@ -62,10 +62,14 @@ class _MiniAppView(HomeAssistantView):
         try:
             session = self.controller.sessions.get(token)
         except MiniAppSessionError as exc:
-            raise web.HTTPUnauthorized from exc
+            # Do not raise HTTPUnauthorized here. Home Assistant's global
+            # HTTP ban middleware treats raised 401 responses as failed HA
+            # login attempts. Mini App sessions are integration-owned and an
+            # expired/restarted WebView must not poison HA's IP-ban counter.
+            raise web.HTTPForbidden from exc
         if not self.controller.session_is_allowed(session):
             self.controller.sessions.delete(token)
-            raise web.HTTPUnauthorized
+            raise web.HTTPForbidden
         return token, session
 
     @staticmethod
@@ -138,7 +142,9 @@ class MiniAppSessionView(_MiniAppView):
                 future_skew_seconds=AUTH_FUTURE_SKEW_SECONDS,
             )
         except TelegramAuthenticationError as exc:
-            raise web.HTTPUnauthorized from exc
+            # This is Telegram Mini App authentication, not Home Assistant
+            # user authentication. Avoid HA's global raised-401 ban path.
+            raise web.HTTPForbidden from exc
 
         token, session = self.controller.sessions.create(
             identity.user_id,
