@@ -26,8 +26,7 @@ from ..const import (
     MAIN_ENTRANCE_UNIQUE_ID,
     MAIN_GATE_UNIQUE_ID,
 )
-from .session import MiniAppMediaGrantStore, MiniAppSession, MiniAppSessionStore
-
+from .session import (\n    MiniAppMediaGrantStore,\n    MiniAppSession,\n    MiniAppSessionError,\n    MiniAppSessionStore,\n)\n
 
 INTERCOM_UNIQUE_IDS = frozenset(
     {
@@ -146,7 +145,7 @@ class ComelitMiniAppController:
 
     @property
     def index_path(self) -> Path:
-        return self.frontend_dir / "miniapp" / "index.html"
+        return Path(__file__).resolve().parent / "index.html"
 
     def session_is_allowed(self, session: MiniAppSession) -> bool:
         settings = self.settings
@@ -329,6 +328,6 @@ class ComelitMiniAppController:
             raise MiniAppOperationError("unsupported HLS resource")
         try:
             grant = self.media_grants.get(media_id, session_token)
-        except Exception as exc:
+        except MiniAppSessionError as exc:
             raise MiniAppOperationError("Mini App media grant is unavailable") from exc
         return grant.upstream_base_path + tail
