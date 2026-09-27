@@ -288,10 +288,16 @@ allowlist or changing the configured bot ID also prevents further proxy
 requests from that session.
 
 The Mini App host provides a small `picture-entity` compatibility element
-using an HTML5 `video` element. Native HLS support in the target Telegram
-WebViews remains a deployment acceptance item; if a target WebView lacks native
-HLS, a bundled HLS player can be added without changing the backend or security
-architecture.
+using an HTML5 `video` element.
+
+Playback is capability-driven. The integration bundles pinned `hls.js 1.7.3`
+under the existing same-origin Comelit frontend path. Telegram Desktop / Android
+WebViews that expose MediaSource use hls.js; native HLS remains the fallback for
+platforms such as Safari/iOS. No third-party JavaScript is fetched at runtime.
+
+The hls.js instance is destroyed when the viewer is removed. Fatal playback
+errors stop that viewer and are surfaced to the user instead of automatically
+reopening the Comelit camera session.
 
 ## 10. Home Assistant options
 

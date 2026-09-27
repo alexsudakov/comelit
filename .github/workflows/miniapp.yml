@@ -60,6 +60,9 @@ jobs:
       - name: Parse Mini App host
         run: node --check custom_components/comelit/frontend/miniapp/host.js
 
+      - name: Parse bundled hls.js
+        run: node --check custom_components/comelit/frontend/miniapp/vendor/hls.min.js
+
       - name: Parse shared bundled Comelit card
         run: node --check custom_components/comelit/frontend/comelit-card.js
 
