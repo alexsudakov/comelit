@@ -177,3 +177,12 @@ def test_tokens_are_not_present_in_frontend_files():
     assert BOT_TOKEN not in content
     assert "HA_SECRET" not in content
     assert SESSION_SECRET not in content
+
+
+def test_frontend_registers_camera_viewer_custom_element():
+    script = (
+        Path(__file__).resolve().parents[1] / "app" / "static" / "miniapp.js"
+    ).read_text(encoding="utf-8")
+    assert 'customElements.define("miniapp-picture-entity"' in script
+    assert 'document.createElement("miniapp-picture-entity")' in script
+    assert "new MiniAppPictureEntity(" not in script
