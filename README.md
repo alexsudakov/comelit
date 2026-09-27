@@ -80,6 +80,8 @@ action nonce, and one accepted request maps to exactly one existing Comelit
 
 Camera viewing uses Home Assistant's normal HLS stream API, so
 `camera.comelit_entrance` keeps its existing camera-owned media lifecycle.
+The raw HA HLS capability path remains server-side and is exposed to Telegram
+only through a session-bound Comelit media proxy.
 
 Architecture and deployment boundary: `docs/miniapp-architecture.md`.
 
