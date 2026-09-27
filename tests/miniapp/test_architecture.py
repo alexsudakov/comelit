@@ -10,12 +10,13 @@ def _read(relative: str) -> str:
 
 def test_miniapp_is_embedded_in_custom_component():
     assert (ROOT / "custom_components/comelit/miniapp/views.py").is_file()
-    assert (ROOT / "custom_components/comelit/frontend/miniapp/index.html").is_file()
+    assert (ROOT / "custom_components/comelit/miniapp/index.html").is_file()
+    assert not (ROOT / "custom_components/comelit/frontend/miniapp/index.html").exists()
     assert not (ROOT / "miniapp").exists()
 
 
 def test_shared_card_is_the_only_intercom_ui():
-    html = _read("custom_components/comelit/frontend/miniapp/index.html")
+    html = _read("custom_components/comelit/miniapp/index.html")
     assert "/api/comelit/frontend/comelit-card.js" in html
     assert '<comelit-card id="comelitCard">' in html
     assert not (
