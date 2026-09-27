@@ -62,6 +62,14 @@ Microphone / Answer / Hangup remain intentionally out of scope until the full-du
 
 On a new authoritative `ringing` event, the card focuses the «Домофон» tab once and highlights the active panel. If the user then switches to «Видеонаблюдение», the card does not force the tab back on subsequent Home Assistant state updates. This keeps surveillance viewing independent while a call is active.
 
+## Telegram Mini App
+
+The repository also contains a Telegram Mini App host under `miniapp/`. It reuses the exact bundled `custom:comelit-card` rather than maintaining a second intercom UI.
+
+The Mini App gateway keeps both Telegram bot credentials and the Home Assistant Long-Lived Access Token server-side. The browser receives only a narrow, filtered Home Assistant surface required by the shared card. Door/Gate actions retain the existing one-shot safety contract: one explicit click maps to one Home Assistant `button.press`, with no automatic retry.
+
+Architecture and deployment boundary: `docs/miniapp-architecture.md`.
+
 ## Current capabilities
 
 - Direct Comelit cloud P2P bootstrap and persistent session
