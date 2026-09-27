@@ -11,7 +11,7 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.6.0**. This release adds the opt-in embedded Telegram Mini App directly inside `custom_components/comelit`, while retaining the 1.5.20 live-validated entrance-camera startup baseline and all existing Door/media safety invariants. The Mini App is disabled by default and introduces no standalone gateway, Home Assistant Long-Lived Access Token, or Telegram bot token dependency. Release details and rollout boundaries are recorded in `docs/releases/1.6.0-embedded-telegram-miniapp.md`; the accepted camera-startup baseline remains documented in `docs/releases/1.5.20-camera-startup-stabilization.md`.
+Current stable release: **1.6.1**. This patch keeps the embedded Telegram Mini App architecture from 1.6.0 and adds same-origin bundled `hls.js` playback for Telegram WebViews that do not reliably play Home Assistant HLS natively. Door/Gate, authentication, the HLS capability proxy, and Comelit media ownership are unchanged. Details are recorded in `docs/releases/1.6.1-miniapp-hls-playback.md`.
 
 ## Home Assistant Custom Card
 
