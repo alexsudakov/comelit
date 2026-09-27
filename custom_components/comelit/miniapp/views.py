@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from http import HTTPStatus
 import json
+from urllib.parse import urljoin
 
 from aiohttp import web
 
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.network import NoURLAvailableError, get_url
 from homeassistant.exceptions import HomeAssistantError
 
 from ..const import DOOR_ENTRANCE, DOOR_GATE
@@ -240,18 +243,94 @@ class MiniAppCameraStreamView(_MiniAppView):
 
     async def post(self, request: web.Request, entity_id: str) -> web.Response:
         self._require_miniapp_marker(request)
-        self._require_session(request)
+        token, session = self._require_session(request)
         if not entity_id.startswith("camera."):
             raise web.HTTPNotFound
 
         try:
-            url = await self.controller.async_camera_stream_url(entity_id)
-        except (MiniAppOperationError, HomeAssistantError):
+            url = await self.controller.async_create_camera_media(
+                token,
+                session,
+                entity_id,
+            )
+        except (MiniAppOperationError, HomeAssistantError, TimeoutError):
             return _json_response(
                 {"error": "camera_stream_unavailable"},
                 status=HTTPStatus.CONFLICT,
             )
         return _json_response({"url": url})
+
+
+class MiniAppMediaView(_MiniAppView):
+    url = r"/api/comelit/miniapp/media/{media_id}/{tail:.*}"
+    name = "api:comelit:miniapp:media"
+
+    async def get(
+        self,
+        request: web.Request,
+        media_id: str,
+        tail: str,
+    ) -> web.StreamResponse:
+        token, _session = self._require_session(request)
+        try:
+            upstream_path = self.controller.resolve_media_upstream_path(
+                media_id,
+                token,
+                tail,
+            )
+        except MiniAppOperationError as exc:
+            raise web.HTTPNotFound from exc
+
+        try:
+            base = get_url(
+                self.controller.hass,
+                allow_internal=True,
+                allow_external=False,
+                prefer_external=False,
+                allow_cloud=False,
+            )
+        except (NoURLAvailableError, ValueError) as exc:
+            raise web.HTTPServiceUnavailable from exc
+
+        upstream_url = urljoin(
+            base.rstrip("/") + "/",
+            upstream_path.lstrip("/"),
+        )
+        if request.query_string:
+            upstream_url = f"{upstream_url}?{request.query_string}"
+
+        forward_headers: dict[str, str] = {}
+        if range_header := request.headers.get("Range"):
+            forward_headers["Range"] = range_header
+
+        client = async_get_clientsession(self.controller.hass)
+        try:
+            async with client.get(
+                upstream_url,
+                headers=forward_headers,
+                allow_redirects=False,
+            ) as upstream:
+                headers = {
+                    "Cache-Control": "no-store",
+                    "X-Content-Type-Options": "nosniff",
+                }
+                for header in ("Content-Type", "Content-Range", "Accept-Ranges"):
+                    if value := upstream.headers.get(header):
+                        headers[header] = value
+
+                response = web.StreamResponse(
+                    status=upstream.status,
+                    headers=headers,
+                )
+                await response.prepare(request)
+                try:
+                    async for chunk in upstream.content.iter_chunked(64 * 1024):
+                        await response.write(chunk)
+                except ConnectionResetError:
+                    pass
+                return response
+        except TimeoutError as exc:
+            raise web.HTTPGatewayTimeout from exc
 
 
 def async_register_miniapp_views(
@@ -265,3 +344,4 @@ def async_register_miniapp_views(
     hass.http.register_view(MiniAppStateView(controller))
     hass.http.register_view(MiniAppDoorView(controller))
     hass.http.register_view(MiniAppCameraStreamView(controller))
+    hass.http.register_view(MiniAppMediaView(controller))
