@@ -23,11 +23,16 @@
   }
 
   class MiniAppPictureEntity extends HTMLElement {
-    constructor(config) {
+    constructor() {
       super();
-      this._config = config;
+      this._config = null;
       this._hass = null;
       this._img = null;
+    }
+
+    setConfig(config) {
+      this._config = config;
+      this._render();
     }
 
     set hass(value) {
@@ -82,12 +87,18 @@
     }
   }
 
+  if (!customElements.get("miniapp-picture-entity")) {
+    customElements.define("miniapp-picture-entity", MiniAppPictureEntity);
+  }
+
   window.loadCardHelpers = async () => ({
     createCardElement: async (config) => {
       if (config?.type !== "picture-entity" || !config?.entity) {
         throw new Error("Mini App supports only picture-entity viewers");
       }
-      return new MiniAppPictureEntity(config);
+      const viewer = document.createElement("miniapp-picture-entity");
+      viewer.setConfig(config);
+      return viewer;
     },
   });
 
