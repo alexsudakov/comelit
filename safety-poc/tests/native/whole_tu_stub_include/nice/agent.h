@@ -11,10 +11,13 @@
 typedef struct _NiceAgent NiceAgent;
 typedef gint NiceComponentState;
 
+#define NICE_CANDIDATE_MAX_FOUNDATION 32
+
 typedef struct _NiceCandidate {
     gint type;
     gint transport;
     guint component_id;
+    gchar foundation[NICE_CANDIDATE_MAX_FOUNDATION];
 } NiceCandidate;
 
 #define NICE_COMPATIBILITY_RFC5245 0

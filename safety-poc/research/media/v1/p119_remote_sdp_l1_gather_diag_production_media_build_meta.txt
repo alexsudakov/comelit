@@ -1,0 +1,65 @@
+P119_REMOTE_SDP_L1_GATHER_DIAG_PRODUCTION_MEDIA_BUILD=SOURCE_ONLY_EVIDENCE
+TASK_ID=COMELIT-PRODUCTION-CAMERA-REMOTE-SDP-L1-PLUS-GATHER-DIAGNOSTIC-V1
+build_input_commit=42aa134af752b72bec82074566681011d8b38e42
+worktree_dirty_count=0
+worktree_state=clean_at_base
+# The raw door source (safety-poc/research/door/v1_5_7/comelit-v4-persistent-
+# ctpp-door.c) is NOT edited by this round: its sha256 is pinned as a frozen
+# anchor by many unrelated rounds (R18, R20, R27, R35-R37, R54, R57, R58,
+# P29, ...), so -- exactly like the settle-candidate round before it -- the
+# L1 removal and the new gathering-stage markers are layered in downstream,
+# as a new transform composed on top of the existing R65 production
+# candidate (entrance_p116_r65_production_media_refresh_transform.py, which
+# is itself untouched and still produces its own original output/sha).
+canonical_generator=safety-poc/research/media/v1/entrance_p119_remote_sdp_l1_gather_diag_transform.py (include_p116=1, composes entrance_p116_r65_production_media_refresh_transform.py)
+GENERATED_SOURCE_SHA256=2f8137e988437c779a0f3bb1c9904c81cbe2d13641efa2e6a070054116dd43ed
+GENERATED_SOURCE_BYTES=251588
+EXPECTED_SOURCE_SHA_GATE=PASS
+base_generated_source_sha256=4448e8368bd6275a2cd398c35ef171d012f315d2bb5bd05daf2e33a13d4c0001
+base_generated_source_bytes=247412
+generated_source_diff_lines=159
+generated_source_diff_method=unified_diff_default_context_excluding_file_headers
+remote_sdp_l1_function_changed=remote_sdp_check_cb
+remote_sdp_stable_ticks_before=2
+remote_sdp_stable_ticks_after=0
+poll_interval_unchanged=true
+diagnostic_markers_added=G0_NATIVE_PROCESS_START_MONOTONIC_MS,G1_NICE_AGENT_READY_MONOTONIC_MS,G2_GATHER_CALL_MONOTONIC_MS,G3_FIRST_HOST_CANDIDATE_MONOTONIC_MS,G3_HOST_CANDIDATE_COUNT,G4_FIRST_SRFLX_CANDIDATE_MONOTONIC_MS,G4_SRFLX_CANDIDATE_COUNT,G5_GATHER_DONE_MONOTONIC_MS,G6_OFFER_WRITTEN_MONOTONIC_MS,RSP_VISIBLE_MONOTONIC_MS,RSP_LOADED_MONOTONIC_MS
+# R57 (entrance_p116_r57_native_failure_attribution_transform.py) is a
+# structurally independent branch: it composes R54, not R27/R65, and never
+# reaches this round's markers either way. It is unaffected by this round
+# because the raw source it (like R65) is ultimately rooted in is unchanged.
+r57_transform_still_applies=true
+r57_markers_present_in_output=not_applicable_independent_branch
+# This round is diagnostic-only on the *generated source* side (L1
+# remote.sdp wait removal + gathering-stage monotonic markers, added by a
+# new downstream transform). The orchestrator's musl/CT120 rebuild lane owns
+# turning this source into a new packaged binary; that has NOT happened in
+# this worktree. No build_a/build_b run roots or hashes are recorded here
+# because no build was performed -- inventing them would misrepresent
+# evidence that does not exist.
+NATIVE_BINARY_SHA256=ff16db0d809135cf5cdf6be4bfe8133fd77b3f41871b6c8f46eea765064537fb
+NATIVE_BINARY_SIZE=295056
+binary_rebuild_pending_orchestrator=true
+binary_unchanged_from_p117=true
+superseded_native_binary_sha256=ff16db0d809135cf5cdf6be4bfe8133fd77b3f41871b6c8f46eea765064537fb
+superseded_generated_source_sha256=4448e8368bd6275a2cd398c35ef171d012f315d2bb5bd05daf2e33a13d4c0001
+superseded_provenance_file=safety-poc/research/media/v1/p117_settle1000_production_media_build_meta.txt
+remote_sdp_detection_wait_removed=true
+remote_sdp_content_changed=false
+remote_sdp_format_changed=false
+ice_settings_changed=false
+pseudotcp_behavior_changed=false
+ctpp_changed=false
+rtpc_changed=false
+settle_ms=1000
+door_semantics_changed=false
+gate_semantics_changed=false
+protocol_messages_added=false
+production_deploy_performed=false
+candidate_executed=false
+LIVE_INVOCATIONS=0
+DOOR_ACTIONS=0
+GATE_ACTIONS=0
+COMELIT_NETWORK_REQUESTS=0
+LISTENER_CHANGED=NO
+HA_CORE_CHANGED=NO

@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 from pathlib import Path
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -34,6 +35,16 @@ SETTLE_BASE_SOURCE_SHA256 = (
 SETTLE_CANDIDATE_SOURCE_SHA256 = (
     "4448e8368bd6275a2cd398c35ef171d012f315d2bb5bd05daf2e33a13d4c0001"
 )
+# The exact commit whose door source, run through the R65 transform,
+# reproduces SETTLE_CANDIDATE_SOURCE_SHA256 (safety-poc/research/media/v1/
+# p117_settle1000_production_media_build_meta.txt: build_input_commit).
+# P119 goes on to change the generated source further (L1 remote.sdp wait
+# removal + gathering-stage markers), so the settle-isolation proof below
+# must be pinned to this frozen historical commit rather than to whatever
+# HEAD's door source currently produces -- otherwise every later native
+# source change would spuriously "break" a proof about a round that already
+# shipped and is not being revisited.
+P117_BUILD_INPUT_COMMIT = "dcb85f8ff28e218f4dc81af0da4d6d5302d43cee"
 
 
 def _load(name: str, path: Path):
@@ -86,6 +97,18 @@ EXPECTED_FIELD_ORDER = (
     "CAMERA_REQUEST_TO_LISTENER_PAUSED_MS",
     "LISTENER_PAUSED_TO_TRANSPORT_START_MS",
     "TRANSPORT_START_TO_ICE_GATHER_DONE_MS",
+    # P119: 10 new fields, derived only from native monotonic values,
+    # inserted here (immediately after TRANSPORT_START_TO_ICE_GATHER_DONE_MS).
+    "NATIVE_PROCESS_START_TO_NICE_AGENT_READY_MS",
+    "NICE_AGENT_READY_TO_GATHER_CALL_MS",
+    "GATHER_CALL_TO_FIRST_HOST_CANDIDATE_MS",
+    "FIRST_HOST_TO_FIRST_SRFLX_CANDIDATE_MS",
+    "FIRST_SRFLX_TO_GATHER_DONE_MS",
+    "GATHER_CALL_TO_GATHER_DONE_MS",
+    "GATHER_DONE_TO_OFFER_WRITTEN_MS",
+    "REMOTE_SDP_FILE_VISIBLE_TO_LOAD_MS",
+    "G3_HOST_CANDIDATE_COUNT",
+    "G4_SRFLX_CANDIDATE_COUNT",
     "ICE_GATHER_DONE_TO_CLOUD_NEGOTIATE_MS",
     "TRANSPORT_START_TO_CLOUD_NEGOTIATE_MS",
     "CLOUD_NEGOTIATE_TO_REMOTE_SDP_MS",
@@ -138,6 +161,29 @@ def _generate_head_source() -> str:
     return r65_transform(DOOR_SOURCE.read_text(encoding="utf-8"), include_p116=True)
 
 
+def _git_show(commit: str, path: Path) -> str:
+    rel = path.relative_to(ROOT)
+    result = subprocess.run(
+        ["git", "show", f"{commit}:{rel.as_posix()}"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
+
+
+def _generate_p117_head_source() -> str:
+    """The frozen P117 settle-round generated source, from git history.
+
+    Offline, local-only: no network I/O, just ``git show`` against this
+    repository's own history.
+    """
+    return r65_transform(
+        _git_show(P117_BUILD_INPUT_COMMIT, DOOR_SOURCE), include_p116=True
+    )
+
+
 def _generate_base_source() -> str:
     """Reconstruct the pre-change generated production source hermetically.
 
@@ -146,9 +192,11 @@ def _generate_base_source() -> str:
     byte -- that equality IS the proof that no other textual delta exists.
     Resolving the pre-change text from git history would not be stronger (and
     is unavailable in a shallow CI checkout), so the recorded hash is the
-    anchor instead.
+    anchor instead. Pinned to the frozen P117 head source (not the live,
+    ever-evolving HEAD source), since this reconstructs specifically the
+    settle round's own before/after pair.
     """
-    head_source = _generate_head_source()
+    head_source = _generate_p117_head_source()
     if head_source.count(SETTLE_DEFINE_NEW) != 1:
         raise AssertionError("settle candidate define is not present exactly once")
     if SETTLE_DEFINE_OLD in head_source:
@@ -210,13 +258,21 @@ class CameraRequestLatencyTimelineTests(unittest.TestCase):
         timeline = latency_timeline.CameraRequestLatencyTimeline()
         line = timeline.log_line()
         self.assertTrue(line.startswith("COMELIT_CAMERA_E2E_LATENCY "))
-        for name, _, _ in latency_timeline._DERIVED_FIELDS:
+        for name in latency_timeline.FIELD_ORDER:
             self.assertIn(f"{name}=N_A", line)
 
-    def test_emitted_field_list_matches_exact_order_with_twentyfive_fields(self) -> None:
-        field_names = tuple(name for name, _, _ in latency_timeline._DERIVED_FIELDS)
-        self.assertEqual(field_names, EXPECTED_FIELD_ORDER)
-        self.assertEqual(len(EXPECTED_FIELD_ORDER), 25)
+    def test_emitted_field_list_matches_exact_order_with_thirtyfive_fields(self) -> None:
+        # 25 pre-P119 fields + 10 P119 native gathering-stage fields, in the
+        # exact positions specified: the 10 new fields sit immediately after
+        # TRANSPORT_START_TO_ICE_GATHER_DONE_MS (the original 3rd field).
+        self.assertEqual(latency_timeline.FIELD_ORDER, EXPECTED_FIELD_ORDER)
+        self.assertEqual(len(EXPECTED_FIELD_ORDER), 35)
+        t_field_names = tuple(name for name, _, _ in latency_timeline._DERIVED_FIELDS)
+        self.assertEqual(len(t_field_names), 25)
+        self.assertEqual(
+            EXPECTED_FIELD_ORDER[:3] + EXPECTED_FIELD_ORDER[13:],
+            t_field_names,
+        )
         timeline = latency_timeline.CameraRequestLatencyTimeline()
         line = timeline.log_line()
         body = line[len("COMELIT_CAMERA_E2E_LATENCY "):]
@@ -435,7 +491,7 @@ class SettleCandidateGateTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.generated_source = _generate_head_source()
+        cls.generated_source = _generate_p117_head_source()
         cls.transform_text = SETTLE_TRANSFORM.read_text(encoding="utf-8")
 
     def test_exactly_one_settle_define_at_1000_in_generated_source(self) -> None:
@@ -514,7 +570,7 @@ class SettleCandidateNegativeGuardTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.head_source = _generate_head_source()
+        cls.head_source = _generate_p117_head_source()
         cls.base_source = _generate_base_source()
 
     def test_generated_source_diff_is_exactly_one_line(self) -> None:

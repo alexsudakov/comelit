@@ -16,6 +16,17 @@ from .cloud import ComelitCloudError, async_negotiate_p2p
 from .h264_recovery import H264RecoveryRtpShim
 from .latency_timeline import (
     CameraRequestLatencyTimeline,
+    G0_NATIVE_PROCESS_START_MONOTONIC_MS,
+    G1_NICE_AGENT_READY_MONOTONIC_MS,
+    G2_GATHER_CALL_MONOTONIC_MS,
+    G3_FIRST_HOST_CANDIDATE_MONOTONIC_MS,
+    G3_HOST_CANDIDATE_COUNT,
+    G4_FIRST_SRFLX_CANDIDATE_MONOTONIC_MS,
+    G4_SRFLX_CANDIDATE_COUNT,
+    G5_GATHER_DONE_MONOTONIC_MS,
+    G6_OFFER_WRITTEN_MONOTONIC_MS,
+    RSP_LOADED_MONOTONIC_MS,
+    RSP_VISIBLE_MONOTONIC_MS,
     T04_TRANSPORT_START_BEGIN,
     T05_ICE_GATHER_DONE,
     T06_CLOUD_NEGOTIATE_BEGIN,
@@ -133,6 +144,30 @@ _NATIVE_MARKER_LATENCY_BOUNDARIES = {
     "P80_MEDIA_ACTIVE=true": T15_MEDIA_ACTIVE,
     "P80_VIDEO_RTP_FORWARDING=PASS": T16_FIRST_VIDEO_RTP,
 }
+
+# Diagnostic-only: the P119 native gathering-stage stage markers (integer
+# monotonic ms or counts, never IPs/candidates/ports/credentials/SDP -- see
+# safety-poc/research/door/v1_5_7/comelit-v4-persistent-ctpp-door.c). Unlike
+# _NATIVE_MARKER_LATENCY_BOUNDARIES above, these are NOT observation-time
+# boundaries: the numeric value carried on the line itself is the native
+# process's own monotonic timestamp/count, fed into the timeline verbatim via
+# CameraRequestLatencyTimeline.mark_native() instead of loop.time().
+_NATIVE_STAGE_MARKER_KEYS = (
+    G0_NATIVE_PROCESS_START_MONOTONIC_MS,
+    G1_NICE_AGENT_READY_MONOTONIC_MS,
+    G2_GATHER_CALL_MONOTONIC_MS,
+    G3_FIRST_HOST_CANDIDATE_MONOTONIC_MS,
+    G3_HOST_CANDIDATE_COUNT,
+    G4_FIRST_SRFLX_CANDIDATE_MONOTONIC_MS,
+    G4_SRFLX_CANDIDATE_COUNT,
+    G5_GATHER_DONE_MONOTONIC_MS,
+    G6_OFFER_WRITTEN_MONOTONIC_MS,
+    RSP_VISIBLE_MONOTONIC_MS,
+    RSP_LOADED_MONOTONIC_MS,
+)
+_NATIVE_STAGE_MARKER_RE = re.compile(
+    r"^(" + "|".join(_NATIVE_STAGE_MARKER_KEYS) + r")=([0-9]{1,20})$"
+)
 
 _LOCAL_RTP_SDP = f"""v=0\r
 o=- 0 0 IN IP4 127.0.0.1\r
@@ -508,6 +543,15 @@ class ComelitEntranceMediaTransport:
             if raw_count.isdigit() and int(raw_count) > 0:
                 timeline.mark(T16_FIRST_VIDEO_RTP, asyncio.get_running_loop().time())
 
+    def _observe_native_stage_marker(self, line: str) -> None:
+        timeline = self._latency_timeline
+        if timeline is None:
+            return
+        match = _NATIVE_STAGE_MARKER_RE.fullmatch(line)
+        if match is None:
+            return
+        timeline.mark_native(match.group(1), int(match.group(2)))
+
     def _capture_native_failure(self, returncode: int) -> None:
         self._last_native_exit_code = returncode
         self._last_native_failure_markers = list(self._native_marker_tail)
@@ -856,6 +900,7 @@ class ComelitEntranceMediaTransport:
             line = raw.decode("utf-8", errors="replace").strip()
             self._remember_native_marker(line)
             self._observe_latency_marker(line)
+            self._observe_native_stage_marker(line)
 
             if line == "ICE_GATHER=PASS":
                 self._offer_ready.set()
