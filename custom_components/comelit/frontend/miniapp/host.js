@@ -386,6 +386,12 @@
     }
     refreshTimer = setInterval(() => {
       refreshState().catch((error) => {
+        if (error?.status === 403) {
+          setFatal(
+            "Сессия Mini App завершена. Закройте окно и откройте «Домофон» снова.",
+          );
+          return;
+        }
         startupStatus.classList.remove("ready");
         startupStatus.textContent =
           "Связь с Home Assistant: " + (error?.message || "ошибка");
