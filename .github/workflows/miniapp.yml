@@ -67,4 +67,4 @@ jobs:
         run: |
           test ! -e miniapp
           test ! -e custom_components/comelit/frontend/miniapp/comelit-card.js
-          grep -F '/api/comelit/frontend/comelit-card.js' custom_components/comelit/frontend/miniapp/index.html
+          grep -F '/api/comelit/frontend/comelit-card.js' custom_components/comelit/miniapp/index.html
