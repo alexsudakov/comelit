@@ -255,7 +255,7 @@ class Mvp1RingTelegramOfflineBuildTests(unittest.TestCase):
         # camera-owned lifecycle work. Freeze only the protocol/native lineage
         # that this UI/lifecycle change must not mutate.
         expected = {
-            "custom_components/comelit/media_transport.py": "9a911ac241465ac9bee2ee8c7aebb4c1f0be1d3775b1a57c8418ec5e793a97dc",
+            "custom_components/comelit/media_transport.py": "7bdbaaad3ed78c9ec8251e5584d52ddcb9be7378c84da25f44f15fb3e101f68a",
             "safety-poc/research/media/v1/entrance_p116_r27_repeat_001a_transform.py": "9c4ebff3fe5c54b05bdb31d6bfd1ddbadd76efa72d5c6f1abdc8c8bd4d69160b",
             "safety-poc/research/media/v1/ct120_run_p116_r27_repeat_001a_live.sh": "ff20881a27f81cbcc6adf704ce0eb4edc3f037862d6495255ed7cfa9cc73f33b",
             "safety-poc/research/media/v1/entrance_p116_r30_call_ctp_envelope_model.py": "367db8028a0a1ed5c09a86b40bb5ae01657d823ca8f6561557338a609ba5a8d0",

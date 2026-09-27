@@ -1,0 +1,81 @@
+P121_GATHER_INITIAL_TIMEOUT_PRODUCTION_MEDIA_BUILD=SOURCE_ONLY_PENDING_ORCHESTRATOR_REBUILD
+TASK_ID=COMELIT-GATHERING-INITIAL-TIMEOUT-250-CANDIDATE-V1
+build_input_commit=69806e9a851e672362128081c6b0dbd4476f985d
+worktree_dirty_count=0
+worktree_state=clean_at_base
+# The raw door source (safety-poc/research/door/v1_5_7/comelit-v4-persistent-
+# ctpp-door.c) is NOT edited by this round: its sha256 is pinned as a frozen
+# anchor by many unrelated rounds (R18, R20, R27, R35-R37, R54, R57, R58,
+# P29, ...), so -- exactly like every round before it -- the gather-only
+# stun-initial-timeout override is layered in downstream, as a new transform
+# composed on top of the existing P119 production candidate
+# (entrance_p119_remote_sdp_l1_gather_diag_transform.py, which is itself
+# untouched and still produces its own original output/sha).
+canonical_generator=safety-poc/research/media/v1/entrance_p121_gather_initial_timeout_transform.py (include_p116=1, composes entrance_p119_remote_sdp_l1_gather_diag_transform.py)
+GENERATED_SOURCE_SHA256=07468cd74027d02d5f002c1cc63558f68526cf06b9694c5afe94579ea68f9e74
+GENERATED_SOURCE_BYTES=252818
+EXPECTED_SOURCE_SHA_GATE=PASS
+base_generated_source_sha256=2f8137e988437c779a0f3bb1c9904c81cbe2d13641efa2e6a070054116dd43ed
+base_generated_source_bytes=251588
+generated_source_diff_lines=95
+generated_source_diff_method=unified_diff_default_context_excluding_file_headers
+# Forensic basis (libnice 0.1.22, exact sources): stun-initial-timeout (RTO)
+# is used only by the discovery/gathering timers (agent/discovery.c:269-270,
+# :1323-1324), never by ICE connectivity checks, whose timer is computed
+# independently (agent/conncheck.c:2850-2861) and which only borrow a
+# separate retransmission-count property (agent/conncheck.c:2987) that this
+# round never touches.
+gather_initial_timeout_set_ms=250
+gather_initial_timeout_restored_ms=500
+restore_call_sites=candidate_gathering_done_cb_top,gather_start_failure_branch,component_state_failed_branch,post_main_loop_teardown
+diagnostic_markers_added=GATHER_INITIAL_TIMEOUT_SET_MS,GATHER_INITIAL_TIMEOUT_RESTORED_MS
+p119_diagnostic_markers_retained=G0_NATIVE_PROCESS_START_MONOTONIC_MS,G1_NICE_AGENT_READY_MONOTONIC_MS,G2_GATHER_CALL_MONOTONIC_MS,G3_FIRST_HOST_CANDIDATE_MONOTONIC_MS,G3_HOST_CANDIDATE_COUNT,G4_FIRST_SRFLX_CANDIDATE_MONOTONIC_MS,G4_SRFLX_CANDIDATE_COUNT,G5_GATHER_DONE_MONOTONIC_MS,G6_OFFER_WRITTEN_MONOTONIC_MS,RSP_VISIBLE_MONOTONIC_MS,RSP_LOADED_MONOTONIC_MS
+# R57 (entrance_p116_r57_native_failure_attribution_transform.py) is a
+# structurally independent branch: it composes R54, not R27/R65/P119, and
+# never reaches this round's markers either way. It is unaffected by this
+# round because the raw source it (like P119) is ultimately rooted in is
+# unchanged.
+r57_transform_still_applies=true
+r57_markers_present_in_output=not_applicable_independent_branch
+# This round is source-only: the gather-only stun-initial-timeout override
+# and its two new markers, added by a new downstream transform composed on
+# P119. The orchestrator's musl/CT120 rebuild lane owns turning this source
+# into a new packaged binary; that has NOT happened in this worktree. No
+# build_a/build_b run roots or hashes are recorded here because no build was
+# performed -- inventing them would misrepresent evidence that does not
+# exist.
+NATIVE_BINARY_SHA256=095051f42b7e6393c48fce51eaef73665e722fc852f263beed1b5c433308b0e0
+NATIVE_BINARY_SIZE=297408
+binary_rebuild_pending_orchestrator=true
+binary_unchanged_from_p119=true
+packaged_native_binary_sha256=095051f42b7e6393c48fce51eaef73665e722fc852f263beed1b5c433308b0e0
+packaged_native_binary_size=297408
+superseded_native_binary_sha256=095051f42b7e6393c48fce51eaef73665e722fc852f263beed1b5c433308b0e0
+superseded_generated_source_sha256=2f8137e988437c779a0f3bb1c9904c81cbe2d13641efa2e6a070054116dd43ed
+superseded_provenance_file=safety-poc/research/media/v1/p119_remote_sdp_l1_gather_diag_production_media_build_meta.txt
+# --- offline safety contract isolation booleans ---
+gather_only=true
+stun_max_retransmissions_changed=false
+connectivity_check_timer_path_changed=false
+ice_role_changed=false
+stun_server_changed=false
+turn_changed=false
+candidate_filtering_changed=false
+offer_content_logic_changed=false
+trickle_changed=false
+pseudotcp_changed=false
+ctpp_changed=false
+rtpc_changed=false
+settle_ms=1000
+remote_sdp_l1_retained=true
+door_semantics_changed=false
+gate_semantics_changed=false
+automatic_retry_added=false
+production_deploy_performed=false
+candidate_executed=false
+LIVE_INVOCATIONS=0
+DOOR_ACTIONS=0
+GATE_ACTIONS=0
+COMELIT_NETWORK_REQUESTS=0
+LISTENER_CHANGED=NO
+HA_CORE_CHANGED=NO
