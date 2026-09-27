@@ -66,6 +66,7 @@ EXPECTED_BOUNDARIES = (
     "T06_CLOUD_NEGOTIATE_BEGIN",
     "T07_REMOTE_SDP_READY",
     "T08_ICE_CONNECTED",
+    "T08B_ICE_READY",
     "T09_PSEUDOTCP_OPEN",
     "T10_CTPP_READY",
     "T11_SIGNALING_ARMED",
@@ -84,11 +85,15 @@ EXPECTED_BOUNDARIES = (
 EXPECTED_FIELD_ORDER = (
     "CAMERA_REQUEST_TO_LISTENER_PAUSED_MS",
     "LISTENER_PAUSED_TO_TRANSPORT_START_MS",
+    "TRANSPORT_START_TO_ICE_GATHER_DONE_MS",
+    "ICE_GATHER_DONE_TO_CLOUD_NEGOTIATE_MS",
     "TRANSPORT_START_TO_CLOUD_NEGOTIATE_MS",
     "CLOUD_NEGOTIATE_TO_REMOTE_SDP_MS",
     "REMOTE_SDP_TO_ICE_CONNECTED_MS",
     "TRANSPORT_START_TO_ICE_CONNECTED_MS",
     "ICE_CONNECTED_TO_PSEUDOTCP_OPEN_MS",
+    "ICE_CONNECTED_TO_ICE_READY_MS",
+    "ICE_READY_TO_PSEUDOTCP_OPEN_MS",
     "PSEUDOTCP_OPEN_TO_CTPP_READY_MS",
     "ICE_CONNECTED_TO_CTPP_READY_MS",
     "CTPP_READY_TO_SIGNALING_ARMED_MS",
@@ -108,6 +113,7 @@ EXPECTED_FIELD_ORDER = (
 EXPECTED_NATIVE_MARKER_MAP = {
     "ICE_GATHER=PASS": "T05_ICE_GATHER_DONE",
     "ICE_CONNECTED=PASS": "T08_ICE_CONNECTED",
+    "ICE_READY=PASS": "T08B_ICE_READY",
     "PSEUDOTCP_OPEN=PASS": "T09_PSEUDOTCP_OPEN",
     "V4_CTPP_REGISTRATION=PASS": "T10_CTPP_READY",
     "ENTRANCE_SIGNALING_ARMED=true": "T11_SIGNALING_ARMED",
@@ -159,7 +165,7 @@ def _generate_base_source() -> str:
 
 class CameraRequestLatencyTimelineTests(unittest.TestCase):
     def test_bounded_key_set_has_exactly_the_frozen_boundaries(self) -> None:
-        self.assertEqual(latency_timeline.MAX_BOUNDARIES, 22)
+        self.assertEqual(latency_timeline.MAX_BOUNDARIES, 23)
         self.assertEqual(latency_timeline._BOUNDARY_KEYS, frozenset(EXPECTED_BOUNDARIES))
         for name in EXPECTED_BOUNDARIES:
             self.assertEqual(getattr(latency_timeline, name), name)
@@ -192,8 +198,9 @@ class CameraRequestLatencyTimelineTests(unittest.TestCase):
             timeline.mark(boundary, 100.0 + index * 0.5)
         fields = timeline.summary_fields()
         self.assertEqual(fields["CAMERA_REQUEST_TO_LISTENER_PAUSED_MS"], "1500")
-        self.assertEqual(fields["CAMERA_REQUEST_TO_FIRST_HLS_SEGMENT_MS"], "10500")
+        self.assertEqual(fields["CAMERA_REQUEST_TO_FIRST_HLS_SEGMENT_MS"], "11000")
         self.assertEqual(fields["FIRST_VIDEO_RTP_TO_DECODABLE_FRAME_MS"], "500")
+        self.assertEqual(fields["ICE_CONNECTED_TO_ICE_READY_MS"], "500")
         self.assertTrue(timeline.is_complete())
         self.assertFalse(timeline.emitted)
         timeline.mark_emitted()
@@ -206,15 +213,53 @@ class CameraRequestLatencyTimelineTests(unittest.TestCase):
         for name, _, _ in latency_timeline._DERIVED_FIELDS:
             self.assertIn(f"{name}=N_A", line)
 
-    def test_emitted_field_list_matches_exact_order_with_twentyone_fields(self) -> None:
+    def test_emitted_field_list_matches_exact_order_with_twentyfive_fields(self) -> None:
         field_names = tuple(name for name, _, _ in latency_timeline._DERIVED_FIELDS)
         self.assertEqual(field_names, EXPECTED_FIELD_ORDER)
-        self.assertEqual(len(EXPECTED_FIELD_ORDER), 21)
+        self.assertEqual(len(EXPECTED_FIELD_ORDER), 25)
         timeline = latency_timeline.CameraRequestLatencyTimeline()
         line = timeline.log_line()
         body = line[len("COMELIT_CAMERA_E2E_LATENCY "):]
         emitted_order = tuple(pair.split("=", 1)[0] for pair in body.split(" "))
         self.assertEqual(emitted_order, EXPECTED_FIELD_ORDER)
+
+    def test_split_boundary_arithmetic_invariants_hold_within_tolerance(self) -> None:
+        timeline = latency_timeline.CameraRequestLatencyTimeline()
+        boundaries = [getattr(latency_timeline, name) for name in EXPECTED_BOUNDARIES]
+        for index, boundary in enumerate(boundaries):
+            timeline.mark(boundary, 100.0 + index * 0.37)
+        fields = timeline.summary_fields()
+        tolerance_ms = 2
+
+        transport_to_ice_gather = int(fields["TRANSPORT_START_TO_ICE_GATHER_DONE_MS"])
+        ice_gather_to_negotiate = int(fields["ICE_GATHER_DONE_TO_CLOUD_NEGOTIATE_MS"])
+        transport_to_negotiate = int(fields["TRANSPORT_START_TO_CLOUD_NEGOTIATE_MS"])
+        self.assertLessEqual(
+            abs(
+                (transport_to_ice_gather + ice_gather_to_negotiate)
+                - transport_to_negotiate
+            ),
+            tolerance_ms,
+        )
+
+        connected_to_ready = int(fields["ICE_CONNECTED_TO_ICE_READY_MS"])
+        ready_to_pseudotcp = int(fields["ICE_READY_TO_PSEUDOTCP_OPEN_MS"])
+        connected_to_pseudotcp = int(fields["ICE_CONNECTED_TO_PSEUDOTCP_OPEN_MS"])
+        self.assertLessEqual(
+            abs((connected_to_ready + ready_to_pseudotcp) - connected_to_pseudotcp),
+            tolerance_ms,
+        )
+
+    def test_ice_ready_dependent_fields_are_n_a_when_t08b_absent(self) -> None:
+        timeline = latency_timeline.CameraRequestLatencyTimeline()
+        timeline.mark(latency_timeline.T08_ICE_CONNECTED, 10.0)
+        timeline.mark(latency_timeline.T09_PSEUDOTCP_OPEN, 12.0)
+        # T08B_ICE_READY never observed: both new T08B-dependent fields must
+        # be N_A, while the pre-existing aggregate is still reported.
+        fields = timeline.summary_fields()
+        self.assertEqual(fields["ICE_CONNECTED_TO_ICE_READY_MS"], "N_A")
+        self.assertEqual(fields["ICE_READY_TO_PSEUDOTCP_OPEN_MS"], "N_A")
+        self.assertEqual(fields["ICE_CONNECTED_TO_PSEUDOTCP_OPEN_MS"], "2000")
 
     def test_new_field_reports_n_a_when_only_one_endpoint_observed(self) -> None:
         timeline = latency_timeline.CameraRequestLatencyTimeline()
@@ -554,6 +599,7 @@ class MediaTransportEndToEndBootstrapLatencyTests(
         process = scenario.current_process
         await asyncio.wait_for(asyncio.sleep(0.01), timeout=1)
         process.feed_line("ICE_CONNECTED=PASS")
+        process.feed_line("ICE_READY=PASS")
         process.feed_line("PSEUDOTCP_OPEN=PASS")
         process.feed_line("V4_CTPP_REGISTRATION=PASS")
         process.feed_line("ENTRANCE_SIGNALING_ARMED=true")
@@ -574,6 +620,7 @@ class MediaTransportEndToEndBootstrapLatencyTests(
             latency_timeline.T06_CLOUD_NEGOTIATE_BEGIN,
             latency_timeline.T07_REMOTE_SDP_READY,
             latency_timeline.T08_ICE_CONNECTED,
+            latency_timeline.T08B_ICE_READY,
             latency_timeline.T09_PSEUDOTCP_OPEN,
             latency_timeline.T10_CTPP_READY,
             latency_timeline.T11_SIGNALING_ARMED,
