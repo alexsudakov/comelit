@@ -47,7 +47,7 @@ custom_components/comelit/frontend/comelit-card.js
 Telegram hosts the same custom element from:
 
 ```text
-custom_components/comelit/frontend/miniapp/index.html
+custom_components/comelit/miniapp/index.html
 custom_components/comelit/frontend/miniapp/host.js
 custom_components/comelit/frontend/miniapp/styles.css
 ```
@@ -85,11 +85,15 @@ Home Assistant access token.
 All state, Door and camera endpoints enforce the integration-owned Mini App
 session.
 
-Static assets continue to use the existing Comelit static prefix:
+Only JavaScript/CSS assets use the existing Comelit static prefix:
 
 ```text
 /api/comelit/frontend/...
 ```
+
+The Mini App HTML itself is deliberately stored outside that static tree and is
+served only by the dynamic `/api/comelit/miniapp` view, so the enable/configuration
+gate and CSP cannot be bypassed through an alternate static URL.
 
 ## 4. Telegram authentication without a bot token
 
