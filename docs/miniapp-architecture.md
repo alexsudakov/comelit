@@ -226,8 +226,7 @@ A successful software call never asserts the physical Door effect.
 
 ## 9. Camera lifecycle
 
-The Mini App does not implement a second camera transport and does not proxy the
-Home Assistant token.
+The Mini App does not implement a second camera transport.
 
 After validating the requested camera against the embedded allowlist, the
 integration calls Home Assistant's normal camera stream API:
@@ -235,8 +234,6 @@ integration calls Home Assistant's normal camera stream API:
 ```text
 async_request_stream(hass, entity_id, HLS_PROVIDER)
 ```
-
-Home Assistant returns the normal HA Stream HLS capability path.
 
 For `camera.comelit_entrance`, this enters the existing
 `ComelitEntranceCamera.async_create_stream()` lifecycle:
@@ -251,13 +248,46 @@ explicit Mini App viewer
 -> existing camera-view cleanup
 ```
 
-The HA Stream URL contains only the stream's random access capability token. It
-does not contain a Home Assistant Long-Lived Access Token.
+### 9.1 Do not expose the HA HLS capability to the WebView
+
+Home Assistant's HLS endpoint contains a random stream capability token and is
+itself intentionally usable without HA user authentication.
+
+The embedded Mini App therefore keeps that HA HLS path server-side.
+
+For each authorized camera open it creates a random, session-bound media grant:
+
+```text
+/api/comelit/miniapp/media/<media_id>/master_playlist.m3u8
+```
+
+The media grant stores the upstream HA HLS base path only inside Home
+Assistant. Every Mini App playlist/init/segment request:
+
+1. revalidates the current Mini App session;
+2. rechecks the current bot ID and Telegram user allowlist through the session
+   boundary;
+3. verifies that the media grant belongs to that exact opaque session token;
+4. allows only the closed HLS resource set:
+   - `master_playlist.m3u8`
+   - `playlist.m3u8`
+   - `init.mp4`
+   - numeric `segment/*.m4s`
+5. proxies that resource to Home Assistant's own local HLS endpoint.
+
+Relative HLS references keep the browser inside the Mini App proxy hierarchy,
+so the underlying `/api/hls/<token>/...` capability is never serialized to
+the WebView.
+
+The media grant expires with the Mini App session. Removing a user from the
+allowlist or changing the configured bot ID also prevents further proxy
+requests from that session.
 
 The Mini App host provides a small `picture-entity` compatibility element
 using an HTML5 `video` element. Native HLS support in the target Telegram
-WebViews is a deployment acceptance item; if a target WebView lacks native HLS,
-a bundled HLS player can be added without changing the backend architecture.
+WebViews remains a deployment acceptance item; if a target WebView lacks native
+HLS, a bundled HLS player can be added without changing the backend or security
+architecture.
 
 ## 10. Home Assistant options
 
