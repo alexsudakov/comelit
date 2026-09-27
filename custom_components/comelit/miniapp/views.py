@@ -102,12 +102,20 @@ class MiniAppSessionView(_MiniAppView):
 
     async def post(self, request: web.Request) -> web.Response:
         self._require_configured()
-        body = await request.content.read(MAX_AUTH_BODY_BYTES + 1)
-        if len(body) > MAX_AUTH_BODY_BYTES:
-            raise web.HTTPRequestEntityTooLarge(
-                max_size=MAX_AUTH_BODY_BYTES,
-                actual_size=len(body),
-            )
+        body_parts: list[bytes] = []
+        body_size = 0
+        while True:
+            chunk = await request.content.read(4096)
+            if not chunk:
+                break
+            body_size += len(chunk)
+            if body_size > MAX_AUTH_BODY_BYTES:
+                raise web.HTTPRequestEntityTooLarge(
+                    max_size=MAX_AUTH_BODY_BYTES,
+                    actual_size=body_size,
+                )
+            body_parts.append(chunk)
+        body = b"".join(body_parts)
         try:
             payload = json.loads(body)
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
