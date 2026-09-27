@@ -210,6 +210,15 @@ G6_OFFER_WRITTEN_MONOTONIC_MS: Final = "G6_OFFER_WRITTEN_MONOTONIC_MS"
 RSP_VISIBLE_MONOTONIC_MS: Final = "RSP_VISIBLE_MONOTONIC_MS"
 RSP_LOADED_MONOTONIC_MS: Final = "RSP_LOADED_MONOTONIC_MS"
 
+# P121: gather-only stun-initial-timeout override markers. Plain integers/
+# presence, no clock semantics -- never differenced against anything, so
+# they never mix with the monotonic-ms arithmetic above.
+GATHER_INITIAL_TIMEOUT_SET_MS: Final = "GATHER_INITIAL_TIMEOUT_SET_MS"
+GATHER_INITIAL_TIMEOUT_RESTORED_MS: Final = "GATHER_INITIAL_TIMEOUT_RESTORED_MS"
+GATHER_INITIAL_TIMEOUT_RESTORE_CONFIRMED: Final = (
+    "GATHER_INITIAL_TIMEOUT_RESTORE_CONFIRMED"
+)
+
 _NATIVE_KEYS: Final[frozenset[str]] = frozenset(
     {
         G0_NATIVE_PROCESS_START_MONOTONIC_MS,
@@ -223,6 +232,8 @@ _NATIVE_KEYS: Final[frozenset[str]] = frozenset(
         G6_OFFER_WRITTEN_MONOTONIC_MS,
         RSP_VISIBLE_MONOTONIC_MS,
         RSP_LOADED_MONOTONIC_MS,
+        GATHER_INITIAL_TIMEOUT_SET_MS,
+        GATHER_INITIAL_TIMEOUT_RESTORED_MS,
     }
 )
 
@@ -278,12 +289,22 @@ _NATIVE_COUNT_FIELDS: Final[tuple[str, ...]] = (
     G4_SRFLX_CANDIDATE_COUNT,
 )
 
-# The exact emitted field order: the first 3 existing fields, the 10 new
-# native fields, then the remaining 22 existing fields.
+# P121: passthrough gather-only stun-initial-timeout fields, placed
+# immediately after the existing P119 gathering-stage fields above.
+_GATHER_INITIAL_TIMEOUT_PASSTHROUGH_FIELDS: Final[tuple[str, ...]] = (
+    GATHER_INITIAL_TIMEOUT_SET_MS,
+    GATHER_INITIAL_TIMEOUT_RESTORED_MS,
+)
+
+# The exact emitted field order: the first 3 existing fields, the 10 P119
+# native fields, the 3 new P121 fields, then the remaining 22 existing
+# fields.
 FIELD_ORDER: Final[tuple[str, ...]] = (
     tuple(name for name, _, _ in _DERIVED_FIELDS[:3])
     + tuple(name for name, _, _ in _NATIVE_DERIVED_FIELDS)
     + _NATIVE_COUNT_FIELDS
+    + _GATHER_INITIAL_TIMEOUT_PASSTHROUGH_FIELDS
+    + (GATHER_INITIAL_TIMEOUT_RESTORE_CONFIRMED,)
     + tuple(name for name, _, _ in _DERIVED_FIELDS[3:])
 )
 
@@ -356,6 +377,12 @@ class CameraRequestLatencyTimeline:
         for name in _NATIVE_COUNT_FIELDS:
             count_value = self._native.get(name)
             result[name] = "N_A" if count_value is None else str(count_value)
+        for name in _GATHER_INITIAL_TIMEOUT_PASSTHROUGH_FIELDS:
+            passthrough_value = self._native.get(name)
+            result[name] = "N_A" if passthrough_value is None else str(passthrough_value)
+        result[GATHER_INITIAL_TIMEOUT_RESTORE_CONFIRMED] = (
+            "true" if GATHER_INITIAL_TIMEOUT_RESTORED_MS in self._native else "false"
+        )
         return result
 
     def log_line(self) -> str:

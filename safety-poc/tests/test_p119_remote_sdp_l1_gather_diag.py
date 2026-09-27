@@ -309,7 +309,10 @@ class P119NativeTimelineFieldTests(unittest.TestCase):
     computed only from native monotonic values."""
 
     def test_field_order_has_25_previous_plus_10_new(self) -> None:
-        self.assertEqual(len(latency_timeline.FIELD_ORDER), 35)
+        # P121 later appends 3 more fields after these 10 (index 13-15), so
+        # the total length is now 38, not 35 -- but this slice (indices 3-12)
+        # is unaffected by that later insertion.
+        self.assertEqual(len(latency_timeline.FIELD_ORDER), 38)
         self.assertEqual(
             latency_timeline.FIELD_ORDER[3:13],
             (

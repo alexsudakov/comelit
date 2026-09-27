@@ -27,7 +27,7 @@ SERVICES = COMPONENT / "services.yaml"
 BINARY = COMPONENT / "native" / "comelit-media"
 SOURCE = SAFETY / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-ctpp-door.c"
 HARNESS = MEDIA / "entrance_p116_sdp_rtp_bridge_harness.py"
-EXPECTED_SHA256 = "095051f42b7e6393c48fce51eaef73665e722fc852f263beed1b5c433308b0e0"
+EXPECTED_SHA256 = "9347a973b012d5ca86b406642a5fcd9b86ce44201d0b5144073005ca72ce7712"
 
 
 class P116HaStreamRtpBridgeTests(unittest.TestCase):

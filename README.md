@@ -11,6 +11,8 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
+Current stable release: **1.5.20**. This release freezes the live-validated entrance-camera cold-start improvements and their diagnostic boundaries. On the reference installation, the measured cold path from an explicit camera request to the first decodable frame improved from 11.219 s to 6.858 s. This is a reference measurement, not a universal latency guarantee. The accepted startup baseline and deferred experiments are recorded in `docs/releases/1.5.20-camera-startup-stabilization.md`.
+
 ## Home Assistant Custom Card
 
 Version 1.5.19 keeps an explicitly opened entrance intercom live view active across switches between «Домофон» and «Видеонаблюдение», while retaining the Phase C controls.

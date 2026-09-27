@@ -109,6 +109,11 @@ EXPECTED_FIELD_ORDER = (
     "REMOTE_SDP_FILE_VISIBLE_TO_LOAD_MS",
     "G3_HOST_CANDIDATE_COUNT",
     "G4_SRFLX_CANDIDATE_COUNT",
+    # P121: gather-only stun-initial-timeout override fields, inserted here
+    # (immediately after the P119 gathering-stage fields above).
+    "GATHER_INITIAL_TIMEOUT_SET_MS",
+    "GATHER_INITIAL_TIMEOUT_RESTORED_MS",
+    "GATHER_INITIAL_TIMEOUT_RESTORE_CONFIRMED",
     "ICE_GATHER_DONE_TO_CLOUD_NEGOTIATE_MS",
     "TRANSPORT_START_TO_CLOUD_NEGOTIATE_MS",
     "CLOUD_NEGOTIATE_TO_REMOTE_SDP_MS",
@@ -236,7 +241,12 @@ class CameraRequestLatencyTimelineTests(unittest.TestCase):
     def test_missing_boundary_is_reported_as_n_a(self) -> None:
         timeline = latency_timeline.CameraRequestLatencyTimeline()
         fields = timeline.summary_fields()
-        for value in fields.values():
+        for name, value in fields.items():
+            if name == "GATHER_INITIAL_TIMEOUT_RESTORE_CONFIRMED":
+                # boolean diagnostic: reports whether the fail-closed restore was
+                # announced, so an empty session reports "false", not N_A.
+                self.assertEqual(value, "false")
+                continue
             self.assertEqual(value, "N_A")
 
     def test_full_timeline_computes_exact_integer_millisecond_offsets(self) -> None:
@@ -259,18 +269,23 @@ class CameraRequestLatencyTimelineTests(unittest.TestCase):
         line = timeline.log_line()
         self.assertTrue(line.startswith("COMELIT_CAMERA_E2E_LATENCY "))
         for name in latency_timeline.FIELD_ORDER:
+            if name == "GATHER_INITIAL_TIMEOUT_RESTORE_CONFIRMED":
+                self.assertIn(f"{name}=false", line)
+                continue
             self.assertIn(f"{name}=N_A", line)
 
-    def test_emitted_field_list_matches_exact_order_with_thirtyfive_fields(self) -> None:
-        # 25 pre-P119 fields + 10 P119 native gathering-stage fields, in the
-        # exact positions specified: the 10 new fields sit immediately after
-        # TRANSPORT_START_TO_ICE_GATHER_DONE_MS (the original 3rd field).
+    def test_emitted_field_list_matches_exact_order_with_thirtyeight_fields(self) -> None:
+        # 25 pre-P119 fields + 10 P119 native gathering-stage fields + 3 P121
+        # gather-only stun-initial-timeout fields, in the exact positions
+        # specified: the 10 P119 fields sit immediately after
+        # TRANSPORT_START_TO_ICE_GATHER_DONE_MS (the original 3rd field), and
+        # the 3 P121 fields sit immediately after those.
         self.assertEqual(latency_timeline.FIELD_ORDER, EXPECTED_FIELD_ORDER)
-        self.assertEqual(len(EXPECTED_FIELD_ORDER), 35)
+        self.assertEqual(len(EXPECTED_FIELD_ORDER), 38)
         t_field_names = tuple(name for name, _, _ in latency_timeline._DERIVED_FIELDS)
         self.assertEqual(len(t_field_names), 25)
         self.assertEqual(
-            EXPECTED_FIELD_ORDER[:3] + EXPECTED_FIELD_ORDER[13:],
+            EXPECTED_FIELD_ORDER[:3] + EXPECTED_FIELD_ORDER[16:],
             t_field_names,
         )
         timeline = latency_timeline.CameraRequestLatencyTimeline()
