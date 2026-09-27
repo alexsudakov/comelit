@@ -7,6 +7,7 @@ import time
 
 SESSION_TTL_SECONDS = 900
 MAX_SESSIONS = 256
+MAX_MEDIA_GRANTS = 256
 
 
 class MiniAppSessionError(ValueError):
@@ -110,3 +111,69 @@ class MiniAppSessionStore:
 
     def delete(self, token: str) -> None:
         self._sessions.pop(token, None)
+
+
+@dataclass(slots=True)
+class MiniAppMediaGrant:
+    """Session-bound proxy grant for one HA HLS stream."""
+
+    session_token: str
+    upstream_base_path: str
+    expires_at: int
+
+
+class MiniAppMediaGrantStore:
+    """Short-lived HLS proxy grants bound to Mini App sessions."""
+
+    def __init__(self, *, max_grants: int = MAX_MEDIA_GRANTS) -> None:
+        self._max_grants = max_grants
+        self._grants: dict[str, MiniAppMediaGrant] = {}
+
+    def _purge(self, now: int) -> None:
+        expired = [
+            media_id
+            for media_id, grant in self._grants.items()
+            if grant.expires_at <= now
+        ]
+        for media_id in expired:
+            self._grants.pop(media_id, None)
+
+        while len(self._grants) >= self._max_grants:
+            oldest_media_id = next(iter(self._grants))
+            self._grants.pop(oldest_media_id, None)
+
+    def create(
+        self,
+        session_token: str,
+        upstream_base_path: str,
+        expires_at: int,
+        *,
+        now: int | None = None,
+    ) -> str:
+        current = int(time.time()) if now is None else int(now)
+        self._purge(current)
+        media_id = secrets.token_urlsafe(24)
+        self._grants[media_id] = MiniAppMediaGrant(
+            session_token=session_token,
+            upstream_base_path=upstream_base_path,
+            expires_at=expires_at,
+        )
+        return media_id
+
+    def get(
+        self,
+        media_id: str,
+        session_token: str,
+        *,
+        now: int | None = None,
+    ) -> MiniAppMediaGrant:
+        current = int(time.time()) if now is None else int(now)
+        self._purge(current)
+        grant = self._grants.get(media_id)
+        if (
+            grant is None
+            or grant.expires_at <= current
+            or not secrets.compare_digest(grant.session_token, session_token)
+        ):
+            raise MiniAppSessionError("Mini App media grant is invalid or expired")
+        return grant
