@@ -159,3 +159,21 @@ def test_session_carries_bot_identity():
     token, created = store.create(USER_ID, BOT_ID, now=NOW)
     assert created.bot_id == BOT_ID
     assert store.get(token, now=NOW + 1).bot_id == BOT_ID
+
+
+def test_media_grant_is_bound_to_session_and_expiry():
+    grants = session_mod.MiniAppMediaGrantStore()
+    media_id = grants.create(
+        "session-a",
+        "/api/hls/deadbeef/",
+        NOW + 30,
+        now=NOW,
+    )
+    grant = grants.get(media_id, "session-a", now=NOW + 1)
+    assert grant.upstream_base_path == "/api/hls/deadbeef/"
+
+    with pytest.raises(session_mod.MiniAppSessionError):
+        grants.get(media_id, "session-b", now=NOW + 1)
+
+    with pytest.raises(session_mod.MiniAppSessionError):
+        grants.get(media_id, "session-a", now=NOW + 30)
