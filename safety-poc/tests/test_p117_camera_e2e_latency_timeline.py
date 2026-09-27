@@ -3,11 +3,10 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import hashlib
 import importlib.util
 from pathlib import Path
-import shutil
 import struct
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -24,6 +23,17 @@ DOOR_SOURCE = (
     / "comelit-v4-persistent-ctpp-door.c"
 )
 SETTLE_TRANSFORM = MEDIA_DIR / "entrance_device_video_ack_observation_transform.py"
+SETTLE_DEFINE_OLD = "#define ENTRANCE_SIGNAL_SETTLE_MS 4000"
+SETTLE_DEFINE_NEW = "#define ENTRANCE_SIGNAL_SETTLE_MS 1000"
+# Recorded generated-source identities of the settle round: the base commit's
+# output and this candidate's output. The base value is what makes the
+# single-token negative guard self-contained.
+SETTLE_BASE_SOURCE_SHA256 = (
+    "4fc6188c6231b94682205973b6a6f628ca005e8b7c3a04efbd8056c5a608c58c"
+)
+SETTLE_CANDIDATE_SOURCE_SHA256 = (
+    "4448e8368bd6275a2cd398c35ef171d012f315d2bb5bd05daf2e33a13d4c0001"
+)
 
 
 def _load(name: str, path: Path):
@@ -123,38 +133,28 @@ def _generate_head_source() -> str:
 
 
 def _generate_base_source() -> str:
-    """Reproduce the generated production source as it stood before this
-    round's settle-value edit, by running the full R65 transform chain
-    against a scratch copy of research/media/v1 with only
-    entrance_device_video_ack_observation_transform.py reverted to the
-    version committed at HEAD (this worktree's uncommitted change is the
-    only local diff on that file)."""
-    base_text = subprocess.run(
-        ["git", "show", f"HEAD:{SETTLE_TRANSFORM.relative_to(ROOT)}"],
-        cwd=ROOT,
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    ).stdout
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_media = Path(tmp) / "media_v1"
-        shutil.copytree(MEDIA_DIR, tmp_media)
-        (tmp_media / SETTLE_TRANSFORM.name).write_text(base_text, encoding="utf-8")
-        script = (
-            "import sys; sys.path.insert(0, sys.argv[1]);"
-            "from entrance_p116_r65_production_media_refresh_transform import transform;"
-            "from pathlib import Path;"
-            "sys.stdout.write(transform(Path(sys.argv[2]).read_text(encoding='utf-8'), include_p116=True))"
+    """Reconstruct the pre-change generated production source hermetically.
+
+    The settle round changed exactly one C token in the generated source.
+    Reverting that single token must reproduce the recorded base hash byte for
+    byte -- that equality IS the proof that no other textual delta exists.
+    Resolving the pre-change text from git history would not be stronger (and
+    is unavailable in a shallow CI checkout), so the recorded hash is the
+    anchor instead.
+    """
+    head_source = _generate_head_source()
+    if head_source.count(SETTLE_DEFINE_NEW) != 1:
+        raise AssertionError("settle candidate define is not present exactly once")
+    if SETTLE_DEFINE_OLD in head_source:
+        raise AssertionError("settle candidate still contains the old define")
+    base_source = head_source.replace(SETTLE_DEFINE_NEW, SETTLE_DEFINE_OLD, 1)
+    base_sha = hashlib.sha256(base_source.encode("utf-8")).hexdigest()
+    if base_sha != SETTLE_BASE_SOURCE_SHA256:
+        raise AssertionError(
+            f"reverting the settle token does not reproduce the base generated "
+            f"source sha256 (got {base_sha})"
         )
-        result = subprocess.run(
-            [sys.executable, "-c", script, str(tmp_media), str(DOOR_SOURCE)],
-            check=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        return result.stdout
+    return base_source
 
 
 class CameraRequestLatencyTimelineTests(unittest.TestCase):
@@ -395,12 +395,18 @@ class SettleCandidateGateTests(unittest.TestCase):
 
     def test_exactly_one_settle_define_at_1000_in_generated_source(self) -> None:
         self.assertEqual(
-            self.generated_source.count("#define ENTRANCE_SIGNAL_SETTLE_MS 1000"), 1
+            self.generated_source.count(SETTLE_DEFINE_NEW), 1
+        )
+
+    def test_generated_source_identity_matches_the_recorded_candidate_sha(self) -> None:
+        self.assertEqual(
+            hashlib.sha256(self.generated_source.encode("utf-8")).hexdigest(),
+            SETTLE_CANDIDATE_SOURCE_SHA256,
         )
 
     def test_zero_occurrences_of_the_old_4000_settle_define(self) -> None:
         self.assertEqual(
-            self.generated_source.count("#define ENTRANCE_SIGNAL_SETTLE_MS 4000"), 0
+            self.generated_source.count(SETTLE_DEFINE_OLD), 0
         )
 
     def test_timer_call_site_still_uses_the_settle_macro(self) -> None:

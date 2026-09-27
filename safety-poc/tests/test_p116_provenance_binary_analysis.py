@@ -17,11 +17,15 @@ R65_BUILD_META = ROOT / "safety-poc" / "research" / "media" / "v1" / "p116_r65_p
 P114_BUILD_META = ROOT / "safety-poc" / "research" / "media" / "v1" / "p114_media_diagnostics_build_meta.txt"
 HISTORICAL_PINNED = ROOT / ".p116-evidence" / "bin" / "pinned-historical.bin"
 REBUILT = ROOT / ".p116-evidence" / "bin" / "rebuilt-historical-source.bin"
-# R65 promoted a new production binary (bounded periodic media refresh) over
-# the R30E-era one. PINNED_SHA256/R65_SOURCE_SHA256 are the current shipped
-# artifact; PRE_R65_PACKAGED_* are what p116_media_telemetry_build_meta.txt
-# (now a historical record, left unmodified) still documents.
-PINNED_SHA256 = "76218861c72e9a2b87283df6c5c7e0b03a4d7fb11bee4364f59be1513acd6129"
+# The settle-candidate round promoted a new production binary
+# (ENTRANCE_SIGNAL_SETTLE_MS 4000 -> 1000, same source otherwise) over the R65
+# one. PINNED_SHA256 is the current shipped artifact;
+# SUPERSEDED_R65_BINARY_SHA256 / R65_SOURCE_SHA256 are the pair that
+# p116_r65_production_media_build_meta.txt (frozen record, left unmodified)
+# documents as the artifact it built; PRE_R65_PACKAGED_* are what
+# p116_media_telemetry_build_meta.txt (also a historical record) documents.
+PINNED_SHA256 = "ff16db0d809135cf5cdf6be4bfe8133fd77b3f41871b6c8f46eea765064537fb"
+SUPERSEDED_R65_BINARY_SHA256 = "76218861c72e9a2b87283df6c5c7e0b03a4d7fb11bee4364f59be1513acd6129"
 R65_SOURCE_SHA256 = "4fc6188c6231b94682205973b6a6f628ca005e8b7c3a04efbd8056c5a608c58c"
 PRE_R65_PACKAGED_BINARY_SHA256 = "a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8"
 PRE_R65_PACKAGED_SOURCE_SHA256 = "1c89d61de4372d96b25f6894862741244753c107a3a9b9e04817250b3bea55b2"
@@ -239,16 +243,19 @@ class P116ProvenanceBinaryAnalysisTests(unittest.TestCase):
         self.assertEqual(match.group(2), HISTORICAL_PINNED_SHA256)
         self.assertEqual(match.group(3), "NON_RUNTIME_BUILD_METADATA")
 
-    def test_r65_build_metadata_matches_current_pin(self) -> None:
+    def test_frozen_r65_build_metadata_documents_the_superseded_pair(self) -> None:
         # The R65 build-meta file (§1 raw facts from the CT120 offline
-        # reproducible build) is the current provenance record; this proves
-        # it actually matches what's now shipped, not just that it exists.
+        # reproducible build) is a FROZEN record of the artifact it built. The
+        # settle-candidate round promoted a new binary over it, so this file
+        # must keep documenting the superseded R65 pair exactly -- and it must
+        # not be rewritten to claim the current pin.
         r65_meta = _metadata(R65_BUILD_META)
 
-        self.assertEqual(r65_meta["NATIVE_BINARY_SHA256"], PINNED_SHA256)
+        self.assertEqual(r65_meta["NATIVE_BINARY_SHA256"], SUPERSEDED_R65_BINARY_SHA256)
         self.assertEqual(r65_meta["GENERATED_SOURCE_SHA256"], R65_SOURCE_SHA256)
-        self.assertEqual(r65_meta["build_a_sha256"], PINNED_SHA256)
-        self.assertEqual(r65_meta["build_b_sha256"], PINNED_SHA256)
+        self.assertEqual(r65_meta["build_a_sha256"], SUPERSEDED_R65_BINARY_SHA256)
+        self.assertEqual(r65_meta["build_b_sha256"], SUPERSEDED_R65_BINARY_SHA256)
+        self.assertNotEqual(SUPERSEDED_R65_BINARY_SHA256, PINNED_SHA256)
         self.assertEqual(r65_meta["reproducible_binary_sha_gate"], "PASS")
         self.assertEqual(r65_meta["reproducible_binary_cmp_gate"], "PASS")
         self.assertEqual(r65_meta["musl_interpreter_gate"], "PASS")

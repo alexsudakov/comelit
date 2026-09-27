@@ -18,21 +18,24 @@ BINARY = ROOT / "custom_components" / "comelit" / "native" / "comelit-media"
 NATIVE_LIB = ROOT / "custom_components" / "comelit" / "native" / "lib"
 SOURCE = SAFETY_ROOT / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-ctpp-door.c"
 # p116_media_telemetry_build_meta.txt is the frozen R30E-era provenance
-# record; R65 promoted a new packaged binary over it (bounded periodic media
-# refresh), so the current provenance lives in p116_r65_production_media_build_meta.txt.
-BUILD_META = MEDIA_DIR / "p116_r65_production_media_build_meta.txt"
+# record; R65 promoted a binary over it (bounded periodic media refresh) and
+# the settle-candidate round (ENTRANCE_SIGNAL_SETTLE_MS 4000 -> 1000) then
+# promoted the current one over R65, so the current provenance lives in
+# p117_settle1000_production_media_build_meta.txt and
+# p116_r65_production_media_build_meta.txt is now the frozen record of the
+# superseded R65 pair.
+BUILD_META = MEDIA_DIR / "p117_settle1000_production_media_build_meta.txt"
+FROZEN_R65_BUILD_META = MEDIA_DIR / "p116_r65_production_media_build_meta.txt"
 PRE_R65_BUILD_META = MEDIA_DIR / "p116_media_telemetry_build_meta.txt"
-EXPECTED_MUSL_SHA256 = "76218861c72e9a2b87283df6c5c7e0b03a4d7fb11bee4364f59be1513acd6129"
+EXPECTED_MUSL_SHA256 = "ff16db0d809135cf5cdf6be4bfe8133fd77b3f41871b6c8f46eea765064537fb"
 EXPECTED_RUN3_GLIBC_SHA256 = "94063498a35a886dc4cb735c3e629a5097b965224cb3354192723d30e70c16ac"
-# PACKAGED_NATIVE_SOURCE_SHA256 is the source identity of the *still-shipped*
-# comelit-media binary: the settle-candidate change below (ENTRANCE_SIGNAL_
-# SETTLE_MS 4000 -> 1000) is diagnostic/protocol-candidate-only and does not
-# rebuild+repin the native binary in this same commit -- the orchestrator
-# does that in a follow-up commit on this branch. Until that repin lands,
-# HEAD's generated source and the packaged artifact's source are expected to
-# differ by exactly that one token.
-PACKAGED_NATIVE_SOURCE_SHA256 = "4fc6188c6231b94682205973b6a6f628ca005e8b7c3a04efbd8056c5a608c58c"
+# The settle-candidate rebuild+repin landed in the same branch: the generated
+# source of HEAD, of the packaged native binary and of the frozen build-meta
+# record are all the same identity again.
+PACKAGED_NATIVE_SOURCE_SHA256 = "4448e8368bd6275a2cd398c35ef171d012f315d2bb5bd05daf2e33a13d4c0001"
 HEAD_P116_SOURCE_SHA256 = "4448e8368bd6275a2cd398c35ef171d012f315d2bb5bd05daf2e33a13d4c0001"
+SUPERSEDED_R65_BINARY_SHA256 = "76218861c72e9a2b87283df6c5c7e0b03a4d7fb11bee4364f59be1513acd6129"
+SUPERSEDED_R65_SOURCE_SHA256 = "4fc6188c6231b94682205973b6a6f628ca005e8b7c3a04efbd8056c5a608c58c"
 PRE_R65_PACKAGED_BINARY_SHA256 = "a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8"
 PRE_R65_PACKAGED_SOURCE_SHA256 = "1c89d61de4372d96b25f6894862741244753c107a3a9b9e04817250b3bea55b2"
 PRE_R30E_PACKAGED_BINARY_SHA256 = "35a9a1604c4bef3667713e3487b68aadc79501c4630748d7143ee9ee7cd85622"
@@ -195,13 +198,21 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
     def test_packaged_binary_sha256_matches_transport_pin_and_offline_musl_artifact(self) -> None:
         actual = _sha256_bytes(self.binary_blob)
         meta = _metadata(BUILD_META)
+        frozen_r65_meta = _metadata(FROZEN_R65_BUILD_META)
         pre_r65_meta = _metadata(PRE_R65_BUILD_META)
         self.assertEqual(actual, EXPECTED_MUSL_SHA256)
         self.assertEqual(_transport_sha_pin(self.transport_source), EXPECTED_MUSL_SHA256)
         self.assertEqual(meta["NATIVE_BINARY_SHA256"], EXPECTED_MUSL_SHA256)
         self.assertEqual(meta["build_a_sha256"], EXPECTED_MUSL_SHA256)
         self.assertEqual(meta["build_b_sha256"], EXPECTED_MUSL_SHA256)
-        self.assertEqual(meta["superseded_native_binary_sha256"], PRE_R65_PACKAGED_BINARY_SHA256)
+        self.assertEqual(meta["superseded_native_binary_sha256"], SUPERSEDED_R65_BINARY_SHA256)
+        # The frozen R65 record documents the artifact it built -- exactly the
+        # pair this round superseded -- and must not be rewritten.
+        self.assertEqual(frozen_r65_meta["NATIVE_BINARY_SHA256"], SUPERSEDED_R65_BINARY_SHA256)
+        self.assertEqual(frozen_r65_meta["build_a_sha256"], SUPERSEDED_R65_BINARY_SHA256)
+        self.assertEqual(frozen_r65_meta["build_b_sha256"], SUPERSEDED_R65_BINARY_SHA256)
+        self.assertEqual(frozen_r65_meta["superseded_native_binary_sha256"], PRE_R65_PACKAGED_BINARY_SHA256)
+        self.assertNotEqual(actual, SUPERSEDED_R65_BINARY_SHA256)
         # pre_r65_meta (the frozen R30E-era record) still documents the
         # binary it shipped, unmodified, so it must equal the superseded pin.
         self.assertEqual(pre_r65_meta["NATIVE_BINARY_SHA256"], PRE_R65_PACKAGED_BINARY_SHA256)
@@ -261,26 +272,23 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         ).encode("utf-8")
         head_sha = hashlib.sha256(candidate).hexdigest()
         meta = _metadata(BUILD_META)
-        # Declared intermediate state for this commit: this round lands the
-        # ENTRANCE_SIGNAL_SETTLE_MS 4000 -> 1000 diagnostic/protocol candidate
-        # only. HEAD's generated source therefore now differs from the still
-        # -packaged native binary's source (PACKAGED_NATIVE_SOURCE_SHA256,
-        # which the frozen p116_r65_production_media_build_meta.txt still
-        # documents), and a native rebuild + re-pin is required and lands in
-        # a follow-up commit on this same branch -- not in this one.
+        frozen_r65_meta = _metadata(FROZEN_R65_BUILD_META)
         native_rebuild_required = head_sha != PACKAGED_NATIVE_SOURCE_SHA256
         current_packaged_matches_head = head_sha == PACKAGED_NATIVE_SOURCE_SHA256
         self.assertEqual(head_sha, HEAD_P116_SOURCE_SHA256)
-        self.assertNotEqual(head_sha, PACKAGED_NATIVE_SOURCE_SHA256)
-        self.assertEqual(meta["GENERATED_SOURCE_SHA256"], PACKAGED_NATIVE_SOURCE_SHA256)
-        self.assertNotEqual(meta["GENERATED_SOURCE_SHA256"], HEAD_P116_SOURCE_SHA256)
-        self.assertEqual(meta["superseded_generated_source_sha256"], PRE_R65_PACKAGED_SOURCE_SHA256)
+        self.assertEqual(head_sha, PACKAGED_NATIVE_SOURCE_SHA256)
+        self.assertEqual(meta["GENERATED_SOURCE_SHA256"], HEAD_P116_SOURCE_SHA256)
+        self.assertEqual(meta["superseded_generated_source_sha256"], SUPERSEDED_R65_SOURCE_SHA256)
+        # The frozen R65 record must keep documenting exactly the pair it built
+        # (the artifact this round superseded), never the current pin.
+        self.assertEqual(frozen_r65_meta["GENERATED_SOURCE_SHA256"], SUPERSEDED_R65_SOURCE_SHA256)
+        self.assertNotEqual(head_sha, SUPERSEDED_R65_SOURCE_SHA256)
         self.assertNotEqual(head_sha, PRE_R65_PACKAGED_SOURCE_SHA256)
         self.assertNotEqual(head_sha, PRE_R30E_PACKAGED_SOURCE_SHA256)
-        self.assertEqual(f"NATIVE_REBUILD_REQUIRED={str(native_rebuild_required).lower()}", "NATIVE_REBUILD_REQUIRED=true")
+        self.assertEqual(f"NATIVE_REBUILD_REQUIRED={str(native_rebuild_required).lower()}", "NATIVE_REBUILD_REQUIRED=false")
         self.assertEqual(
             f"CURRENT_PACKAGED_BINARY_MATCHES_HEAD_SOURCE={str(current_packaged_matches_head).lower()}",
-            "CURRENT_PACKAGED_BINARY_MATCHES_HEAD_SOURCE=false",
+            "CURRENT_PACKAGED_BINARY_MATCHES_HEAD_SOURCE=true",
         )
 
     def test_packaged_and_head_digest_pins_fail_on_byte_flip(self) -> None:
