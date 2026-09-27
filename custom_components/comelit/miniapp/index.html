@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="color-scheme" content="light dark" />
+    <title>Comelit</title>
+    <link rel="stylesheet" href="/api/comelit/frontend/miniapp/styles.css" />
+    <script src="https://telegram.org/js/telegram-web-app.js?63"></script>
+    <script
+      type="module"
+      src="/api/comelit/frontend/comelit-card.js"
+    ></script>
+    <script
+      src="/api/comelit/frontend/miniapp/host.js"
+      defer
+    ></script>
+  </head>
+  <body>
+    <main class="miniapp-shell">
+      <div id="startupStatus" class="startup-status">Подключение…</div>
+      <comelit-card id="comelitCard"></comelit-card>
+      <section id="fatalError" class="fatal-error" hidden></section>
+    </main>
+  </body>
+</html>
