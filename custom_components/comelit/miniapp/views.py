@@ -102,14 +102,15 @@ class MiniAppSessionView(_MiniAppView):
 
     async def post(self, request: web.Request) -> web.Response:
         self._require_configured()
-        if request.content_length is not None and request.content_length > MAX_AUTH_BODY_BYTES:
+        body = await request.read()
+        if len(body) > MAX_AUTH_BODY_BYTES:
             raise web.HTTPRequestEntityTooLarge(
                 max_size=MAX_AUTH_BODY_BYTES,
-                actual_size=request.content_length,
+                actual_size=len(body),
             )
         try:
-            payload = await request.json()
-        except (json.JSONDecodeError, ValueError):
+            payload = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
             raise web.HTTPBadRequest from None
         init_data = payload.get("init_data") if isinstance(payload, dict) else None
         if not isinstance(init_data, str) or not init_data:
@@ -174,7 +175,7 @@ class MiniAppStateView(_MiniAppView):
 
 
 class MiniAppDoorView(_MiniAppView):
-    url = r"/api/comelit/miniapp/door/{door:(?:entrance|gate)}"
+    url = "/api/comelit/miniapp/door/{door}"
     name = "api:comelit:miniapp:door"
 
     async def post(self, request: web.Request, door: str) -> web.Response:
