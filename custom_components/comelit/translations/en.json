@@ -32,5 +32,22 @@
         }
       }
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Telegram Mini App",
+        "description": "Expose the existing Comelit card as a Telegram Mini App directly from Home Assistant. Telegram initData is verified with Telegram's public Ed25519 key; no bot token or Home Assistant access token is required.",
+        "data": {
+          "miniapp_enabled": "Enable Telegram Mini App",
+          "miniapp_bot_id": "Telegram bot ID",
+          "miniapp_allowed_user_ids": "Allowed Telegram user IDs (comma-separated)",
+          "miniapp_surveillance_label": "Home Assistant camera label (ID or name)"
+        }
+      }
+    },
+    "error": {
+      "invalid_miniapp_config": "When Mini App is enabled, enter a positive bot ID and at least one positive Telegram user ID."
+    }
   }
 }
