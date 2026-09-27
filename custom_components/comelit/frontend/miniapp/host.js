@@ -54,6 +54,8 @@
       this._config = null;
       this._hass = null;
       this._video = null;
+      this._hls = null;
+      this._failed = false;
       this._requestGeneration = 0;
     }
 
@@ -73,12 +75,100 @@
 
     disconnectedCallback() {
       this._requestGeneration += 1;
+      this._destroyPlayback();
+      this._video = null;
+    }
+
+    _destroyPlayback() {
+      if (this._hls) {
+        this._hls.destroy();
+        this._hls = null;
+      }
       if (this._video) {
         this._video.pause();
         this._video.removeAttribute("src");
         this._video.load();
       }
+    }
+
+    _showPlaybackError(message) {
+      this._failed = true;
+      this._destroyPlayback();
       this._video = null;
+      const error = document.createElement("div");
+      error.className = "miniapp-video-error";
+      error.textContent = message;
+      this.replaceChildren(error);
+    }
+
+    async _startPlayback(source, generation) {
+      const video = this._video;
+      if (
+        generation !== this._requestGeneration ||
+        !this.isConnected ||
+        !video
+      ) {
+        return;
+      }
+
+      const HlsClass = window.Hls;
+      if (
+        HlsClass &&
+        typeof HlsClass.isSupported === "function" &&
+        HlsClass.isSupported()
+      ) {
+        const hls = new HlsClass({
+          enableWorker: false,
+          lowLatencyMode: true,
+          backBufferLength: 30,
+        });
+        this._hls = hls;
+
+        hls.on(HlsClass.Events.MANIFEST_PARSED, () => {
+          if (
+            generation !== this._requestGeneration ||
+            !this.isConnected ||
+            this._video !== video
+          ) {
+            return;
+          }
+          video.play().catch(() => {
+            // Telegram autoplay policy may still require an explicit Play tap.
+          });
+        });
+
+        hls.on(HlsClass.Events.ERROR, (_event, data) => {
+          if (
+            !data?.fatal ||
+            generation !== this._requestGeneration ||
+            !this.isConnected
+          ) {
+            return;
+          }
+          const detail = data.details || data.type || "fatal";
+          this._showPlaybackError(
+            "Не удалось воспроизвести HLS-поток: " + detail,
+          );
+        });
+
+        hls.loadSource(source);
+        hls.attachMedia(video);
+        return;
+      }
+
+      if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        video.src = source;
+        try {
+          await video.play();
+        } catch (_) {
+          // Native-HLS autoplay may require an explicit Play tap.
+        }
+        return;
+      }
+
+      this._showPlaybackError(
+        "Этот Telegram WebView не поддерживает HLS или MediaSource.",
+      );
     }
 
     async _openStream(entityId, generation) {
@@ -100,27 +190,25 @@
           return;
         }
 
-        this._video.src = result.url;
-        try {
-          await this._video.play();
-        } catch (_) {
-          // Autoplay policies may require the user to press Play.
-        }
+        await this._startPlayback(result.url, generation);
       } catch (error) {
         if (generation !== this._requestGeneration || !this.isConnected) {
           return;
         }
-        const message = document.createElement("div");
-        message.className = "miniapp-video-error";
-        message.textContent =
+        this._showPlaybackError(
           "Не удалось открыть видеопоток: " +
-          (error?.message || "ошибка");
-        this.replaceChildren(message);
+            (error?.message || "ошибка"),
+        );
       }
     }
 
     _render() {
-      if (!this.isConnected || !this._config?.entity || this._video) {
+      if (
+        !this.isConnected ||
+        !this._config?.entity ||
+        this._video ||
+        this._failed
+      ) {
         return;
       }
 
