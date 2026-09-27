@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any
 
 from homeassistant.components.camera import async_request_stream
@@ -25,7 +26,7 @@ from ..const import (
     MAIN_ENTRANCE_UNIQUE_ID,
     MAIN_GATE_UNIQUE_ID,
 )
-from .session import MiniAppSession, MiniAppSessionStore
+from .session import MiniAppMediaGrantStore, MiniAppSession, MiniAppSessionStore
 
 
 INTERCOM_UNIQUE_IDS = frozenset(
@@ -52,6 +53,13 @@ DOOR_UNIQUE_IDS = {
     DOOR_ENTRANCE: MAIN_ENTRANCE_UNIQUE_ID,
     DOOR_GATE: MAIN_GATE_UNIQUE_ID,
 }
+_HLS_MASTER_PATH = re.compile(
+    r"^/api/hls/[a-f0-9]+/master_playlist\.m3u8$"
+)
+_HLS_PROXY_TAIL = re.compile(
+    r"^(?:master_playlist\.m3u8|playlist\.m3u8|init\.mp4|"
+    r"segment/[0-9]+(?:\.[0-9]+)?\.m4s)$"
+)
 
 
 class MiniAppOperationError(HomeAssistantError):
@@ -112,6 +120,7 @@ class ComelitMiniAppController:
         self.hass = hass
         self.frontend_dir = frontend_dir
         self.sessions = MiniAppSessionStore()
+        self.media_grants = MiniAppMediaGrantStore()
         self._entry: ConfigEntry | None = None
 
     def set_entry(self, entry: ConfigEntry) -> None:
@@ -275,7 +284,12 @@ class ComelitMiniAppController:
             if str(entry["entity_id"]).startswith("camera.")
         )
 
-    async def async_camera_stream_url(self, entity_id: str) -> str:
+    async def async_create_camera_media(
+        self,
+        session_token: str,
+        session: MiniAppSession,
+        entity_id: str,
+    ) -> str:
         if entity_id not in self._allowed_camera_entity_ids():
             raise MiniAppOperationError("camera is not allowed for the Mini App")
 
@@ -285,5 +299,36 @@ class ComelitMiniAppController:
 
         # Use Home Assistant's normal camera stream API. For
         # camera.comelit_entrance this enters ComelitEntranceCamera's existing
-        # camera-owned lifecycle and returns HA Stream's capability URL.
-        return await async_request_stream(self.hass, entity_id, HLS_PROVIDER)
+        # camera-owned lifecycle. The HA HLS capability itself remains inside
+        # Home Assistant; the WebView receives only a session-bound proxy path.
+        upstream_master = await async_request_stream(
+            self.hass,
+            entity_id,
+            HLS_PROVIDER,
+        )
+        if _HLS_MASTER_PATH.fullmatch(upstream_master) is None:
+            raise MiniAppOperationError("unexpected Home Assistant HLS path")
+
+        upstream_base = upstream_master.rsplit("/", 1)[0] + "/"
+        media_id = self.media_grants.create(
+            session_token,
+            upstream_base,
+            session.expires_at,
+        )
+        return (
+            f"/api/comelit/miniapp/media/{media_id}/master_playlist.m3u8"
+        )
+
+    def resolve_media_upstream_path(
+        self,
+        media_id: str,
+        session_token: str,
+        tail: str,
+    ) -> str:
+        if _HLS_PROXY_TAIL.fullmatch(tail) is None:
+            raise MiniAppOperationError("unsupported HLS resource")
+        try:
+            grant = self.media_grants.get(media_id, session_token)
+        except Exception as exc:
+            raise MiniAppOperationError("Mini App media grant is unavailable") from exc
+        return grant.upstream_base_path + tail
