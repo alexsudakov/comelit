@@ -1,0 +1,43 @@
+name: Vendor Mini App hls.js
+
+on:
+  push:
+    branches:
+      - fix/miniapp-hls-playback
+    paths:
+      - ".github/workflows/vendor-miniapp-hls.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  vendor:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/miniapp-hls-playback
+
+      - name: Download and verify hls.js 1.7.3
+        shell: bash
+        run: |
+          set -euo pipefail
+          url='https://github.com/video-dev/hls.js/releases/download/v1.7.3/release.zip'
+          expected='abbda85f3e9b8325fc6b8dbf4fa612ea87144ebad93c2150594e64aad58ec529'
+          curl --fail --location --silent --show-error "$url" -o /tmp/hls-release.zip
+          actual="$(sha256sum /tmp/hls-release.zip | awk '{print $1}')"
+          test "$actual" = "$expected"
+          mkdir -p custom_components/comelit/frontend/miniapp/vendor
+          unzip -p /tmp/hls-release.zip dist/hls.min.js > custom_components/comelit/frontend/miniapp/vendor/hls.min.js
+          test -s custom_components/comelit/frontend/miniapp/vendor/hls.min.js
+          grep -q 'Hls' custom_components/comelit/frontend/miniapp/vendor/hls.min.js
+
+      - name: Commit vendored player
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add custom_components/comelit/frontend/miniapp/vendor/hls.min.js
+          git commit -m 'vendor(miniapp): add hls.js 1.7.3'
+          git push origin HEAD:fix/miniapp-hls-playback
