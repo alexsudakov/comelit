@@ -65,3 +65,22 @@ def test_camera_uses_home_assistant_stream_api_behind_session_proxy():
     assert "MiniAppMediaView" in views
     assert "stream_camera" not in controller
     assert "/api/hls/" not in host
+
+
+def test_miniapp_bundles_hls_player_for_non_native_webviews():
+    html = _read("custom_components/comelit/miniapp/index.html")
+    host = _read("custom_components/comelit/frontend/miniapp/host.js")
+    vendor = ROOT / "custom_components/comelit/frontend/miniapp/vendor/hls.min.js"
+    license_file = (
+        ROOT / "custom_components/comelit/frontend/miniapp/vendor/hls-LICENSE.txt"
+    )
+
+    assert vendor.is_file()
+    assert vendor.stat().st_size > 100_000
+    assert license_file.is_file()
+    assert "/api/comelit/frontend/miniapp/vendor/hls.min.js" in html
+    assert "cdn.jsdelivr.net" not in html
+    assert "HlsClass.isSupported()" in host
+    assert "enableWorker: false" in host
+    assert 'video.canPlayType("application/vnd.apple.mpegurl")' in host
+    assert "this._hls.destroy()" in host
