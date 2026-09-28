@@ -98,11 +98,13 @@ def test_miniapp_session_failures_do_not_use_ha_raised_401_path():
 
 
 def test_surveillance_video_is_bounded_to_mobile_viewport():
-    styles = _read("custom_components/comelit/frontend/miniapp/styles.css")
+    host = _read("custom_components/comelit/frontend/miniapp/host.js")
 
-    assert "miniapp-video-shell.surveillance" in styles
-    assert "height: clamp(180px, 34dvh, 320px)" in styles
-    assert "object-fit: contain" in styles
+    assert "miniapp-video-shell.surveillance" in host
+    assert "height: clamp(180px, 34dvh, 320px)" in host
+    assert "object-fit: contain" in host
+    assert 'this.attachShadow({mode: "open"})' in host
+    assert "this.shadowRoot.replaceChildren(style, content)" in host
 
 
 def test_surveillance_prefers_session_bound_ha_webrtc_with_hls_fallback():
@@ -157,7 +159,8 @@ def test_webrtc_session_id_precedes_provider_offer_and_zero_rtp_falls_back():
     session_pos = views.index('"type": "session"')
     assert session_pos < offer_pos
     assert "ICE " in host
-    assert 'elapsed >= 10' in host
+    assert 'elapsed >= 5' in host
+    assert 'elapsed >= 8' in host
     assert 'bytesReceived === 0' in host
     assert '["new", "checking", "disconnected", "failed"]' in host
     assert "fallback HLS" in host
@@ -165,14 +168,12 @@ def test_webrtc_session_id_precedes_provider_offer_and_zero_rtp_falls_back():
 
 
 def test_video_viewport_uses_explicit_stage_and_playback_mode_guard():
-    styles = _read("custom_components/comelit/frontend/miniapp/styles.css")
     host = _read("custom_components/comelit/frontend/miniapp/host.js")
 
-    assert ".miniapp-video-stage" in styles
-    assert "height: clamp(180px, 34dvh, 320px)" in styles
-    assert "width: 100% !important" in styles
-    assert "height: 100% !important" in styles
-    assert "object-fit: contain !important" in styles
+    assert ".miniapp-video-stage" in host
+    assert "height: clamp(180px, 34dvh, 320px)" in host
+    assert "width: 100%; height: 100%" in host
+    assert "object-fit: contain" in host
     assert 'stage.className = "miniapp-video-stage"' in host
     assert 'this._playbackMode = "webrtc"' in host
     assert 'this._playbackMode = "hls"' in host
@@ -182,11 +183,11 @@ def test_video_viewport_uses_explicit_stage_and_playback_mode_guard():
 
 def test_miniapp_frontend_assets_are_release_versioned_and_stage_is_contained():
     html = _read("custom_components/comelit/miniapp/index.html")
-    styles = _read("custom_components/comelit/frontend/miniapp/styles.css")
+    host = _read("custom_components/comelit/frontend/miniapp/host.js")
 
-    assert "styles.css?v=1.7.4" in html
-    assert "comelit-card.js?v=1.7.4" in html
-    assert "hls.min.js?v=1.7.4" in html
-    assert "host.js?v=1.7.4" in html
-    assert "contain: layout paint size" in styles
-    assert "overflow: hidden !important" in styles
+    assert "styles.css?v=1.7.5" in html
+    assert "comelit-card.js?v=1.7.5" in html
+    assert "hls.min.js?v=1.7.5" in html
+    assert "host.js?v=1.7.5" in html
+    assert "contain: layout paint size" in host
+    assert "overflow: hidden" in host

@@ -12,6 +12,40 @@
   let refreshTimer = null;
   let refreshInFlight = false;
 
+  // The shared comelit-card mounts this viewer inside its Shadow DOM.
+  // Page-level styles.css cannot style descendants across that boundary.
+  const VIEWER_STYLES = `
+    :host { display: block; min-width: 0; max-width: 100%; }
+    * { box-sizing: border-box; }
+    .miniapp-video-shell {
+      width: 100%; max-width: 100%; overflow: hidden;
+      border-radius: 12px; background: #000;
+    }
+    .miniapp-video-stage {
+      position: relative; width: 100%; max-width: 100%; min-width: 0;
+      overflow: hidden; contain: layout paint size; background: #000;
+    }
+    .miniapp-video-shell.surveillance .miniapp-video-stage {
+      height: clamp(180px, 34dvh, 320px);
+    }
+    .miniapp-video-shell.intercom .miniapp-video-stage {
+      height: clamp(220px, 52dvh, 520px);
+    }
+    .miniapp-video {
+      position: absolute; inset: 0; display: block;
+      width: 100%; height: 100%; max-width: 100%; max-height: 100%;
+      object-fit: contain; background: #000;
+    }
+    .miniapp-video-label {
+      padding: 8px 10px; background: var(--card-background-color, #fff);
+      color: var(--primary-text-color, #111827);
+    }
+    .miniapp-video-error {
+      padding: 16px; color: var(--error-color, #dc2626);
+      background: var(--secondary-background-color, #f3f4f6);
+    }
+  `;
+
   if (!customElements.get("ha-card")) {
     customElements.define(
       "ha-card",
@@ -61,6 +95,7 @@
   class MiniAppPictureEntity extends HTMLElement {
     constructor() {
       super();
+      this.attachShadow({mode: "open"});
       this._config = null;
       this._hass = null;
       this._video = null;
@@ -78,6 +113,8 @@
       this._webrtcStatsTimer = null;
       this._webrtcStartTime = null;
       this._firstFrameSeen = false;
+      this._firstHlsFrameSeen = false;
+      this._viewStartTime = null;
       this._playbackMode = null;
       this._failed = false;
       this._requestGeneration = 0;
@@ -181,7 +218,13 @@
       const error = document.createElement("div");
       error.className = "miniapp-video-error";
       error.textContent = message;
-      this.replaceChildren(error);
+      this._replaceContent(error);
+    }
+
+    _replaceContent(content) {
+      const style = document.createElement("style");
+      style.textContent = VIEWER_STYLES;
+      this.shadowRoot.replaceChildren(style, content);
     }
 
     _formatBytes(value) {
@@ -219,6 +262,22 @@
       this._setTransportLabel(
         "WebRTC · первый кадр " + elapsed.toFixed(1) + " с",
       );
+    }
+
+    _markFirstHlsFrame(generation) {
+      if (
+        this._firstHlsFrameSeen ||
+        generation !== this._requestGeneration ||
+        this._playbackMode !== "hls" ||
+        !this.isConnected
+      ) {
+        return;
+      }
+      this._firstHlsFrameSeen = true;
+      const elapsed = this._viewStartTime
+        ? (performance.now() - this._viewStartTime) / 1000
+        : 0;
+      this._setTransportLabel("HLS · первый кадр " + elapsed.toFixed(1) + " с");
     }
 
     _watchWebRTCFirstFrame(peer, video, entityId, generation) {
@@ -275,16 +334,17 @@
         );
 
         if (
-          elapsed >= 10 &&
           bytesReceived === 0 &&
-          ["new", "checking", "disconnected", "failed"].includes(iceState)
+          (elapsed >= 8 ||
+            (elapsed >= 5 &&
+              ["new", "checking", "disconnected", "failed"].includes(iceState)))
         ) {
           this._setTransportLabel(
             "WebRTC · ICE " + iceState + " · fallback HLS",
           );
           this._fallbackToHls(entityId, generation);
         }
-      }, 2000);
+      }, 1000);
     }
 
     async _startHlsPlayback(source, generation) {
@@ -299,6 +359,12 @@
 
       this._playbackMode = "hls";
       this._setTransportLabel("HLS");
+      const markHlsFrame = () => this._markFirstHlsFrame(generation);
+      if (typeof video.requestVideoFrameCallback === "function") {
+        video.requestVideoFrameCallback(markHlsFrame);
+      } else {
+        video.addEventListener("loadeddata", markHlsFrame, {once: true});
+      }
 
       const HlsClass = window.Hls;
       if (
@@ -445,7 +511,7 @@
         if (!this._remoteStream) {
           this._fallbackToHls(entityId, generation);
         }
-      }, 12000);
+      }, 6000);
 
       socket.onmessage = async (event) => {
         if (
@@ -705,8 +771,10 @@
         shell.appendChild(label);
       }
 
-      this.replaceChildren(shell);
+      this._replaceContent(shell);
       const generation = ++this._requestGeneration;
+      this._viewStartTime = performance.now();
+      this._firstHlsFrameSeen = false;
       this._webrtcFallbackStarted = false;
 
       if (isIntercomCameraEntity(entityId)) {
