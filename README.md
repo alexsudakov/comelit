@@ -11,7 +11,7 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.7.8**. This release restores Door service availability during a physical inbound Ring while attached call media is active. Attached Ring media reuses the still-running persistent listener and its existing CTPP channel, so `comelit.open_door` now keeps using the validated one-shot listener Door path instead of rejecting the operation solely because attached media is busy. Separately bootstrapped on-demand media remains fail-closed for Door while the persistent listener is paused. Details are recorded in `docs/releases/1.7.8-door-during-attached-ring-media.md`.
+Current stable release: **1.7.9**. This diagnostics-only release adds bounded Home Assistant logging for the native Door one-shot path so a physical attached-call failure can be attributed to command acceptance, individual writes, reject stage, ACK proof, native timeout, and final conservative outcome without exposing payloads, channel IDs, addresses, credentials, or media data. Door protocol behavior and the 1.7.8 attached-Ring routing fix are unchanged. Details are recorded in `docs/releases/1.7.9-door-native-observability.md`.
 
 ## Home Assistant Custom Card
 
