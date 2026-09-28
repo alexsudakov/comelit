@@ -7,6 +7,7 @@ from urllib.parse import urljoin
 from uuid import uuid4
 
 from aiohttp import ClientError, WSMsgType, web
+from mashumaro import MissingField
 
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
@@ -371,7 +372,7 @@ class MiniAppCameraWebRTCView(_MiniAppView):
                             session_id,
                             candidate_init,
                         )
-                    except (HomeAssistantError, ValueError, TypeError):
+                    except (HomeAssistantError, MissingField, ValueError, TypeError):
                         await websocket.send_json(
                             {
                                 "type": "error",
