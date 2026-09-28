@@ -5,9 +5,8 @@ from pathlib import Path
 import re
 from typing import Any
 
-from homeassistant.components.camera import async_request_stream
+from homeassistant.components.camera import async_request_stream, get_camera_from_entity_id
 from homeassistant.components.camera.const import StreamType
-from homeassistant.components.camera.helper import get_camera_from_entity_id
 from homeassistant.components.stream import HLS_PROVIDER
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import STATE_UNAVAILABLE
