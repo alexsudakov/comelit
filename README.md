@@ -11,7 +11,7 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.6.2**. This patch keeps the 1.6.1 bundled HLS playback fix and prevents expired/restarted Telegram Mini App sessions from entering Home Assistant's global raised-401/IP-ban path. The WebView now stops polling when its integration-owned session is no longer valid and asks the user to reopen the Mini App. Door/Gate, camera transport and Telegram signature validation are unchanged. Details are recorded in `docs/releases/1.6.2-miniapp-session-ban-fix.md`.
+Current stable release: **1.7.0**. Ordinary surveillance cameras in the Telegram Mini App now prefer Home Assistant's on-demand WebRTC provider (normally the HA-managed go2rtc instance), with HLS retained as a fallback. Camera video is also bounded to the mobile viewport with contain scaling. No camera preload is enabled, and the Comelit entrance-camera media lifecycle plus Door/Gate behavior are unchanged. Details are recorded in `docs/releases/1.7.0-miniapp-go2rtc-on-demand.md`.
 
 ## Home Assistant Custom Card
 
@@ -78,10 +78,12 @@ semantic `entrance` / `gate` endpoints, each request requires a one-time
 action nonce, and one accepted request maps to exactly one existing Comelit
 `button.press` with no automatic retry.
 
-Camera viewing uses Home Assistant's normal HLS stream API, so
-`camera.comelit_entrance` keeps its existing camera-owned media lifecycle.
-The raw HA HLS capability path remains server-side and is exposed to Telegram
-only through a session-bound Comelit media proxy.
+Camera viewing uses two deliberately separate paths. The Comelit entrance
+camera keeps Home Assistant HLS and its existing validated camera-owned media
+lifecycle. Ordinary surveillance cameras first use Home Assistant WebRTC,
+normally backed by the HA-managed go2rtc provider, and fall back to the
+session-bound HLS proxy if WebRTC is unavailable. No Mini App camera preload is
+enabled. Raw HA/go2rtc management credentials are never exposed to Telegram.
 
 Architecture and deployment boundary: `docs/miniapp-architecture.md`.
 
