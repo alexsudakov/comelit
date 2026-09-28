@@ -78,6 +78,7 @@
       this._webrtcStatsTimer = null;
       this._webrtcStartTime = null;
       this._firstFrameSeen = false;
+      this._playbackMode = null;
       this._failed = false;
       this._requestGeneration = 0;
     }
@@ -158,6 +159,7 @@
     }
 
     _destroyPlayback() {
+      this._playbackMode = null;
       this._destroyWebRTC();
 
       if (this._hls) {
@@ -197,6 +199,7 @@
       if (
         this._firstFrameSeen ||
         generation !== this._requestGeneration ||
+        this._playbackMode !== "webrtc" ||
         !this.isConnected
       ) {
         return;
@@ -230,6 +233,7 @@
       this._webrtcStatsTimer = setInterval(async () => {
         if (
           generation !== this._requestGeneration ||
+          this._playbackMode !== "webrtc" ||
           !this.isConnected ||
           this._peerConnection !== peer ||
           this._firstFrameSeen
@@ -293,6 +297,7 @@
         return;
       }
 
+      this._playbackMode = "hls";
       this._setTransportLabel("HLS");
 
       const HlsClass = window.Hls;
@@ -397,6 +402,10 @@
       }
 
       this._webrtcFallbackStarted = true;
+      // Invalidate any pending WebRTC video-frame callback before attaching
+      // HLS to the same <video> element. Otherwise the first HLS frame can be
+      // misreported as a successful WebRTC frame.
+      this._playbackMode = "hls";
       this._destroyWebRTC();
       this._openHls(entityId, generation);
     }
@@ -424,6 +433,7 @@
         return;
       }
       this._websocket = socket;
+      this._playbackMode = "webrtc";
       this._webrtcStartTime = performance.now();
       this._firstFrameSeen = false;
       this._setTransportLabel("WebRTC · подключение…");
@@ -672,6 +682,9 @@
         "miniapp-video-shell " +
         (this._config.show_name !== false ? "surveillance" : "intercom");
 
+      const stage = document.createElement("div");
+      stage.className = "miniapp-video-stage";
+
       const video = document.createElement("video");
       video.className = "miniapp-video";
       video.controls = true;
@@ -681,7 +694,8 @@
       video.setAttribute("playsinline", "");
       video.setAttribute("webkit-playsinline", "");
       this._video = video;
-      shell.appendChild(video);
+      stage.appendChild(video);
+      shell.appendChild(stage);
 
       if (this._config.show_name !== false) {
         const label = document.createElement("div");
