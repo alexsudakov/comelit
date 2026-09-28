@@ -101,7 +101,7 @@ def test_surveillance_video_is_bounded_to_mobile_viewport():
     styles = _read("custom_components/comelit/frontend/miniapp/styles.css")
 
     assert "miniapp-video-shell.surveillance" in styles
-    assert "height: min(34dvh, 320px)" in styles
+    assert "height: clamp(180px, 34dvh, 320px)" in styles
     assert "object-fit: contain" in styles
 
 
