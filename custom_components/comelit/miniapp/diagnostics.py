@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import json
 import re
 from typing import Any
@@ -83,9 +84,13 @@ HLS_ERROR_KINDS = (
 )
 
 MAX_BODY_BYTES = 2048
-MAX_COUNTERS = 12
+MAX_COUNTERS = 16
 MAX_MS = 600_000
 MAX_COUNTER_VALUE = 1_000_000
+MAX_EVENTS_PER_SESSION = 160
+MAX_EVENTS_PER_SESSION_ENTITY = 80
+MAX_RATE_LIMIT_SESSIONS = 128
+MAX_RATE_LIMIT_ENTITIES_PER_SESSION = 8
 _ALLOWED_KEYS = frozenset(
     {"event", "elapsed_ms", "stage_ms", "state", "reason", "counters"}
 )
@@ -103,6 +108,80 @@ class MiniAppDiagnosticsError(ValueError):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+@dataclass(slots=True)
+class _DiagnosticsRateBucket:
+    expires_at: float
+    total: int = 0
+    entity_counts: dict[str, int] = field(default_factory=dict)
+    entity_seen: dict[str, float] = field(default_factory=dict)
+    last_seen: float = 0.0
+
+
+class MiniAppDiagnosticsRateLimiter:
+    """Bound accepted diagnostics events by Mini App session and entity."""
+
+    def __init__(self) -> None:
+        self._buckets: dict[str, _DiagnosticsRateBucket] = {}
+
+    def accept(
+        self,
+        session_token: str,
+        entity_id: str,
+        *,
+        expires_at: float,
+        now: float,
+    ) -> bool:
+        self.prune(now=now)
+        if len(self._buckets) >= MAX_RATE_LIMIT_SESSIONS:
+            oldest = min(
+                self._buckets,
+                key=lambda token: self._buckets[token].last_seen,
+            )
+            self._buckets.pop(oldest, None)
+
+        bucket = self._buckets.get(session_token)
+        if bucket is None:
+            bucket = _DiagnosticsRateBucket(expires_at=expires_at)
+            self._buckets[session_token] = bucket
+        else:
+            bucket.expires_at = max(bucket.expires_at, expires_at)
+
+        bucket.last_seen = now
+        bucket.entity_seen[entity_id] = now
+        if len(bucket.entity_counts) >= MAX_RATE_LIMIT_ENTITIES_PER_SESSION:
+            if entity_id not in bucket.entity_counts:
+                oldest_entity = min(
+                    bucket.entity_seen,
+                    key=lambda item: bucket.entity_seen[item],
+                )
+                bucket.entity_counts.pop(oldest_entity, None)
+                bucket.entity_seen.pop(oldest_entity, None)
+
+        current_entity_count = bucket.entity_counts.get(entity_id, 0)
+        if (
+            bucket.total >= MAX_EVENTS_PER_SESSION
+            or current_entity_count >= MAX_EVENTS_PER_SESSION_ENTITY
+        ):
+            return False
+
+        bucket.total += 1
+        bucket.entity_counts[entity_id] = current_entity_count + 1
+        return True
+
+    def prune(self, *, now: float) -> None:
+        expired = [
+            token
+            for token, bucket in self._buckets.items()
+            if bucket.expires_at <= now
+        ]
+        for token in expired:
+            self._buckets.pop(token, None)
+
+    @property
+    def bucket_count(self) -> int:
+        return len(self._buckets)
 
 
 def loads_limited(body: bytes) -> dict[str, Any]:

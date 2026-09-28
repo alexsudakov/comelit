@@ -22,6 +22,7 @@ from ..const import DOOR_ENTRANCE, DOOR_GATE
 from .auth import TelegramAuthenticationError, validate_telegram_init_data
 from .controller import ComelitMiniAppController, MiniAppOperationError
 from .diagnostics import (
+    MiniAppDiagnosticsRateLimiter,
     MiniAppDiagnosticsError,
     format_log_line,
     loads_limited,
@@ -423,9 +424,13 @@ class MiniAppCameraDiagnosticsView(_MiniAppView):
     url = r"/api/comelit/miniapp/camera/{entity_id}/diagnostics"
     name = "api:comelit:miniapp:camera_diagnostics"
 
+    def __init__(self, controller: ComelitMiniAppController) -> None:
+        super().__init__(controller)
+        self._rate_limiter = MiniAppDiagnosticsRateLimiter()
+
     async def post(self, request: web.Request, entity_id: str) -> web.Response:
         self._require_miniapp_marker(request)
-        self._require_session(request)
+        token, session = self._require_session(request)
         if (
             not entity_id.startswith("camera.")
             or entity_id not in self.controller._allowed_camera_entity_ids()
@@ -440,6 +445,16 @@ class MiniAppCameraDiagnosticsView(_MiniAppView):
             return _json_response(
                 {"error": "invalid_diagnostics_event"},
                 status=HTTPStatus.BAD_REQUEST,
+            )
+        if not self._rate_limiter.accept(
+            token,
+            entity_id,
+            expires_at=float(session.expires_at),
+            now=time.time(),
+        ):
+            return _json_response(
+                {"error": "diagnostics_rate_limited"},
+                status=HTTPStatus.TOO_MANY_REQUESTS,
             )
 
         _LOGGER.info(line)

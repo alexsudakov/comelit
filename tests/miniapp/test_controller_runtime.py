@@ -227,7 +227,7 @@ controller_mod = _load(
     MINIAPP_ROOT / "controller.py",
     "custom_components.comelit.miniapp.controller",
 )
-_load(
+diagnostics_mod = _load(
     MINIAPP_ROOT / "diagnostics.py",
     "custom_components.comelit.miniapp.diagnostics",
 )
@@ -723,3 +723,87 @@ def test_diagnostics_endpoint_logs_one_closed_line(caplog):
         "elapsed_ms=5000 stage_ms=1000 state=- reason=stats_deadline_checking "
         "counters=bytes_received=0"
     ]
+
+
+def test_diagnostics_endpoint_rate_limits_per_session_entity_without_echo():
+    controller, _hass = _controller(surveillance_label="Outside")
+    token, _session = controller.sessions.create(424242, 12345678)
+    view = views_mod.MiniAppCameraDiagnosticsView(controller)
+
+    for index in range(diagnostics_mod.MAX_EVENTS_PER_SESSION_ENTITY):
+        response = asyncio.run(
+            view.post(
+                _FakeRequest(
+                    {"event": "config", "elapsed_ms": index},
+                    token=token,
+                ),
+                "camera.driveway",
+            )
+        )
+        assert response.status == 200
+
+    response = asyncio.run(
+        view.post(
+            _FakeRequest(
+                {"event": "config", "elapsed_ms": 1, "extra": "secret"},
+                token=token,
+            ),
+            "camera.driveway",
+        )
+    )
+
+    assert response.status == 400
+    assert json.loads(response.text) == {"error": "invalid_diagnostics_event"}
+    assert "secret" not in response.text
+
+    response = asyncio.run(
+        view.post(
+            _FakeRequest({"event": "config", "elapsed_ms": 1}, token=token),
+            "camera.driveway",
+        )
+    )
+
+    assert response.status == 429
+    assert json.loads(response.text) == {"error": "diagnostics_rate_limited"}
+
+
+def test_diagnostics_endpoint_rate_limit_does_not_cross_sessions():
+    controller, _hass = _controller(surveillance_label="Outside")
+    token, _session = controller.sessions.create(424242, 12345678)
+    fresh_token, _fresh_session = controller.sessions.create(424242, 12345678)
+    view = views_mod.MiniAppCameraDiagnosticsView(controller)
+
+    for _index in range(diagnostics_mod.MAX_EVENTS_PER_SESSION_ENTITY):
+        response = asyncio.run(
+            view.post(
+                _FakeRequest({"event": "config"}, token=token),
+                "camera.driveway",
+            )
+        )
+        assert response.status == 200
+
+    response = asyncio.run(
+        view.post(
+            _FakeRequest({"event": "config"}, token=fresh_token),
+            "camera.driveway",
+        )
+    )
+
+    assert response.status == 200
+
+
+def test_diagnostics_rate_limiter_store_stays_bounded_under_overflow():
+    controller, _hass = _controller(surveillance_label="Outside")
+    view = views_mod.MiniAppCameraDiagnosticsView(controller)
+
+    for _index in range(diagnostics_mod.MAX_RATE_LIMIT_SESSIONS + 12):
+        token, _session = controller.sessions.create(424242, 12345678)
+        response = asyncio.run(
+            view.post(
+                _FakeRequest({"event": "config"}, token=token),
+                "camera.driveway",
+            )
+        )
+        assert response.status == 200
+
+    assert view._rate_limiter.bucket_count <= diagnostics_mod.MAX_RATE_LIMIT_SESSIONS

@@ -11,6 +11,35 @@
   let actionNonce = null;
   let refreshTimer = null;
   let refreshInFlight = false;
+  const MAX_DIAGNOSTICS_COUNTERS = 16;
+  const WEBRTC_COUNTER_PRIORITY = [
+    "bytes_received",
+    "frames_decoded",
+    "ice_gathering_state",
+    "cand_host",
+    "cand_srflx",
+    "cand_prflx",
+    "cand_relay",
+    "cand_udp",
+    "cand_tcp",
+    "pair_waiting",
+    "pair_in_progress",
+    "pair_succeeded",
+    "pair_failed",
+    "pair_nominated",
+  ];
+  const HLS_COUNTER_PRIORITY = [
+    "paused",
+    "ended",
+    "ready_state",
+    "network_state",
+    "buffered_count",
+    "seekable_count",
+    "buffered_s",
+    "seekable_s",
+    "live_latency_s",
+    "fatal",
+  ];
 
   // The shared comelit-card mounts this viewer inside its Shadow DOM.
   // Page-level styles.css cannot style descendants across that boundary.
@@ -109,8 +138,10 @@
       this._pendingLocalCandidates = [];
       this._webrtcSessionReady = false;
       this._webrtcFallbackStarted = false;
+      this._webrtcTrackSeen = false;
       this._webrtcTimer = null;
       this._webrtcStatsTimer = null;
+      this._webrtcDiagnosticTimer = null;
       this._webrtcStartTime = null;
       this._firstFrameSeen = false;
       this._firstHlsFrameSeen = false;
@@ -164,6 +195,10 @@
         clearInterval(this._webrtcStatsTimer);
         this._webrtcStatsTimer = null;
       }
+      if (this._webrtcDiagnosticTimer) {
+        clearInterval(this._webrtcDiagnosticTimer);
+        this._webrtcDiagnosticTimer = null;
+      }
       this._webrtcStartTime = null;
       this._firstFrameSeen = false;
       this._firstMovingFrameSeen = false;
@@ -195,6 +230,7 @@
       this._pendingRemoteCandidates = [];
       this._pendingLocalCandidates = [];
       this._webrtcSessionReady = false;
+      this._webrtcTrackSeen = false;
 
       if (this._video) {
         this._video.srcObject = null;
@@ -245,6 +281,11 @@
     }
 
     _startDiagnostics(entityId, generation) {
+      if (this._diagnostics?.queuedTimers) {
+        for (const timer of this._diagnostics.queuedTimers) {
+          clearTimeout(timer);
+        }
+      }
       this._diagnostics = {
         entityId,
         generation,
@@ -254,6 +295,7 @@
         lastAt: -Infinity,
         lastTriple: "",
         queuedTriples: new Set(),
+        queuedTimers: new Set(),
       };
     }
 
@@ -286,11 +328,22 @@
       }
       if (diagnostics.count > 0 && now - diagnostics.lastAt < 250) {
         if (!diagnostics.queuedTriples.has(triple)) {
+          const queuedEntityId = diagnostics.entityId;
+          const queuedGeneration = diagnostics.generation;
           diagnostics.queuedTriples.add(triple);
-          setTimeout(() => {
+          const timer = setTimeout(() => {
+            diagnostics.queuedTimers.delete(timer);
             diagnostics.queuedTriples.delete(triple);
+            if (
+              !this._diagnostics ||
+              this._diagnostics.entityId !== queuedEntityId ||
+              this._diagnostics.generation !== queuedGeneration
+            ) {
+              return;
+            }
             this._reportDiagnostics(event, options);
           }, Math.max(0, 250 - (now - diagnostics.lastAt)));
+          diagnostics.queuedTimers.add(timer);
         }
         return;
       }
@@ -310,7 +363,7 @@
         payload.reason = options.reason;
       }
       if (options.counters) {
-        payload.counters = options.counters;
+        payload.counters = this._limitDiagnosticCounters(event, options.counters);
       }
       fetch(
         "/api/comelit/miniapp/camera/" +
@@ -326,6 +379,30 @@
           body: JSON.stringify(payload),
         },
       ).catch(() => {});
+    }
+
+    _limitDiagnosticCounters(event, counters) {
+      const priority = ["ice", "rtp"].includes(event)
+        ? WEBRTC_COUNTER_PRIORITY
+        : HLS_COUNTER_PRIORITY;
+      const result = {};
+      for (const key of priority) {
+        if (Object.prototype.hasOwnProperty.call(counters, key)) {
+          result[key] = counters[key];
+        }
+        if (Object.keys(result).length >= MAX_DIAGNOSTICS_COUNTERS) {
+          return result;
+        }
+      }
+      for (const key of Object.keys(counters).sort()) {
+        if (!Object.prototype.hasOwnProperty.call(result, key)) {
+          result[key] = counters[key];
+        }
+        if (Object.keys(result).length >= MAX_DIAGNOSTICS_COUNTERS) {
+          break;
+        }
+      }
+      return result;
     }
 
     _boundedCounter(value) {
@@ -411,6 +488,7 @@
       const counters = {
         bytes_received: 0,
         frames_decoded: 0,
+        ice_gathering_state: this._iceGatheringStateCode(peer.iceGatheringState),
       };
       const candidateTypes = new Set(["host", "srflx", "prflx", "relay"]);
       const protocols = new Set(["udp", "tcp"]);
@@ -436,13 +514,12 @@
               report.type === "remote-candidate") &&
             candidateTypes.has(report.candidateType)
           ) {
-            const prefix = report.type === "local-candidate" ? "local" : "remote";
-            counters[prefix + "_" + report.candidateType] =
-              (counters[prefix + "_" + report.candidateType] || 0) + 1;
+            counters["cand_" + report.candidateType] =
+              (counters["cand_" + report.candidateType] || 0) + 1;
             const protocol = String(report.protocol || "").toLowerCase();
             if (protocols.has(protocol)) {
-              counters[prefix + "_" + protocol] =
-                (counters[prefix + "_" + protocol] || 0) + 1;
+              counters["cand_" + protocol] =
+                (counters["cand_" + protocol] || 0) + 1;
             }
           }
           if (report.type === "candidate-pair") {
@@ -462,6 +539,16 @@
       counters.bytes_received = this._boundedCounter(counters.bytes_received);
       counters.frames_decoded = this._boundedCounter(counters.frames_decoded);
       return counters;
+    }
+
+    _iceGatheringStateCode(state) {
+      if (state === "gathering") {
+        return 1;
+      }
+      if (state === "complete") {
+        return 2;
+      }
+      return 0;
     }
 
     _markFirstWebRTCFrame(generation) {
@@ -583,6 +670,33 @@
           );
         }
       }, 1000);
+    }
+
+    _startWebRTCDiagnosticsSampler(peer, generation) {
+      this._stopWebRTCDiagnosticsSampler();
+      this._webrtcDiagnosticTimer = setInterval(async () => {
+        if (
+          generation !== this._requestGeneration ||
+          this._playbackMode !== "webrtc" ||
+          !this.isConnected ||
+          this._peerConnection !== peer ||
+          this._firstFrameSeen ||
+          this._webrtcTrackSeen
+        ) {
+          return;
+        }
+        const counters = await this._webrtcCounters(peer);
+        const state = peer.iceConnectionState || "unknown";
+        this._reportDiagnostics("ice", {state, counters});
+        this._reportDiagnostics("rtp", {state, counters});
+      }, 1000);
+    }
+
+    _stopWebRTCDiagnosticsSampler() {
+      if (this._webrtcDiagnosticTimer) {
+        clearInterval(this._webrtcDiagnosticTimer);
+        this._webrtcDiagnosticTimer = null;
+      }
     }
 
     async _startHlsPlayback(source, generation) {
@@ -816,6 +930,8 @@
             this._pendingRemoteCandidates = [];
             this._pendingLocalCandidates = [];
             this._webrtcSessionReady = false;
+            this._webrtcTrackSeen = false;
+            this._startWebRTCDiagnosticsSampler(peer, generation);
 
             // Mirror Home Assistant's native WebRTC player negotiation shape.
             // go2rtc may expose audio+video even though the Mini App stays muted.
@@ -835,6 +951,8 @@
                 return;
               }
 
+              this._webrtcTrackSeen = true;
+              this._stopWebRTCDiagnosticsSampler();
               if (trackEvent.streams?.[0]) {
                 this._remoteStream = trackEvent.streams[0];
               } else if (trackEvent.track) {

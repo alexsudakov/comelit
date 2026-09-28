@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import re
 import sys
 
 import pytest
@@ -10,6 +11,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 DIAGNOSTICS_PATH = ROOT / "custom_components/comelit/miniapp/diagnostics.py"
+HOST_PATH = ROOT / "custom_components/comelit/frontend/miniapp/host.js"
 
 
 def _load():
@@ -71,7 +73,10 @@ def test_schema_rejects_unknown_types_bounds_and_extra_structures():
         "counter_out_of_bounds",
     )
     _rejects(
-        {"event": "rtp", "counters": {f"k{i}": i for i in range(13)}},
+        {
+            "event": "rtp",
+            "counters": {f"k{i}": i for i in range(diagnostics.MAX_COUNTERS + 1)},
+        },
         "too_many_counters",
     )
 
@@ -129,3 +134,38 @@ def test_redaction_guard_refuses_sdp_and_telegram_auth_backstop_tokens():
         with pytest.raises(diagnostics.MiniAppDiagnosticsError) as exc:
             diagnostics.format_log_line(value, {"event": "config"})
         assert exc.value.code == "redacted_value"
+
+
+def _js_array_length(source: str, name: str) -> int:
+    match = re.search(rf"const {name} = \[(.*?)\];", source, re.S)
+    assert match is not None
+    return len(re.findall(r'"[a-z0-9_]+"', match.group(1)))
+
+
+def test_client_counter_budget_is_derived_from_server_schema_limit():
+    host = HOST_PATH.read_text(encoding="utf-8")
+    max_match = re.search(r"const MAX_DIAGNOSTICS_COUNTERS = ([0-9]+);", host)
+    assert max_match is not None
+    assert int(max_match.group(1)) == diagnostics.MAX_COUNTERS
+
+    family_counts = {
+        "webrtc": _js_array_length(host, "WEBRTC_COUNTER_PRIORITY"),
+        "hls": _js_array_length(host, "HLS_COUNTER_PRIORITY"),
+    }
+    assert max(family_counts.values()) <= diagnostics.MAX_COUNTERS
+
+
+def test_rate_limiter_prunes_expired_session_state():
+    limiter = diagnostics.MiniAppDiagnosticsRateLimiter()
+
+    assert limiter.accept(
+        "session-a",
+        "camera.driveway",
+        expires_at=10.0,
+        now=1.0,
+    )
+    assert limiter.bucket_count == 1
+
+    limiter.prune(now=11.0)
+
+    assert limiter.bucket_count == 0

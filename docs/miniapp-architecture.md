@@ -420,7 +420,7 @@ elapsed_ms integer 0..600000
 stage_ms   integer 0..600000
 state      fixed player-state enum or null
 reason     fixed fallback-reason enum, or fixed HLS-error enum for hls_error
-counters   up to 12 integer counters, keys matching ^[a-z][a-z0-9_]{0,39}$
+counters   up to 16 integer counters, keys matching ^[a-z][a-z0-9_]{0,39}$
 ```
 
 Fallback reasons are:
@@ -446,9 +446,28 @@ matching:
 
 The browser reports only enums and integers. WebRTC candidate diagnostics count
 candidate types and transports from `getStats()` reports (`host`, `srflx`,
-`prflx`, `relay`, `udp`, `tcp`) plus candidate-pair states and nomination
-counts. It never reads or posts ICE candidate strings, SDP, IP addresses, URLs,
-cookies, `initData`, Telegram user data, RTSP URLs, or media bytes.
+`prflx`, `relay`, `udp`, `tcp`) plus candidate-pair states, nomination counts,
+ICE gathering state, inbound RTP bytes and decoded-frame counts. It never reads
+or posts ICE candidate strings, SDP, IP addresses, URLs, cookies, `initData`,
+Telegram user data, RTSP URLs, or media bytes.
+
+Accepted diagnostics are rate limited server-side using constants from
+`custom_components/comelit/miniapp/diagnostics.py`:
+
+```text
+MAX_EVENTS_PER_SESSION = 160
+MAX_EVENTS_PER_SESSION_ENTITY = 80
+MAX_RATE_LIMIT_SESSIONS = 128
+MAX_RATE_LIMIT_ENTITIES_PER_SESSION = 8
+```
+
+The limits allow a normal client playback attempt, which is already capped at
+60 posted events, while bounding Home Assistant log volume and limiter memory.
+Expired session buckets are pruned, and overflow returns:
+
+```text
+HTTP 429 {"error": "diagnostics_rate_limited"}
+```
 
 Accepted events produce exactly one Home Assistant log line:
 

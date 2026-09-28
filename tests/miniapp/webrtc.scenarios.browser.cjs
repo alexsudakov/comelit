@@ -28,6 +28,9 @@ const hostPath = path.resolve(
   "../../custom_components/comelit/frontend/miniapp/host.js",
 );
 const ENTITY_ID = "camera.parking_6048";
+const SECOND_ENTITY_ID = "camera.second_6048";
+const MAX_COUNTERS = 16;
+const COUNTER_KEY = /^[a-z][a-z0-9_]{0,39}$/;
 
 async function setupPage(browser) {
   const page = await browser.newPage({ viewport: { width: 390, height: 780 } });
@@ -35,7 +38,12 @@ async function setupPage(browser) {
   await page.route("**/*", async (route) => {
     const request = route.request();
     if (request.url().includes("/diagnostics")) {
-      posts.push(JSON.parse(request.postData() || "{}"));
+      const payload = JSON.parse(request.postData() || "{}");
+      Object.defineProperty(payload, "__url", {
+        value: request.url(),
+        enumerable: false,
+      });
+      posts.push(payload);
       await route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -54,7 +62,41 @@ async function setupPage(browser) {
   await page.goto("http://miniapp.test/");
   await page.addScriptTag({ path: hostPath });
   await page.evaluate((entityId) => {
-    window.makeViewer = () => {
+    window.makeFakePeer = ({
+      stats = [],
+      iceState = "connected",
+      gatheringState = "new",
+    } = {}) => ({
+      iceConnectionState: iceState,
+      connectionState: "new",
+      iceGatheringState: gatheringState,
+      localDescription: null,
+      remoteDescription: null,
+      onicecandidate: null,
+      ontrack: null,
+      oniceconnectionstatechange: null,
+      onconnectionstatechange: null,
+      addTransceiver() {},
+      async createOffer() {
+        return { type: "offer", sdp: "v=0\r\n" };
+      },
+      async setLocalDescription(description) {
+        this.localDescription = description;
+      },
+      async setRemoteDescription(description) {
+        this.remoteDescription = description;
+      },
+      async addIceCandidate() {},
+      async getStats() {
+        return new Map(stats.map((report, index) => ["r" + index, report]));
+      },
+      close() {
+        this.connectionState = "closed";
+        this.iceConnectionState = "closed";
+      },
+    });
+
+    window.makeViewer = (selectedEntityId = entityId) => {
       const Viewer = customElements.get("miniapp-picture-entity");
       const originalOpenWebRTC = Viewer.prototype._openWebRTC;
       Viewer.prototype._openWebRTC = function () {};
@@ -62,11 +104,14 @@ async function setupPage(browser) {
       outer.attachShadow({ mode: "open" });
       document.body.appendChild(outer);
       const viewer = new Viewer();
-      viewer.setConfig({ entity: entityId, show_name: true });
+      viewer.setConfig({ entity: selectedEntityId, show_name: true });
       viewer.hass = {
         states: {
           [entityId]: {
             attributes: { friendly_name: "Parking" },
+          },
+          "camera.second_6048": {
+            attributes: { friendly_name: "Second" },
           },
         },
       };
@@ -88,6 +133,19 @@ function events(posts, name) {
   return posts.filter((payload) => payload.event === name);
 }
 
+function assertSchemaBudget(posts) {
+  for (const payload of posts) {
+    const counters = payload.counters || {};
+    const keys = Object.keys(counters);
+    assert.ok(keys.length <= MAX_COUNTERS, JSON.stringify(payload));
+    for (const key of keys) {
+      assert.match(key, COUNTER_KEY, JSON.stringify(payload));
+      assert.equal(Number.isInteger(counters[key]), true, JSON.stringify(payload));
+      assert.ok(counters[key] >= 0 && counters[key] <= 1000000, JSON.stringify(payload));
+    }
+  }
+}
+
 async function flush(page, ms = 0) {
   if (ms > 0) {
     await page.clock.runFor(ms);
@@ -102,6 +160,10 @@ async function startViewer(page) {
     viewer._playbackMode = "webrtc";
     viewer._webrtcStartTime = performance.now();
   }, ENTITY_ID);
+}
+
+async function finishScenario(posts) {
+  assertSchemaBudget(posts);
 }
 
 async function installSignallingTimer(page, withAnswer) {
@@ -128,16 +190,13 @@ async function installSignallingTimer(page, withAnswer) {
 async function installStatsWatch(page, stats, iceState, withTrack) {
   await page.evaluate(({ entityId, stats, iceState, withTrack }) => {
     const viewer = window.testViewer;
-    const peer = {
-      iceConnectionState: iceState,
-      getStats: async () =>
-        new Map(stats.map((report, index) => ["r" + index, report])),
-    };
+    const peer = window.makeFakePeer({ stats, iceState });
     viewer._peerConnection = peer;
     viewer._playbackMode = "webrtc";
     viewer._webrtcStartTime = performance.now();
     if (withTrack) {
       viewer._remoteStream = new MediaStream();
+      viewer._webrtcTrackSeen = true;
       viewer._reportDiagnostics("track");
     }
     viewer._watchWebRTCFirstFrame(
@@ -147,6 +206,31 @@ async function installStatsWatch(page, stats, iceState, withTrack) {
       viewer._requestGeneration,
     );
   }, { entityId: ENTITY_ID, stats, iceState, withTrack });
+}
+
+async function installPreTrackSampler(page, stats, iceState) {
+  await page.evaluate(({ entityId, stats, iceState }) => {
+    const viewer = window.testViewer;
+    const peer = window.makeFakePeer({
+      stats,
+      iceState,
+      gatheringState: "gathering",
+    });
+    viewer._peerConnection = peer;
+    viewer._playbackMode = "webrtc";
+    viewer._webrtcStartTime = performance.now();
+    viewer._webrtcTrackSeen = false;
+    viewer._startWebRTCDiagnosticsSampler(peer, viewer._requestGeneration);
+    viewer._webrtcTimer = setTimeout(() => {
+      if (!viewer._remoteStream) {
+        viewer._fallbackToHls(
+          entityId,
+          viewer._requestGeneration,
+          "stats_deadline_other",
+        );
+      }
+    }, 6000);
+  }, { entityId: ENTITY_ID, stats, iceState });
 }
 
 async function runWithPage(browser, callback) {
@@ -173,6 +257,7 @@ async function main() {
       assert.equal(event(posts, "answer"), undefined);
       assert.equal(event(posts, "track"), undefined);
       assert.equal(event(posts, "fallback")?.reason, "stats_deadline_other");
+      await finishScenario(posts);
     });
 
     await runWithPage(browser, async (page, posts) => {
@@ -181,6 +266,83 @@ async function main() {
       assert.equal(event(posts, "answer")?.event, "answer");
       assert.equal(event(posts, "track"), undefined);
       assert.equal(event(posts, "fallback")?.reason, "stats_deadline_other");
+      await finishScenario(posts);
+    });
+
+    await runWithPage(browser, async (page, posts) => {
+      await installPreTrackSampler(
+        page,
+        [
+          {
+            type: "inbound-rtp",
+            kind: "video",
+            bytesReceived: 0,
+            framesDecoded: 0,
+          },
+          { type: "local-candidate", candidateType: "host", protocol: "udp" },
+          { type: "remote-candidate", candidateType: "srflx", protocol: "tcp" },
+          { type: "candidate-pair", state: "waiting" },
+        ],
+        "checking",
+      );
+      await flush(page, 6500);
+      assert.equal(event(posts, "ice")?.state, "checking");
+      assert.equal(event(posts, "rtp")?.state, "checking");
+      assert.equal(event(posts, "ice")?.counters.ice_gathering_state, 1);
+      assert.equal(event(posts, "ice")?.counters.cand_host, 1);
+      assert.equal(event(posts, "ice")?.counters.cand_srflx, 1);
+      assert.equal(event(posts, "fallback")?.reason, "stats_deadline_other");
+      // The 6000 ms signalling timer fires on the next fake-clock tick, so the reported
+      // elapsed_ms lands one tick past the deadline boundary.
+      assert.ok(
+        event(posts, "fallback").elapsed_ms >= 6000 &&
+          event(posts, "fallback").elapsed_ms <= 6600,
+        JSON.stringify(event(posts, "fallback")),
+      );
+      await finishScenario(posts);
+    });
+
+    await runWithPage(browser, async (page, posts) => {
+      await page.evaluate((entityId) => {
+        const viewer = window.testViewer;
+        const peer = window.makeFakePeer({
+          iceState: "checking",
+          gatheringState: "gathering",
+          stats: [
+            {
+              type: "inbound-rtp",
+              kind: "video",
+              bytesReceived: 0,
+              framesDecoded: 0,
+            },
+          ],
+        });
+        viewer._peerConnection = peer;
+        viewer._playbackMode = "webrtc";
+        viewer._webrtcStartTime = performance.now();
+        viewer._webrtcTrackSeen = false;
+        viewer._startWebRTCDiagnosticsSampler(peer, viewer._requestGeneration);
+        setTimeout(() => {
+          viewer._webrtcTrackSeen = true;
+          viewer._stopWebRTCDiagnosticsSampler();
+          viewer._reportDiagnostics("track");
+          viewer._watchWebRTCFirstFrame(
+            peer,
+            viewer._video,
+            entityId,
+            viewer._requestGeneration,
+          );
+        }, 2200);
+      }, ENTITY_ID);
+      await flush(page, 4500);
+      assert.ok(events(posts, "ice").length >= 1, JSON.stringify(posts));
+      const trackPost = event(posts, "track");
+      assert.ok(trackPost, JSON.stringify(posts));
+      const iceAfterTrack = events(posts, "ice").filter(
+        (payload) => payload.elapsed_ms > trackPost.elapsed_ms,
+      );
+      assert.equal(iceAfterTrack.length, 0, JSON.stringify(posts));
+      await finishScenario(posts);
     });
 
     await runWithPage(browser, async (page, posts) => {
@@ -204,6 +366,7 @@ async function main() {
           event(posts, "fallback").elapsed_ms <= 6000,
         JSON.stringify(event(posts, "fallback")),
       );
+      await finishScenario(posts);
     });
 
     await runWithPage(browser, async (page, posts) => {
@@ -227,6 +390,7 @@ async function main() {
           event(posts, "fallback").elapsed_ms <= 9000,
         JSON.stringify(event(posts, "fallback")),
       );
+      await finishScenario(posts);
     });
 
     await runWithPage(browser, async (page, posts) => {
@@ -245,6 +409,27 @@ async function main() {
       assert.equal(event(posts, "fallback"), undefined);
       assert.ok(event(posts, "rtp").counters.bytes_received > 0);
       assert.equal(event(posts, "rtp").counters.frames_decoded, 0);
+      await finishScenario(posts);
+    });
+
+    await runWithPage(browser, async (page, posts) => {
+      await page.evaluate(({ firstEntityId, secondEntityId }) => {
+        const viewer = window.testViewer;
+        viewer._startDiagnostics(firstEntityId, viewer._requestGeneration);
+        viewer._reportDiagnostics("config");
+        viewer._reportDiagnostics("offer");
+        viewer._requestGeneration += 1;
+        viewer._startDiagnostics(secondEntityId, viewer._requestGeneration);
+        viewer._reportDiagnostics("config");
+      }, { firstEntityId: ENTITY_ID, secondEntityId: SECOND_ENTITY_ID });
+      await flush(page, 1000);
+      assert.equal(events(posts, "offer").length, 0, JSON.stringify(posts));
+      assert.equal(
+        posts.some((payload) => payload.__url.includes(encodeURIComponent(SECOND_ENTITY_ID)) && payload.event === "offer"),
+        false,
+        JSON.stringify(posts),
+      );
+      await finishScenario(posts);
     });
 
     await runWithPage(browser, async (page, posts) => {
@@ -282,6 +467,7 @@ async function main() {
             .textContent,
       );
       assert.match(label, /нажмите Play/);
+      await finishScenario(posts);
     });
 
     console.log("webrtc diagnostics scenarios: PASS");
