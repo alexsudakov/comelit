@@ -48,6 +48,16 @@
     return response.json();
   }
 
+  function isIntercomCameraEntity(entityId) {
+    const entry = (bootstrap?.entity_registry || []).find(
+      (candidate) => candidate.entity_id === entityId,
+    );
+    return (
+      entry?.platform === "comelit" &&
+      entry?.unique_id === "comelit_entrance_camera"
+    );
+  }
+
   class MiniAppPictureEntity extends HTMLElement {
     constructor() {
       super();
@@ -55,6 +65,12 @@
       this._hass = null;
       this._video = null;
       this._hls = null;
+      this._peerConnection = null;
+      this._websocket = null;
+      this._remoteStream = null;
+      this._pendingRemoteCandidates = [];
+      this._webrtcFallbackStarted = false;
+      this._webrtcTimer = null;
       this._failed = false;
       this._requestGeneration = 0;
     }
@@ -79,13 +95,53 @@
       this._video = null;
     }
 
+    _destroyWebRTC() {
+      if (this._webrtcTimer) {
+        clearTimeout(this._webrtcTimer);
+        this._webrtcTimer = null;
+      }
+
+      const socket = this._websocket;
+      this._websocket = null;
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        try {
+          socket.send(JSON.stringify({type: "close"}));
+        } catch (_) {
+          // Best-effort session close; closing the socket is authoritative.
+        }
+      }
+      if (socket && socket.readyState < WebSocket.CLOSING) {
+        socket.close();
+      }
+
+      if (this._peerConnection) {
+        this._peerConnection.close();
+        this._peerConnection = null;
+      }
+
+      if (this._remoteStream) {
+        for (const track of this._remoteStream.getTracks()) {
+          track.stop();
+        }
+        this._remoteStream = null;
+      }
+      this._pendingRemoteCandidates = [];
+
+      if (this._video) {
+        this._video.srcObject = null;
+      }
+    }
+
     _destroyPlayback() {
+      this._destroyWebRTC();
+
       if (this._hls) {
         this._hls.destroy();
         this._hls = null;
       }
       if (this._video) {
         this._video.pause();
+        this._video.srcObject = null;
         this._video.removeAttribute("src");
         this._video.load();
       }
@@ -101,7 +157,7 @@
       this.replaceChildren(error);
     }
 
-    async _startPlayback(source, generation) {
+    async _startHlsPlayback(source, generation) {
       const video = this._video;
       if (
         generation !== this._requestGeneration ||
@@ -171,7 +227,7 @@
       );
     }
 
-    async _openStream(entityId, generation) {
+    async _openHls(entityId, generation) {
       try {
         const result = await fetchJson(
           "/api/comelit/miniapp/camera/" +
@@ -190,7 +246,7 @@
           return;
         }
 
-        await this._startPlayback(result.url, generation);
+        await this._startHlsPlayback(result.url, generation);
       } catch (error) {
         if (generation !== this._requestGeneration || !this.isConnected) {
           return;
@@ -200,6 +256,192 @@
             (error?.message || "ошибка"),
         );
       }
+    }
+
+    _fallbackToHls(entityId, generation) {
+      if (
+        this._webrtcFallbackStarted ||
+        generation !== this._requestGeneration ||
+        !this.isConnected ||
+        !this._video
+      ) {
+        return;
+      }
+
+      this._webrtcFallbackStarted = true;
+      this._destroyWebRTC();
+      this._openHls(entityId, generation);
+    }
+
+    _openWebRTC(entityId, generation) {
+      if (typeof RTCPeerConnection !== "function") {
+        this._fallbackToHls(entityId, generation);
+        return;
+      }
+
+      const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const url =
+        scheme +
+        "//" +
+        window.location.host +
+        "/api/comelit/miniapp/camera/" +
+        encodeURIComponent(entityId) +
+        "/webrtc";
+
+      let socket;
+      try {
+        socket = new WebSocket(url);
+      } catch (_) {
+        this._fallbackToHls(entityId, generation);
+        return;
+      }
+      this._websocket = socket;
+
+      this._webrtcTimer = setTimeout(() => {
+        this._fallbackToHls(entityId, generation);
+      }, 12000);
+
+      socket.onmessage = async (event) => {
+        if (
+          generation !== this._requestGeneration ||
+          !this.isConnected ||
+          this._websocket !== socket
+        ) {
+          return;
+        }
+
+        let message;
+        try {
+          message = JSON.parse(event.data);
+        } catch (_) {
+          return;
+        }
+
+        if (message.type === "config") {
+          try {
+            const peer = new RTCPeerConnection(message.configuration || {});
+            this._peerConnection = peer;
+            this._remoteStream = new MediaStream();
+            this._pendingRemoteCandidates = [];
+
+            peer.addTransceiver("video", {direction: "recvonly"});
+
+            peer.ontrack = (trackEvent) => {
+              if (
+                generation !== this._requestGeneration ||
+                this._peerConnection !== peer ||
+                !this._video
+              ) {
+                return;
+              }
+
+              if (trackEvent.streams?.[0]) {
+                this._remoteStream = trackEvent.streams[0];
+              } else if (trackEvent.track) {
+                this._remoteStream.addTrack(trackEvent.track);
+              }
+              this._video.srcObject = this._remoteStream;
+              if (this._webrtcTimer) {
+                clearTimeout(this._webrtcTimer);
+                this._webrtcTimer = null;
+              }
+              this._video.play().catch(() => {
+                // Telegram autoplay policy may require an explicit Play tap.
+              });
+            };
+
+            peer.onicecandidate = (candidateEvent) => {
+              if (
+                candidateEvent.candidate &&
+                socket.readyState === WebSocket.OPEN
+              ) {
+                socket.send(
+                  JSON.stringify({
+                    type: "candidate",
+                    candidate: candidateEvent.candidate.toJSON(),
+                  }),
+                );
+              }
+            };
+
+            peer.onconnectionstatechange = () => {
+              if (
+                peer.connectionState === "failed" &&
+                generation === this._requestGeneration
+              ) {
+                this._fallbackToHls(entityId, generation);
+              }
+            };
+
+            const offer = await peer.createOffer();
+            await peer.setLocalDescription(offer);
+            if (
+              socket.readyState === WebSocket.OPEN &&
+              peer.localDescription?.sdp
+            ) {
+              socket.send(
+                JSON.stringify({
+                  type: "offer",
+                  sdp: peer.localDescription.sdp,
+                }),
+              );
+            }
+          } catch (_) {
+            this._fallbackToHls(entityId, generation);
+          }
+          return;
+        }
+
+        const peer = this._peerConnection;
+        if (!peer) {
+          return;
+        }
+
+        if (message.type === "answer" && typeof message.answer === "string") {
+          try {
+            await peer.setRemoteDescription({
+              type: "answer",
+              sdp: message.answer,
+            });
+            for (const candidate of this._pendingRemoteCandidates.splice(0)) {
+              await peer.addIceCandidate(candidate);
+            }
+          } catch (_) {
+            this._fallbackToHls(entityId, generation);
+          }
+          return;
+        }
+
+        if (message.type === "candidate" && message.candidate) {
+          try {
+            if (peer.remoteDescription) {
+              await peer.addIceCandidate(message.candidate);
+            } else {
+              this._pendingRemoteCandidates.push(message.candidate);
+            }
+          } catch (_) {
+            this._fallbackToHls(entityId, generation);
+          }
+          return;
+        }
+
+        if (message.type === "error") {
+          this._fallbackToHls(entityId, generation);
+        }
+      };
+
+      socket.onerror = () => {
+        this._fallbackToHls(entityId, generation);
+      };
+      socket.onclose = () => {
+        if (
+          generation === this._requestGeneration &&
+          !this._webrtcFallbackStarted &&
+          !this._remoteStream
+        ) {
+          this._fallbackToHls(entityId, generation);
+        }
+      };
     }
 
     _render() {
@@ -239,7 +481,13 @@
 
       this.replaceChildren(shell);
       const generation = ++this._requestGeneration;
-      this._openStream(entityId, generation);
+      this._webrtcFallbackStarted = false;
+
+      if (isIntercomCameraEntity(entityId)) {
+        this._openHls(entityId, generation);
+      } else {
+        this._openWebRTC(entityId, generation);
+      }
     }
   }
 
