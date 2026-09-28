@@ -157,6 +157,9 @@ class FakeEntityRegistry:
     def __init__(self, entries: list[FakeRegistryEntry]):
         self.entities = {entry.entity_id: entry for entry in entries}
 
+    def async_get(self, entity_id: str):
+        return self.entities.get(entity_id)
+
     def async_get_entity_id(self, domain: str, platform: str, unique_id: str):
         prefix = domain + "."
         for entry in self.entities.values():
@@ -184,6 +187,18 @@ class FakeLabelRegistry:
 
     def async_get_label_by_name(self, value: str):
         return next((label for label in self._labels if label.name == value), None)
+
+
+
+
+class FakeCameraCapabilities:
+    def __init__(self, frontend_stream_types):
+        self.frontend_stream_types = set(frontend_stream_types)
+
+
+class FakeCamera:
+    def __init__(self, frontend_stream_types):
+        self.camera_capabilities = FakeCameraCapabilities(frontend_stream_types)
 
 
 class FakeServices:
@@ -450,3 +465,33 @@ def test_media_proxy_tail_is_closed_set():
     ):
         with pytest.raises(controller_mod.MiniAppOperationError, match="unsupported"):
             controller.resolve_media_upstream_path(media_id, token, unsafe)
+
+
+def test_webrtc_surveillance_camera_allows_ordinary_labeled_camera():
+    controller, hass = _controller(surveillance_label="Outside")
+    camera = FakeCamera({_StreamType.WEB_RTC})
+    hass.cameras["camera.driveway"] = camera
+
+    assert controller.get_webrtc_surveillance_camera("camera.driveway") is camera
+
+
+def test_webrtc_surveillance_camera_rejects_intercom_camera():
+    controller, hass = _controller(surveillance_label="Outside")
+    hass.cameras["camera.comelit_entrance"] = FakeCamera({_StreamType.WEB_RTC})
+
+    with pytest.raises(
+        controller_mod.MiniAppOperationError,
+        match="intercom camera WebRTC is not enabled",
+    ):
+        controller.get_webrtc_surveillance_camera("camera.comelit_entrance")
+
+
+def test_webrtc_surveillance_camera_falls_back_when_provider_missing():
+    controller, hass = _controller(surveillance_label="Outside")
+    hass.cameras["camera.driveway"] = FakeCamera(set())
+
+    with pytest.raises(
+        controller_mod.MiniAppOperationError,
+        match="camera WebRTC is unavailable",
+    ):
+        controller.get_webrtc_surveillance_camera("camera.driveway")
