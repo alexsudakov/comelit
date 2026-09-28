@@ -73,7 +73,11 @@ miniapp-picture-entity {
 .miniapp-video-stage {
   position: relative;
   width: 100%;
-  overflow: hidden;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden !important;
+  contain: layout paint size;
+  flex: 0 0 auto;
   background: #000;
 }
 
