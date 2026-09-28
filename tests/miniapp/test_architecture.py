@@ -147,3 +147,18 @@ def test_webrtc_negotiation_buffers_ice_until_provider_session_ready():
     assert "new RTCIceCandidate" in host
     assert 'state === "failed"' in host
     assert "_fallbackToHls(entityId, generation)" in host
+
+
+def test_webrtc_session_id_precedes_provider_offer_and_zero_rtp_falls_back():
+    views = _read("custom_components/comelit/miniapp/views.py")
+    host = _read("custom_components/comelit/frontend/miniapp/host.js")
+
+    offer_pos = views.index("async_handle_async_webrtc_offer")
+    session_pos = views.index('"type": "session"')
+    assert session_pos < offer_pos
+    assert "ICE " in host
+    assert 'elapsed >= 10' in host
+    assert 'bytesReceived === 0' in host
+    assert '["new", "checking", "disconnected", "failed"]' in host
+    assert "fallback HLS" in host
+    assert 'offerSdp += "a=" + candidate.candidate + "\\r\\n"' in host

@@ -218,7 +218,7 @@
       );
     }
 
-    _watchWebRTCFirstFrame(peer, video, generation) {
+    _watchWebRTCFirstFrame(peer, video, entityId, generation) {
       const mark = () => this._markFirstWebRTCFrame(generation);
 
       if (typeof video.requestVideoFrameCallback === "function") {
@@ -258,14 +258,28 @@
         const elapsed = this._webrtcStartTime
           ? Math.round((performance.now() - this._webrtcStartTime) / 1000)
           : 0;
+        const iceState = peer.iceConnectionState || "unknown";
         this._setTransportLabel(
           "WebRTC · ожидание кадра " +
             elapsed +
-            " с · RTP " +
+            " с · ICE " +
+            iceState +
+            " · RTP " +
             this._formatBytes(bytesReceived) +
             " · decoded " +
             framesDecoded,
         );
+
+        if (
+          elapsed >= 10 &&
+          bytesReceived === 0 &&
+          ["new", "checking", "disconnected", "failed"].includes(iceState)
+        ) {
+          this._setTransportLabel(
+            "WebRTC · ICE " + iceState + " · fallback HLS",
+          );
+          this._fallbackToHls(entityId, generation);
+        }
       }, 2000);
     }
 
@@ -477,7 +491,12 @@
                 clearTimeout(this._webrtcTimer);
                 this._webrtcTimer = null;
               }
-              this._watchWebRTCFirstFrame(peer, this._video, generation);
+              this._watchWebRTCFirstFrame(
+                peer,
+                this._video,
+                entityId,
+                generation,
+              );
               this._video.play().catch(() => {
                 // Telegram autoplay policy may require an explicit Play tap.
               });
@@ -533,14 +552,23 @@
               offerToReceiveVideo: true,
             });
             await peer.setLocalDescription(offer);
-            if (
-              socket.readyState === WebSocket.OPEN &&
-              peer.localDescription?.sdp
-            ) {
+
+            // Match Home Assistant's native WebRTC player: include local ICE
+            // candidates gathered before the provider session id arrives in
+            // the initial SDP, then trickle only later candidates.
+            let offerSdp = offer.sdp || "";
+            while (this._pendingLocalCandidates.length) {
+              const candidate = this._pendingLocalCandidates.pop();
+              if (candidate?.candidate) {
+                offerSdp += "a=" + candidate.candidate + "\r\n";
+              }
+            }
+
+            if (socket.readyState === WebSocket.OPEN && offerSdp) {
               socket.send(
                 JSON.stringify({
                   type: "offer",
-                  sdp: peer.localDescription.sdp,
+                  sdp: offerSdp,
                 }),
               );
             }
