@@ -162,3 +162,19 @@ def test_webrtc_session_id_precedes_provider_offer_and_zero_rtp_falls_back():
     assert '["new", "checking", "disconnected", "failed"]' in host
     assert "fallback HLS" in host
     assert 'offerSdp += "a=" + candidate.candidate + "\\r\\n"' in host
+
+
+def test_video_viewport_uses_explicit_stage_and_playback_mode_guard():
+    styles = _read("custom_components/comelit/frontend/miniapp/styles.css")
+    host = _read("custom_components/comelit/frontend/miniapp/host.js")
+
+    assert ".miniapp-video-stage" in styles
+    assert "height: clamp(180px, 34dvh, 320px)" in styles
+    assert "width: 100% !important" in styles
+    assert "height: 100% !important" in styles
+    assert "object-fit: contain !important" in styles
+    assert 'stage.className = "miniapp-video-stage"' in host
+    assert 'this._playbackMode = "webrtc"' in host
+    assert 'this._playbackMode = "hls"' in host
+    assert 'this._playbackMode !== "webrtc"' in host
+    assert "misreported as a successful WebRTC frame" in host
