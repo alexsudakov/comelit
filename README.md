@@ -11,7 +11,7 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.7.0**. Ordinary surveillance cameras in the Telegram Mini App now prefer Home Assistant's on-demand WebRTC provider (normally the HA-managed go2rtc instance), with HLS retained as a fallback. Camera video is also bounded to the mobile viewport with contain scaling. No camera preload is enabled, and the Comelit entrance-camera media lifecycle plus Door/Gate behavior are unchanged. Details are recorded in `docs/releases/1.7.0-miniapp-go2rtc-on-demand.md`.
+Current stable release: **1.7.1**. This patch tightens the surveillance-camera mobile viewport and aligns Mini App WebRTC/ICE negotiation more closely with Home Assistant's native WebRTC player. It also distinguishes a remote WebRTC track from the first actually decoded/rendered frame and exposes first-frame/RTP diagnostics during startup. No camera preload is enabled, and the Comelit entrance-camera media lifecycle plus Door/Gate behavior are unchanged. Details are recorded in `docs/releases/1.7.1-surveillance-webrtc-startup.md`.
 
 ## Home Assistant Custom Card
 
