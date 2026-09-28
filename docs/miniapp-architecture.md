@@ -345,3 +345,40 @@ Repository implementation does not by itself:
 - open a production camera session.
 
 Those remain explicit deployment and acceptance steps.
+
+
+## Surveillance live view: on-demand WebRTC via Home Assistant go2rtc
+
+Ordinary Home Assistant surveillance cameras use a different live-view path from
+the Comelit entrance camera.
+
+For ordinary cameras, the Mini App first attempts Home Assistant's registered
+WebRTC provider. On HAOS/default-config installations this is normally the
+Home Assistant-managed go2rtc provider. The source is registered with go2rtc
+on demand when the viewer opens; Comelit does not enable camera preload.
+
+Conceptual path:
+
+```text
+Telegram Mini App
+  -> session-bound Comelit WebSocket signaling endpoint
+  -> Home Assistant Camera WebRTC API/provider
+  -> Home Assistant-managed go2rtc
+  -> camera RTSP source
+```
+
+The browser receives only WebRTC signaling through the authenticated Mini App
+route. It does not receive go2rtc credentials or direct go2rtc management API
+access.
+
+When the viewer is removed or the Mini App WebSocket closes, the Home Assistant
+camera WebRTC session is explicitly closed. If WebRTC is unavailable for a
+particular ordinary camera/client, the existing session-bound Home Assistant
+HLS proxy remains the fallback.
+
+The Comelit entrance camera is deliberately excluded from this new path. It
+continues to use the separately validated on-demand Comelit media manager and
+HLS proxy, preserving listener/media ownership invariants.
+
+This WebRTC path does not imply preload: no ordinary camera stream is kept open
+merely because it is listed in the Mini App.

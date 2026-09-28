@@ -45,9 +45,25 @@ async def _async_request_stream(hass, entity_id, fmt):
 
 _install_module("homeassistant").__path__ = []
 _install_module("homeassistant.components").__path__ = []
-_install_module(
+def _get_camera_from_entity_id(hass, entity_id):
+    return hass.cameras[entity_id]
+
+
+_camera_module = _install_module(
     "homeassistant.components.camera",
     async_request_stream=_async_request_stream,
+    get_camera_from_entity_id=_get_camera_from_entity_id,
+)
+_camera_module.__path__ = []
+
+
+class _StreamType:
+    WEB_RTC = "web_rtc"
+
+
+_install_module(
+    "homeassistant.components.camera.const",
+    StreamType=_StreamType,
 )
 _install_module(
     "homeassistant.components.stream",
@@ -139,6 +155,9 @@ class FakeEntityRegistry:
     def __init__(self, entries: list[FakeRegistryEntry]):
         self.entities = {entry.entity_id: entry for entry in entries}
 
+    def async_get(self, entity_id: str):
+        return self.entities.get(entity_id)
+
     def async_get_entity_id(self, domain: str, platform: str, unique_id: str):
         prefix = domain + "."
         for entry in self.entities.values():
@@ -168,6 +187,18 @@ class FakeLabelRegistry:
         return next((label for label in self._labels if label.name == value), None)
 
 
+
+
+class FakeCameraCapabilities:
+    def __init__(self, frontend_stream_types):
+        self.frontend_stream_types = set(frontend_stream_types)
+
+
+class FakeCamera:
+    def __init__(self, frontend_stream_types):
+        self.camera_capabilities = FakeCameraCapabilities(frontend_stream_types)
+
+
 class FakeServices:
     def __init__(self):
         self.calls: list[tuple[str, str, dict, bool]] = []
@@ -188,6 +219,7 @@ class FakeHass:
         self.entity_registry = FakeEntityRegistry(entries)
         self.label_registry = FakeLabelRegistry(labels)
         self.services = FakeServices()
+        self.cameras = {}
 
 
 _entity_registry_module.async_get = lambda hass: hass.entity_registry
@@ -431,3 +463,33 @@ def test_media_proxy_tail_is_closed_set():
     ):
         with pytest.raises(controller_mod.MiniAppOperationError, match="unsupported"):
             controller.resolve_media_upstream_path(media_id, token, unsafe)
+
+
+def test_webrtc_surveillance_camera_allows_ordinary_labeled_camera():
+    controller, hass = _controller(surveillance_label="Outside")
+    camera = FakeCamera({_StreamType.WEB_RTC})
+    hass.cameras["camera.driveway"] = camera
+
+    assert controller.get_webrtc_surveillance_camera("camera.driveway") is camera
+
+
+def test_webrtc_surveillance_camera_rejects_intercom_camera():
+    controller, hass = _controller(surveillance_label="Outside")
+    hass.cameras["camera.comelit_entrance"] = FakeCamera({_StreamType.WEB_RTC})
+
+    with pytest.raises(
+        controller_mod.MiniAppOperationError,
+        match="intercom camera WebRTC is not enabled",
+    ):
+        controller.get_webrtc_surveillance_camera("camera.comelit_entrance")
+
+
+def test_webrtc_surveillance_camera_falls_back_when_provider_missing():
+    controller, hass = _controller(surveillance_label="Outside")
+    hass.cameras["camera.driveway"] = FakeCamera(set())
+
+    with pytest.raises(
+        controller_mod.MiniAppOperationError,
+        match="camera WebRTC is unavailable",
+    ):
+        controller.get_webrtc_surveillance_camera("camera.driveway")
