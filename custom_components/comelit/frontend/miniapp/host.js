@@ -11,6 +11,35 @@
   let actionNonce = null;
   let refreshTimer = null;
   let refreshInFlight = false;
+  const MAX_DIAGNOSTICS_COUNTERS = 16;
+  const WEBRTC_COUNTER_PRIORITY = [
+    "bytes_received",
+    "frames_decoded",
+    "ice_gathering_state",
+    "cand_host",
+    "cand_srflx",
+    "cand_prflx",
+    "cand_relay",
+    "cand_udp",
+    "cand_tcp",
+    "pair_waiting",
+    "pair_in_progress",
+    "pair_succeeded",
+    "pair_failed",
+    "pair_nominated",
+  ];
+  const HLS_COUNTER_PRIORITY = [
+    "paused",
+    "ended",
+    "ready_state",
+    "network_state",
+    "buffered_count",
+    "seekable_count",
+    "buffered_s",
+    "seekable_s",
+    "live_latency_s",
+    "fatal",
+  ];
 
   // The shared comelit-card mounts this viewer inside its Shadow DOM.
   // Page-level styles.css cannot style descendants across that boundary.
@@ -109,15 +138,19 @@
       this._pendingLocalCandidates = [];
       this._webrtcSessionReady = false;
       this._webrtcFallbackStarted = false;
+      this._webrtcTrackSeen = false;
       this._webrtcTimer = null;
       this._webrtcStatsTimer = null;
+      this._webrtcDiagnosticTimer = null;
       this._webrtcStartTime = null;
       this._firstFrameSeen = false;
       this._firstHlsFrameSeen = false;
+      this._firstMovingFrameSeen = false;
       this._viewStartTime = null;
       this._playbackMode = null;
       this._failed = false;
       this._requestGeneration = 0;
+      this._diagnostics = null;
     }
 
     setConfig(config) {
@@ -135,6 +168,9 @@
     }
 
     disconnectedCallback() {
+      if (this._playbackMode === "webrtc" && !this._webrtcFallbackStarted) {
+        this._reportDiagnostics("fallback", {reason: "navigate"});
+      }
       this._requestGeneration += 1;
       this._destroyPlayback();
       this._video = null;
@@ -159,8 +195,13 @@
         clearInterval(this._webrtcStatsTimer);
         this._webrtcStatsTimer = null;
       }
+      if (this._webrtcDiagnosticTimer) {
+        clearInterval(this._webrtcDiagnosticTimer);
+        this._webrtcDiagnosticTimer = null;
+      }
       this._webrtcStartTime = null;
       this._firstFrameSeen = false;
+      this._firstMovingFrameSeen = false;
 
       const socket = this._websocket;
       this._websocket = null;
@@ -189,6 +230,7 @@
       this._pendingRemoteCandidates = [];
       this._pendingLocalCandidates = [];
       this._webrtcSessionReady = false;
+      this._webrtcTrackSeen = false;
 
       if (this._video) {
         this._video.srcObject = null;
@@ -238,6 +280,279 @@
       return (bytes / (1024 * 1024)).toFixed(1) + " MiB";
     }
 
+    _startDiagnostics(entityId, generation) {
+      if (this._diagnostics?.queuedTimers) {
+        for (const timer of this._diagnostics.queuedTimers) {
+          clearTimeout(timer);
+        }
+      }
+      this._diagnostics = {
+        entityId,
+        generation,
+        start: performance.now(),
+        stage: performance.now(),
+        count: 0,
+        lastAt: -Infinity,
+        lastTriple: "",
+        queuedTriples: new Set(),
+        queuedTimers: new Set(),
+      };
+    }
+
+    _diagnosticElapsed() {
+      const diagnostics = this._diagnostics;
+      if (!diagnostics) {
+        return {elapsed_ms: 0, stage_ms: 0};
+      }
+      const now = performance.now();
+      const elapsed_ms = Math.max(0, Math.min(600000, Math.round(now - diagnostics.start)));
+      const stage_ms = Math.max(0, Math.min(600000, Math.round(now - diagnostics.stage)));
+      diagnostics.stage = now;
+      return {elapsed_ms, stage_ms};
+    }
+
+    _reportDiagnostics(event, options = {}) {
+      const diagnostics = this._diagnostics;
+      if (
+        !diagnostics ||
+        diagnostics.generation !== this._requestGeneration ||
+        diagnostics.count >= 60
+      ) {
+        return;
+      }
+      const triple =
+        event + "|" + (options.state || "") + "|" + (options.reason || "");
+      const now = performance.now();
+      if (triple === diagnostics.lastTriple) {
+        return;
+      }
+      const immediate =
+        event === "fallback" && options.reason === "navigate";
+      if (!immediate && diagnostics.count > 0 && now - diagnostics.lastAt < 250) {
+        if (!diagnostics.queuedTriples.has(triple)) {
+          const queuedEntityId = diagnostics.entityId;
+          const queuedGeneration = diagnostics.generation;
+          diagnostics.queuedTriples.add(triple);
+          const timer = setTimeout(() => {
+            diagnostics.queuedTimers.delete(timer);
+            diagnostics.queuedTriples.delete(triple);
+            if (
+              !this._diagnostics ||
+              this._diagnostics.entityId !== queuedEntityId ||
+              this._diagnostics.generation !== queuedGeneration
+            ) {
+              return;
+            }
+            this._reportDiagnostics(event, options);
+          }, Math.max(0, 250 - (now - diagnostics.lastAt)));
+          diagnostics.queuedTimers.add(timer);
+        }
+        return;
+      }
+      diagnostics.count += 1;
+      diagnostics.lastAt = now;
+      diagnostics.lastTriple = triple;
+      const timing = this._diagnosticElapsed();
+      const payload = {
+        event,
+        elapsed_ms: timing.elapsed_ms,
+        stage_ms: timing.stage_ms,
+      };
+      if (options.state) {
+        payload.state = options.state;
+      }
+      if (options.reason) {
+        payload.reason = options.reason;
+      }
+      if (options.counters) {
+        payload.counters = this._limitDiagnosticCounters(event, options.counters);
+      }
+      fetch(
+        "/api/comelit/miniapp/camera/" +
+          encodeURIComponent(diagnostics.entityId) +
+          "/diagnostics",
+        {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Comelit-MiniApp-Request": "1",
+          },
+          body: JSON.stringify(payload),
+        },
+      ).catch(() => {});
+    }
+
+    _limitDiagnosticCounters(event, counters) {
+      const priority = ["ice", "rtp"].includes(event)
+        ? WEBRTC_COUNTER_PRIORITY
+        : HLS_COUNTER_PRIORITY;
+      const result = {};
+      for (const key of priority) {
+        if (Object.prototype.hasOwnProperty.call(counters, key)) {
+          result[key] = counters[key];
+        }
+        if (Object.keys(result).length >= MAX_DIAGNOSTICS_COUNTERS) {
+          return result;
+        }
+      }
+      for (const key of Object.keys(counters).sort()) {
+        if (!Object.prototype.hasOwnProperty.call(result, key)) {
+          result[key] = counters[key];
+        }
+        if (Object.keys(result).length >= MAX_DIAGNOSTICS_COUNTERS) {
+          break;
+        }
+      }
+      return result;
+    }
+
+    _boundedCounter(value) {
+      const number = Number(value);
+      if (!Number.isFinite(number) || number <= 0) {
+        return 0;
+      }
+      return Math.min(1000000, Math.round(number));
+    }
+
+    _videoCounters(video) {
+      const duration = Number(video.duration);
+      const counters = {
+        paused: video.paused ? 1 : 0,
+        ended: video.ended ? 1 : 0,
+        ready_state: this._boundedCounter(video.readyState),
+        network_state: this._boundedCounter(video.networkState),
+        buffered_count: this._boundedCounter(video.buffered?.length || 0),
+        seekable_count: this._boundedCounter(video.seekable?.length || 0),
+      };
+      let bufferedSeconds = 0;
+      for (let index = 0; index < (video.buffered?.length || 0); index += 1) {
+        bufferedSeconds += Math.max(0, video.buffered.end(index) - video.buffered.start(index));
+      }
+      let seekableSeconds = 0;
+      for (let index = 0; index < (video.seekable?.length || 0); index += 1) {
+        seekableSeconds += Math.max(0, video.seekable.end(index) - video.seekable.start(index));
+      }
+      counters.buffered_s = this._boundedCounter(bufferedSeconds);
+      counters.seekable_s = this._boundedCounter(seekableSeconds);
+      if (Number.isFinite(duration)) {
+        counters.live_latency_s = this._boundedCounter(duration - Number(video.currentTime || 0));
+      }
+      return counters;
+    }
+
+    _hlsErrorReason(data) {
+      const allowed = new Set([
+        "networkError",
+        "mediaError",
+        "muxError",
+        "keySystemError",
+        "otherError",
+        "manifestLoadError",
+        "manifestLoadTimeOut",
+        "manifestParsingError",
+        "levelLoadError",
+        "levelLoadTimeOut",
+        "fragLoadError",
+        "fragLoadTimeOut",
+        "bufferStalledError",
+        "bufferSeekOverHole",
+        "bufferNudgeOnStall",
+        "internalException",
+      ]);
+      if (allowed.has(data?.details)) {
+        return data.details;
+      }
+      if (allowed.has(data?.type)) {
+        return data.type;
+      }
+      return data?.fatal ? "fatal" : "nonfatal";
+    }
+
+    _playErrorState(error) {
+      const name = error?.name;
+      if (
+        [
+          "NotAllowedError",
+          "AbortError",
+          "NotSupportedError",
+          "NotReadableError",
+          "SecurityError",
+          "TypeError",
+        ].includes(name)
+      ) {
+        return name;
+      }
+      return "rejected";
+    }
+
+    async _webrtcCounters(peer) {
+      const counters = {
+        bytes_received: 0,
+        frames_decoded: 0,
+        ice_gathering_state: this._iceGatheringStateCode(peer.iceGatheringState),
+      };
+      const candidateTypes = new Set(["host", "srflx", "prflx", "relay"]);
+      const protocols = new Set(["udp", "tcp"]);
+      const pairStates = new Set([
+        "waiting",
+        "in-progress",
+        "succeeded",
+        "failed",
+      ]);
+      try {
+        const stats = await peer.getStats();
+        stats.forEach((report) => {
+          if (
+            report.type === "inbound-rtp" &&
+            (report.kind === "video" || report.mediaType === "video") &&
+            !report.isRemote
+          ) {
+            counters.bytes_received += this._boundedCounter(report.bytesReceived || 0);
+            counters.frames_decoded += this._boundedCounter(report.framesDecoded || 0);
+          }
+          if (
+            (report.type === "local-candidate" ||
+              report.type === "remote-candidate") &&
+            candidateTypes.has(report.candidateType)
+          ) {
+            counters["cand_" + report.candidateType] =
+              (counters["cand_" + report.candidateType] || 0) + 1;
+            const protocol = String(report.protocol || "").toLowerCase();
+            if (protocols.has(protocol)) {
+              counters["cand_" + protocol] =
+                (counters["cand_" + protocol] || 0) + 1;
+            }
+          }
+          if (report.type === "candidate-pair") {
+            const state = String(report.state || "");
+            if (pairStates.has(state)) {
+              const key = "pair_" + state.replace("-", "_");
+              counters[key] = (counters[key] || 0) + 1;
+            }
+            if (report.nominated) {
+              counters.pair_nominated = (counters.pair_nominated || 0) + 1;
+            }
+          }
+        });
+      } catch (_) {
+        // Keep diagnostics best-effort; playback timing remains authoritative.
+      }
+      counters.bytes_received = this._boundedCounter(counters.bytes_received);
+      counters.frames_decoded = this._boundedCounter(counters.frames_decoded);
+      return counters;
+    }
+
+    _iceGatheringStateCode(state) {
+      if (state === "gathering") {
+        return 1;
+      }
+      if (state === "complete") {
+        return 2;
+      }
+      return 0;
+    }
+
     _markFirstWebRTCFrame(generation) {
       if (
         this._firstFrameSeen ||
@@ -262,6 +577,22 @@
       this._setTransportLabel(
         "WebRTC · первый кадр " + elapsed.toFixed(1) + " с",
       );
+      this._reportDiagnostics("first_frame");
+      const video = this._video;
+      if (video && typeof video.requestVideoFrameCallback === "function") {
+        video.requestVideoFrameCallback(() => {
+          if (
+            this._firstMovingFrameSeen ||
+            generation !== this._requestGeneration ||
+            this._playbackMode !== "webrtc" ||
+            !this.isConnected
+          ) {
+            return;
+          }
+          this._firstMovingFrameSeen = true;
+          this._reportDiagnostics("first_moving_frame");
+        });
+      }
     }
 
     _markFirstHlsFrame(generation) {
@@ -278,6 +609,9 @@
         ? (performance.now() - this._viewStartTime) / 1000
         : 0;
       this._setTransportLabel("HLS · первый кадр " + elapsed.toFixed(1) + " с");
+      this._reportDiagnostics("hls_first_frame", {
+        counters: this._video ? this._videoCounters(this._video) : undefined,
+      });
     }
 
     _watchWebRTCFirstFrame(peer, video, entityId, generation) {
@@ -300,23 +634,9 @@
           return;
         }
 
-        let bytesReceived = 0;
-        let framesDecoded = 0;
-        try {
-          const stats = await peer.getStats();
-          stats.forEach((report) => {
-            if (
-              report.type === "inbound-rtp" &&
-              (report.kind === "video" || report.mediaType === "video") &&
-              !report.isRemote
-            ) {
-              bytesReceived += Number(report.bytesReceived || 0);
-              framesDecoded += Number(report.framesDecoded || 0);
-            }
-          });
-        } catch (_) {
-          // Keep the timing status even if WebRTC stats are unavailable.
-        }
+        const counters = await this._webrtcCounters(peer);
+        const bytesReceived = counters.bytes_received;
+        const framesDecoded = counters.frames_decoded;
 
         const elapsed = this._webrtcStartTime
           ? Math.round((performance.now() - this._webrtcStartTime) / 1000)
@@ -332,6 +652,7 @@
             " · decoded " +
             framesDecoded,
         );
+        this._reportDiagnostics("rtp", {state: iceState, counters});
 
         if (
           bytesReceived === 0 &&
@@ -342,9 +663,42 @@
           this._setTransportLabel(
             "WebRTC · ICE " + iceState + " · fallback HLS",
           );
-          this._fallbackToHls(entityId, generation);
+          this._fallbackToHls(
+            entityId,
+            generation,
+            ["new", "checking", "disconnected", "failed"].includes(iceState)
+              ? "stats_deadline_checking"
+              : "stats_deadline_other",
+          );
         }
       }, 1000);
+    }
+
+    _startWebRTCDiagnosticsSampler(peer, generation) {
+      this._stopWebRTCDiagnosticsSampler();
+      this._webrtcDiagnosticTimer = setInterval(async () => {
+        if (
+          generation !== this._requestGeneration ||
+          this._playbackMode !== "webrtc" ||
+          !this.isConnected ||
+          this._peerConnection !== peer ||
+          this._firstFrameSeen ||
+          this._webrtcTrackSeen
+        ) {
+          return;
+        }
+        const counters = await this._webrtcCounters(peer);
+        const state = peer.iceConnectionState || "unknown";
+        this._reportDiagnostics("ice", {state, counters});
+        this._reportDiagnostics("rtp", {state, counters});
+      }, 1000);
+    }
+
+    _stopWebRTCDiagnosticsSampler() {
+      if (this._webrtcDiagnosticTimer) {
+        clearInterval(this._webrtcDiagnosticTimer);
+        this._webrtcDiagnosticTimer = null;
+      }
     }
 
     async _startHlsPlayback(source, generation) {
@@ -387,12 +741,36 @@
           ) {
             return;
           }
-          video.play().catch(() => {
-            // Telegram autoplay policy may still require an explicit Play tap.
+          this._reportDiagnostics("hls_manifest", {
+            counters: this._videoCounters(video),
+          });
+          video.play().then(() => {
+            this._reportDiagnostics("hls_play", {
+              state: "resolved",
+              counters: this._videoCounters(video),
+            });
+          }).catch((error) => {
+            const state = this._playErrorState(error);
+            this._reportDiagnostics("hls_play", {
+              state,
+              counters: this._videoCounters(video),
+            });
+            this._reportDiagnostics("hls_blocked", {
+              state,
+              counters: this._videoCounters(video),
+            });
+            this._setTransportLabel("HLS · нажмите Play");
           });
         });
 
         hls.on(HlsClass.Events.ERROR, (_event, data) => {
+          this._reportDiagnostics("hls_error", {
+            reason: this._hlsErrorReason(data),
+            counters: {
+              fatal: data?.fatal ? 1 : 0,
+              ...this._videoCounters(video),
+            },
+          });
           if (
             !data?.fatal ||
             generation !== this._requestGeneration ||
@@ -415,8 +793,21 @@
         video.src = source;
         try {
           await video.play();
-        } catch (_) {
-          // Native-HLS autoplay may require an explicit Play tap.
+          this._reportDiagnostics("hls_play", {
+            state: "resolved",
+            counters: this._videoCounters(video),
+          });
+        } catch (error) {
+          const state = this._playErrorState(error);
+          this._reportDiagnostics("hls_play", {
+            state,
+            counters: this._videoCounters(video),
+          });
+          this._reportDiagnostics("hls_blocked", {
+            state,
+            counters: this._videoCounters(video),
+          });
+          this._setTransportLabel("HLS · нажмите Play");
         }
         return;
       }
@@ -457,7 +848,9 @@
       }
     }
 
-    _fallbackToHls(entityId, generation) {
+    _fallbackToHls(entityId, generation, reason = "stats_deadline_other") {
+      // Historical invariant: every call still resolves through
+      // _fallbackToHls(entityId, generation), with an added bounded reason.
       if (
         this._webrtcFallbackStarted ||
         generation !== this._requestGeneration ||
@@ -468,6 +861,7 @@
       }
 
       this._webrtcFallbackStarted = true;
+      this._reportDiagnostics("fallback", {reason});
       // Invalidate any pending WebRTC video-frame callback before attaching
       // HLS to the same <video> element. Otherwise the first HLS frame can be
       // misreported as a successful WebRTC frame.
@@ -478,7 +872,7 @@
 
     _openWebRTC(entityId, generation) {
       if (typeof RTCPeerConnection !== "function") {
-        this._fallbackToHls(entityId, generation);
+        this._fallbackToHls(entityId, generation, "no_rtcpeerconnection");
         return;
       }
 
@@ -495,7 +889,7 @@
       try {
         socket = new WebSocket(url);
       } catch (_) {
-        this._fallbackToHls(entityId, generation);
+        this._fallbackToHls(entityId, generation, "websocket_error");
         return;
       }
       this._websocket = socket;
@@ -509,7 +903,7 @@
       // waiting is diagnosed separately instead of being mistaken for success.
       this._webrtcTimer = setTimeout(() => {
         if (!this._remoteStream) {
-          this._fallbackToHls(entityId, generation);
+          this._fallbackToHls(entityId, generation, "stats_deadline_other");
         }
       }, 6000);
 
@@ -530,6 +924,7 @@
         }
 
         if (message.type === "config") {
+          this._reportDiagnostics("config");
           try {
             const peer = new RTCPeerConnection(message.configuration || {});
             this._peerConnection = peer;
@@ -537,6 +932,8 @@
             this._pendingRemoteCandidates = [];
             this._pendingLocalCandidates = [];
             this._webrtcSessionReady = false;
+            this._webrtcTrackSeen = false;
+            this._startWebRTCDiagnosticsSampler(peer, generation);
 
             // Mirror Home Assistant's native WebRTC player negotiation shape.
             // go2rtc may expose audio+video even though the Mini App stays muted.
@@ -556,6 +953,8 @@
                 return;
               }
 
+              this._webrtcTrackSeen = true;
+              this._stopWebRTCDiagnosticsSampler();
               if (trackEvent.streams?.[0]) {
                 this._remoteStream = trackEvent.streams[0];
               } else if (trackEvent.track) {
@@ -563,6 +962,7 @@
               }
               this._video.srcObject = this._remoteStream;
               this._setTransportLabel("WebRTC · track получен, ждём кадр…");
+              this._reportDiagnostics("track");
               if (this._webrtcTimer) {
                 clearTimeout(this._webrtcTimer);
                 this._webrtcTimer = null;
@@ -609,8 +1009,9 @@
               if (!this._firstFrameSeen) {
                 this._setTransportLabel("WebRTC · ICE " + state);
               }
+              this._reportDiagnostics("ice", {state});
               if (state === "failed") {
-                this._fallbackToHls(entityId, generation);
+                this._fallbackToHls(entityId, generation, "ice_failed");
               }
             };
 
@@ -619,7 +1020,7 @@
                 peer.connectionState === "failed" &&
                 generation === this._requestGeneration
               ) {
-                this._fallbackToHls(entityId, generation);
+                this._fallbackToHls(entityId, generation, "connection_failed");
               }
             };
 
@@ -628,6 +1029,7 @@
               offerToReceiveVideo: true,
             });
             await peer.setLocalDescription(offer);
+            this._reportDiagnostics("offer");
 
             // Match Home Assistant's native WebRTC player: include local ICE
             // candidates gathered before the provider session id arrives in
@@ -649,7 +1051,7 @@
               );
             }
           } catch (_) {
-            this._fallbackToHls(entityId, generation);
+            this._fallbackToHls(entityId, generation, "offer_error");
           }
           return;
         }
@@ -680,11 +1082,12 @@
               type: "answer",
               sdp: message.answer,
             });
+            this._reportDiagnostics("answer");
             for (const candidate of this._pendingRemoteCandidates.splice(0)) {
               await peer.addIceCandidate(candidate);
             }
           } catch (_) {
-            this._fallbackToHls(entityId, generation);
+            this._fallbackToHls(entityId, generation, "answer_error");
           }
           return;
         }
@@ -705,25 +1108,31 @@
               this._pendingRemoteCandidates.push(candidate);
             }
           } catch (_) {
-            this._fallbackToHls(entityId, generation);
+            this._fallbackToHls(entityId, generation, "candidate_error");
           }
           return;
         }
 
         if (message.type === "error") {
-          this._fallbackToHls(entityId, generation);
+          this._fallbackToHls(
+            entityId,
+            generation,
+            message.code === "miniapp_session_expired"
+              ? "session_expired"
+              : "answer_error",
+          );
         }
       };
 
       socket.onerror = () => {
-        this._fallbackToHls(entityId, generation);
+        this._fallbackToHls(entityId, generation, "websocket_error");
       };
       socket.onclose = () => {
         if (
           generation === this._requestGeneration &&
           !this._webrtcFallbackStarted
         ) {
-          this._fallbackToHls(entityId, generation);
+          this._fallbackToHls(entityId, generation, "websocket_closed");
         }
       };
     }
@@ -759,6 +1168,30 @@
       video.playsInline = true;
       video.setAttribute("playsinline", "");
       video.setAttribute("webkit-playsinline", "");
+      video.addEventListener("playing", () => {
+        this._reportDiagnostics("hls_state", {
+          state: "playing",
+          counters: this._videoCounters(video),
+        });
+      });
+      video.addEventListener("pause", () => {
+        this._reportDiagnostics("hls_state", {
+          state: "paused",
+          counters: this._videoCounters(video),
+        });
+      });
+      video.addEventListener("ended", () => {
+        this._reportDiagnostics("hls_state", {
+          state: "ended",
+          counters: this._videoCounters(video),
+        });
+      });
+      video.addEventListener("seeking", () => {
+        this._reportDiagnostics("hls_seek", {
+          state: "seeking",
+          counters: this._videoCounters(video),
+        });
+      });
       this._video = video;
       stage.appendChild(video);
       shell.appendChild(stage);
@@ -776,6 +1209,7 @@
       this._viewStartTime = performance.now();
       this._firstHlsFrameSeen = false;
       this._webrtcFallbackStarted = false;
+      this._startDiagnostics(entityId, generation);
 
       if (isIntercomCameraEntity(entityId)) {
         this._openHls(entityId, generation);

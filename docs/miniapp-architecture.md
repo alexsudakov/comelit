@@ -389,3 +389,102 @@ HLS proxy, preserving listener/media ownership invariants.
 
 This WebRTC path does not imply preload: no ordinary camera stream is kept open
 merely because it is listed in the Mini App.
+
+## 13. Mini App player diagnostics
+
+The Mini App can report bounded player milestones for an authorized camera
+viewer:
+
+```text
+POST /api/comelit/miniapp/camera/{entity_id}/diagnostics
+```
+
+The endpoint uses the same integration-owned Mini App session cookie as the
+stream and WebRTC camera endpoints. It also requires
+`X-Comelit-MiniApp-Request: 1` and rejects entities outside the controller's
+allowed camera set. Session failure remains `403`, not raised `401`.
+
+The accepted event enum is:
+
+```text
+config, offer, answer, track, ice, rtp, first_frame,
+first_moving_frame, fallback, hls_manifest, hls_play, hls_state,
+hls_first_frame, hls_seek, hls_error, hls_blocked
+```
+
+Payload fields are closed and optional except `event`:
+
+```text
+event      fixed enum above
+elapsed_ms integer 0..600000
+stage_ms   integer 0..600000
+state      fixed player-state enum or null
+reason     fixed fallback-reason enum, or fixed HLS-error enum for hls_error
+counters   up to 16 integer counters, keys matching ^[a-z][a-z0-9_]{0,39}$
+```
+
+Fallback reasons are:
+
+```text
+stats_deadline_checking, stats_deadline_other, ice_failed,
+connection_failed, websocket_error, websocket_closed, offer_error,
+answer_error, candidate_error, no_rtcpeerconnection, session_expired,
+navigate
+```
+
+The diagnostics module has no free-text field. Unknown keys, unknown enum
+values, nested structures, strings in counters, oversized integers, more than
+16 counters, non-dict JSON, and bodies larger than 2048 bytes are rejected with
+`{"error": "invalid_diagnostics_event"}`. Rejected content is never echoed.
+
+The serializer has a defensive redaction guard and refuses to serialize values
+matching:
+
+```text
+(?i)(sdp|a=candidate|\d{1,3}(\.\d{1,3}){3}|https?://|wss?://|rtsp://|bearer|cookie|initdata|token|ice-ufrag|ice-pwd|v=0|o=-|m=audio|m=video|hash=|signature|candidate:)
+```
+
+The browser reports only enums and integers. WebRTC candidate diagnostics count
+candidate types and transports from `getStats()` reports (`host`, `srflx`,
+`prflx`, `relay`, `udp`, `tcp`) plus candidate-pair states, nomination counts,
+ICE gathering state, inbound RTP bytes and decoded-frame counts. It never reads
+or posts ICE candidate strings, SDP, IP addresses, URLs, cookies, `initData`,
+Telegram user data, RTSP URLs, or media bytes.
+
+Accepted diagnostics are rate limited server-side using constants from
+`custom_components/comelit/miniapp/diagnostics.py`:
+
+```text
+MAX_EVENTS_PER_SESSION = 160
+MAX_EVENTS_PER_SESSION_ENTITY = 80
+MAX_RATE_LIMIT_SESSIONS = 128
+MAX_RATE_LIMIT_ENTITIES_PER_SESSION = 8
+```
+
+The limits allow a normal client playback attempt, which is already capped at
+60 posted events, while bounding Home Assistant log volume and limiter memory.
+Expired session buckets are pruned, and overflow returns:
+
+```text
+HTTP 429 {"error": "diagnostics_rate_limited"}
+```
+
+Accepted events produce exactly one Home Assistant log line:
+
+```text
+COMELIT_MINIAPP_DIAG entity=<entity> event=<event> elapsed_ms=<n> stage_ms=<n> state=<s|-> reason=<r|-> counters=<k=v,...|->
+```
+
+The summary helper uses the same closed format with:
+
+```text
+COMELIT_MINIAPP_DIAG_SUMMARY
+```
+
+Operators can retrieve a real Mini App session trace from the Home Assistant
+log stream exposed by the SSH gateway by filtering for:
+
+```text
+COMELIT_MINIAPP_DIAG
+COMELIT_MINIAPP_DIAG_SUMMARY
+```

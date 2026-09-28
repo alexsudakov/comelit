@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from http import HTTPStatus
 import json
+import logging
 import time
 from urllib.parse import urljoin
 from uuid import uuid4
@@ -20,9 +21,16 @@ from webrtc_models import RTCIceCandidateInit
 from ..const import DOOR_ENTRANCE, DOOR_GATE
 from .auth import TelegramAuthenticationError, validate_telegram_init_data
 from .controller import ComelitMiniAppController, MiniAppOperationError
+from .diagnostics import (
+    MiniAppDiagnosticsRateLimiter,
+    MiniAppDiagnosticsError,
+    format_log_line,
+    loads_limited,
+)
 from .session import MiniAppSession, MiniAppSessionError
 
 
+_LOGGER = logging.getLogger(__name__)
 COOKIE_NAME = "comelit_miniapp_session"
 AUTH_MAX_AGE_SECONDS = 300
 AUTH_FUTURE_SKEW_SECONDS = 30
@@ -412,6 +420,47 @@ class MiniAppCameraWebRTCView(_MiniAppView):
         return websocket
 
 
+class MiniAppCameraDiagnosticsView(_MiniAppView):
+    url = r"/api/comelit/miniapp/camera/{entity_id}/diagnostics"
+    name = "api:comelit:miniapp:camera_diagnostics"
+
+    def __init__(self, controller: ComelitMiniAppController) -> None:
+        super().__init__(controller)
+        self._rate_limiter = MiniAppDiagnosticsRateLimiter()
+
+    async def post(self, request: web.Request, entity_id: str) -> web.Response:
+        self._require_miniapp_marker(request)
+        token, session = self._require_session(request)
+        if (
+            not entity_id.startswith("camera.")
+            or entity_id not in self.controller._allowed_camera_entity_ids()
+        ):
+            raise web.HTTPNotFound
+
+        body = await request.content.read(2049)
+        try:
+            payload = loads_limited(body)
+            line = format_log_line(entity_id, payload)
+        except MiniAppDiagnosticsError:
+            return _json_response(
+                {"error": "invalid_diagnostics_event"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        if not self._rate_limiter.accept(
+            token,
+            entity_id,
+            expires_at=float(session.expires_at),
+            now=time.time(),
+        ):
+            return _json_response(
+                {"error": "diagnostics_rate_limited"},
+                status=HTTPStatus.TOO_MANY_REQUESTS,
+            )
+
+        _LOGGER.info(line)
+        return _json_response({"ok": True})
+
+
 class MiniAppMediaView(_MiniAppView):
     url = r"/api/comelit/miniapp/media/{media_id}/{tail:.*}"
     name = "api:comelit:miniapp:media"
@@ -498,4 +547,5 @@ def async_register_miniapp_views(
     hass.http.register_view(MiniAppDoorView(controller))
     hass.http.register_view(MiniAppCameraStreamView(controller))
     hass.http.register_view(MiniAppCameraWebRTCView(controller))
+    hass.http.register_view(MiniAppCameraDiagnosticsView(controller))
     hass.http.register_view(MiniAppMediaView(controller))
