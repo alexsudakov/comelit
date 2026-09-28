@@ -447,9 +447,23 @@ matching:
 The browser reports only enums and integers. WebRTC candidate diagnostics count
 candidate types and transports from `getStats()` reports (`host`, `srflx`,
 `prflx`, `relay`, `udp`, `tcp`) plus candidate-pair states, nomination counts,
-ICE gathering state, inbound RTP bytes and decoded-frame counts. It never reads
-or posts ICE candidate strings, SDP, IP addresses, URLs, cookies, `initData`,
-Telegram user data, RTSP URLs, or media bytes.
+ICE gathering state, inbound RTP bytes and decoded-frame counts. Critical pair
+counters (`pair_waiting`, `pair_in_progress`, `pair_succeeded`,
+`pair_failed`, and `pair_nominated`) are emitted explicitly as zero when no
+matching report exists, so operators can distinguish an observed zero from a
+counter that was not collected.
+
+When an RTC transport exposes only the opaque `selectedCandidatePairId`,
+diagnostics compare that identifier inside the browser with candidate-pair
+report IDs and emit only bounded integer facts: `pair_selected`,
+`selected_pair_succeeded`, and `selected_pair_nominated`. The identifier
+itself is never serialized. Repeated `ice`/`rtp` events are deduplicated
+only while their bounded counter snapshot is unchanged; a candidate-pair state
+transition therefore remains visible even when the ICE state string stays
+`checking`.
+
+The browser never reads or posts ICE candidate strings, SDP, IP addresses,
+URLs, cookies, `initData`, Telegram user data, RTSP URLs, or media bytes.
 
 Accepted diagnostics are rate limited server-side using constants from
 `custom_components/comelit/miniapp/diagnostics.py`:

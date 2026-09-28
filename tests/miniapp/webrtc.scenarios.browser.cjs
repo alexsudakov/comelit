@@ -420,6 +420,79 @@ async function main() {
     await runWithPage(browser, async (page, posts) => {
       await installStatsWatch(
         page,
+        [
+          {
+            type: "inbound-rtp",
+            kind: "video",
+            bytesReceived: 0,
+            framesDecoded: 0,
+          },
+          {
+            id: "transport-1",
+            type: "transport",
+            selectedCandidatePairId: "pair-1",
+          },
+          {
+            id: "pair-1",
+            type: "candidate-pair",
+            state: "succeeded",
+            nominated: true,
+          },
+        ],
+        "connected",
+        true,
+      );
+      await flush(page, 1200);
+      const rtpPost = event(posts, "rtp");
+      assert.ok(rtpPost, JSON.stringify(posts));
+      assert.equal(rtpPost.counters.pair_waiting, 0);
+      assert.equal(rtpPost.counters.pair_in_progress, 0);
+      assert.equal(rtpPost.counters.pair_succeeded, 1);
+      assert.equal(rtpPost.counters.pair_failed, 0);
+      assert.equal(rtpPost.counters.pair_nominated, 1);
+      assert.equal(rtpPost.counters.pair_selected, 1);
+      assert.equal(rtpPost.counters.selected_pair_succeeded, 1);
+      assert.equal(rtpPost.counters.selected_pair_nominated, 1);
+      await finishScenario(posts);
+    });
+
+    await runWithPage(browser, async (page, posts) => {
+      await page.evaluate(() => {
+        const viewer = window.testViewer;
+        viewer._reportDiagnostics("rtp", {
+          state: "checking",
+          counters: {
+            bytes_received: 0,
+            frames_decoded: 0,
+            pair_in_progress: 1,
+            pair_succeeded: 0,
+          },
+        });
+      });
+      await flush(page, 300);
+      await page.evaluate(() => {
+        const viewer = window.testViewer;
+        viewer._reportDiagnostics("rtp", {
+          state: "checking",
+          counters: {
+            bytes_received: 0,
+            frames_decoded: 0,
+            pair_in_progress: 0,
+            pair_succeeded: 1,
+          },
+        });
+      });
+      await flush(page, 300);
+      const rtpPosts = events(posts, "rtp");
+      assert.equal(rtpPosts.length, 2, JSON.stringify(posts));
+      assert.equal(rtpPosts[0].counters.pair_in_progress, 1);
+      assert.equal(rtpPosts[1].counters.pair_succeeded, 1);
+      await finishScenario(posts);
+    });
+
+    await runWithPage(browser, async (page, posts) => {
+      await installStatsWatch(
+        page,
         [{
           type: "inbound-rtp",
           kind: "video",

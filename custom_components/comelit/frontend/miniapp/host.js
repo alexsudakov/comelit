@@ -16,17 +16,19 @@
     "bytes_received",
     "frames_decoded",
     "ice_gathering_state",
-    "cand_host",
-    "cand_srflx",
-    "cand_prflx",
-    "cand_relay",
-    "cand_udp",
-    "cand_tcp",
     "pair_waiting",
     "pair_in_progress",
     "pair_succeeded",
     "pair_failed",
     "pair_nominated",
+    "pair_selected",
+    "selected_pair_succeeded",
+    "selected_pair_nominated",
+    "cand_host",
+    "cand_srflx",
+    "cand_relay",
+    "cand_udp",
+    "cand_tcp",
   ];
   const HLS_COUNTER_PRIORITY = [
     "paused",
@@ -320,8 +322,20 @@
       ) {
         return;
       }
+      const limitedCounters = options.counters
+        ? this._limitDiagnosticCounters(event, options.counters)
+        : null;
+      const counterFingerprint =
+        limitedCounters && ["ice", "rtp"].includes(event)
+          ? "|" + JSON.stringify(limitedCounters)
+          : "";
       const triple =
-        event + "|" + (options.state || "") + "|" + (options.reason || "");
+        event +
+        "|" +
+        (options.state || "") +
+        "|" +
+        (options.reason || "") +
+        counterFingerprint;
       const now = performance.now();
       if (triple === diagnostics.lastTriple) {
         return;
@@ -364,8 +378,8 @@
       if (options.reason) {
         payload.reason = options.reason;
       }
-      if (options.counters) {
-        payload.counters = this._limitDiagnosticCounters(event, options.counters);
+      if (limitedCounters) {
+        payload.counters = limitedCounters;
       }
       fetch(
         "/api/comelit/miniapp/camera/" +
@@ -491,6 +505,14 @@
         bytes_received: 0,
         frames_decoded: 0,
         ice_gathering_state: this._iceGatheringStateCode(peer.iceGatheringState),
+        pair_waiting: 0,
+        pair_in_progress: 0,
+        pair_succeeded: 0,
+        pair_failed: 0,
+        pair_nominated: 0,
+        pair_selected: 0,
+        selected_pair_succeeded: 0,
+        selected_pair_nominated: 0,
       };
       const candidateTypes = new Set(["host", "srflx", "prflx", "relay"]);
       const protocols = new Set(["udp", "tcp"]);
@@ -502,6 +524,16 @@
       ]);
       try {
         const stats = await peer.getStats();
+        let selectedPairId = null;
+        stats.forEach((report) => {
+          if (
+            report.type === "transport" &&
+            typeof report.selectedCandidatePairId === "string" &&
+            report.selectedCandidatePairId
+          ) {
+            selectedPairId = report.selectedCandidatePairId;
+          }
+        });
         stats.forEach((report) => {
           if (
             report.type === "inbound-rtp" &&
@@ -531,7 +563,19 @@
               counters[key] = (counters[key] || 0) + 1;
             }
             if (report.nominated) {
-              counters.pair_nominated = (counters.pair_nominated || 0) + 1;
+              counters.pair_nominated += 1;
+            }
+            const selected =
+              (selectedPairId && report.id === selectedPairId) ||
+              report.selected === true;
+            if (selected) {
+              counters.pair_selected += 1;
+              if (state === "succeeded") {
+                counters.selected_pair_succeeded += 1;
+              }
+              if (report.nominated) {
+                counters.selected_pair_nominated += 1;
+              }
             }
           }
         });
