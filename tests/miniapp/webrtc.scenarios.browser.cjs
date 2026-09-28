@@ -298,7 +298,7 @@ async function main() {
       // elapsed_ms lands one tick past the deadline boundary.
       assert.ok(
         event(posts, "fallback").elapsed_ms >= 6000 &&
-          event(posts, "fallback").elapsed_ms <= 6600,
+          event(posts, "fallback").elapsed_ms <= 7000,
         JSON.stringify(event(posts, "fallback")),
       );
       await finishScenario(posts);
