@@ -92,10 +92,18 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         supervisor: ComelitRuntimeSupervisor | None = supervisors.get(entry_id)
         if supervisor is None:
             raise HomeAssistantError("Comelit runtime supervisor is unavailable")
-        if supervisor.media_paused or supervisor.attached_media_busy:
+        # A separately bootstrapped on-demand media session owns the only
+        # Comelit connection and keeps the persistent listener stopped, so the
+        # listener-owned Door path must stay fail-closed in that mode.
+        #
+        # Attached inbound Ring media is deliberately different: it reuses the
+        # still-running persistent listener transaction and its existing CTPP
+        # channel. The validated Door one-shot therefore remains available
+        # during an attached physical call.
+        if supervisor.media_paused:
             raise HomeAssistantError(
-                "Comelit Door is temporarily unavailable while an intercom "
-                "media lifecycle owns the Comelit connection"
+                "Comelit Door is temporarily unavailable while a separately "
+                "bootstrapped media session owns the exclusive connection"
             )
 
         event_id = call.data.get(ATTR_EVENT_ID)
