@@ -376,6 +376,13 @@ camera WebRTC session is explicitly closed. If WebRTC is unavailable for a
 particular ordinary camera/client, the existing session-bound Home Assistant
 HLS proxy remains the fallback.
 
+The Mini App treats WebRTC signaling, remote-track announcement, and the first
+decoded/rendered video frame as separate milestones. A remote track alone is
+not reported as successful playback. While a first frame is pending, the UI can
+surface elapsed time plus inbound RTP bytes and decoded-frame count from browser
+WebRTC statistics. This distinguishes an ICE/RTP delivery problem from a
+decode/render or slow-source/keyframe problem during production canaries.
+
 The Comelit entrance camera is deliberately excluded from this new path. It
 continues to use the separately validated on-demand Comelit media manager and
 HLS proxy, preserving listener/media ownership invariants.
