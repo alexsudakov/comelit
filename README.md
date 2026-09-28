@@ -11,7 +11,7 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.7.4**. This patch tightens the surveillance-camera mobile viewport and aligns Mini App WebRTC/ICE negotiation more closely with Home Assistant's native WebRTC player. It also distinguishes a remote WebRTC track from the first actually decoded/rendered frame and exposes first-frame/RTP diagnostics during startup. No camera preload is enabled, and the Comelit entrance-camera media lifecycle plus Door/Gate behavior are unchanged. Details are recorded in `docs/releases/1.7.1-surveillance-webrtc-startup.md`.
+Current stable release: **1.7.5**. The Mini App viewer now constrains video inside its Shadow DOM after the first HLS frame. For ordinary cameras with zero incoming WebRTC video RTP, it starts the working HLS fallback sooner and reports total time to the first HLS frame. No camera preload is enabled, and the Comelit entrance-camera media lifecycle plus Door/Gate behavior are unchanged. Details are recorded in `docs/releases/1.7.5-miniapp-remote-camera-startup.md`.
 
 ## Home Assistant Custom Card
 
