@@ -71,6 +71,8 @@
       this._websocket = null;
       this._remoteStream = null;
       this._pendingRemoteCandidates = [];
+      this._pendingLocalCandidates = [];
+      this._webrtcSessionReady = false;
       this._webrtcFallbackStarted = false;
       this._webrtcTimer = null;
       this._webrtcStatsTimer = null;
@@ -147,6 +149,8 @@
         this._remoteStream = null;
       }
       this._pendingRemoteCandidates = [];
+      this._pendingLocalCandidates = [];
+      this._webrtcSessionReady = false;
 
       if (this._video) {
         this._video.srcObject = null;
@@ -441,7 +445,12 @@
             this._peerConnection = peer;
             this._remoteStream = new MediaStream();
             this._pendingRemoteCandidates = [];
+            this._pendingLocalCandidates = [];
+            this._webrtcSessionReady = false;
 
+            // Mirror Home Assistant's native WebRTC player negotiation shape.
+            // go2rtc may expose audio+video even though the Mini App stays muted.
+            peer.addTransceiver("audio", {direction: "recvonly"});
             peer.addTransceiver("video", {direction: "recvonly"});
 
             peer.ontrack = (trackEvent) => {
@@ -450,6 +459,10 @@
                 this._peerConnection !== peer ||
                 !this._video
               ) {
+                return;
+              }
+
+              if (trackEvent.track?.kind === "audio") {
                 return;
               }
 
@@ -471,16 +484,38 @@
             };
 
             peer.onicecandidate = (candidateEvent) => {
+              if (!candidateEvent.candidate) {
+                return;
+              }
+              const candidate = candidateEvent.candidate.toJSON();
               if (
-                candidateEvent.candidate &&
+                this._webrtcSessionReady &&
                 socket.readyState === WebSocket.OPEN
               ) {
                 socket.send(
                   JSON.stringify({
                     type: "candidate",
-                    candidate: candidateEvent.candidate.toJSON(),
+                    candidate,
                   }),
                 );
+              } else {
+                this._pendingLocalCandidates.push(candidate);
+              }
+            };
+
+            peer.oniceconnectionstatechange = () => {
+              if (
+                generation !== this._requestGeneration ||
+                this._peerConnection !== peer
+              ) {
+                return;
+              }
+              const state = peer.iceConnectionState;
+              if (!this._firstFrameSeen) {
+                this._setTransportLabel("WebRTC · ICE " + state);
+              }
+              if (state === "failed") {
+                peer.restartIce();
               }
             };
 
@@ -493,7 +528,10 @@
               }
             };
 
-            const offer = await peer.createOffer();
+            const offer = await peer.createOffer({
+              offerToReceiveAudio: true,
+              offerToReceiveVideo: true,
+            });
             await peer.setLocalDescription(offer);
             if (
               socket.readyState === WebSocket.OPEN &&
@@ -517,6 +555,21 @@
           return;
         }
 
+        if (message.type === "session") {
+          this._webrtcSessionReady = true;
+          if (socket.readyState === WebSocket.OPEN) {
+            for (const candidate of this._pendingLocalCandidates.splice(0)) {
+              socket.send(
+                JSON.stringify({
+                  type: "candidate",
+                  candidate,
+                }),
+              );
+            }
+          }
+          return;
+        }
+
         if (message.type === "answer" && typeof message.answer === "string") {
           try {
             await peer.setRemoteDescription({
@@ -534,10 +587,18 @@
 
         if (message.type === "candidate" && message.candidate) {
           try {
+            const raw = message.candidate;
+            const candidate =
+              raw.sdpMid || raw.sdpMLineIndex != null
+                ? new RTCIceCandidate(raw)
+                : new RTCIceCandidate({
+                    candidate: raw.candidate,
+                    sdpMid: "0",
+                  });
             if (peer.remoteDescription) {
-              await peer.addIceCandidate(message.candidate);
+              await peer.addIceCandidate(candidate);
             } else {
-              this._pendingRemoteCandidates.push(message.candidate);
+              this._pendingRemoteCandidates.push(candidate);
             }
           } catch (_) {
             this._fallbackToHls(entityId, generation);
