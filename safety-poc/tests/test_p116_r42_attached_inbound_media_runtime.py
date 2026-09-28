@@ -396,14 +396,34 @@ class P116R42AttachedInboundMediaRuntimeTests(unittest.TestCase):
         self.assertIn("self._attached_media_busy.set()", self.runtime_source)
         self.assertIn("self._attached_media_busy.clear()", self.runtime_source)
 
-    def test_door_service_is_blocked_during_attached_media(self) -> None:
+    def test_door_service_stays_available_during_attached_media(self) -> None:
         self.assertIn(
+            "if supervisor.media_paused:",
+            self.init_source,
+        )
+        self.assertNotIn(
             "supervisor.media_paused or supervisor.attached_media_busy",
             self.init_source,
         )
         self.assertIn(
-            "media lifecycle owns the Comelit connection",
+            "return await runtime.async_open_door(",
             self.init_source,
+        )
+        self.assertIn(
+            "signal(SIGUSR1, v4_door_signal_handler);",
+            self.r42b_candidate,
+        )
+        self.assertIn(
+            "V4_DOOR_EXISTING_CTPP_REUSED=true",
+            self.r42b_candidate,
+        )
+        self.assertIn(
+            "R42_ATTACHED_MEDIA_ACTIVE=true",
+            self.r42b_candidate,
+        )
+        self.assertNotIn(
+            "signal(SIGUSR1, SIG_IGN);",
+            self.r42b_candidate,
         )
 
     def test_runtime_exposes_bounded_sigusr2_attached_stop(self) -> None:
