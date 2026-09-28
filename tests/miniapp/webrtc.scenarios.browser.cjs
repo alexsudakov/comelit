@@ -474,6 +474,9 @@ async function main() {
           viewer._requestGeneration,
         );
       });
+      // Let the rejected play() promise enqueue its throttled diagnostics
+      // before advancing the fake clock that releases those timers.
+      await page.waitForTimeout(0);
       await flush(page, 1000);
       assert.equal(event(posts, "hls_play")?.state, "NotAllowedError");
       assert.equal(event(posts, "hls_blocked")?.state, "NotAllowedError");
