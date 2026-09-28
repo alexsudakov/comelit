@@ -349,21 +349,22 @@ class MiniAppCameraWebRTCView(_MiniAppView):
                             )
                             continue
                         offer_seen = True
+
+                        # Mirror Home Assistant core exactly: expose the
+                        # session id before provider offer handling begins so
+                        # trickled local ICE candidates can arrive while the
+                        # provider/go2rtc offer path is still being established.
+                        await websocket.send_json(
+                            {
+                                "type": "session",
+                                "session_id": session_id,
+                            }
+                        )
                         try:
                             await camera.async_handle_async_webrtc_offer(
                                 sdp,
                                 session_id,
                                 send_message,
-                            )
-                            # Match Home Assistant's native WebRTC frontend
-                            # ordering: only tell the browser to trickle local
-                            # ICE candidates after the provider has registered
-                            # this session id.
-                            await websocket.send_json(
-                                {
-                                    "type": "session",
-                                    "session_id": session_id,
-                                }
                             )
                         except HomeAssistantError as exc:
                             await websocket.send_json(
