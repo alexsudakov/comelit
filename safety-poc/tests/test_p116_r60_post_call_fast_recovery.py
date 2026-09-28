@@ -26,6 +26,7 @@ LIBNICE_EVIDENCE = ROOT / "research" / "media" / "v1" / "P116_R60_LIBNICE_0_1_22
 NATIVE_BINARY = REPO / "custom_components" / "comelit" / "native" / "comelit-v4"
 R63_BUILD_INFO = MEDIA_V1 / "P116_R63_BUILD_INFO.txt"
 R64_BUILD_INFO = MEDIA_V1 / "P116_R64_BUILD_INFO.txt"
+R66_BUILD_INFO = MEDIA_V1 / "P116_R66_BUILD_INFO.txt"
 
 
 class R60A2WindowDecompositionTests(unittest.TestCase):
@@ -122,7 +123,9 @@ class R60A3A5PseudoTcpForensicTests(unittest.TestCase):
         # When a later build is shipped, its own repository build metadata
         # becomes the current binary identity gate.
         current_build_info = (
-            R64_BUILD_INFO
+            R66_BUILD_INFO
+            if R66_BUILD_INFO.is_file()
+            else R64_BUILD_INFO
             if R64_BUILD_INFO.is_file()
             else R63_BUILD_INFO
             if R63_BUILD_INFO.is_file()
