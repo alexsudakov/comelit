@@ -45,9 +45,14 @@ async def _async_request_stream(hass, entity_id, fmt):
 
 _install_module("homeassistant").__path__ = []
 _install_module("homeassistant.components").__path__ = []
+def _get_camera_from_entity_id(hass, entity_id):
+    return hass.cameras[entity_id]
+
+
 _camera_module = _install_module(
     "homeassistant.components.camera",
     async_request_stream=_async_request_stream,
+    get_camera_from_entity_id=_get_camera_from_entity_id,
 )
 _camera_module.__path__ = []
 
@@ -56,17 +61,9 @@ class _StreamType:
     WEB_RTC = "web_rtc"
 
 
-def _get_camera_from_entity_id(hass, entity_id):
-    return hass.cameras[entity_id]
-
-
 _install_module(
     "homeassistant.components.camera.const",
     StreamType=_StreamType,
-)
-_install_module(
-    "homeassistant.components.camera.helper",
-    get_camera_from_entity_id=_get_camera_from_entity_id,
 )
 _install_module(
     "homeassistant.components.stream",
