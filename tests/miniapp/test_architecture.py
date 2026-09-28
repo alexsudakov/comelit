@@ -131,3 +131,18 @@ def test_webrtc_status_waits_for_actual_first_decoded_frame():
     assert "framesDecoded" in host
     assert "track получен, ждём кадр" in host
     assert "первый кадр " in host
+
+
+def test_webrtc_negotiation_buffers_ice_until_provider_session_ready():
+    views = _read("custom_components/comelit/miniapp/views.py")
+    host = _read("custom_components/comelit/frontend/miniapp/host.js")
+
+    assert '"type": "session"' in views
+    assert "_pendingLocalCandidates" in host
+    assert "_webrtcSessionReady" in host
+    assert 'peer.addTransceiver("audio"' in host
+    assert 'peer.addTransceiver("video"' in host
+    assert "offerToReceiveAudio: true" in host
+    assert "offerToReceiveVideo: true" in host
+    assert "new RTCIceCandidate" in host
+    assert "peer.restartIce()" in host
