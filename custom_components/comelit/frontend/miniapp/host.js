@@ -71,8 +71,13 @@
       this._websocket = null;
       this._remoteStream = null;
       this._pendingRemoteCandidates = [];
+      this._pendingLocalCandidates = [];
+      this._webrtcSessionReady = false;
       this._webrtcFallbackStarted = false;
       this._webrtcTimer = null;
+      this._webrtcStatsTimer = null;
+      this._webrtcStartTime = null;
+      this._firstFrameSeen = false;
       this._failed = false;
       this._requestGeneration = 0;
     }
@@ -112,6 +117,12 @@
         clearTimeout(this._webrtcTimer);
         this._webrtcTimer = null;
       }
+      if (this._webrtcStatsTimer) {
+        clearInterval(this._webrtcStatsTimer);
+        this._webrtcStatsTimer = null;
+      }
+      this._webrtcStartTime = null;
+      this._firstFrameSeen = false;
 
       const socket = this._websocket;
       this._websocket = null;
@@ -138,6 +149,8 @@
         this._remoteStream = null;
       }
       this._pendingRemoteCandidates = [];
+      this._pendingLocalCandidates = [];
+      this._webrtcSessionReady = false;
 
       if (this._video) {
         this._video.srcObject = null;
@@ -167,6 +180,93 @@
       error.className = "miniapp-video-error";
       error.textContent = message;
       this.replaceChildren(error);
+    }
+
+    _formatBytes(value) {
+      const bytes = Number(value) || 0;
+      if (bytes < 1024) {
+        return bytes + " B";
+      }
+      if (bytes < 1024 * 1024) {
+        return (bytes / 1024).toFixed(1) + " KiB";
+      }
+      return (bytes / (1024 * 1024)).toFixed(1) + " MiB";
+    }
+
+    _markFirstWebRTCFrame(generation) {
+      if (
+        this._firstFrameSeen ||
+        generation !== this._requestGeneration ||
+        !this.isConnected
+      ) {
+        return;
+      }
+      this._firstFrameSeen = true;
+      if (this._webrtcTimer) {
+        clearTimeout(this._webrtcTimer);
+        this._webrtcTimer = null;
+      }
+      if (this._webrtcStatsTimer) {
+        clearInterval(this._webrtcStatsTimer);
+        this._webrtcStatsTimer = null;
+      }
+      const elapsed = this._webrtcStartTime
+        ? (performance.now() - this._webrtcStartTime) / 1000
+        : 0;
+      this._setTransportLabel(
+        "WebRTC · первый кадр " + elapsed.toFixed(1) + " с",
+      );
+    }
+
+    _watchWebRTCFirstFrame(peer, video, generation) {
+      const mark = () => this._markFirstWebRTCFrame(generation);
+
+      if (typeof video.requestVideoFrameCallback === "function") {
+        video.requestVideoFrameCallback(() => mark());
+      } else {
+        video.addEventListener("loadeddata", mark, {once: true});
+      }
+
+      this._webrtcStatsTimer = setInterval(async () => {
+        if (
+          generation !== this._requestGeneration ||
+          !this.isConnected ||
+          this._peerConnection !== peer ||
+          this._firstFrameSeen
+        ) {
+          return;
+        }
+
+        let bytesReceived = 0;
+        let framesDecoded = 0;
+        try {
+          const stats = await peer.getStats();
+          stats.forEach((report) => {
+            if (
+              report.type === "inbound-rtp" &&
+              (report.kind === "video" || report.mediaType === "video") &&
+              !report.isRemote
+            ) {
+              bytesReceived += Number(report.bytesReceived || 0);
+              framesDecoded += Number(report.framesDecoded || 0);
+            }
+          });
+        } catch (_) {
+          // Keep the timing status even if WebRTC stats are unavailable.
+        }
+
+        const elapsed = this._webrtcStartTime
+          ? Math.round((performance.now() - this._webrtcStartTime) / 1000)
+          : 0;
+        this._setTransportLabel(
+          "WebRTC · ожидание кадра " +
+            elapsed +
+            " с · RTP " +
+            this._formatBytes(bytesReceived) +
+            " · decoded " +
+            framesDecoded,
+        );
+      }, 2000);
     }
 
     async _startHlsPlayback(source, generation) {
@@ -310,9 +410,17 @@
         return;
       }
       this._websocket = socket;
+      this._webrtcStartTime = performance.now();
+      this._firstFrameSeen = false;
+      this._setTransportLabel("WebRTC · подключение…");
 
+      // This timeout covers signaling failure only. A remote track may be
+      // announced before the first decodable frame arrives, so first-frame
+      // waiting is diagnosed separately instead of being mistaken for success.
       this._webrtcTimer = setTimeout(() => {
-        this._fallbackToHls(entityId, generation);
+        if (!this._remoteStream) {
+          this._fallbackToHls(entityId, generation);
+        }
       }, 12000);
 
       socket.onmessage = async (event) => {
@@ -337,7 +445,12 @@
             this._peerConnection = peer;
             this._remoteStream = new MediaStream();
             this._pendingRemoteCandidates = [];
+            this._pendingLocalCandidates = [];
+            this._webrtcSessionReady = false;
 
+            // Mirror Home Assistant's native WebRTC player negotiation shape.
+            // go2rtc may expose audio+video even though the Mini App stays muted.
+            peer.addTransceiver("audio", {direction: "recvonly"});
             peer.addTransceiver("video", {direction: "recvonly"});
 
             peer.ontrack = (trackEvent) => {
@@ -349,33 +462,60 @@
                 return;
               }
 
+              if (trackEvent.track?.kind === "audio") {
+                return;
+              }
+
               if (trackEvent.streams?.[0]) {
                 this._remoteStream = trackEvent.streams[0];
               } else if (trackEvent.track) {
                 this._remoteStream.addTrack(trackEvent.track);
               }
               this._video.srcObject = this._remoteStream;
-              this._setTransportLabel("WebRTC");
+              this._setTransportLabel("WebRTC · track получен, ждём кадр…");
               if (this._webrtcTimer) {
                 clearTimeout(this._webrtcTimer);
                 this._webrtcTimer = null;
               }
+              this._watchWebRTCFirstFrame(peer, this._video, generation);
               this._video.play().catch(() => {
                 // Telegram autoplay policy may require an explicit Play tap.
               });
             };
 
             peer.onicecandidate = (candidateEvent) => {
+              if (!candidateEvent.candidate) {
+                return;
+              }
+              const candidate = candidateEvent.candidate.toJSON();
               if (
-                candidateEvent.candidate &&
+                this._webrtcSessionReady &&
                 socket.readyState === WebSocket.OPEN
               ) {
                 socket.send(
                   JSON.stringify({
                     type: "candidate",
-                    candidate: candidateEvent.candidate.toJSON(),
+                    candidate,
                   }),
                 );
+              } else {
+                this._pendingLocalCandidates.push(candidate);
+              }
+            };
+
+            peer.oniceconnectionstatechange = () => {
+              if (
+                generation !== this._requestGeneration ||
+                this._peerConnection !== peer
+              ) {
+                return;
+              }
+              const state = peer.iceConnectionState;
+              if (!this._firstFrameSeen) {
+                this._setTransportLabel("WebRTC · ICE " + state);
+              }
+              if (state === "failed") {
+                this._fallbackToHls(entityId, generation);
               }
             };
 
@@ -388,7 +528,10 @@
               }
             };
 
-            const offer = await peer.createOffer();
+            const offer = await peer.createOffer({
+              offerToReceiveAudio: true,
+              offerToReceiveVideo: true,
+            });
             await peer.setLocalDescription(offer);
             if (
               socket.readyState === WebSocket.OPEN &&
@@ -412,6 +555,21 @@
           return;
         }
 
+        if (message.type === "session") {
+          this._webrtcSessionReady = true;
+          if (socket.readyState === WebSocket.OPEN) {
+            for (const candidate of this._pendingLocalCandidates.splice(0)) {
+              socket.send(
+                JSON.stringify({
+                  type: "candidate",
+                  candidate,
+                }),
+              );
+            }
+          }
+          return;
+        }
+
         if (message.type === "answer" && typeof message.answer === "string") {
           try {
             await peer.setRemoteDescription({
@@ -429,10 +587,18 @@
 
         if (message.type === "candidate" && message.candidate) {
           try {
+            const raw = message.candidate;
+            const candidate =
+              raw.sdpMid || raw.sdpMLineIndex != null
+                ? new RTCIceCandidate(raw)
+                : new RTCIceCandidate({
+                    candidate: raw.candidate,
+                    sdpMid: "0",
+                  });
             if (peer.remoteDescription) {
-              await peer.addIceCandidate(message.candidate);
+              await peer.addIceCandidate(candidate);
             } else {
-              this._pendingRemoteCandidates.push(message.candidate);
+              this._pendingRemoteCandidates.push(candidate);
             }
           } catch (_) {
             this._fallbackToHls(entityId, generation);
@@ -474,7 +640,9 @@
       this._displayName = name;
 
       const shell = document.createElement("div");
-      shell.className = "miniapp-video-shell";
+      shell.className =
+        "miniapp-video-shell " +
+        (this._config.show_name !== false ? "surveillance" : "intercom");
 
       const video = document.createElement("video");
       video.className = "miniapp-video";

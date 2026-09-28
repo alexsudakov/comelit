@@ -100,7 +100,8 @@ def test_miniapp_session_failures_do_not_use_ha_raised_401_path():
 def test_surveillance_video_is_bounded_to_mobile_viewport():
     styles = _read("custom_components/comelit/frontend/miniapp/styles.css")
 
-    assert "max-height: min(52dvh, 520px)" in styles
+    assert "miniapp-video-shell.surveillance" in styles
+    assert "height: min(34dvh, 320px)" in styles
     assert "object-fit: contain" in styles
 
 
@@ -118,3 +119,31 @@ def test_surveillance_prefers_session_bound_ha_webrtc_with_hls_fallback():
     assert "new WebSocket(url)" in host
     assert "_fallbackToHls" in host
     assert "isIntercomCameraEntity(entityId)" in host
+
+
+def test_webrtc_status_waits_for_actual_first_decoded_frame():
+    host = _read("custom_components/comelit/frontend/miniapp/host.js")
+
+    assert "requestVideoFrameCallback" in host
+    assert "_markFirstWebRTCFrame" in host
+    assert "peer.getStats()" in host
+    assert "bytesReceived" in host
+    assert "framesDecoded" in host
+    assert "track получен, ждём кадр" in host
+    assert "первый кадр " in host
+
+
+def test_webrtc_negotiation_buffers_ice_until_provider_session_ready():
+    views = _read("custom_components/comelit/miniapp/views.py")
+    host = _read("custom_components/comelit/frontend/miniapp/host.js")
+
+    assert '"type": "session"' in views
+    assert "_pendingLocalCandidates" in host
+    assert "_webrtcSessionReady" in host
+    assert 'peer.addTransceiver("audio"' in host
+    assert 'peer.addTransceiver("video"' in host
+    assert "offerToReceiveAudio: true" in host
+    assert "offerToReceiveVideo: true" in host
+    assert "new RTCIceCandidate" in host
+    assert 'state === "failed"' in host
+    assert "_fallbackToHls(entityId, generation)" in host
