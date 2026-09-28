@@ -11,7 +11,7 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.7.7**. This release fixes the Mini App WebRTC zero-RTP timeout so its 5/8-second media wait starts when the remote video track arrives instead of being consumed by slow signaling. The independent 6000 ms signaling timeout and the existing HLS fallback, camera lifecycle, and Door/Gate behavior remain unchanged. Details are recorded in `docs/releases/1.7.7-miniapp-webrtc-media-deadline.md`.
+Current stable release: **1.7.8**. This release restores Door service availability during a physical inbound Ring while attached call media is active. Attached Ring media reuses the still-running persistent listener and its existing CTPP channel, so `comelit.open_door` now keeps using the validated one-shot listener Door path instead of rejecting the operation solely because attached media is busy. Separately bootstrapped on-demand media remains fail-closed for Door while the persistent listener is paused. Details are recorded in `docs/releases/1.7.8-door-during-attached-ring-media.md`.
 
 ## Home Assistant Custom Card
 
