@@ -73,6 +73,9 @@
       this._pendingRemoteCandidates = [];
       this._webrtcFallbackStarted = false;
       this._webrtcTimer = null;
+      this._webrtcStatsTimer = null;
+      this._webrtcStartTime = null;
+      this._firstFrameSeen = false;
       this._failed = false;
       this._requestGeneration = 0;
     }
@@ -112,6 +115,12 @@
         clearTimeout(this._webrtcTimer);
         this._webrtcTimer = null;
       }
+      if (this._webrtcStatsTimer) {
+        clearInterval(this._webrtcStatsTimer);
+        this._webrtcStatsTimer = null;
+      }
+      this._webrtcStartTime = null;
+      this._firstFrameSeen = false;
 
       const socket = this._websocket;
       this._websocket = null;
@@ -167,6 +176,93 @@
       error.className = "miniapp-video-error";
       error.textContent = message;
       this.replaceChildren(error);
+    }
+
+    _formatBytes(value) {
+      const bytes = Number(value) || 0;
+      if (bytes < 1024) {
+        return bytes + " B";
+      }
+      if (bytes < 1024 * 1024) {
+        return (bytes / 1024).toFixed(1) + " KiB";
+      }
+      return (bytes / (1024 * 1024)).toFixed(1) + " MiB";
+    }
+
+    _markFirstWebRTCFrame(generation) {
+      if (
+        this._firstFrameSeen ||
+        generation !== this._requestGeneration ||
+        !this.isConnected
+      ) {
+        return;
+      }
+      this._firstFrameSeen = true;
+      if (this._webrtcTimer) {
+        clearTimeout(this._webrtcTimer);
+        this._webrtcTimer = null;
+      }
+      if (this._webrtcStatsTimer) {
+        clearInterval(this._webrtcStatsTimer);
+        this._webrtcStatsTimer = null;
+      }
+      const elapsed = this._webrtcStartTime
+        ? (performance.now() - this._webrtcStartTime) / 1000
+        : 0;
+      this._setTransportLabel(
+        "WebRTC · первый кадр " + elapsed.toFixed(1) + " с",
+      );
+    }
+
+    _watchWebRTCFirstFrame(peer, video, generation) {
+      const mark = () => this._markFirstWebRTCFrame(generation);
+
+      if (typeof video.requestVideoFrameCallback === "function") {
+        video.requestVideoFrameCallback(() => mark());
+      } else {
+        video.addEventListener("loadeddata", mark, {once: true});
+      }
+
+      this._webrtcStatsTimer = setInterval(async () => {
+        if (
+          generation !== this._requestGeneration ||
+          !this.isConnected ||
+          this._peerConnection !== peer ||
+          this._firstFrameSeen
+        ) {
+          return;
+        }
+
+        let bytesReceived = 0;
+        let framesDecoded = 0;
+        try {
+          const stats = await peer.getStats();
+          stats.forEach((report) => {
+            if (
+              report.type === "inbound-rtp" &&
+              report.kind === "video" &&
+              !report.isRemote
+            ) {
+              bytesReceived += Number(report.bytesReceived || 0);
+              framesDecoded += Number(report.framesDecoded || 0);
+            }
+          });
+        } catch (_) {
+          // Keep the timing status even if WebRTC stats are unavailable.
+        }
+
+        const elapsed = this._webrtcStartTime
+          ? Math.round((performance.now() - this._webrtcStartTime) / 1000)
+          : 0;
+        this._setTransportLabel(
+          "WebRTC · ожидание кадра " +
+            elapsed +
+            " с · RTP " +
+            this._formatBytes(bytesReceived) +
+            " · decoded " +
+            framesDecoded,
+        );
+      }, 2000);
     }
 
     async _startHlsPlayback(source, generation) {
@@ -310,9 +406,17 @@
         return;
       }
       this._websocket = socket;
+      this._webrtcStartTime = performance.now();
+      this._firstFrameSeen = false;
+      this._setTransportLabel("WebRTC · подключение…");
 
+      // This timeout covers signaling failure only. A remote track may be
+      // announced before the first decodable frame arrives, so first-frame
+      // waiting is diagnosed separately instead of being mistaken for success.
       this._webrtcTimer = setTimeout(() => {
-        this._fallbackToHls(entityId, generation);
+        if (!this._remoteStream) {
+          this._fallbackToHls(entityId, generation);
+        }
       }, 12000);
 
       socket.onmessage = async (event) => {
@@ -355,11 +459,12 @@
                 this._remoteStream.addTrack(trackEvent.track);
               }
               this._video.srcObject = this._remoteStream;
-              this._setTransportLabel("WebRTC");
+              this._setTransportLabel("WebRTC · track получен, ждём кадр…");
               if (this._webrtcTimer) {
                 clearTimeout(this._webrtcTimer);
                 this._webrtcTimer = null;
               }
+              this._watchWebRTCFirstFrame(peer, this._video, generation);
               this._video.play().catch(() => {
                 // Telegram autoplay policy may require an explicit Play tap.
               });
@@ -474,7 +579,9 @@
       this._displayName = name;
 
       const shell = document.createElement("div");
-      shell.className = "miniapp-video-shell";
+      shell.className =
+        "miniapp-video-shell " +
+        (this._config.show_name !== false ? "surveillance" : "intercom");
 
       const video = document.createElement("video");
       video.className = "miniapp-video";
