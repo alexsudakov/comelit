@@ -161,3 +161,4 @@ def test_webrtc_session_id_precedes_provider_offer_and_zero_rtp_falls_back():
     assert 'bytesReceived === 0' in host
     assert '["new", "checking", "disconnected", "failed"]' in host
     assert "fallback HLS" in host
+    assert 'offerSdp += "a=" + candidate.candidate + "\\r\\n"' in host
