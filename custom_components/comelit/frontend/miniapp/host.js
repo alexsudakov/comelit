@@ -552,14 +552,23 @@
               offerToReceiveVideo: true,
             });
             await peer.setLocalDescription(offer);
-            if (
-              socket.readyState === WebSocket.OPEN &&
-              peer.localDescription?.sdp
-            ) {
+
+            // Match Home Assistant's native WebRTC player: include local ICE
+            // candidates gathered before the provider session id arrives in
+            // the initial SDP, then trickle only later candidates.
+            let offerSdp = offer.sdp || "";
+            while (this._pendingLocalCandidates.length) {
+              const candidate = this._pendingLocalCandidates.pop();
+              if (candidate?.candidate) {
+                offerSdp += "a=" + candidate.candidate + "\r\n";
+              }
+            }
+
+            if (socket.readyState === WebSocket.OPEN && offerSdp) {
               socket.send(
                 JSON.stringify({
                   type: "offer",
-                  sdp: peer.localDescription.sdp,
+                  sdp: offerSdp,
                 }),
               );
             }
