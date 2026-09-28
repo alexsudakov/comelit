@@ -451,8 +451,7 @@
       socket.onclose = () => {
         if (
           generation === this._requestGeneration &&
-          !this._webrtcFallbackStarted &&
-          !this._remoteStream
+          !this._webrtcFallbackStarted
         ) {
           this._fallbackToHls(entityId, generation);
         }
