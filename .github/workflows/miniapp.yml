@@ -74,6 +74,9 @@ jobs:
       - name: Verify viewer layout and stalled ICE fallback
         run: node tests/miniapp/viewer.browser.cjs
 
+      - name: Verify WebRTC and HLS diagnostics scenarios
+        run: node tests/miniapp/webrtc.scenarios.browser.cjs
+
       - name: Assert standalone gateway is gone
         run: |
           test ! -e miniapp

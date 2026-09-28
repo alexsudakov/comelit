@@ -97,6 +97,37 @@ def test_miniapp_session_failures_do_not_use_ha_raised_401_path():
     assert "Сессия Mini App завершена." in host
 
 
+def test_miniapp_diagnostics_have_closed_schema_and_session_gate():
+    diagnostics = _read("custom_components/comelit/miniapp/diagnostics.py")
+    views = _read("custom_components/comelit/miniapp/views.py")
+
+    assert "EVENTS = (" in diagnostics
+    assert "PLAYER_STATES = (" in diagnostics
+    assert "FALLBACK_REASONS = (" in diagnostics
+    assert "HLS_ERROR_KINDS = (" in diagnostics
+    assert "_REDACTION_GUARD = re.compile" in diagnostics
+    assert "free_text" not in diagnostics
+    assert "message" not in diagnostics
+    assert "sdp" in diagnostics
+    assert "a=candidate" in diagnostics
+    assert "initdata" in diagnostics
+    assert "token" in diagnostics
+    assert "format_log_line" in diagnostics
+    assert "payload.get('event')" not in diagnostics
+
+    assert "MiniAppCameraDiagnosticsView" in views
+    assert "/api/comelit/miniapp/camera/{entity_id}/diagnostics" in views
+    assert "api:comelit:miniapp:camera_diagnostics" in views
+    assert "self._require_session(request)" in views
+    assert "self._require_miniapp_marker(request)" in views
+    assert "loads_limited(body)" in views
+    assert 'invalid_diagnostics_event' in views
+    assert "_LOGGER.info(line)" in views
+    assert "register_view(MiniAppCameraDiagnosticsView(controller))" in views
+    assert "COMELIT_MINIAPP_HA_TOKEN" not in diagnostics + views
+    assert "Long-Lived Access Token" not in diagnostics + views
+
+
 def test_surveillance_video_is_bounded_to_mobile_viewport():
     host = _read("custom_components/comelit/frontend/miniapp/host.js")
 

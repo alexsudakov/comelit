@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
+import logging
 from pathlib import Path
 import sys
 import types
@@ -45,6 +47,96 @@ async def _async_request_stream(hass, entity_id, fmt):
 
 _install_module("homeassistant").__path__ = []
 _install_module("homeassistant.components").__path__ = []
+
+
+class _HTTPException(Exception):
+    status = 500
+
+
+class _HTTPForbidden(_HTTPException):
+    status = 403
+
+
+class _HTTPNotFound(_HTTPException):
+    status = 404
+
+
+class _HTTPBadRequest(_HTTPException):
+    status = 400
+
+
+class _HTTPConflict(_HTTPException):
+    status = 409
+
+    def __init__(self, text: str = ""):
+        super().__init__(text)
+        self.text = text
+
+
+class _HTTPServiceUnavailable(_HTTPException):
+    status = 503
+
+
+class _HTTPGatewayTimeout(_HTTPException):
+    status = 504
+
+
+class _HTTPBadGateway(_HTTPException):
+    status = 502
+
+
+class _HTTPRequestEntityTooLarge(_HTTPException):
+    status = 413
+
+    def __init__(self, *, max_size: int, actual_size: int):
+        super().__init__(max_size, actual_size)
+
+
+class _FakeResponse:
+    def __init__(self, data=None, *, status=200, text=""):
+        self.data = data
+        self.status = status
+        self.text = text or (json.dumps(data) if data is not None else "")
+        self.headers = {}
+
+    def set_cookie(self, *args, **kwargs):
+        pass
+
+    def del_cookie(self, *args, **kwargs):
+        pass
+
+
+class _FakeWebSocketResponse:
+    closed = True
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+
+_aiohttp_web = types.SimpleNamespace(
+    StreamResponse=_FakeResponse,
+    Response=_FakeResponse,
+    FileResponse=lambda *args, **kwargs: _FakeResponse(),
+    WebSocketResponse=_FakeWebSocketResponse,
+    json_response=lambda data, status=200: _FakeResponse(data, status=status),
+    HTTPForbidden=_HTTPForbidden,
+    HTTPNotFound=_HTTPNotFound,
+    HTTPBadRequest=_HTTPBadRequest,
+    HTTPConflict=_HTTPConflict,
+    HTTPServiceUnavailable=_HTTPServiceUnavailable,
+    HTTPGatewayTimeout=_HTTPGatewayTimeout,
+    HTTPBadGateway=_HTTPBadGateway,
+    HTTPRequestEntityTooLarge=_HTTPRequestEntityTooLarge,
+)
+_install_module(
+    "aiohttp",
+    ClientError=Exception,
+    WSMsgType=types.SimpleNamespace(ERROR="error", TEXT="text"),
+    web=_aiohttp_web,
+)
+_install_module("mashumaro", MissingField=ValueError)
+
+
 def _get_camera_from_entity_id(hass, entity_id):
     return hass.cameras[entity_id]
 
@@ -64,6 +156,10 @@ class _StreamType:
 _install_module(
     "homeassistant.components.camera.const",
     StreamType=_StreamType,
+)
+_install_module(
+    "homeassistant.components.http",
+    HomeAssistantView=object,
 )
 _install_module(
     "homeassistant.components.stream",
@@ -87,8 +183,23 @@ _install_module(
 )
 _helpers = _install_module("homeassistant.helpers")
 _helpers.__path__ = []
+_install_module(
+    "homeassistant.helpers.aiohttp_client",
+    async_get_clientsession=lambda hass: None,
+)
 _entity_registry_module = _install_module("homeassistant.helpers.entity_registry")
 _label_registry_module = _install_module("homeassistant.helpers.label_registry")
+_install_module(
+    "homeassistant.helpers.network",
+    NoURLAvailableError=ValueError,
+    get_url=lambda *args, **kwargs: "http://127.0.0.1:8123",
+)
+_install_module(
+    "webrtc_models",
+    RTCIceCandidateInit=types.SimpleNamespace(
+        from_dict=lambda value: value,
+    ),
+)
 
 _custom_components = _install_module("custom_components")
 _custom_components.__path__ = [str(ROOT / "custom_components")]
@@ -115,6 +226,14 @@ session_mod = _load(
 controller_mod = _load(
     MINIAPP_ROOT / "controller.py",
     "custom_components.comelit.miniapp.controller",
+)
+_load(
+    MINIAPP_ROOT / "diagnostics.py",
+    "custom_components.comelit.miniapp.diagnostics",
+)
+views_mod = _load(
+    MINIAPP_ROOT / "views.py",
+    "custom_components.comelit.miniapp.views",
 )
 
 
@@ -493,3 +612,114 @@ def test_webrtc_surveillance_camera_falls_back_when_provider_missing():
         match="camera WebRTC is unavailable",
     ):
         controller.get_webrtc_surveillance_camera("camera.driveway")
+
+
+class _FakeContent:
+    def __init__(self, body: bytes):
+        self._body = body
+
+    async def read(self, _size: int = -1):
+        body = self._body
+        self._body = b""
+        return body
+
+
+class _FakeRequest:
+    def __init__(
+        self,
+        body: dict | bytes,
+        *,
+        token: str = "",
+        marker: bool = True,
+    ):
+        self.cookies = {views_mod.COOKIE_NAME: token} if token else {}
+        self.headers = {views_mod.MINIAPP_MARKER_HEADER: "1"} if marker else {}
+        raw = body if isinstance(body, bytes) else json.dumps(body).encode("utf-8")
+        self.content = _FakeContent(raw)
+
+
+def test_diagnostics_endpoint_requires_session():
+    controller, _hass = _controller(surveillance_label="Outside")
+    view = views_mod.MiniAppCameraDiagnosticsView(controller)
+
+    with pytest.raises(Exception) as exc:
+        asyncio.run(
+            view.post(
+                _FakeRequest({"event": "config"}, token="", marker=True),
+                "camera.driveway",
+            )
+        )
+
+    assert exc.value.status == 403
+
+
+def test_diagnostics_endpoint_rejects_unknown_entity():
+    controller, _hass = _controller(surveillance_label="Outside")
+    token, _session = controller.sessions.create(424242, 12345678)
+    view = views_mod.MiniAppCameraDiagnosticsView(controller)
+
+    with pytest.raises(Exception) as exc:
+        asyncio.run(
+            view.post(
+                _FakeRequest({"event": "config"}, token=token),
+                "camera.unlisted",
+            )
+        )
+
+    assert exc.value.status == 404
+
+
+def test_diagnostics_endpoint_invalid_payload_returns_fixed_error_without_echo():
+    controller, _hass = _controller(surveillance_label="Outside")
+    token, _session = controller.sessions.create(424242, 12345678)
+    view = views_mod.MiniAppCameraDiagnosticsView(controller)
+
+    response = asyncio.run(
+        view.post(
+            _FakeRequest(
+                {"event": "rtp", "extra": "https://secret.invalid"},
+                token=token,
+            ),
+            "camera.driveway",
+        )
+    )
+
+    assert response.status == 400
+    assert json.loads(response.text) == {"error": "invalid_diagnostics_event"}
+    assert "secret" not in response.text
+
+
+def test_diagnostics_endpoint_logs_one_closed_line(caplog):
+    controller, _hass = _controller(surveillance_label="Outside")
+    token, _session = controller.sessions.create(424242, 12345678)
+    view = views_mod.MiniAppCameraDiagnosticsView(controller)
+
+    with caplog.at_level(logging.INFO, logger="custom_components.comelit.miniapp.views"):
+        response = asyncio.run(
+            view.post(
+                _FakeRequest(
+                    {
+                        "event": "fallback",
+                        "elapsed_ms": 5000,
+                        "stage_ms": 1000,
+                        "reason": "stats_deadline_checking",
+                        "counters": {"bytes_received": 0},
+                    },
+                    token=token,
+                ),
+                "camera.driveway",
+            )
+        )
+
+    assert response.status == 200
+    assert json.loads(response.text) == {"ok": True}
+    records = [
+        record.message
+        for record in caplog.records
+        if record.message.startswith("COMELIT_MINIAPP_DIAG ")
+    ]
+    assert records == [
+        "COMELIT_MINIAPP_DIAG entity=camera.driveway event=fallback "
+        "elapsed_ms=5000 stage_ms=1000 state=- reason=stats_deadline_checking "
+        "counters=bytes_received=0"
+    ]
