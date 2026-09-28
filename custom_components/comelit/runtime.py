@@ -53,6 +53,28 @@ _DOOR_STATES = {
     "FAILED_SAFE",
     "UNKNOWN_OUTCOME",
 }
+_DOOR_LOG_BOOLEAN_KEYS = frozenset(
+    {
+        "V4_DOOR_TARGET_VALID",
+        "V4_DOOR_COMMAND_ACCEPTED",
+        "V4_DOOR_EXISTING_CTPP_REUSED",
+        "V4_DOOR_DOOR_SPECIFIC_ACK_PROVEN",
+        "V4_DOOR_AUTOMATIC_RETRY_ALLOWED",
+        "V4_DOOR_PHYSICAL_EFFECT_ASSERTED",
+    }
+)
+_DOOR_LOG_INTEGER_KEYS = frozenset(
+    {
+        "V4_DOOR_WRITE_COUNT",
+        "V4_DOOR_OPERATION_WRITES_SENT",
+        "V4_DOOR_REJECT_RESPONSE_WORD",
+    }
+)
+_DOOR_LOG_TARGETS = frozenset({"entrance", "gate"})
+_DOOR_LOG_STAGE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,47}$")
+_DOOR_LOG_WRITE_RE = re.compile(
+    r"^V4_DOOR_OPERATION_WRITE_([1-5])_SENT=(true|false)$"
+)
 
 _RING_KEYS = {
     "V4_RING_OBSERVED",
@@ -796,6 +818,51 @@ class ComelitRingRuntime:
             safe_value,
         )
 
+    def _observe_door_log_marker(self, line: str) -> None:
+        """Log only bounded, allowlisted Door evidence from native stdout."""
+        write_match = _DOOR_LOG_WRITE_RE.fullmatch(line)
+        if write_match is not None:
+            _LOGGER.warning(
+                "Comelit Door evidence marker=V4_DOOR_OPERATION_WRITE_%s_SENT value=%s",
+                write_match.group(1),
+                write_match.group(2),
+            )
+            return
+
+        if "=" not in line:
+            return
+        key, value = line.split("=", 1)
+
+        if key in _DOOR_LOG_BOOLEAN_KEYS:
+            if value not in {"true", "false"}:
+                return
+        elif key in _DOOR_LOG_INTEGER_KEYS:
+            if not value.isdigit():
+                return
+            number = int(value)
+            if key in {"V4_DOOR_WRITE_COUNT", "V4_DOOR_OPERATION_WRITES_SENT"}:
+                if not 0 <= number <= 5:
+                    return
+            elif not 0 <= number <= 65535:
+                return
+        elif key == "V4_DOOR_TARGET":
+            if value not in _DOOR_LOG_TARGETS:
+                return
+        elif key == "V4_DOOR_RESULT":
+            if value not in _DOOR_STATES:
+                return
+        elif key == "V4_DOOR_REJECT_STAGE":
+            if not _DOOR_LOG_STAGE_RE.fullmatch(value):
+                return
+        else:
+            return
+
+        _LOGGER.warning(
+            "Comelit Door evidence marker=%s value=%s",
+            key,
+            value,
+        )
+
     def _record_r64_snapshot_marker(self, line: str) -> None:
         """Retain only bounded R64 snapshot scalars for read-only status."""
         if "=" not in line:
@@ -1144,6 +1211,15 @@ class ComelitRingRuntime:
             # Generate the operation id immediately before the irreversible
             # one-shot boundary. It is HA-local and is never caller supplied.
             operation_id = f"comelit-ha-{uuid4()}"
+            _LOGGER.warning(
+                "Comelit Door attempt started operation_id=%s door=%s "
+                "attached_media_open=%s attached_media_busy=%s listener_ready=%s",
+                operation_id,
+                door,
+                self.attached_media_open,
+                self.attached_media_busy,
+                self.listener_ready,
+            )
 
             # R63 binds the requested target to the existing SIGUSR1 one-shot
             # boundary through a root-only, exact-vocabulary control file.
@@ -1172,6 +1248,12 @@ class ComelitRingRuntime:
                 state = await asyncio.wait_for(asyncio.shield(future), timeout=10)
             except TimeoutError:
                 state = "UNKNOWN_OUTCOME"
+                _LOGGER.warning(
+                    "Comelit Door native result timeout operation_id=%s "
+                    "attached_media_open=%s",
+                    operation_id,
+                    self.attached_media_open,
+                )
             finally:
                 if self._door_result_future is future:
                     self._door_result_future = None
@@ -1236,6 +1318,18 @@ class ComelitRingRuntime:
                 and result.get("door_specific_ack_proven") is True
             )
 
+            _LOGGER.warning(
+                "Comelit Door attempt completed operation_id=%s door=%s "
+                "state=%s write_count=%s ack_proven=%s existing_ctpp_reused=%s "
+                "attached_media_open=%s",
+                operation_id,
+                door,
+                state,
+                write_count,
+                door_specific_ack_proven,
+                existing_ctpp_reused,
+                self.attached_media_open,
+            )
             return self._finalize_door_operation(result, event_id=event_id)
 
     async def _async_run_once(self) -> None:
@@ -1387,6 +1481,7 @@ class ComelitRingRuntime:
             self._remember_native_marker(line)
             self._media_diagnostics.observe_line(line)
             self._observe_canary_log_marker(line)
+            self._observe_door_log_marker(line)
             self._record_r64_snapshot_marker(line)
             self._record_post_call_transport_marker(line)
             if line in {

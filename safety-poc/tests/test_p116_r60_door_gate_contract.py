@@ -165,6 +165,30 @@ class P116R60DoorRuntimeStaticContractTests(unittest.TestCase):
         self.assertIn("V4_DOOR_WRITE_COUNT=", reader)
         self.assertIn("V4_DOOR_RESULT=", reader)
 
+    def test_runtime_logs_bounded_door_evidence_without_raw_channel_ids(self) -> None:
+        observer = function_source(self.runtime_text, "_observe_door_log_marker")
+        reader = function_source(self.runtime_text, "_async_read_output")
+        method = function_source(self.runtime_text, "async_open_door")
+
+        self.assertIn("_DOOR_LOG_WRITE_RE.fullmatch(line)", observer)
+        self.assertIn("_DOOR_LOG_BOOLEAN_KEYS", observer)
+        self.assertIn("_DOOR_LOG_INTEGER_KEYS", observer)
+        self.assertIn("V4_DOOR_TARGET", observer)
+        self.assertIn("V4_DOOR_RESULT", observer)
+        self.assertIn("V4_DOOR_REJECT_STAGE", observer)
+        self.assertIn("Comelit Door evidence marker=%s value=%s", observer)
+        self.assertIn("self._observe_door_log_marker(line)", reader)
+
+        self.assertIn("Comelit Door attempt started operation_id=%s", method)
+        self.assertIn("attached_media_open=%s", method)
+        self.assertIn("Comelit Door native result timeout operation_id=%s", method)
+        self.assertIn("Comelit Door attempt completed operation_id=%s", method)
+
+        self.assertNotIn("V4_DOOR_CTPP_CHANNEL_ID", observer)
+        self.assertNotIn("V4_DOOR_REQUESTED_CHANNEL_ID", observer)
+        self.assertNotIn("V4_DOOR_RESPONSE_CHANNEL_ID", observer)
+        self.assertNotIn("_LOGGER.warning(line", observer)
+
 
 class P116R60DoorGateOfflineHarnessTests(unittest.TestCase):
     def test_entrance_one_shot_matrix_and_gate_fail_closed(self) -> None:
