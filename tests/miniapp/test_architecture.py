@@ -178,3 +178,15 @@ def test_video_viewport_uses_explicit_stage_and_playback_mode_guard():
     assert 'this._playbackMode = "hls"' in host
     assert 'this._playbackMode !== "webrtc"' in host
     assert "misreported as a successful WebRTC frame" in host
+
+
+def test_miniapp_frontend_assets_are_release_versioned_and_stage_is_contained():
+    html = _read("custom_components/comelit/miniapp/index.html")
+    styles = _read("custom_components/comelit/frontend/miniapp/styles.css")
+
+    assert "styles.css?v=1.7.4" in html
+    assert "comelit-card.js?v=1.7.4" in html
+    assert "hls.min.js?v=1.7.4" in html
+    assert "host.js?v=1.7.4" in html
+    assert "contain: layout paint size" in styles
+    assert "overflow: hidden !important" in styles
