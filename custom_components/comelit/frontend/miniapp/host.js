@@ -616,6 +616,9 @@
 
     _watchWebRTCFirstFrame(peer, video, entityId, generation) {
       const mark = () => this._markFirstWebRTCFrame(generation);
+      // The 5/8 second zero-RTP policy bounds the media wait after a remote
+      // video track arrives. Signaling has its own independent 6000 ms timer.
+      const mediaStartTime = performance.now();
 
       if (typeof video.requestVideoFrameCallback === "function") {
         video.requestVideoFrameCallback(() => mark());
@@ -638,13 +641,13 @@
         const bytesReceived = counters.bytes_received;
         const framesDecoded = counters.frames_decoded;
 
-        const elapsed = this._webrtcStartTime
-          ? Math.round((performance.now() - this._webrtcStartTime) / 1000)
-          : 0;
+        const mediaElapsed = Math.round(
+          (performance.now() - mediaStartTime) / 1000,
+        );
         const iceState = peer.iceConnectionState || "unknown";
         this._setTransportLabel(
           "WebRTC · ожидание кадра " +
-            elapsed +
+            mediaElapsed +
             " с · ICE " +
             iceState +
             " · RTP " +
@@ -656,8 +659,8 @@
 
         if (
           bytesReceived === 0 &&
-          (elapsed >= 8 ||
-            (elapsed >= 5 &&
+          (mediaElapsed >= 8 ||
+            (mediaElapsed >= 5 &&
               ["new", "checking", "disconnected", "failed"].includes(iceState)))
         ) {
           this._setTransportLabel(

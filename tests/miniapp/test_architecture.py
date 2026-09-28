@@ -190,8 +190,9 @@ def test_webrtc_session_id_precedes_provider_offer_and_zero_rtp_falls_back():
     session_pos = views.index('"type": "session"')
     assert session_pos < offer_pos
     assert "ICE " in host
-    assert 'elapsed >= 5' in host
-    assert 'elapsed >= 8' in host
+    assert "const mediaStartTime = performance.now()" in host
+    assert 'mediaElapsed >= 5' in host
+    assert 'mediaElapsed >= 8' in host
     assert 'bytesReceived === 0' in host
     assert '["new", "checking", "disconnected", "failed"]' in host
     assert "fallback HLS" in host
