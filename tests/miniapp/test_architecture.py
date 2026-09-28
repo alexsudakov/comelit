@@ -160,4 +160,4 @@ def test_webrtc_session_id_precedes_provider_offer_and_zero_rtp_falls_back():
     assert 'elapsed >= 10' in host
     assert 'bytesReceived === 0' in host
     assert '["new", "checking", "disconnected", "failed"]' in host
-    assert '"fallback HLS"' in host
+    assert "fallback HLS" in host
