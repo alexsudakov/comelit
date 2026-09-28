@@ -49,6 +49,24 @@ _install_module(
     "homeassistant.components.camera",
     async_request_stream=_async_request_stream,
 )
+
+
+class _StreamType:
+    WEB_RTC = "web_rtc"
+
+
+def _get_camera_from_entity_id(hass, entity_id):
+    return hass.cameras[entity_id]
+
+
+_install_module(
+    "homeassistant.components.camera.const",
+    StreamType=_StreamType,
+)
+_install_module(
+    "homeassistant.components.camera.helper",
+    get_camera_from_entity_id=_get_camera_from_entity_id,
+)
 _install_module(
     "homeassistant.components.stream",
     HLS_PROVIDER="hls",
@@ -188,6 +206,7 @@ class FakeHass:
         self.entity_registry = FakeEntityRegistry(entries)
         self.label_registry = FakeLabelRegistry(labels)
         self.services = FakeServices()
+        self.cameras = {}
 
 
 _entity_registry_module.async_get = lambda hass: hass.entity_registry
