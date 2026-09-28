@@ -252,7 +252,9 @@ async function main() {
   try {
     await runWithPage(browser, async (page, posts) => {
       await installSignallingTimer(page, false);
-      await flush(page, 6500);
+      // Playwright's fake clock may deliver the 6000 ms timer on the next
+      // scheduler tick. Allow one bounded second for that tick.
+      await flush(page, 7000);
       assert.equal(event(posts, "config")?.event, "config");
       assert.equal(event(posts, "answer"), undefined);
       assert.equal(event(posts, "track"), undefined);
@@ -262,7 +264,7 @@ async function main() {
 
     await runWithPage(browser, async (page, posts) => {
       await installSignallingTimer(page, true);
-      await flush(page, 6500);
+      await flush(page, 7000);
       assert.equal(event(posts, "answer")?.event, "answer");
       assert.equal(event(posts, "track"), undefined);
       assert.equal(event(posts, "fallback")?.reason, "stats_deadline_other");
