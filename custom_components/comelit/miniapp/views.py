@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from http import HTTPStatus
 import json
 from urllib.parse import urljoin
+from uuid import uuid4
 
 from aiohttp import ClientError, web
 
@@ -11,6 +13,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.network import NoURLAvailableError, get_url
 from homeassistant.exceptions import HomeAssistantError
+from webrtc_models import RTCIceCandidateInit
 
 from ..const import DOOR_ENTRANCE, DOOR_GATE
 from .auth import TelegramAuthenticationError, validate_telegram_init_data
@@ -267,6 +270,123 @@ class MiniAppCameraStreamView(_MiniAppView):
         return _json_response({"url": url})
 
 
+class MiniAppCameraWebRTCView(_MiniAppView):
+    url = r"/api/comelit/miniapp/camera/{entity_id}/webrtc"
+    name = "api:comelit:miniapp:camera_webrtc"
+
+    async def get(
+        self,
+        request: web.Request,
+        entity_id: str,
+    ) -> web.StreamResponse:
+        self._require_session(request)
+        if not entity_id.startswith("camera."):
+            raise web.HTTPNotFound
+
+        try:
+            camera = self.controller.get_webrtc_surveillance_camera(entity_id)
+        except MiniAppOperationError as exc:
+            raise web.HTTPConflict(text=str(exc)) from exc
+
+        websocket = web.WebSocketResponse(
+            heartbeat=20,
+            max_msg_size=64 * 1024,
+        )
+        await websocket.prepare(request)
+
+        session_id = uuid4().hex
+        offer_seen = False
+        pending_sends: set[asyncio.Task[None]] = set()
+
+        def send_message(message) -> None:
+            async def _send() -> None:
+                if not websocket.closed:
+                    await websocket.send_json(message.as_dict())
+
+            task = self.controller.hass.async_create_task(_send())
+            pending_sends.add(task)
+            task.add_done_callback(pending_sends.discard)
+
+        try:
+            config = camera.async_get_webrtc_client_configuration().to_frontend_dict()
+            await websocket.send_json(
+                {
+                    "type": "config",
+                    **config,
+                }
+            )
+
+            async for message in websocket:
+                if message.type == web.WSMsgType.ERROR:
+                    break
+                if message.type != web.WSMsgType.TEXT:
+                    continue
+
+                try:
+                    payload = json.loads(message.data)
+                except (json.JSONDecodeError, TypeError):
+                    await websocket.send_json(
+                        {"type": "error", "code": "invalid_message"}
+                    )
+                    continue
+
+                if not isinstance(payload, dict):
+                    continue
+
+                message_type = payload.get("type")
+                if message_type == "close":
+                    break
+
+                if message_type == "offer":
+                    sdp = payload.get("sdp")
+                    if offer_seen or not isinstance(sdp, str) or not sdp:
+                        await websocket.send_json(
+                            {"type": "error", "code": "invalid_offer"}
+                        )
+                        continue
+                    offer_seen = True
+                    try:
+                        await camera.async_handle_async_webrtc_offer(
+                            sdp,
+                            session_id,
+                            send_message,
+                        )
+                    except HomeAssistantError as exc:
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "code": "webrtc_offer_failed",
+                                "message": str(exc),
+                            }
+                        )
+                    continue
+
+                if message_type == "candidate":
+                    candidate = payload.get("candidate")
+                    if not offer_seen or not isinstance(candidate, dict):
+                        continue
+                    try:
+                        candidate_init = RTCIceCandidateInit.from_dict(candidate)
+                        await camera.async_on_webrtc_candidate(
+                            session_id,
+                            candidate_init,
+                        )
+                    except (HomeAssistantError, ValueError, TypeError):
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "code": "webrtc_candidate_failed",
+                            }
+                        )
+                    continue
+        finally:
+            camera.close_webrtc_session(session_id)
+            if pending_sends:
+                await asyncio.gather(*tuple(pending_sends), return_exceptions=True)
+
+        return websocket
+
+
 class MiniAppMediaView(_MiniAppView):
     url = r"/api/comelit/miniapp/media/{media_id}/{tail:.*}"
     name = "api:comelit:miniapp:media"
@@ -352,4 +472,5 @@ def async_register_miniapp_views(
     hass.http.register_view(MiniAppStateView(controller))
     hass.http.register_view(MiniAppDoorView(controller))
     hass.http.register_view(MiniAppCameraStreamView(controller))
+    hass.http.register_view(MiniAppCameraWebRTCView(controller))
     hass.http.register_view(MiniAppMediaView(controller))
