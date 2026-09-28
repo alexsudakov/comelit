@@ -174,10 +174,24 @@ class P116R60DoorRuntimeStaticContractTests(unittest.TestCase):
         self.assertIn("_DOOR_LOG_BOOLEAN_KEYS", observer)
         self.assertIn("_DOOR_LOG_INTEGER_KEYS", observer)
         self.assertIn("V4_DOOR_TARGET", observer)
+        self.assertIn("V4_DOOR_PATH", observer)
         self.assertIn("V4_DOOR_RESULT", observer)
         self.assertIn("V4_DOOR_REJECT_STAGE", observer)
         self.assertIn("Comelit Door evidence marker=%s value=%s", observer)
         self.assertIn("self._observe_door_log_marker(line)", reader)
+        for marker in (
+            "V4_CALL_TIME_DOOR_COMMAND_ACCEPTED",
+            "V4_CALL_TIME_DOOR_QUEUED",
+            "V4_CALL_TIME_DOOR_SENT",
+            "V4_CALL_TIME_DOOR_WRITE_COUNT",
+            "CALL_GENERATION",
+            "CALL_SEQUENCE_BEFORE",
+            "CALL_SEQUENCE_AFTER",
+            "CALL_TIME_DOOR_ACK_OBSERVED",
+            "CALL_TIME_SINGLE",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.runtime_text)
 
         self.assertIn("Comelit Door attempt started operation_id=%s", method)
         self.assertIn("attached_media_open=%s", method)
@@ -187,6 +201,9 @@ class P116R60DoorRuntimeStaticContractTests(unittest.TestCase):
         self.assertNotIn("V4_DOOR_CTPP_CHANNEL_ID", observer)
         self.assertNotIn("V4_DOOR_REQUESTED_CHANNEL_ID", observer)
         self.assertNotIn("V4_DOOR_RESPONSE_CHANNEL_ID", observer)
+        self.assertNotIn("source_logical", observer)
+        self.assertNotIn("dest_logical", observer)
+        self.assertNotIn("payload", observer)
         self.assertNotIn("_LOGGER.warning(line", observer)
 
 

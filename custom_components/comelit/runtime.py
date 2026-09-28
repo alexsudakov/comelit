@@ -61,6 +61,10 @@ _DOOR_LOG_BOOLEAN_KEYS = frozenset(
         "V4_DOOR_DOOR_SPECIFIC_ACK_PROVEN",
         "V4_DOOR_AUTOMATIC_RETRY_ALLOWED",
         "V4_DOOR_PHYSICAL_EFFECT_ASSERTED",
+        "V4_CALL_TIME_DOOR_COMMAND_ACCEPTED",
+        "V4_CALL_TIME_DOOR_QUEUED",
+        "V4_CALL_TIME_DOOR_SENT",
+        "CALL_TIME_DOOR_ACK_OBSERVED",
     }
 )
 _DOOR_LOG_INTEGER_KEYS = frozenset(
@@ -68,9 +72,14 @@ _DOOR_LOG_INTEGER_KEYS = frozenset(
         "V4_DOOR_WRITE_COUNT",
         "V4_DOOR_OPERATION_WRITES_SENT",
         "V4_DOOR_REJECT_RESPONSE_WORD",
+        "V4_CALL_TIME_DOOR_WRITE_COUNT",
+        "CALL_GENERATION",
+        "CALL_SEQUENCE_BEFORE",
+        "CALL_SEQUENCE_AFTER",
     }
 )
 _DOOR_LOG_TARGETS = frozenset({"entrance", "gate"})
+_DOOR_LOG_PATHS = frozenset({"CALL_TIME_SINGLE"})
 _DOOR_LOG_STAGE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,47}$")
 _DOOR_LOG_WRITE_RE = re.compile(
     r"^V4_DOOR_OPERATION_WRITE_([1-5])_SENT=(true|false)$"
@@ -843,10 +852,22 @@ class ComelitRingRuntime:
             if key in {"V4_DOOR_WRITE_COUNT", "V4_DOOR_OPERATION_WRITES_SENT"}:
                 if not 0 <= number <= 5:
                     return
+            elif key == "V4_CALL_TIME_DOOR_WRITE_COUNT":
+                if number != 1:
+                    return
+            elif key in {"CALL_SEQUENCE_BEFORE", "CALL_SEQUENCE_AFTER"}:
+                if not 0 <= number <= 255:
+                    return
+            elif key == "CALL_GENERATION":
+                if not 0 <= number <= 9999999999:
+                    return
             elif not 0 <= number <= 65535:
                 return
         elif key == "V4_DOOR_TARGET":
             if value not in _DOOR_LOG_TARGETS:
+                return
+        elif key == "V4_DOOR_PATH":
+            if value not in _DOOR_LOG_PATHS:
                 return
         elif key == "V4_DOOR_RESULT":
             if value not in _DOOR_STATES:
