@@ -370,6 +370,52 @@ async function main() {
     });
 
     await runWithPage(browser, async (page, posts) => {
+      // Reproduce the 1.7.6 production canary shape: signaling consumes almost
+      // five seconds before the remote video track arrives. The media watchdog
+      // must start at track time instead of inheriting that signaling delay.
+      await flush(page, 4800);
+      await page.evaluate((entityId) => {
+        const viewer = window.testViewer;
+        const peer = window.makeFakePeer({
+          iceState: "checking",
+          stats: [{
+            type: "inbound-rtp",
+            kind: "video",
+            bytesReceived: 0,
+            framesDecoded: 0,
+          }],
+        });
+        viewer._peerConnection = peer;
+        viewer._remoteStream = new MediaStream();
+        viewer._webrtcTrackSeen = true;
+        viewer._reportDiagnostics("answer");
+        viewer._reportDiagnostics("track");
+        viewer._watchWebRTCFirstFrame(
+          peer,
+          viewer._video,
+          entityId,
+          viewer._requestGeneration,
+        );
+      }, ENTITY_ID);
+
+      await flush(page, 1200);
+      assert.equal(event(posts, "fallback"), undefined, JSON.stringify(posts));
+
+      await flush(page, 4000);
+      assert.equal(
+        event(posts, "fallback")?.reason,
+        "stats_deadline_checking",
+        JSON.stringify(posts),
+      );
+      assert.ok(
+        event(posts, "fallback").elapsed_ms >= 9500 &&
+          event(posts, "fallback").elapsed_ms <= 10100,
+        JSON.stringify(event(posts, "fallback")),
+      );
+      await finishScenario(posts);
+    });
+
+    await runWithPage(browser, async (page, posts) => {
       await installStatsWatch(
         page,
         [{
