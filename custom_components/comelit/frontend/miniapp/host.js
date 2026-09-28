@@ -515,7 +515,7 @@
                 this._setTransportLabel("WebRTC · ICE " + state);
               }
               if (state === "failed") {
-                peer.restartIce();
+                this._fallbackToHls(entityId, generation);
               }
             };
 
