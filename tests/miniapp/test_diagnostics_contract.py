@@ -169,3 +169,29 @@ def test_rate_limiter_prunes_expired_session_state():
     limiter.prune(now=11.0)
 
     assert limiter.bucket_count == 0
+
+def test_rate_limiter_existing_session_does_not_evict_at_capacity():
+    limiter = diagnostics.MiniAppDiagnosticsRateLimiter()
+
+    for index in range(diagnostics.MAX_RATE_LIMIT_SESSIONS):
+        assert limiter.accept(
+            f"session-{index}",
+            "camera.driveway",
+            expires_at=10_000.0,
+            now=float(index + 1),
+        )
+
+    oldest = limiter._buckets["session-0"]
+    existing = limiter._buckets[f"session-{diagnostics.MAX_RATE_LIMIT_SESSIONS - 1}"]
+
+    assert limiter.accept(
+        f"session-{diagnostics.MAX_RATE_LIMIT_SESSIONS - 1}",
+        "camera.driveway",
+        expires_at=10_000.0,
+        now=999.0,
+    )
+
+    assert limiter.bucket_count == diagnostics.MAX_RATE_LIMIT_SESSIONS
+    assert limiter._buckets["session-0"] is oldest
+    assert oldest.total == 1
+    assert existing.total == 2

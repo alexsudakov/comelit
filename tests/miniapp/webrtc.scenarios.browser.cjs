@@ -435,6 +435,23 @@ async function main() {
     await runWithPage(browser, async (page, posts) => {
       await page.evaluate(() => {
         const viewer = window.testViewer;
+        viewer._reportDiagnostics("config");
+        viewer._playbackMode = "webrtc";
+        viewer._webrtcFallbackStarted = false;
+        viewer.disconnectedCallback();
+      });
+      await flush(page, 50);
+      const navigate = events(posts, "fallback").filter(
+        (payload) => payload.reason === "navigate",
+      );
+      assert.equal(navigate.length, 1, JSON.stringify(posts));
+      assert.equal(event(posts, "config")?.event, "config");
+      await finishScenario(posts);
+    });
+
+    await runWithPage(browser, async (page, posts) => {
+      await page.evaluate(() => {
+        const viewer = window.testViewer;
         viewer._playbackMode = null;
         const video = viewer._video;
         video.play = () => Promise.reject({ name: "NotAllowedError" });

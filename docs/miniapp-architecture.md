@@ -434,14 +434,14 @@ navigate
 
 The diagnostics module has no free-text field. Unknown keys, unknown enum
 values, nested structures, strings in counters, oversized integers, more than
-12 counters, non-dict JSON, and bodies larger than 2048 bytes are rejected with
+16 counters, non-dict JSON, and bodies larger than 2048 bytes are rejected with
 `{"error": "invalid_diagnostics_event"}`. Rejected content is never echoed.
 
 The serializer has a defensive redaction guard and refuses to serialize values
 matching:
 
 ```text
-(?i)(sdp|a=candidate|\d{1,3}(\.\d{1,3}){3}|https?://|wss?://|rtsp://|bearer|cookie|initdata|token)
+(?i)(sdp|a=candidate|\d{1,3}(\.\d{1,3}){3}|https?://|wss?://|rtsp://|bearer|cookie|initdata|token|ice-ufrag|ice-pwd|v=0|o=-|m=audio|m=video|hash=|signature|candidate:)
 ```
 
 The browser reports only enums and integers. WebRTC candidate diagnostics count

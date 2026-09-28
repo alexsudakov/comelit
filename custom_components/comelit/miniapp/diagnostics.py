@@ -134,7 +134,10 @@ class MiniAppDiagnosticsRateLimiter:
         now: float,
     ) -> bool:
         self.prune(now=now)
-        if len(self._buckets) >= MAX_RATE_LIMIT_SESSIONS:
+        if (
+            session_token not in self._buckets
+            and len(self._buckets) >= MAX_RATE_LIMIT_SESSIONS
+        ):
             oldest = min(
                 self._buckets,
                 key=lambda token: self._buckets[token].last_seen,

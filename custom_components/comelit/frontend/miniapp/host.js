@@ -326,7 +326,9 @@
       if (triple === diagnostics.lastTriple) {
         return;
       }
-      if (diagnostics.count > 0 && now - diagnostics.lastAt < 250) {
+      const immediate =
+        event === "fallback" && options.reason === "navigate";
+      if (!immediate && diagnostics.count > 0 && now - diagnostics.lastAt < 250) {
         if (!diagnostics.queuedTriples.has(triple)) {
           const queuedEntityId = diagnostics.entityId;
           const queuedGeneration = diagnostics.generation;
