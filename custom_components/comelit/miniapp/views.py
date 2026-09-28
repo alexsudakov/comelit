@@ -6,7 +6,7 @@ import json
 from urllib.parse import urljoin
 from uuid import uuid4
 
-from aiohttp import ClientError, web
+from aiohttp import ClientError, WSMsgType, web
 
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
@@ -317,9 +317,9 @@ class MiniAppCameraWebRTCView(_MiniAppView):
             )
 
             async for message in websocket:
-                if message.type == web.WSMsgType.ERROR:
+                if message.type == WSMsgType.ERROR:
                     break
-                if message.type != web.WSMsgType.TEXT:
+                if message.type != WSMsgType.TEXT:
                     continue
 
                 try:
