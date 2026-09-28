@@ -64,6 +64,8 @@
       this._config = null;
       this._hass = null;
       this._video = null;
+      this._labelElement = null;
+      this._displayName = "";
       this._hls = null;
       this._peerConnection = null;
       this._websocket = null;
@@ -93,6 +95,16 @@
       this._requestGeneration += 1;
       this._destroyPlayback();
       this._video = null;
+      this._labelElement = null;
+    }
+
+    _setTransportLabel(transport) {
+      if (!this._labelElement) {
+        return;
+      }
+      this._labelElement.textContent = transport
+        ? this._displayName + " · " + transport
+        : this._displayName;
     }
 
     _destroyWebRTC() {
@@ -166,6 +178,8 @@
       ) {
         return;
       }
+
+      this._setTransportLabel("HLS");
 
       const HlsClass = window.Hls;
       if (
@@ -341,6 +355,7 @@
                 this._remoteStream.addTrack(trackEvent.track);
               }
               this._video.srcObject = this._remoteStream;
+              this._setTransportLabel("WebRTC");
               if (this._webrtcTimer) {
                 clearTimeout(this._webrtcTimer);
                 this._webrtcTimer = null;
@@ -457,6 +472,7 @@
       const entityId = this._config.entity;
       const state = this._hass?.states?.[entityId];
       const name = state?.attributes?.friendly_name || entityId;
+      this._displayName = name;
 
       const shell = document.createElement("div");
       shell.className = "miniapp-video-shell";
@@ -476,6 +492,7 @@
         const label = document.createElement("div");
         label.className = "miniapp-video-label";
         label.textContent = name;
+        this._labelElement = label;
         shell.appendChild(label);
       }
 
