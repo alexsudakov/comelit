@@ -75,9 +75,18 @@ miniapp-picture-entity {
   display: block;
   width: 100%;
   min-height: 120px;
-  max-height: min(52dvh, 520px);
   object-fit: contain;
   background: #000;
+}
+
+.miniapp-video-shell.surveillance .miniapp-video {
+  height: min(34dvh, 320px);
+  min-height: 180px;
+  max-height: 320px;
+}
+
+.miniapp-video-shell.intercom .miniapp-video {
+  max-height: min(52dvh, 520px);
 }
 
 .miniapp-video-label {
