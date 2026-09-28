@@ -66,6 +66,14 @@ jobs:
       - name: Parse shared bundled Comelit card
         run: node --check custom_components/comelit/frontend/comelit-card.js
 
+      - name: Install browser regression dependencies
+        run: |
+          npm install --no-save playwright@1.62.1
+          npx playwright install --with-deps chromium
+
+      - name: Verify viewer layout and stalled ICE fallback
+        run: node tests/miniapp/viewer.browser.cjs
+
       - name: Assert standalone gateway is gone
         run: |
           test ! -e miniapp
