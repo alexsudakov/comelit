@@ -45,10 +45,11 @@ async def _async_request_stream(hass, entity_id, fmt):
 
 _install_module("homeassistant").__path__ = []
 _install_module("homeassistant.components").__path__ = []
-_install_module(
+_camera_module = _install_module(
     "homeassistant.components.camera",
     async_request_stream=_async_request_stream,
 )
+_camera_module.__path__ = []
 
 
 class _StreamType:
