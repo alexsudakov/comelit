@@ -11,7 +11,7 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.7.5**. The Mini App viewer now constrains video inside its Shadow DOM after the first HLS frame. For ordinary cameras with zero incoming WebRTC video RTP, it starts the working HLS fallback sooner and reports total time to the first HLS frame. No camera preload is enabled, and the Comelit entrance-camera media lifecycle plus Door/Gate behavior are unchanged. Details are recorded in `docs/releases/1.7.5-miniapp-remote-camera-startup.md`.
+Current stable release: **1.7.6**. This release adds bounded Mini App diagnostics for WebRTC and HLS startup, including pre-track ICE/RTP statistics needed to diagnose stalled external-camera sessions. It does not change the existing WebRTC fallback deadlines, enable camera preload, or alter the Comelit entrance-camera media lifecycle or Door/Gate behavior. Details are recorded in `docs/releases/1.7.6-miniapp-webrtc-diagnostics.md`.
 
 ## Home Assistant Custom Card
 
