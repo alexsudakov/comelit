@@ -244,7 +244,7 @@
           stats.forEach((report) => {
             if (
               report.type === "inbound-rtp" &&
-              report.kind === "video" &&
+              (report.kind === "video" || report.mediaType === "video") &&
               !report.isRemote
             ) {
               bytesReceived += Number(report.bytesReceived || 0);
