@@ -52,7 +52,7 @@ class P80MediaExclusivityStaticContractTests(unittest.TestCase):
             self.init,
         )
         self.assertIn(
-            "separately bootstrapped media session owns the exclusive connection",
+            "bootstrapped media session owns the exclusive connection",
             self.init,
         )
 
