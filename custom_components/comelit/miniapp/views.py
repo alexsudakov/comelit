@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from http import HTTPStatus
 import json
+import time
 from urllib.parse import urljoin
 from uuid import uuid4
 
@@ -280,7 +281,7 @@ class MiniAppCameraWebRTCView(_MiniAppView):
         request: web.Request,
         entity_id: str,
     ) -> web.StreamResponse:
-        self._require_session(request)
+        _token, session = self._require_session(request)
         if not entity_id.startswith("camera."):
             raise web.HTTPNotFound
 
@@ -317,69 +318,81 @@ class MiniAppCameraWebRTCView(_MiniAppView):
                 }
             )
 
-            async for message in websocket:
-                if message.type == WSMsgType.ERROR:
-                    break
-                if message.type != WSMsgType.TEXT:
-                    continue
+            remaining = max(0.0, float(session.expires_at) - time.time())
+            async with asyncio.timeout(remaining):
+                async for message in websocket:
+                    if message.type == WSMsgType.ERROR:
+                        break
+                    if message.type != WSMsgType.TEXT:
+                        continue
 
-                try:
-                    payload = json.loads(message.data)
-                except (json.JSONDecodeError, TypeError):
-                    await websocket.send_json(
-                        {"type": "error", "code": "invalid_message"}
-                    )
-                    continue
-
-                if not isinstance(payload, dict):
-                    continue
-
-                message_type = payload.get("type")
-                if message_type == "close":
-                    break
-
-                if message_type == "offer":
-                    sdp = payload.get("sdp")
-                    if offer_seen or not isinstance(sdp, str) or not sdp:
+                    try:
+                        payload = json.loads(message.data)
+                    except (json.JSONDecodeError, TypeError):
                         await websocket.send_json(
-                            {"type": "error", "code": "invalid_offer"}
+                            {"type": "error", "code": "invalid_message"}
                         )
                         continue
-                    offer_seen = True
-                    try:
-                        await camera.async_handle_async_webrtc_offer(
-                            sdp,
-                            session_id,
-                            send_message,
-                        )
-                    except HomeAssistantError as exc:
-                        await websocket.send_json(
-                            {
-                                "type": "error",
-                                "code": "webrtc_offer_failed",
-                                "message": str(exc),
-                            }
-                        )
-                    continue
 
-                if message_type == "candidate":
-                    candidate = payload.get("candidate")
-                    if not offer_seen or not isinstance(candidate, dict):
+                    if not isinstance(payload, dict):
                         continue
-                    try:
-                        candidate_init = RTCIceCandidateInit.from_dict(candidate)
-                        await camera.async_on_webrtc_candidate(
-                            session_id,
-                            candidate_init,
-                        )
-                    except (HomeAssistantError, MissingField, ValueError, TypeError):
-                        await websocket.send_json(
-                            {
-                                "type": "error",
-                                "code": "webrtc_candidate_failed",
-                            }
-                        )
-                    continue
+
+                    message_type = payload.get("type")
+                    if message_type == "close":
+                        break
+
+                    if message_type == "offer":
+                        sdp = payload.get("sdp")
+                        if offer_seen or not isinstance(sdp, str) or not sdp:
+                            await websocket.send_json(
+                                {"type": "error", "code": "invalid_offer"}
+                            )
+                            continue
+                        offer_seen = True
+                        try:
+                            await camera.async_handle_async_webrtc_offer(
+                                sdp,
+                                session_id,
+                                send_message,
+                            )
+                        except HomeAssistantError as exc:
+                            await websocket.send_json(
+                                {
+                                    "type": "error",
+                                    "code": "webrtc_offer_failed",
+                                    "message": str(exc),
+                                }
+                            )
+                        continue
+
+                    if message_type == "candidate":
+                        candidate = payload.get("candidate")
+                        if not offer_seen or not isinstance(candidate, dict):
+                            continue
+                        try:
+                            candidate_init = RTCIceCandidateInit.from_dict(candidate)
+                            await camera.async_on_webrtc_candidate(
+                                session_id,
+                                candidate_init,
+                            )
+                        except (
+                            HomeAssistantError,
+                            MissingField,
+                            ValueError,
+                            TypeError,
+                        ):
+                            await websocket.send_json(
+                                {
+                                    "type": "error",
+                                    "code": "webrtc_candidate_failed",
+                                }
+                            )
+                        continue
+        except TimeoutError:
+            if not websocket.closed:
+                await websocket.send_json(
+                    {"type": "error", "code": "miniapp_session_expired"}
+                )
         finally:
             camera.close_webrtc_session(session_id)
             if pending_sends:
