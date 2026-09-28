@@ -11,7 +11,7 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.7.6**. This release adds bounded Mini App diagnostics for WebRTC and HLS startup, including pre-track ICE/RTP statistics needed to diagnose stalled external-camera sessions. It does not change the existing WebRTC fallback deadlines, enable camera preload, or alter the Comelit entrance-camera media lifecycle or Door/Gate behavior. Details are recorded in `docs/releases/1.7.6-miniapp-webrtc-diagnostics.md`.
+Current stable release: **1.7.7**. This release fixes the Mini App WebRTC zero-RTP timeout so its 5/8-second media wait starts when the remote video track arrives instead of being consumed by slow signaling. The independent 6000 ms signaling timeout and the existing HLS fallback, camera lifecycle, and Door/Gate behavior remain unchanged. Details are recorded in `docs/releases/1.7.7-miniapp-webrtc-media-deadline.md`.
 
 ## Home Assistant Custom Card
 
