@@ -6,6 +6,8 @@ import re
 from typing import Any
 
 from homeassistant.components.camera import async_request_stream
+from homeassistant.components.camera.const import StreamType
+from homeassistant.components.camera.helper import get_camera_from_entity_id
 from homeassistant.components.stream import HLS_PROVIDER
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import STATE_UNAVAILABLE
@@ -288,6 +290,34 @@ class ComelitMiniAppController:
             for entry in entries
             if str(entry["entity_id"]).startswith("camera.")
         )
+
+    def get_webrtc_surveillance_camera(self, entity_id: str):
+        """Return an allowed ordinary camera with Home Assistant WebRTC support.
+
+        The intercom camera keeps its separately validated HLS/media lifecycle.
+        Ordinary surveillance cameras may use Home Assistant's registered WebRTC
+        provider (normally the HA-managed go2rtc instance) on demand.
+        """
+        if entity_id not in self._allowed_camera_entity_ids():
+            raise MiniAppOperationError("camera is not allowed for the Mini App")
+
+        registry = er.async_get(self.hass)
+        entry = registry.async_get(entity_id)
+        if (
+            entry is not None
+            and entry.platform == DOMAIN
+            and entry.unique_id in INTERCOM_UNIQUE_IDS
+        ):
+            raise MiniAppOperationError("intercom camera WebRTC is not enabled")
+
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state == STATE_UNAVAILABLE:
+            raise MiniAppOperationError("camera is unavailable")
+
+        camera = get_camera_from_entity_id(self.hass, entity_id)
+        if StreamType.WEB_RTC not in camera.camera_capabilities.frontend_stream_types:
+            raise MiniAppOperationError("camera WebRTC is unavailable")
+        return camera
 
     async def async_create_camera_media(
         self,
