@@ -355,6 +355,16 @@ class MiniAppCameraWebRTCView(_MiniAppView):
                                 session_id,
                                 send_message,
                             )
+                            # Match Home Assistant's native WebRTC frontend
+                            # ordering: only tell the browser to trickle local
+                            # ICE candidates after the provider has registered
+                            # this session id.
+                            await websocket.send_json(
+                                {
+                                    "type": "session",
+                                    "session_id": session_id,
+                                }
+                            )
                         except HomeAssistantError as exc:
                             await websocket.send_json(
                                 {
