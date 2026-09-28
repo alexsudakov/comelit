@@ -194,8 +194,8 @@ def test_webrtc_session_id_precedes_provider_offer_and_zero_rtp_falls_back():
     assert 'mediaElapsed >= 5' in host
     assert 'mediaElapsed >= 8' in host
     assert 'bytesReceived === 0' in host
-    assert '"pair_succeeded": 0' in host
-    assert '"pair_selected": 0' in host
+    assert "pair_succeeded: 0" in host
+    assert "pair_selected: 0" in host
     assert "selectedCandidatePairId" in host
     assert "selected_pair_succeeded" in host
     assert 'JSON.stringify(limitedCounters)' in host
