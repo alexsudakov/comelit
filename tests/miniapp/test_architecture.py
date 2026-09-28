@@ -145,4 +145,5 @@ def test_webrtc_negotiation_buffers_ice_until_provider_session_ready():
     assert "offerToReceiveAudio: true" in host
     assert "offerToReceiveVideo: true" in host
     assert "new RTCIceCandidate" in host
-    assert "peer.restartIce()" in host
+    assert 'state === "failed"' in host
+    assert "_fallbackToHls(entityId, generation)" in host
