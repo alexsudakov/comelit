@@ -1,3 +1,4 @@
+# retry-after-focused-test-alignment: 2
 name: p122-media-rebuild-corrective-once
 
 on:
