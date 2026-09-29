@@ -312,9 +312,11 @@ class ComelitEntranceMediaTransport:
     """Own one native entrance media process and its cloud bootstrap.
 
     This class assumes the persistent listener has already been paused by
-    ComelitMediaSessionManager. It never starts/stops the listener and has no
-    Door entrypoint. The native helper unwraps only inbound PT99/PT8 RTP to
-    loopback ports described by local_sdp_path.
+    ComelitMediaSessionManager. It never starts/stops the listener. While its
+    own media transaction is active it may own one Entrance-only Door one-shot
+    on that same CTPP; Gate and listener control remain outside this class.
+    The native helper unwraps inbound PT99/PT8 RTP to loopback ports described
+    by local_sdp_path.
     """
 
     def __init__(
