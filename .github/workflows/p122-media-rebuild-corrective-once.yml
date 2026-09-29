@@ -1,0 +1,221 @@
+name: p122-media-rebuild-corrective-once
+
+on:
+  push:
+    branches:
+      - feat/on-demand-media-door-single-message
+    paths:
+      - .github/workflows/p122-media-rebuild-corrective-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  rebuild:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Generate corrected P122 source twice
+        id: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          MEDIA="$GITHUB_WORKSPACE/safety-poc/research/media/v1"
+          SOURCE="$GITHUB_WORKSPACE/safety-poc/research/door/v1_5_7/comelit-v4-persistent-ctpp-door.c"
+          TRANSFORM="$MEDIA/entrance_p122_on_demand_media_door_transform.py"
+          mkdir -p "$GITHUB_WORKSPACE/.p122"
+          for name in a b; do
+            PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$MEDIA"               python3 "$TRANSFORM" --source "$SOURCE"               --output "$GITHUB_WORKSPACE/.p122/$name.c" >/dev/null
+          done
+          cmp -s "$GITHUB_WORKSPACE/.p122/a.c" "$GITHUB_WORKSPACE/.p122/b.c"
+          SOURCE_SHA="$(sha256sum "$GITHUB_WORKSPACE/.p122/a.c" | awk '{print $1}')"
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare pinned Alpine APK closure
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.p122-apks"
+          docker run --rm             -v "$GITHUB_WORKSPACE/.p122-apks:/pkgs"             alpine:3.24.1             /bin/sh -eu -c '
+              apk update >/dev/null
+              apk fetch --recursive --output /pkgs                 build-base pkgconf glib-dev libnice-dev binutils >/dev/null
+            '
+          test -n "$(find "$GITHUB_WORKSPACE/.p122-apks" -maxdepth 1 -name '*.apk' -print -quit)"
+
+      - name: Build A and B independently
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for name in a b; do
+            mkdir -p "$GITHUB_WORKSPACE/.p122-out-$name"
+            docker run --rm               -v "$GITHUB_WORKSPACE/.p122/$name.c:/src/comelit-media.c:ro"               -v "$GITHUB_WORKSPACE/.p122-apks:/pkgs:ro"               -v "$GITHUB_WORKSPACE/.p122-out-$name:/out"               alpine:3.24.1               /bin/sh -eu -c '
+                apk add --no-network /pkgs/*.apk >/dev/null
+                cd /
+                cc -O2 -g -Wall -Wextra -Wl,--as-needed                   -o /out/comelit-media /src/comelit-media.c                   $(pkg-config --cflags --libs nice glib-2.0 gio-2.0 gobject-2.0)
+                chmod 755 /out/comelit-media
+              '
+          done
+
+      - name: Verify corrected P122 reproducibility and contract
+        id: build
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          A="$GITHUB_WORKSPACE/.p122-out-a/comelit-media"
+          B="$GITHUB_WORKSPACE/.p122-out-b/comelit-media"
+          cmp -s "$A" "$B"
+          BIN_SHA="$(sha256sum "$A" | awk '{print $1}')"
+          BIN_SIZE="$(stat -c '%s' "$A")"
+          INTERPRETER="$(readelf -l "$A" | sed -n 's@.*Requesting program interpreter: \(.*\)]@\1@p')"
+          NEEDED="$(readelf -d "$A" | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' | sort | paste -sd, -)"
+          BUILD_ID="$(readelf -n "$A" | sed -n 's/^.*Build ID: //p' | head -1)"
+          test "$INTERPRETER" = "/lib/ld-musl-x86_64.so.1"
+          test "$NEEDED" = "libc.musl-x86_64.so.1,libglib-2.0.so.0,libgobject-2.0.so.0,libnice.so.10"
+          ! printf '%s\n' "$NEEDED" | grep -Fq 'libc.so.6'
+          strings -a "$A" > "$GITHUB_WORKSPACE/.p122/strings.txt"
+          for marker in             'P80_MEDIA_ACTIVE=true'             'P80_DOOR_SIGNAL_ENTRYPOINT=true'             'P122_ONDEMAND_DOOR_PROFILE=ACTIVE_MEDIA_SINGLE'             'P122_ONDEMAND_DOOR_PATH=ACTIVE_MEDIA_SINGLE'             'P122_ONDEMAND_DOOR_SENT=true'             'P122_ONDEMAND_DOOR_WRITE_COUNT=1'             'P122_ONDEMAND_DOOR_COUNTER_COMMITTED=true'             'P122_ONDEMAND_DOOR_SEQUENCE_BEFORE=%u'             'P122_ONDEMAND_DOOR_SEQUENCE_AFTER=%u'             'P122_ONDEMAND_DOOR_AUTOMATIC_RETRY_ALLOWED=false'             'P122_ONDEMAND_DOOR_PHYSICAL_EFFECT_ASSERTED=false'             'P78_SECOND_CTPP_OPEN=false'
+          do
+            grep -Fq "$marker" "$GITHUB_WORKSPACE/.p122/strings.txt"
+          done
+          ! grep -Fq '/run/comelit-p2p' "$GITHUB_WORKSPACE/.p122/strings.txt"
+          echo "binary_sha=$BIN_SHA" >> "$GITHUB_OUTPUT"
+          echo "binary_size=$BIN_SIZE" >> "$GITHUB_OUTPUT"
+          echo "interpreter=$INTERPRETER" >> "$GITHUB_OUTPUT"
+          echo "needed=$NEEDED" >> "$GITHUB_OUTPUT"
+          echo "build_id=$BUILD_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Promote corrected P122 helper and pins
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          BINARY_SHA: ${{ steps.build.outputs.binary_sha }}
+          BINARY_SIZE: ${{ steps.build.outputs.binary_size }}
+          INTERPRETER: ${{ steps.build.outputs.interpreter }}
+          NEEDED: ${{ steps.build.outputs.needed }}
+          BUILD_ID: ${{ steps.build.outputs.build_id }}
+        run: |
+          set -Eeuo pipefail
+          OLD_P122_SHA="a3c95f3ec8c5c00963946c8ff550760fadd792a314bb72692e4281da35a5a6a5"
+          install -m 0755 "$GITHUB_WORKSPACE/.p122-out-a/comelit-media"             custom_components/comelit/native/comelit-media
+
+          python3 - "$SOURCE_SHA" "$BINARY_SHA" "$OLD_P122_SHA" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          source_sha, binary_sha, old_binary_sha = sys.argv[1:4]
+
+          targets = (
+              "custom_components/comelit/media_transport.py",
+              "safety-poc/tests/test_p80_media_transport_static_contract.py",
+              "safety-poc/tests/test_p116_r18_hls_runtime_diagnostics.py",
+              "safety-poc/tests/test_p116_r20_hls_http_boundary_diagnostics.py",
+              "safety-poc/tests/test_p116_ha_stream_rtp_bridge.py",
+              "safety-poc/tests/test_p116_native_rtp_telemetry.py",
+              "safety-poc/tests/test_p116_provenance_binary_analysis.py",
+              "safety-poc/tests/test_p116_r24_recovery_shim_lifecycle.py",
+          )
+          for filename in targets:
+              path = Path(filename)
+              text = path.read_text()
+              count = text.count(old_binary_sha)
+              if count != 1:
+                  raise SystemExit(f"{filename}: expected one old current binary pin, got {count}")
+              path.write_text(text.replace(old_binary_sha, binary_sha, 1))
+
+          p107 = Path("safety-poc/tests/test_p107_musl_package_provenance.py")
+          text = p107.read_text()
+          old_expected = re.search(r'EXPECTED_MUSL_SHA256 = "([0-9a-f]{64})"', text)
+          if old_expected is None:
+              raise SystemExit("P107 EXPECTED_MUSL_SHA256 missing")
+          text = text.replace(old_expected.group(1), binary_sha, 1)
+          text, count = re.subn(
+              r'PACKAGED_NATIVE_SOURCE_SHA256 = "[0-9a-f]{64}"',
+              f'PACKAGED_NATIVE_SOURCE_SHA256 = "{source_sha}"',
+              text,
+          )
+          if count != 1:
+              raise SystemExit(f"P107 packaged source pin count={count}")
+          text, count = re.subn(
+              r'HEAD_P116_SOURCE_SHA256 = "[0-9a-f]{64}"',
+              f'HEAD_P116_SOURCE_SHA256 = "{source_sha}"',
+              text,
+          )
+          if count != 1:
+              raise SystemExit(f"P107 head source pin count={count}")
+          p107.write_text(text)
+          PY
+
+          cat > safety-poc/research/media/v1/p122_on_demand_media_door_production_media_build_meta.txt <<EOF
+          phase=P122_ON_DEMAND_MEDIA_DOOR_SINGLE_MESSAGE
+          repo_head_at_build=$GITHUB_SHA
+          canonical_generator=safety-poc/research/media/v1/entrance_p122_on_demand_media_door_transform.py
+          GENERATED_SOURCE_SHA256=$SOURCE_SHA
+          NATIVE_BINARY_SHA256=$BINARY_SHA
+          NATIVE_BINARY_SIZE=$BINARY_SIZE
+          build_a_sha256=$BINARY_SHA
+          build_b_sha256=$BINARY_SHA
+          reproducible_binary_cmp_gate=PASS
+          CONTROL_BUILD_REPRODUCES_CURRENT_BINARY=true
+          binary_rebuild_pending_orchestrator=false
+          superseded_native_binary_sha256=9347a973b012d5ca86b406642a5fcd9b86ce44201d0b5144073005ca72ce7712
+          superseded_generated_source_sha256=07468cd74027d02d5f002c1cc63558f68526cf06b9694c5afe94579ea68f9e74
+          superseded_provenance_file=safety-poc/research/media/v1/p121_gather_initial_timeout_production_media_build_meta.txt
+          interpreter=$INTERPRETER
+          needed=$NEEDED
+          elf_build_id=$BUILD_ID
+          p122_profile=ACTIVE_MEDIA_SINGLE_0x1840_0x000D
+          entrance_only=true
+          relay_index=1
+          packet_len=48
+          manual_repeat_advances_counter=true
+          counter_commit_on_tx_completion=true
+          existing_ctpp_reused=true
+          second_ctpp_open=false
+          second_p2p_session=false
+          automatic_retry=false
+          gate_profile_promoted=false
+          candidate_executed=false
+          production_deploy_performed=false
+          LIVE_INVOCATIONS=0
+          DOOR_ACTIONS=0
+          GATE_ACTIONS=0
+          COMELIT_NETWORK_REQUESTS=0
+          EOF
+
+      - name: Verify corrected promoted identity
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          BINARY_SHA: ${{ steps.build.outputs.binary_sha }}
+        run: |
+          set -Eeuo pipefail
+          test "$(sha256sum custom_components/comelit/native/comelit-media | awk '{print $1}')" = "$BINARY_SHA"
+          grep -Fq "$BINARY_SHA" custom_components/comelit/media_transport.py
+          grep -Fx "GENERATED_SOURCE_SHA256=$SOURCE_SHA"             safety-poc/research/media/v1/p122_on_demand_media_door_production_media_build_meta.txt
+          grep -Fx "NATIVE_BINARY_SHA256=$BINARY_SHA"             safety-poc/research/media/v1/p122_on_demand_media_door_production_media_build_meta.txt
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest             safety-poc/tests/test_p122_on_demand_media_door.py             safety-poc/tests/test_p80_media_transport_static_contract.py             safety-poc/tests/test_p107_musl_package_provenance.py
+
+      - name: Commit corrected P122 helper and remove one-shot workflow
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf .p122 .p122-apks .p122-out-a .p122-out-b
+          git rm .github/workflows/p122-media-rebuild-corrective-once.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add             custom_components/comelit/native/comelit-media             custom_components/comelit/media_transport.py             safety-poc/research/media/v1/p122_on_demand_media_door_production_media_build_meta.txt             safety-poc/tests/test_p80_media_transport_static_contract.py             safety-poc/tests/test_p107_musl_package_provenance.py             safety-poc/tests/test_p116_r18_hls_runtime_diagnostics.py             safety-poc/tests/test_p116_r20_hls_http_boundary_diagnostics.py             safety-poc/tests/test_p116_ha_stream_rtp_bridge.py             safety-poc/tests/test_p116_native_rtp_telemetry.py             safety-poc/tests/test_p116_provenance_binary_analysis.py             safety-poc/tests/test_p116_r24_recovery_shim_lifecycle.py
+          git diff --cached --check
+          git commit -m "build(comelit): promote corrected reproducible P122 helper"
+          git push origin HEAD:feat/on-demand-media-door-single-message
