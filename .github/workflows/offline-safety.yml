@@ -38,6 +38,8 @@ jobs:
           for script in scripts/*.sh deploy/*.sh; do
             bash -n "$script"
           done
+          bash -n research/media/v1/ct122_build_p116_r66_call_time_door_candidate.sh
+          bash -n research/media/v1/ct122_promote_p116_r66_call_time_door_candidate.sh
       - name: Repository-only unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}/safety-poc/src
