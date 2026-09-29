@@ -218,11 +218,19 @@ class P116R20HlsHttpBoundaryDiagnosticsTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, self.probe_source)
 
-    def test_media_transport_is_unchanged(self) -> None:
-        self.assertEqual(_sha256(TRANSPORT), EXPECTED_MEDIA_TRANSPORT_SHA256)
-
-    def test_native_helper_is_unchanged(self) -> None:
-        self.assertEqual(_sha256(NATIVE_BINARY), EXPECTED_NATIVE_SHA256)
+    def test_r20_probe_does_not_own_media_transport_or_native_lifecycle(self) -> None:
+        # Later protocol phases may intentionally change transport/native
+        # implementation. R20 owns only HTTP/HLS observation boundaries.
+        transport = TRANSPORT.read_text(encoding="utf-8")
+        self.assertEqual(transport.count("async_negotiate_p2p("), 1)
+        self.assertEqual(transport.count("asyncio.create_subprocess_exec("), 1)
+        self.assertIn("actual_sha256 = _sha256_file(_MEDIA_NATIVE_BINARY)", transport)
+        for forbidden in (
+            "async_open_door",
+            "signal.SIGUSR1",
+            "P122_",
+        ):
+            self.assertNotIn(forbidden, self.probe_source)
 
     def test_door_and_gate_safety_surfaces_remain_bounded(self) -> None:
         # R20 must not freeze the whole button.py forever: later Door UX
