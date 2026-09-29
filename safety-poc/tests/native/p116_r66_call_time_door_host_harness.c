@@ -38,6 +38,7 @@ static void reset_world(void)
     v4_door_writes_sent = 0u;
     g_r66_call_time_door_ack_observed = FALSE;
     g_r66_call_time_door_waiting_ack = FALSE;
+    g_r66_call_time_door_selected = FALSE;
     g_queue_accept = TRUE;
     g_flush_accept = TRUE;
     g_queued_frames = 0u;
@@ -62,18 +63,43 @@ static void print_passfail(const char *name, int ok)
     printf("%s=%s\n", name, ok ? "PASS" : "FAIL");
 }
 
+/*
+ * Reproduce the production tick ordering that caught the original R66 bug:
+ * select while IDLE, then transition to SENDING, then choose the queue path.
+ * The old implementation re-ran the IDLE-only predicate after the transition
+ * and therefore fell back to the legacy five-write path.
+ */
+static gboolean harness_tick_select_and_queue(void)
+{
+    g_r66_call_time_door_selected = r66_call_time_door_eligible();
+    v4_door_stage = V4_DOOR_SENDING;
+
+    if (g_r66_call_time_door_selected)
+        return r66_queue_call_time_door();
+
+    g_legacy_standalone_writes++;
+    g_last_kind = P12_TX_V4_DOOR_WRITE;
+    return TRUE;
+}
+
 static void case_a_eligible_queues_one_call_time_frame(void)
 {
     int ok;
 
     reset_world();
-    ok = r66_queue_call_time_door();
+    ok = harness_tick_select_and_queue();
     print_passfail(
         "R66_CASE_A_ELIGIBLE_ONE_CALL_TIME_FRAME",
         ok &&
         g_queued_frames == 1u &&
         g_last_kind == P12_TX_CALL_TIME_DOOR &&
         g_last_body_len == R66_CALL_TIME_DOOR_PACKET_LEN &&
+        g_legacy_standalone_writes == 0u);
+    print_passfail(
+        "R66_CASE_A_REAL_TICK_ORDER_SINGLE_MESSAGE",
+        ok &&
+        g_queued_frames == 1u &&
+        g_last_kind == P12_TX_CALL_TIME_DOOR &&
         g_legacy_standalone_writes == 0u);
     printf("R66_CASE_A_QUEUED_FRAMES=%u\n", g_queued_frames);
     printf("R66_CASE_A_QUEUED_KIND=%s\n",
@@ -112,7 +138,7 @@ static void case_c_sequence_and_queue_failure(void)
 
     reset_world();
     before = g_r35_session.call_sequence & 0xffu;
-    (void)r66_queue_call_time_door();
+    (void)harness_tick_select_and_queue();
     wire = g_last_body[4];
     (void)r66_call_time_door_tx_completed();
     after = g_r35_session.call_sequence & 0xffu;
@@ -126,7 +152,7 @@ static void case_c_sequence_and_queue_failure(void)
     reset_world();
     g_queue_accept = FALSE;
     failure_before = g_r35_session.call_sequence & 0xffu;
-    (void)r66_queue_call_time_door();
+    (void)harness_tick_select_and_queue();
     failure_after = g_r35_session.call_sequence & 0xffu;
     print_passfail(
         "R66_CASE_C_QUEUE_FAILURE_DOES_NOT_ADVANCE",
@@ -140,6 +166,12 @@ static void case_d_media_inactive_falls_back(void)
     reset_world();
     r42_media_stage = R42_MEDIA_IDLE;
     print_passfail("R66_CASE_D_SELECTOR_FALSE_MEDIA_INACTIVE", !r66_call_time_door_eligible());
+    (void)harness_tick_select_and_queue();
+    print_passfail(
+        "R66_CASE_D_REAL_TICK_FALLS_BACK_STANDALONE",
+        g_queued_frames == 0u &&
+        g_last_kind == P12_TX_V4_DOOR_WRITE &&
+        g_legacy_standalone_writes == 1u);
     print_passfail("R66_CASE_D_STANDALONE_BODIES_BYTE_IDENTICAL", r66_standalone_bodies_match());
 }
 
@@ -179,7 +211,7 @@ static void case_ack_marker_derivation(void)
     };
 
     reset_world();
-    (void)r66_queue_call_time_door();
+    (void)harness_tick_select_and_queue();
     (void)r66_call_time_door_tx_completed();
     print_passfail(
         "R66_ACK_MARKER_TRUE_DERIVED",
@@ -188,7 +220,7 @@ static void case_ack_marker_derivation(void)
     r66_call_time_door_emit_settle_result();
 
     reset_world();
-    (void)r66_queue_call_time_door();
+    (void)harness_tick_select_and_queue();
     (void)r66_call_time_door_tx_completed();
     print_passfail(
         "R66_ACK_MARKER_FALSE_WITHOUT_RESPONSE",
@@ -196,7 +228,7 @@ static void case_ack_marker_derivation(void)
     r66_call_time_door_emit_settle_result();
 
     reset_world();
-    (void)r66_queue_call_time_door();
+    (void)harness_tick_select_and_queue();
     (void)r66_call_time_door_tx_completed();
     print_passfail(
         "R66_ACK_GENERIC_NOT_DOOR_SPECIFIC",
