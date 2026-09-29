@@ -141,6 +141,12 @@ class ComelitEntranceDoorButton(ButtonEntity):
         self.async_on_remove(
             self._supervisor.async_add_status_listener(self._handle_status_update)
         )
+        if self._media_transport is not None:
+            self.async_on_remove(
+                self._media_transport.async_add_status_listener(
+                    self._handle_status_update
+                )
+            )
 
     def _handle_status_update(self) -> None:
         self.async_write_ha_state()
