@@ -68,8 +68,41 @@ protocol bytes, addresses, channel ids, tokens, SDP, or payload are printed.
 Generated P122 source SHA256:
 
 ```text
-d9bd8a25c66d9caa68857dc4efa4778140cd0a7ea882a384fce6af4a2087a79c
+fa5f3fef61b6673718d677e150770c2af6fe2c752d0756034c9ad5e1864a384c
 ```
+
+## Native Rebuild And Promotion
+
+Promoted native binary SHA256:
+
+```text
+5811415a95bbeb687e7f91d5a1ed70c67473086ddefa4bfb602eba2798ad0573
+```
+
+Size: 311360 bytes.
+
+Hermes ran independent CT120 canonical builds A and B at
+`82efeeb96f6b56a374ffc60e9933c79a8a4ac31f` with `P80_BUILD_PROFILE=P122`,
+`P80_BUILD_INCLUDE_P116=1`, and the P122 on-demand media Door transform. Build A
+and build B produced the same binary SHA256 above, and the binary comparison
+gate passed.
+
+Generated source SHA256 remained:
+
+```text
+fa5f3fef61b6673718d677e150770c2af6fe2c752d0756034c9ad5e1864a384c
+```
+
+Superseded native/source pair:
+
+```text
+a3c95f3ec8c5c00963946c8ff550760fadd792a314bb72692e4281da35a5a6a5
+fd375a37e427e680db60984f6d74807e56892a1a042a168032a6dfa42411eff5
+```
+
+Profile source gate and profile binary gate both passed for P122. The earlier
+candidate build with the same binary bytes was blocked only by the stale legacy
+marker gate.
 
 ## Test Results
 
