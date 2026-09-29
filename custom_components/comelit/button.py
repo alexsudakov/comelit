@@ -9,6 +9,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
+    DATA_MEDIA_TRANSPORTS,
     DATA_RUNTIMES,
     DATA_SUPERVISORS,
     DOMAIN,
@@ -20,6 +21,7 @@ from .const import (
     MAIN_GATE_UNIQUE_ID,
     resolve_door_capability,
 )
+from .media_transport import ComelitEntranceMediaTransport
 from .runtime import ComelitRingRuntime
 from .supervisor import ComelitRuntimeSupervisor
 
@@ -35,10 +37,19 @@ async def async_setup_entry(
     supervisor: ComelitRuntimeSupervisor | None = (
         hass.data.get(DOMAIN, {}).get(DATA_SUPERVISORS, {}).get(entry.entry_id)
     )
+    media_transport: ComelitEntranceMediaTransport | None = (
+        hass.data.get(DOMAIN, {})
+        .get(DATA_MEDIA_TRANSPORTS, {})
+        .get(entry.entry_id)
+    )
     if runtime is not None and supervisor is not None:
         async_add_entities(
             [
-                ComelitEntranceDoorButton(runtime, supervisor),
+                ComelitEntranceDoorButton(
+                    runtime,
+                    supervisor,
+                    media_transport,
+                ),
                 ComelitGateDoorButton(runtime, supervisor),
             ]
         )
@@ -56,33 +67,50 @@ class ComelitEntranceDoorButton(ButtonEntity):
         self,
         runtime: ComelitRingRuntime,
         supervisor: ComelitRuntimeSupervisor,
+        media_transport: ComelitEntranceMediaTransport | None,
     ) -> None:
         self._runtime = runtime
         self._supervisor = supervisor
+        self._media_transport = media_transport
         self.entity_id = MAIN_ENTRANCE_ENTITY_ID
         self._last_result: dict[str, object] | None = None
 
     @property
     def available(self) -> bool:
-        # Media owns the only allowed Comelit session while the listener is
-        # intentionally paused. Door must fail closed rather than restarting
-        # the Ring/Door runtime behind the media manager's back.
-        # Legacy static contract equivalent: return not self._supervisor.media_paused
+        if self._supervisor.media_paused:
+            transport = self._media_transport
+            return transport is not None and transport.active
         return resolve_door_capability(
             DOOR_ENTRANCE,
-            media_paused=self._supervisor.media_paused,
+            media_paused=False,
         ).available
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         result = self._last_result or self._runtime.last_door_result or {}
+        media_door_available = bool(
+            self._supervisor.media_paused
+            and self._media_transport is not None
+            and self._media_transport.active
+        )
         capability = resolve_door_capability(
             DOOR_ENTRANCE,
-            media_paused=self._supervisor.media_paused,
+            media_paused=(
+                self._supervisor.media_paused and not media_door_available
+            ),
         )
         return {
-            "standard_press_allowed": capability.press_allowed,
-            "blocked_by_media_session": self._supervisor.media_paused,
+            "standard_press_allowed": (
+                media_door_available or capability.press_allowed
+            ),
+            "blocked_by_media_session": (
+                self._supervisor.media_paused and not media_door_available
+            ),
+            "door_dispatch_profile": (
+                "ON_DEMAND_MEDIA_SINGLE"
+                if media_door_available
+                else "LISTENER"
+            ),
             "one_shot_operation_required": True,
             "automatic_retry_allowed": False,
             "physical_effect_asserted": False,
@@ -119,12 +147,15 @@ class ComelitEntranceDoorButton(ButtonEntity):
 
     async def async_press(self) -> None:
         if self._supervisor.media_paused:
-            raise HomeAssistantError(
-                "Comelit Door is temporarily unavailable while the intercom "
-                "media session owns the exclusive Comelit connection"
-            )
-
-        result = await self._runtime.async_open_door(DOOR_ENTRANCE)
+            transport = self._media_transport
+            if transport is None or not transport.active:
+                raise HomeAssistantError(
+                    "Comelit Door is unavailable because the on-demand "
+                    "media session is not active"
+                )
+            result = await transport.async_open_door()
+        else:
+            result = await self._runtime.async_open_door(DOOR_ENTRANCE)
         self._last_result = dict(result)
         self.async_write_ha_state()
         # A complete validated Door TX profile without a proven
