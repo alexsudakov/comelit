@@ -4,13 +4,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 MEDIA = ROOT / "research" / "media" / "v1"
 SOURCE = ROOT / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-ctpp-door.c"
 REPO = ROOT.parent
+STUB_INCLUDE = Path(__file__).resolve().parent / "native" / "whole_tu_stub_include"
 sys.path.insert(0, str(MEDIA))
 
 import entrance_p121_gather_initial_timeout_transform as p121  # noqa: E402
@@ -125,6 +129,31 @@ class P122OnDemandMediaDoorTests(unittest.TestCase):
         self.assertIn("media_paused=self._supervisor.media_paused", gate)
         self.assertIn("if self._supervisor.media_paused:", gate)
         self.assertNotIn("async_open_door()", gate)
+
+    def test_whole_generated_translation_unit_compiles(self) -> None:
+        cc = shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
+        if not cc:
+            self.skipTest("no C compiler available")
+        with tempfile.TemporaryDirectory(prefix="p122-tu-") as tmp:
+            tu = Path(tmp) / "p122-whole-tu.c"
+            tu.write_text(self.candidate_a, encoding="utf-8")
+            result = subprocess.run(
+                [
+                    cc,
+                    "-std=gnu11",
+                    "-fsyntax-only",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror=implicit-function-declaration",
+                    "-Werror=implicit-int",
+                    "-I",
+                    str(STUB_INCLUDE),
+                    str(tu),
+                ],
+                text=True,
+                capture_output=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr[:5000])
 
 
 if __name__ == "__main__":
