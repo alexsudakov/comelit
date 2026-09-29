@@ -399,6 +399,7 @@ static void g_main_loop_quit(void *main_loop)
             "R66_CASE_B_INVERSION_DETECTED",
             "R66_CASE_C_SEQUENCE_ADVANCES_ON_TX_COMPLETE",
             "R66_CASE_C_QUEUE_FAILURE_DOES_NOT_ADVANCE",
+            "R66_CASE_C_STALE_GENERATION_DOES_NOT_OVERWRITE",
             "R66_CASE_D_SELECTOR_FALSE_MEDIA_INACTIVE",
             "R66_CASE_D_REAL_TICK_FALLS_BACK_STANDALONE",
             "R66_CASE_D_STANDALONE_BODIES_BYTE_IDENTICAL",
@@ -492,9 +493,27 @@ static void g_main_loop_quit(void *main_loop)
             candidate,
         )
         self.assertIn(
-            "g_r35_session.call_sequence = g_r66_call_time_door_sequence_after & 0xffu;",
+            "g_r35_session.call_generation == g_r66_call_time_door_generation",
             candidate,
         )
+        self.assertIn(
+            "(g_r35_session.call_sequence & 0xffu) ==",
+            candidate,
+        )
+        self.assertIn(
+            "g_r66_call_time_door_sequence_before",
+            candidate,
+        )
+        self.assertIn(
+            "g_r35_session.call_sequence =",
+            candidate,
+        )
+        self.assertIn(
+            "g_r66_call_time_door_sequence_after & 0xffu;",
+            candidate,
+        )
+        self.assertIn("CALL_TIME_DOOR_STALE_GENERATION=true", candidate)
+        self.assertIn("CALL_TIME_DOOR_SEQUENCE_COMMITTED=%s", candidate)
         self.assertIn("r66_call_time_door_tx_completed", candidate)
         region = candidate.split(r66.BEGIN, 1)[1].split(r66.END, 1)[0]
         queue_failure_tail = region.split("if (!queued)\n        return FALSE;", 1)[0]
