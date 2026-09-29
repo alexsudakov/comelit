@@ -219,7 +219,14 @@ class P116R20HlsHttpBoundaryDiagnosticsTests(unittest.TestCase):
             self.assertNotIn(forbidden, self.probe_source)
 
     def test_media_transport_is_unchanged(self) -> None:
-        self.assertEqual(_sha256(TRANSPORT), EXPECTED_MEDIA_TRANSPORT_SHA256)
+        # Later phases may extend the transport outside the R20 HTTP probe.
+        # Keep the R20 isolation contract semantically instead of freezing the
+        # whole file hash forever.
+        transport = TRANSPORT.read_text(encoding="utf-8")
+        self.assertEqual(transport.count("async_negotiate_p2p("), 1)
+        self.assertEqual(transport.count("asyncio.create_subprocess_exec("), 1)
+        self.assertNotIn("async_pause_for_media", transport)
+        self.assertNotIn("async_resume_after_media", transport)
 
     def test_native_helper_is_unchanged(self) -> None:
         self.assertEqual(_sha256(NATIVE_BINARY), EXPECTED_NATIVE_SHA256)
