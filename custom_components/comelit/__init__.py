@@ -41,6 +41,7 @@ from .const import (
     DATA_SYNTHETIC_RING_MEDIA,
     DATA_SUPERVISORS,
     DOMAIN,
+    DOOR_ENTRANCE,
     EVENT_RING_INTERACTION,
     PLATFORMS,
     RING_INTERACTION_OUTCOMES,
@@ -92,24 +93,40 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         supervisor: ComelitRuntimeSupervisor | None = supervisors.get(entry_id)
         if supervisor is None:
             raise HomeAssistantError("Comelit runtime supervisor is unavailable")
-        # A separately bootstrapped on-demand media session owns the only
-        # Comelit connection and keeps the persistent listener stopped, so the
-        # listener-owned Door path must stay fail-closed in that mode.
-        #
-        # Attached inbound Ring media is deliberately different: it reuses the
-        # still-running persistent listener transaction and its existing CTPP
-        # channel. The validated Door one-shot therefore remains available
-        # during an attached physical call.
+
+        door = str(call.data[ATTR_DOOR])
+        event_id = call.data.get(ATTR_EVENT_ID)
+        event_id_str = str(event_id) if event_id else None
+
+        # On-demand media owns the only upstream Comelit connection while the
+        # persistent listener is paused. Entrance Door is therefore routed
+        # through that same active media helper/CTPP; the listener is never
+        # restarted just to actuate the Door. Gate has no validated
+        # on-demand-media profile and remains fail-closed.
         if supervisor.media_paused:
+            media_transports = domain_data.get(DATA_MEDIA_TRANSPORTS, {})
+            media_transport: ComelitEntranceMediaTransport | None = (
+                media_transports.get(entry_id)
+            )
+            if (
+                door == DOOR_ENTRANCE
+                and media_transport is not None
+                and media_transport.active
+            ):
+                return await media_transport.async_open_door(
+                    event_id=event_id_str,
+                )
             raise HomeAssistantError(
-                "Comelit Door is temporarily unavailable while a separately "
-                "bootstrapped media session owns the exclusive connection"
+                "Comelit Door is unavailable for this target while the "
+                "on-demand media session owns the exclusive connection"
             )
 
-        event_id = call.data.get(ATTR_EVENT_ID)
+        # Normal idle and attached inbound-Ring operation stays on the
+        # persistent listener-owned Door path. Attached media keeps that
+        # listener and its existing CTPP alive.
         return await runtime.async_open_door(
-            str(call.data[ATTR_DOOR]),
-            event_id=str(event_id) if event_id else None,
+            door,
+            event_id=event_id_str,
         )
 
     async def handle_emit_ring_interaction(call: ServiceCall) -> None:
