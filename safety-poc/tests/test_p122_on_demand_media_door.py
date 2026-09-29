@@ -73,13 +73,13 @@ class P122OnDemandMediaDoorTests(unittest.TestCase):
         region = self.candidate_a.split(p122.BEGIN, 1)[1].split(p122.END, 1)[0]
         for needle in (
             "#define P122_DOOR_PACKET_LEN 48u",
-            "write_le16(out + 0, 0x1840u);",
+            "p122_write_le16(out + 0, 0x1840u);",
             "p122_door_sequence = previous_sequence + 0x00010000u;",
-            "write_le32(out + 2, p122_door_sequence);",
-            "write_be16(out + 6, 0x000du);",
-            "write_be16(out + 8, 0x002du);",
+            "p122_write_le32(out + 2, p122_door_sequence);",
+            "p122_write_be16(out + 6, 0x000du);",
+            "p122_write_be16(out + 8, 0x002du);",
             "memcpy(out + 10, V4_ENTRANCE, 8u);",
-            "write_le32(out + 20, P122_DOOR_RELAY_ENTRANCE);",
+            "p122_write_le32(out + 20, P122_DOOR_RELAY_ENTRANCE);",
             "memset(out + 24, 0xff, 4u);",
             "memcpy(out + 28, V4_FULL_ADDRESS, 9u);",
             "memcpy(out + 38, V4_APT_ADDRESS, 8u);",
