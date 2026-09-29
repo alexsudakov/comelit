@@ -51,9 +51,16 @@ static gboolean p122_door_waiting_ack = FALSE;
 static gboolean p122_door_ack_observed = FALSE;
 static guint32 p122_door_counter = 0u;
 
+static void p122_door_signal_handler(int signum);
 static gboolean p122_on_demand_door_busy(void);
 static gboolean p122_on_demand_door_tick_cb(gpointer data);
 static gboolean p122_on_demand_door_settle_cb(gpointer data);
+static gboolean p122_note_door_ack(
+    guint16 request_id,
+    const guint8 *body,
+    guint body_len);
+static void p122_emit_door_result(const char *result);
+static gboolean p122_commit_counter_baseline(void);
 
 /* R27 bounded same-session periodic refresh 0x001A research state. */
 '''
@@ -84,6 +91,14 @@ p122_current_media_counter(void)
     if (r27_repeat_001a_sent_count > 0u && r27_repeat_001a_sequence != 0u)
         return r27_repeat_001a_sequence;
     return r27_initial_001a_sequence;
+}
+
+static guint32
+p122_next_media_counter(guint32 current)
+{
+    guint32 next_byte4 =
+        ((((current >> 16u) & 0xffu) + 1u) & 0xffu) << 16u;
+    return (current & 0xff00ffffu) | next_byte4;
 }
 
 static void
@@ -184,7 +199,7 @@ p122_queue_door(void)
         return FALSE;
 
     current_counter = p122_current_media_counter();
-    next_counter = current_counter + 0x00010000u;
+    next_counter = p122_next_media_counter(current_counter);
     if (!p122_serialize_door(packet, next_counter))
         return FALSE;
 
@@ -236,6 +251,16 @@ p122_on_demand_door_tick_cb(gpointer data)
 }
 
 static gboolean
+p122_commit_counter_baseline(void)
+{
+    if (p78_rtpc_client_001a_len != 60u)
+        return FALSE;
+    write_le32(p78_rtpc_client_001a + 2u, p122_door_counter);
+    r27_initial_001a_sequence = p122_door_counter;
+    return TRUE;
+}
+
+static gboolean
 p122_note_door_ack(guint16 request_id, const guint8 *body, guint body_len)
 {
     if (!p122_door_waiting_ack ||
@@ -265,10 +290,15 @@ _TX_CASE_ANCHOR = r'''        case R27_TX_RTPC_CLIENT_001A_REPEAT:
 _TX_CASE_REPLACEMENT = r'''        case P122_TX_ON_DEMAND_DOOR:
             p122_door_queued = FALSE;
             p122_door_waiting_ack = TRUE;
-            write_le32(p78_rtpc_client_001a + 2u, p122_door_counter);
+            if (p122_commit_counter_baseline()) {
+                printf("P122_ON_DEMAND_DOOR_COUNTER_BASELINE_ADVANCED=true\n");
+            } else {
+                r27_refresh_fail_closed = TRUE;
+                printf("P122_ON_DEMAND_DOOR_COUNTER_BASELINE_ADVANCED=false\n");
+                printf("P122_REFRESH_FAIL_CLOSED=true\n");
+            }
             printf("P122_ON_DEMAND_DOOR_SENT=true\n");
             printf("P122_ON_DEMAND_DOOR_WRITE_COUNT=1\n");
-            printf("P122_ON_DEMAND_DOOR_COUNTER_BASELINE_ADVANCED=true\n");
             fflush(stdout);
             if (g_timeout_add(
                     P122_DOOR_SETTLE_MS,
@@ -307,7 +337,7 @@ _REFRESH_ANCHOR = """    r27_repeat_timer_armed = FALSE;
     return G_SOURCE_REMOVE;
 }
 """
-_REFRESH_REPLACEMENT = """    r27_repeat_timer_armed = FALSE;
+_REFRESH_REPLACEMENT = r"""    r27_repeat_timer_armed = FALSE;
     if (p122_on_demand_door_busy()) {
         if (g_timeout_add_seconds(2u, r27_repeat_delay_cb, NULL) == 0u) {
             p78_fail_rtpc("P122_REFRESH_DEFER_TIMER_START=FAIL");
