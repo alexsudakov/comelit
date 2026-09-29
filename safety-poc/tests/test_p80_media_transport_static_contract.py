@@ -79,7 +79,7 @@ class P80MediaTransportStaticContractTests(unittest.TestCase):
         self.assertNotIn("while True:\n            remote = await async_negotiate_p2p", self.source)
 
     def test_transport_has_bounded_entrance_door_but_no_listener_control_surface(self) -> None:
-        self.assertEqual(self.source.count("async def async_open_door(self)"), 1)
+        self.assertEqual(self.source.count("async def async_open_door("), 1)
         self.assertIn("os.kill(process.pid, signal.SIGUSR1)", self.source)
         self.assertIn('"path": "ON_DEMAND_MEDIA_SINGLE"', self.source)
         self.assertIn('"automatic_retry_allowed": False', self.source)
