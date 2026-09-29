@@ -211,9 +211,23 @@ class P116R18HlsRuntimeDiagnosticsTests(unittest.TestCase):
             self.assertNotIn(forbidden, diagnostic_source)
         self.assertIn("self._transport.video_packet_count", self.camera)
 
-    def test_r18_owned_transport_and_native_binary_are_unchanged(self) -> None:
-        self.assertEqual(_sha256(TRANSPORT), EXPECTED_MEDIA_TRANSPORT_SHA256)
-        self.assertEqual(_sha256(NATIVE_BINARY), EXPECTED_NATIVE_SHA256)
+    def test_r18_diagnostics_do_not_own_transport_or_native_lifecycle(self) -> None:
+        # R18 is an HLS observation phase. Later media-owner/native phases may
+        # intentionally evolve transport and helper bytes; keep the historical
+        # invariant semantic instead of freezing those whole files forever.
+        diagnostic_source = "\n".join(
+            _function_source(self.tree, self.camera, name)
+            for name in DIAGNOSTIC_METHODS
+        )
+        self.assertNotIn("async_open_door", diagnostic_source)
+        self.assertNotIn("signal.SIGUSR1", diagnostic_source)
+        self.assertNotIn("async_negotiate_p2p", diagnostic_source)
+        self.assertNotIn("create_subprocess_exec", diagnostic_source)
+
+        transport = TRANSPORT.read_text(encoding="utf-8")
+        self.assertEqual(transport.count("async_negotiate_p2p("), 1)
+        self.assertEqual(transport.count("asyncio.create_subprocess_exec("), 1)
+        self.assertIn("actual_sha256 = _sha256_file(_MEDIA_NATIVE_BINARY)", transport)
 
         # The generic session manager may evolve in later phases. R18 only
         # requires that its HLS diagnostics do not own or mutate session
