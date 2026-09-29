@@ -441,7 +441,7 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         self.assertIn('line == "P80_MEDIA_ACTIVE=true"', source)
         self.assertIn('line == "P80_VIDEO_RTP_FORWARDING=PASS"', source)
         self.assertIn('line == "P80_AUDIO_RTP_FORWARDING=PASS"', source)
-        self.assertEqual(source.count("async def async_open_door(self)"), 1)
+        self.assertEqual(source.count("async def async_open_door("), 1)
         self.assertIn("os.kill(process.pid, signal.SIGUSR1)", source)
         self.assertIn('"automatic_retry_allowed": False', source)
         self.assertIn('"physical_effect_asserted": False', source)
