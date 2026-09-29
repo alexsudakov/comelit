@@ -34,18 +34,21 @@ SOURCE = SAFETY_ROOT / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-c
 # produced the currently shipped binary -- see
 # test_current_head_source_identity_is_separate_from_packaged_native_provenance,
 # which is exactly what its name says now.
-BUILD_META = MEDIA_DIR / "p121_gather_initial_timeout_production_media_build_meta.txt"
+BUILD_META = MEDIA_DIR / "p122_on_demand_media_door_production_media_build_meta.txt"
+FROZEN_P121_BUILD_META = MEDIA_DIR / "p121_gather_initial_timeout_production_media_build_meta.txt"
 FROZEN_P119_BUILD_META = (
     MEDIA_DIR / "p119_remote_sdp_l1_gather_diag_production_media_build_meta.txt"
 )
 # The P119 pair is now the superseded record; keep it as literal values so it keeps
 # describing the artifact P119 actually built, not whatever HEAD pins currently say.
+SUPERSEDED_P121_BINARY_SHA256 = "9347a973b012d5ca86b406642a5fcd9b86ce44201d0b5144073005ca72ce7712"
+SUPERSEDED_P121_SOURCE_SHA256 = "07468cd74027d02d5f002c1cc63558f68526cf06b9694c5afe94579ea68f9e74"
 SUPERSEDED_P119_BINARY_SHA256 = "095051f42b7e6393c48fce51eaef73665e722fc852f263beed1b5c433308b0e0"
 SUPERSEDED_P119_SOURCE_SHA256 = "2f8137e988437c779a0f3bb1c9904c81cbe2d13641efa2e6a070054116dd43ed"
 FROZEN_P117_BUILD_META = MEDIA_DIR / "p117_settle1000_production_media_build_meta.txt"
 FROZEN_R65_BUILD_META = MEDIA_DIR / "p116_r65_production_media_build_meta.txt"
 PRE_R65_BUILD_META = MEDIA_DIR / "p116_media_telemetry_build_meta.txt"
-EXPECTED_MUSL_SHA256 = "9347a973b012d5ca86b406642a5fcd9b86ce44201d0b5144073005ca72ce7712"
+EXPECTED_MUSL_SHA256 = "a3c95f3ec8c5c00963946c8ff550760fadd792a314bb72692e4281da35a5a6a5"
 EXPECTED_RUN3_GLIBC_SHA256 = "94063498a35a886dc4cb735c3e629a5097b965224cb3354192723d30e70c16ac"
 # PACKAGED_NATIVE_SOURCE_SHA256 is the source identity actually baked into
 # the packaged EXPECTED_MUSL_SHA256 binary (the P119 rebuild pair: both moved
@@ -56,8 +59,8 @@ EXPECTED_RUN3_GLIBC_SHA256 = "94063498a35a886dc4cb735c3e629a5097b965224cb3354192
 # transform (entrance_p119_remote_sdp_l1_gather_diag_transform.py), composed
 # on top of the still-frozen R65 output. Since the orchestrator rebuild they
 # describe the same pair again, exactly as in the P117 round.
-PACKAGED_NATIVE_SOURCE_SHA256 = "07468cd74027d02d5f002c1cc63558f68526cf06b9694c5afe94579ea68f9e74"
-HEAD_P116_SOURCE_SHA256 = "07468cd74027d02d5f002c1cc63558f68526cf06b9694c5afe94579ea68f9e74"
+PACKAGED_NATIVE_SOURCE_SHA256 = "fd375a37e427e680db60984f6d74807e56892a1a042a168032a6dfa42411eff5"
+HEAD_P116_SOURCE_SHA256 = "fd375a37e427e680db60984f6d74807e56892a1a042a168032a6dfa42411eff5"
 # The P117 pair is now a historical record: these must stay literal values so
 # they keep describing the artifact P117 actually built, not the current pins.
 SUPERSEDED_P117_BINARY_SHA256 = "ff16db0d809135cf5cdf6be4bfe8133fd77b3f41871b6c8f46eea765064537fb"
@@ -231,6 +234,7 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         pre_r65_meta = _metadata(PRE_R65_BUILD_META)
         self.assertEqual(actual, EXPECTED_MUSL_SHA256)
         self.assertEqual(_transport_sha_pin(self.transport_source), EXPECTED_MUSL_SHA256)
+        frozen_p121_meta = _metadata(FROZEN_P121_BUILD_META)
         frozen_p119_meta = _metadata(FROZEN_P119_BUILD_META)
         # The packaged artifact is always the one the most recent *completed* build
         # record documents; that record is identified by carrying the packaged
@@ -238,7 +242,7 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         packaged_pair_meta = (
             meta
             if meta.get("GENERATED_SOURCE_SHA256") == PACKAGED_NATIVE_SOURCE_SHA256
-            else frozen_p119_meta
+            else frozen_p121_meta
         )
         self.assertEqual(
             packaged_pair_meta["GENERATED_SOURCE_SHA256"], PACKAGED_NATIVE_SOURCE_SHA256
@@ -264,7 +268,7 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
             frozen_p119_meta["GENERATED_SOURCE_SHA256"], SUPERSEDED_P119_SOURCE_SHA256
         )
         self.assertEqual(meta["NATIVE_BINARY_SHA256"], EXPECTED_MUSL_SHA256)
-        self.assertEqual(meta["superseded_native_binary_sha256"], SUPERSEDED_P119_BINARY_SHA256)
+        self.assertEqual(meta["superseded_native_binary_sha256"], SUPERSEDED_P121_BINARY_SHA256)
         self.assertEqual(
             frozen_p119_meta["superseded_native_binary_sha256"], SUPERSEDED_P117_BINARY_SHA256
         )
@@ -343,7 +347,7 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         # P121 is now the canonical generator for HEAD's candidate (it composes P119,
         # which composes R65, which composes P106+P116 below it, unchanged), so HEAD
         # source identity is computed from P121, not from R65 directly.
-        from entrance_p121_gather_initial_timeout_transform import transform
+        from entrance_p122_on_demand_media_door_transform import transform
 
         # Deterministic command:
         # PYTHONPATH=safety-poc/research/media/v1 python3 -c
@@ -351,14 +355,14 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         # entrance_p121_gather_initial_timeout_transform import transform;
         # print(hashlib.sha256(transform(Path("safety-poc/research/door/v1_5_7/comelit-v4-persistent-ctpp-door.c").read_text(encoding="utf-8"), include_p116=True).encode("utf-8")).hexdigest())'
         candidate = transform(
-            SOURCE.read_text(encoding="utf-8"),
-            include_p116=True,
+            SOURCE.read_text(encoding="utf-8")
         ).encode("utf-8")
         head_sha = hashlib.sha256(candidate).hexdigest()
         meta = _metadata(BUILD_META)
         frozen_p117_meta = _metadata(FROZEN_P117_BUILD_META)
         native_rebuild_required = head_sha != PACKAGED_NATIVE_SOURCE_SHA256
         current_packaged_matches_head = head_sha == PACKAGED_NATIVE_SOURCE_SHA256
+        frozen_p121_meta = _metadata(FROZEN_P121_BUILD_META)
         frozen_p119_meta = _metadata(FROZEN_P119_BUILD_META)
         self.assertEqual(head_sha, HEAD_P116_SOURCE_SHA256)
         self.assertEqual(meta["GENERATED_SOURCE_SHA256"], HEAD_P116_SOURCE_SHA256)
@@ -366,12 +370,12 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         # binary still belongs to that P119 pair until the rebuild lands.
         self.assertEqual(
             meta["superseded_generated_source_sha256"],
-            frozen_p119_meta["GENERATED_SOURCE_SHA256"],
+            frozen_p121_meta["GENERATED_SOURCE_SHA256"],
         )
         self.assertEqual(
-            frozen_p119_meta["NATIVE_BINARY_SHA256"], SUPERSEDED_P119_BINARY_SHA256
+            frozen_p121_meta["NATIVE_BINARY_SHA256"], SUPERSEDED_P121_BINARY_SHA256
         )
-        self.assertEqual(meta["superseded_native_binary_sha256"], SUPERSEDED_P119_BINARY_SHA256)
+        self.assertEqual(meta["superseded_native_binary_sha256"], SUPERSEDED_P121_BINARY_SHA256)
         has_evidence = "build_a_sha256" in meta and "build_b_sha256" in meta
         self.assertEqual(
             meta["binary_rebuild_pending_orchestrator"],
@@ -407,11 +411,10 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
             self.assertEqual(corrupted_binary_sha, EXPECTED_MUSL_SHA256)
 
         sys.path.insert(0, str(MEDIA_DIR))
-        from entrance_p121_gather_initial_timeout_transform import transform
+        from entrance_p122_on_demand_media_door_transform import transform
 
         candidate = transform(
-            SOURCE.read_text(encoding="utf-8"),
-            include_p116=True,
+            SOURCE.read_text(encoding="utf-8")
         )
         self.assertEqual(hashlib.sha256(candidate.encode("utf-8")).hexdigest(), HEAD_P116_SOURCE_SHA256)
         corrupted_candidate = candidate.replace("P116_RTP_TELEMETRY_CADENCE", "P116_RTP_TELEMETRY_CADENCE_CORRUPT", 1)

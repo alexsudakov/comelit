@@ -9,7 +9,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 TRANSPORT = ROOT / "custom_components" / "comelit" / "media_transport.py"
 BINARY = ROOT / "custom_components" / "comelit" / "native" / "comelit-media"
-EXPECTED_SHA256 = "9347a973b012d5ca86b406642a5fcd9b86ce44201d0b5144073005ca72ce7712"
+EXPECTED_SHA256 = "a3c95f3ec8c5c00963946c8ff550760fadd792a314bb72692e4281da35a5a6a5"
 
 
 class P80MediaTransportStaticContractTests(unittest.TestCase):
