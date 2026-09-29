@@ -444,7 +444,6 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         for forbidden in (
             "for attempt",
             "force_refresh=True",
-            "async_open_door",
             "create_door_message",
             "homeassistant.restart",
             "systemctl",
@@ -456,6 +455,18 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
                 self.assertIn(forbidden, source)
             else:
                 self.assertNotIn(forbidden, source)
+
+        door_source = _function_source(
+            self.transport_tree,
+            self.transport_source,
+            "async_open_door",
+        )
+        self.assertEqual(door_source.count("signal.SIGUSR1"), 1)
+        self.assertNotIn("async_negotiate_p2p", door_source)
+        self.assertNotIn("asyncio.create_subprocess_exec", door_source)
+        self.assertNotIn("async_start(", door_source)
+        self.assertIn('"automatic_retry_allowed"] = False', self.transport_source)
+        self.assertIn('"physical_effect_asserted"] = False', self.transport_source)
 
     def test_native_gate_still_hashes_before_launch(self) -> None:
         gate_start = self.transport_source.index("def _native_gate() -> None:")
