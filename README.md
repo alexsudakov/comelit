@@ -11,7 +11,7 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.7.10**. This release fixes Entrance Door control during an active physical Ring/attached-media call by using the PCAP-derived single-message call-time Door profile on the existing live call transaction instead of the standalone five-write profile. It preserves the standalone Door and Gate paths, opens no second CTPP/P2P session, adds no automatic retry, and keeps physical-effect reporting conservative. Details are recorded in `docs/releases/1.7.10-door-active-call-single-message.md`.
+Current stable release: **1.7.11**. This release extends the single-message active-video Entrance Door profile to the separately bootstrapped on-demand camera session. While an on-demand entrance video session owns the Comelit connection, Entrance Door is now dispatched to that live media helper and reuses its existing CTPP instead of being blocked. The physical Ring/attached-media profile from 1.7.10 remains unchanged, Gate remains fail-closed in on-demand media, there is no second P2P/CTPP bootstrap and no automatic Door retry. Details are recorded in `docs/releases/1.7.11-on-demand-media-door.md`.
 
 ## Home Assistant Custom Card
 
@@ -182,7 +182,7 @@ open camera.comelit_entrance
 
 ## Safety contract
 
-Door operations are one-shot. Automatic Door retry is not allowed. A protocol acknowledgement is never treated as proof that the physical door opened. The Custom Card and current Ring/Telegram automation use the standard Door button entity for one explicit user request during an attached Ring; separately bootstrapped on-demand media remains fail-closed for Door actions. Physical Door validation remains separate from protocol outcome.
+Door operations are one-shot. Automatic Door retry is not allowed. A protocol acknowledgement is never treated as proof that the physical door opened. The Custom Card and current Ring/Telegram automation use the standard Door button entity for one explicit user request. Entrance Door can use either the active attached physical-call transaction or the separately bootstrapped on-demand entrance-media transaction, depending on which component currently owns the Comelit connection. Gate remains fail-closed during separately bootstrapped on-demand media. Physical Door validation remains separate from protocol outcome.
 
 Intercom media is on-demand only. Home Assistant startup, thumbnails and still-image polling must not open the camera session. Separately bootstrapped on-demand media pauses the persistent listener before bootstrap and restores it only after confirmed teardown. A new viewer or lease never extends the absolute 600-second deadline.
 
