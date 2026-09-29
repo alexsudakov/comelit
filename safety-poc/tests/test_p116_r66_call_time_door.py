@@ -363,16 +363,44 @@ static void g_main_loop_quit(void *main_loop)
         self.assertIn("v4_door_target == V4_DOOR_TARGET_ENTRANCE", candidate)
         self.assertEqual(candidate.count("P12_TX_CALL_TIME_DOOR"), 3)
 
+    def test_real_tick_order_preserves_selected_path_across_sending_transition(self) -> None:
+        candidate = self.generated_a
+        tick_start = candidate.index("v4_door_tick_cb(gpointer data)")
+        tick_end = candidate.index("p12_process_post_uaut", tick_start)
+        tick = candidate[tick_start:tick_end]
+
+        select_at = tick.index(
+            "g_r66_call_time_door_selected = r66_call_time_door_eligible();"
+        )
+        sending_at = tick.index("v4_door_stage = V4_DOOR_SENDING;")
+        queue_at = tick.index("if (g_r66_call_time_door_selected)", sending_at)
+
+        self.assertLess(select_at, sending_at)
+        self.assertLess(sending_at, queue_at)
+        self.assertIn("v4_door_stage == V4_DOOR_IDLE", candidate)
+        self.assertIn("v4_door_stage == V4_DOOR_SENDING", candidate)
+
+        region = candidate.split(r66.BEGIN, 1)[1].split(r66.END, 1)[0]
+        queue_start = region.index("r66_queue_call_time_door(void)")
+        queue_tail = region[queue_start:region.index(
+            "r66_call_time_door_note_control_response", queue_start
+        )]
+        self.assertIn("r66_call_time_door_queue_ready()", queue_tail)
+        self.assertNotIn("r66_call_time_door_eligible()", queue_tail)
+        self.assertIn("V4_DOOR_PATH=CALL_TIME_SINGLE", queue_tail)
+
     def test_native_harness_cases_a_through_h_execute_generated_region(self) -> None:
         self.require_harness()
         self.assertEqual(self.harness_returncode, 0, self.harness_stdout)
         for marker in (
             "R66_CASE_A_ELIGIBLE_ONE_CALL_TIME_FRAME",
+            "R66_CASE_A_REAL_TICK_ORDER_SINGLE_MESSAGE",
             "R66_CASE_B_BYTE_EQUALITY",
             "R66_CASE_B_INVERSION_DETECTED",
             "R66_CASE_C_SEQUENCE_ADVANCES_ON_TX_COMPLETE",
             "R66_CASE_C_QUEUE_FAILURE_DOES_NOT_ADVANCE",
             "R66_CASE_D_SELECTOR_FALSE_MEDIA_INACTIVE",
+            "R66_CASE_D_REAL_TICK_FALLS_BACK_STANDALONE",
             "R66_CASE_D_STANDALONE_BODIES_BYTE_IDENTICAL",
             "R66_CASE_E_GATE_NOT_PROMOTED",
             "R66_CASE_F_PENDING_TX_BLOCKS",
@@ -481,7 +509,11 @@ static void g_main_loop_quit(void *main_loop)
                     _parse_array(self.r64_candidate, f"v4_door_operation_body_{index}"),
                     _parse_array(self.generated_a, f"v4_door_operation_body_{index}"),
                 )
-        self.assertIn("if (r66_call_time_door_eligible())", self.generated_a)
+        self.assertIn(
+            "g_r66_call_time_door_selected = r66_call_time_door_eligible();",
+            self.generated_a,
+        )
+        self.assertIn("if (g_r66_call_time_door_selected)", self.generated_a)
         self.assertIn("if (!v4_door_queue_write(1))", self.generated_a)
         self.assertIn("v4_door_queue_write(v4_door_write_index + 1)", self.generated_a)
 
