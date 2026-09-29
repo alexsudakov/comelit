@@ -441,16 +441,22 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         self.assertIn('line == "P80_MEDIA_ACTIVE=true"', source)
         self.assertIn('line == "P80_VIDEO_RTP_FORWARDING=PASS"', source)
         self.assertIn('line == "P80_AUDIO_RTP_FORWARDING=PASS"', source)
+        self.assertEqual(source.count("async def async_open_door(self)"), 1)
+        self.assertIn("os.kill(process.pid, signal.SIGUSR1)", source)
+        self.assertIn('"automatic_retry_allowed": False', source)
+        self.assertIn('"physical_effect_asserted": False', source)
+        self.assertIn('"path": "ON_DEMAND_MEDIA_SINGLE"', source)
         for forbidden in (
             "for attempt",
             "force_refresh=True",
-            "async_open_door",
             "create_door_message",
             "homeassistant.restart",
             "systemctl",
             'panel == "gate"',
             'panel != "entrance"',
             "LEN=24",
+            "async_pause_for_media",
+            "async_resume_after_media",
         ):
             if forbidden == 'panel != "entrance"':
                 self.assertIn(forbidden, source)
