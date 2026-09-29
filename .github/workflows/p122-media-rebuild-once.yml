@@ -1,0 +1,203 @@
+name: p122-media-rebuild-once
+
+on:
+  push:
+    branches:
+      - fix/door-on-demand-media-session
+    paths:
+      - .github/workflows/p122-media-rebuild-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  rebuild:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Generate P122 source twice
+        id: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          MEDIA="$GITHUB_WORKSPACE/safety-poc/research/media/v1"
+          SOURCE="$GITHUB_WORKSPACE/safety-poc/research/door/v1_5_7/comelit-v4-persistent-ctpp-door.c"
+          TRANSFORM="$MEDIA/entrance_p122_on_demand_door_transform.py"
+          RUN="$GITHUB_WORKSPACE/.p122-run"
+          mkdir -p "$RUN"
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$MEDIA"             python3 "$TRANSFORM" --source "$SOURCE" --output "$RUN/p122-a.c" >/dev/null
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$MEDIA"             python3 "$TRANSFORM" --source "$SOURCE" --output "$RUN/p122-b.c" >/dev/null
+          cmp -s "$RUN/p122-a.c" "$RUN/p122-b.c"
+          SOURCE_A_SHA="$(sha256sum "$RUN/p122-a.c" | awk '{print $1}')"
+          SOURCE_B_SHA="$(sha256sum "$RUN/p122-b.c" | awk '{print $1}')"
+          test "$SOURCE_A_SHA" = "$SOURCE_B_SHA"
+          cp "$RUN/p122-a.c" "$RUN/p122-build-input.c"
+          echo "source_sha=$SOURCE_A_SHA" >> "$GITHUB_OUTPUT"
+          echo "GENERATED_SOURCE_REPRODUCIBLE=PASS"
+
+      - name: Prepare Alpine APK closure
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.p122-apks"
+          docker run --rm             -v "$GITHUB_WORKSPACE/.p122-apks:/pkgs"             alpine:3.24.1             /bin/sh -eu -c '
+              apk update >/dev/null
+              apk fetch --recursive --output /pkgs                 build-base pkgconf glib-dev libnice-dev binutils >/dev/null
+            '
+          test -n "$(find "$GITHUB_WORKSPACE/.p122-apks" -maxdepth 1 -name '*.apk' -print -quit)"
+
+      - name: Build P122 media helper twice offline
+        id: build
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          RUN="$GITHUB_WORKSPACE/.p122-run"
+          cat > "$RUN/build.sh" <<'EOS'
+          set -eu
+          : "${OUT:?}"
+          : "${META:?}"
+          apk add --no-network --allow-untrusted /pkgs/*.apk >/dev/null
+          cc -O2 -g -Wall -Wextra -Wl,--as-needed             -o "/w/$OUT"             /w/p122-build-input.c             $(pkg-config --cflags --libs nice glib-2.0 gio-2.0 gobject-2.0)
+          chmod 755 "/w/$OUT"
+          INTERPRETER="$(readelf -l "/w/$OUT" | sed -n 's@.*Requesting program interpreter: \(.*\)]@\1@p')"
+          NEEDED="$(readelf -d "/w/$OUT" | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' | sort | paste -sd, -)"
+          BUILD_ID="$(readelf -n "/w/$OUT" | sed -n 's/^.*Build ID: //p' | head -1)"
+          {
+            echo "interpreter=$INTERPRETER"
+            echo "needed=$NEEDED"
+            echo "build_id=$BUILD_ID"
+            echo "cc_version=$(cc --version | head -1)"
+            echo "glib_version=$(pkg-config --modversion glib-2.0)"
+            echo "libnice_version=$(pkg-config --modversion nice)"
+          } > "/w/$META"
+          EOS
+          chmod 700 "$RUN/build.sh"
+
+          build_once() {
+            local out="$1" meta="$2"
+            docker run --rm --network none               -e OUT="$out" -e META="$meta"               -v "$RUN:/w"               -v "$GITHUB_WORKSPACE/.p122-apks:/pkgs:ro"               alpine:3.24.1 /bin/sh /w/build.sh
+          }
+
+          build_once comelit-media-p122-a meta-a.txt
+          build_once comelit-media-p122-b meta-b.txt
+
+          cmp -s "$RUN/comelit-media-p122-a" "$RUN/comelit-media-p122-b"
+          SHA_A="$(sha256sum "$RUN/comelit-media-p122-a" | awk '{print $1}')"
+          SHA_B="$(sha256sum "$RUN/comelit-media-p122-b" | awk '{print $1}')"
+          test "$SHA_A" = "$SHA_B"
+
+          EXPECTED_INTERPRETER=/lib/ld-musl-x86_64.so.1
+          EXPECTED_NEEDED=libc.musl-x86_64.so.1,libglib-2.0.so.0,libgobject-2.0.so.0,libnice.so.10
+          test "$(sed -n 's/^interpreter=//p' "$RUN/meta-a.txt")" = "$EXPECTED_INTERPRETER"
+          test "$(sed -n 's/^needed=//p' "$RUN/meta-a.txt")" = "$EXPECTED_NEEDED"
+          test "$(sed -n 's/^interpreter=//p' "$RUN/meta-b.txt")" = "$EXPECTED_INTERPRETER"
+          test "$(sed -n 's/^needed=//p' "$RUN/meta-b.txt")" = "$EXPECTED_NEEDED"
+          ! readelf -d "$RUN/comelit-media-p122-a" | grep -Fq 'libc.so.6'
+
+          strings -a "$RUN/comelit-media-p122-a" > "$RUN/strings.txt"
+          for marker in             'P80_MEDIA_ACTIVE=true'             'P78_SECOND_CTPP_OPEN=false'             'P122_ON_DEMAND_DOOR_SIGNAL_INSTALLED=true'             'P122_ON_DEMAND_DOOR_TIMER_INSTALLED=true'             'P122_ON_DEMAND_DOOR_COMMAND_ACCEPTED=true'             'P122_ON_DEMAND_DOOR_PATH=MEDIA_SESSION_SINGLE'             'P122_ON_DEMAND_DOOR_EXISTING_CTPP_REUSED=true'             'P122_ON_DEMAND_DOOR_QUEUED=true'             'P122_ON_DEMAND_DOOR_SENT=true'             'P122_ON_DEMAND_DOOR_WRITE_COUNT=1'             'P122_ON_DEMAND_DOOR_COUNTER_BASELINE_ADVANCED=true'             'P122_ON_DEMAND_DOOR_ACK_OBSERVED=%s'             'P122_ON_DEMAND_DOOR_DOOR_SPECIFIC_ACK_PROVEN=false'             'P122_ON_DEMAND_DOOR_AUTOMATIC_RETRY_ALLOWED=false'             'P122_ON_DEMAND_DOOR_PHYSICAL_EFFECT_ASSERTED=false'             'P122_ON_DEMAND_DOOR_RESULT=%s'             'P122_REFRESH_DEFERRED_FOR_DOOR=true'
+          do
+            grep -Fq "$marker" "$RUN/strings.txt"
+          done
+          test "$(grep -Fc 'P122_ON_DEMAND_DOOR_WRITE_COUNT=1' "$RUN/strings.txt")" -eq 1
+
+          echo "binary_sha=$SHA_A" >> "$GITHUB_OUTPUT"
+          echo "binary_bytes=$(stat -c '%s' "$RUN/comelit-media-p122-a")" >> "$GITHUB_OUTPUT"
+          echo "REPRODUCIBLE_BINARY_CMP_GATE=PASS"
+
+      - name: Promote exact P122 media helper and provenance
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          BINARY_SHA: ${{ steps.build.outputs.binary_sha }}
+          BINARY_BYTES: ${{ steps.build.outputs.binary_bytes }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          RUN="$GITHUB_WORKSPACE/.p122-run"
+          TARGET=custom_components/comelit/native/comelit-media
+          OLD_SHA="$(sha256sum "$TARGET" | awk '{print $1}')"
+          install -m 0755 "$RUN/comelit-media-p122-a" "$TARGET"
+          test "$(sha256sum "$TARGET" | awk '{print $1}')" = "$BINARY_SHA"
+
+          python3 - "$BINARY_SHA" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          sha = sys.argv[1]
+          path = Path("custom_components/comelit/media_transport.py")
+          text = path.read_text()
+          text, count = re.subn(
+              r'(MEDIA_NATIVE_BINARY_SHA256 = \(\n    ")[0-9a-f]{64}("\n\))',
+              rf'\g<1>{sha}\2',
+              text,
+          )
+          if count != 1:
+              raise SystemExit(f"expected one media binary pin, got {count}")
+          path.write_text(text)
+          PY
+
+          {
+            echo "P122_ON_DEMAND_DOOR_PRODUCTION_MEDIA_BUILD=PROVEN_OFFLINE"
+            echo "build_input_commit=$GITHUB_SHA"
+            echo "canonical_generator=safety-poc/research/media/v1/entrance_p122_on_demand_door_transform.py"
+            echo "GENERATED_SOURCE_SHA256=$SOURCE_SHA"
+            echo "NATIVE_BINARY_SHA256=$BINARY_SHA"
+            echo "NATIVE_BINARY_SIZE=$BINARY_BYTES"
+            echo "superseded_native_binary_sha256=$OLD_SHA"
+            echo "build_a_sha256=$BINARY_SHA"
+            echo "build_b_sha256=$BINARY_SHA"
+            echo "reproducible_source_cmp_gate=PASS"
+            echo "reproducible_binary_cmp_gate=PASS"
+            echo "interpreter=/lib/ld-musl-x86_64.so.1"
+            echo "needed=libc.musl-x86_64.so.1,libglib-2.0.so.0,libgobject-2.0.so.0,libnice.so.10"
+            echo "musl_interpreter_gate=PASS"
+            echo "no_glibc_dependency=PASS"
+            echo "no_new_runtime_dependency=PASS"
+            echo "door_profile=SINGLE_0x1840_0x000D"
+            echo "door_tx_count=1"
+            echo "existing_ctpp_reused=true"
+            echo "second_ctpp_open=false"
+            echo "second_p2p_session=false"
+            echo "gate_profile_promoted=false"
+            echo "automatic_retry_added=false"
+            echo "physical_effect_asserted=false"
+            echo "candidate_executed=false"
+            echo "production_deploy_performed=false"
+            echo "COMELIT_NETWORK_REQUESTS=0"
+            echo "LIVE_INVOCATIONS=0"
+            echo "DOOR_ACTIONS=0"
+            echo "GATE_ACTIONS=0"
+          } > safety-poc/research/media/v1/p122_on_demand_door_production_media_build_meta.txt
+
+      - name: Run focused P122 tests against promoted identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest             safety-poc.tests.test_p122_on_demand_door             safety-poc.tests.test_p122_on_demand_door_python -v
+
+      - name: Commit rebuilt media helper and remove one-shot workflow
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf .p122-apks .p122-run
+          git rm .github/workflows/p122-media-rebuild-once.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add             custom_components/comelit/native/comelit-media             custom_components/comelit/media_transport.py             safety-poc/research/media/v1/p122_on_demand_door_production_media_build_meta.txt
+          git diff --cached --check
+          git commit -m "build(comelit): promote P122 on-demand media Door helper"
+          git push origin HEAD:fix/door-on-demand-media-session
