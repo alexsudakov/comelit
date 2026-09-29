@@ -74,8 +74,8 @@ class P122OnDemandMediaDoorTests(unittest.TestCase):
         for needle in (
             "#define P122_DOOR_PACKET_LEN 48u",
             "p122_write_le16(out + 0, 0x1840u);",
-            "p122_door_sequence = previous_sequence + 0x00010000u;",
-            "p122_write_le32(out + 2, p122_door_sequence);",
+            "p122_door_pending_sequence = previous_sequence + 0x00010000u;",
+            "p122_write_le32(out + 2, p122_door_pending_sequence);",
             "p122_write_be16(out + 6, 0x000du);",
             "p122_write_be16(out + 8, 0x002du);",
             "memcpy(out + 10, V4_ENTRANCE, 8u);",
