@@ -94,6 +94,8 @@ for marker in \
     'CALL_SEQUENCE_BEFORE=%u' \
     'CALL_SEQUENCE_AFTER=%u' \
     'CALL_TIME_DOOR_ACK_OBSERVED=%s' \
+    'CALL_TIME_DOOR_STALE_GENERATION=true' \
+    'CALL_TIME_DOOR_SEQUENCE_COMMITTED=%s' \
     'P12_TX_CALL_TIME_DOOR'
 do
     grep -Fq "$marker" "$STRINGS_TMP" || fail "MARKER_MISSING"
