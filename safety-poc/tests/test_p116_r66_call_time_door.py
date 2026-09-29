@@ -516,8 +516,13 @@ static void g_main_loop_quit(void *main_loop)
         self.assertIn("CALL_TIME_DOOR_SEQUENCE_COMMITTED=%s", candidate)
         self.assertIn("r66_call_time_door_tx_completed", candidate)
         region = candidate.split(r66.BEGIN, 1)[1].split(r66.END, 1)[0]
-        queue_failure_tail = region.split("if (!queued)\n        return FALSE;", 1)[0]
-        self.assertNotIn("g_r35_session.call_sequence =", queue_failure_tail)
+        queue_start = region.index("r66_queue_call_time_door(void)")
+        queue_end = region.index(
+            "r66_call_time_door_note_control_response",
+            queue_start,
+        )
+        queue_function = region[queue_start:queue_end]
+        self.assertNotIn("g_r35_session.call_sequence =", queue_function)
         self.assertIn("CALL_SEQUENCE_BEFORE=%u", candidate)
         self.assertIn("CALL_SEQUENCE_AFTER=%u", candidate)
 
