@@ -10,6 +10,12 @@
 
 typedef struct PseudoTcpSocket PseudoTcpSocket;
 
+typedef int PseudoTcpState;
+#define PSEUDO_TCP_CLOSED 0
+#define PSEUDO_TCP_LISTEN 1
+#define PSEUDO_TCP_SYN_RECEIVED 2
+#define PSEUDO_TCP_ESTABLISHED 3
+
 typedef int PseudoTcpWriteResult;
 #define WR_SUCCESS 0
 #define WR_FAIL 1
