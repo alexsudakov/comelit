@@ -41,6 +41,7 @@ from .const import (
     DATA_SYNTHETIC_RING_MEDIA,
     DATA_SUPERVISORS,
     DOMAIN,
+    DOOR_ENTRANCE,
     EVENT_RING_INTERACTION,
     PLATFORMS,
     RING_INTERACTION_OUTCOMES,
@@ -92,23 +93,29 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         supervisor: ComelitRuntimeSupervisor | None = supervisors.get(entry_id)
         if supervisor is None:
             raise HomeAssistantError("Comelit runtime supervisor is unavailable")
-        # A separately bootstrapped on-demand media session owns the only
-        # Comelit connection and keeps the persistent listener stopped, so the
-        # listener-owned Door path must stay fail-closed in that mode.
-        #
-        # Attached inbound Ring media is deliberately different: it reuses the
-        # still-running persistent listener transaction and its existing CTPP
-        # channel. The validated Door one-shot therefore remains available
-        # during an attached physical call.
+        door = str(call.data[ATTR_DOOR])
         if supervisor.media_paused:
+            media_transports = domain_data.get(DATA_MEDIA_TRANSPORTS, {})
+            media_transport: ComelitEntranceMediaTransport | None = (
+                media_transports.get(entry_id)
+            )
+            if (
+                door == DOOR_ENTRANCE
+                and media_transport is not None
+                and media_transport.active
+            ):
+                event_id = call.data.get(ATTR_EVENT_ID)
+                return await media_transport.async_open_door(
+                    event_id=str(event_id) if event_id else None,
+                )
             raise HomeAssistantError(
-                "Comelit Door is temporarily unavailable while a separately "
-                "bootstrapped media session owns the exclusive connection"
+                "Comelit Door is unavailable while the on-demand media "
+                "session owns the exclusive connection"
             )
 
         event_id = call.data.get(ATTR_EVENT_ID)
         return await runtime.async_open_door(
-            str(call.data[ATTR_DOOR]),
+            door,
             event_id=str(event_id) if event_id else None,
         )
 

@@ -17,7 +17,7 @@ EXPECTED_MEDIA_TRANSPORT_SHA256 = (
     "a8cd21a8d3bd2a277425cc1325e51c1dcb7b17ad180f97d965eadcdda95b9713"
 )
 EXPECTED_NATIVE_SHA256 = (
-    "9347a973b012d5ca86b406642a5fcd9b86ce44201d0b5144073005ca72ce7712"
+    "a3c95f3ec8c5c00963946c8ff550760fadd792a314bb72692e4281da35a5a6a5"
 )
 
 DIAGNOSTIC_FIELDS = (
@@ -212,7 +212,14 @@ class P116R18HlsRuntimeDiagnosticsTests(unittest.TestCase):
         self.assertIn("self._transport.video_packet_count", self.camera)
 
     def test_r18_owned_transport_and_native_binary_are_unchanged(self) -> None:
-        self.assertEqual(_sha256(TRANSPORT), EXPECTED_MEDIA_TRANSPORT_SHA256)
+        # Later phases may add bounded media-owned Door control. R18's real
+        # invariant is that HLS diagnostics do not create another media
+        # bootstrap/process and do not own listener lifecycle.
+        transport = TRANSPORT.read_text(encoding="utf-8")
+        self.assertEqual(transport.count("async_negotiate_p2p("), 1)
+        self.assertEqual(transport.count("asyncio.create_subprocess_exec("), 1)
+        self.assertNotIn("async_pause_for_media", transport)
+        self.assertNotIn("async_resume_after_media", transport)
         self.assertEqual(_sha256(NATIVE_BINARY), EXPECTED_NATIVE_SHA256)
 
         # The generic session manager may evolve in later phases. R18 only

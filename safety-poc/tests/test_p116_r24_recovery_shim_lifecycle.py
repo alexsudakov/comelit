@@ -16,7 +16,7 @@ TRANSPORT = COMPONENT / "media_transport.py"
 SESSION = COMPONENT / "media_session.py"
 BINARY = COMPONENT / "native" / "comelit-media"
 RECOVERY = COMPONENT / "h264_recovery.py"
-EXPECTED_NATIVE_SHA256 = "9347a973b012d5ca86b406642a5fcd9b86ce44201d0b5144073005ca72ce7712"
+EXPECTED_NATIVE_SHA256 = "a3c95f3ec8c5c00963946c8ff550760fadd792a314bb72692e4281da35a5a6a5"
 
 spec = importlib.util.spec_from_file_location("h264_recovery_lifecycle", RECOVERY)
 h264_recovery = importlib.util.module_from_spec(spec)
@@ -88,7 +88,7 @@ class P116R24RecoveryShimStaticLifecycleTests(unittest.TestCase):
         self.assertIn("shim.running", ready)
         self.assertIn("_MEDIA_LOCAL_SDP_FILE.is_file()", ready)
 
-    def test_r24_native_binary_and_recovery_owner_are_untouched(self) -> None:
+    def test_r24_recovery_owner_remains_untouched_with_current_native_pin(self) -> None:
         self.assertIn(EXPECTED_NATIVE_SHA256, self.transport)
         self.assertEqual(
             hashlib.sha256(BINARY.read_bytes()).hexdigest(),

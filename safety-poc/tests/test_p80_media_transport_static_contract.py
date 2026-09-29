@@ -9,7 +9,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 TRANSPORT = ROOT / "custom_components" / "comelit" / "media_transport.py"
 BINARY = ROOT / "custom_components" / "comelit" / "native" / "comelit-media"
-EXPECTED_SHA256 = "9347a973b012d5ca86b406642a5fcd9b86ce44201d0b5144073005ca72ce7712"
+EXPECTED_SHA256 = "a3c95f3ec8c5c00963946c8ff550760fadd792a314bb72692e4281da35a5a6a5"
 
 
 class P80MediaTransportStaticContractTests(unittest.TestCase):
@@ -78,14 +78,18 @@ class P80MediaTransportStaticContractTests(unittest.TestCase):
         self.assertNotIn("for attempt", self.source)
         self.assertNotIn("while True:\n            remote = await async_negotiate_p2p", self.source)
 
-    def test_transport_has_no_door_or_listener_control_surface(self) -> None:
+    def test_transport_has_bounded_entrance_door_but_no_listener_control_surface(self) -> None:
+        self.assertEqual(self.source.count("async def async_open_door("), 1)
+        self.assertIn("os.kill(process.pid, signal.SIGUSR1)", self.source)
+        self.assertIn('"path": "ON_DEMAND_MEDIA_SINGLE"', self.source)
+        self.assertIn('"automatic_retry_allowed": False', self.source)
+        self.assertIn('"physical_effect_asserted": False', self.source)
         for forbidden in (
-            "async_open_door",
-            "SIGUSR1",
             "async_pause_for_media",
             "async_resume_after_media",
             "action\":\"stop",
             "action\":\"start",
+            'panel == "gate"',
         ):
             self.assertNotIn(forbidden, self.source)
 
