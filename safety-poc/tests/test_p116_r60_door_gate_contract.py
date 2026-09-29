@@ -188,6 +188,8 @@ class P116R60DoorRuntimeStaticContractTests(unittest.TestCase):
             "CALL_SEQUENCE_BEFORE",
             "CALL_SEQUENCE_AFTER",
             "CALL_TIME_DOOR_ACK_OBSERVED",
+            "CALL_TIME_DOOR_STALE_GENERATION",
+            "CALL_TIME_DOOR_SEQUENCE_COMMITTED",
             "CALL_TIME_SINGLE",
         ):
             with self.subTest(marker=marker):
