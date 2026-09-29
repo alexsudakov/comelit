@@ -56,6 +56,43 @@ static guint32 p122_door_sequence = 0u;
 static gboolean p122_door_tick_cb(gpointer data);
 static gboolean p122_door_settle_cb(gpointer data);
 
+/* P122 is inserted before the legacy P12 helper definitions. */
+static gboolean p12_queue_vip_frame(
+    guint32 request_id,
+    const guint8 *body,
+    guint body_len,
+    P12TxKind kind);
+static gboolean p12_flush_tx(void);
+
+static guint16
+p122_read_le16(const guint8 *p)
+{
+    return (guint16)p[0] | ((guint16)p[1] << 8);
+}
+
+static void
+p122_write_le16(guint8 *p, guint16 value)
+{
+    p[0] = (guint8)(value & 0xffu);
+    p[1] = (guint8)((value >> 8) & 0xffu);
+}
+
+static void
+p122_write_le32(guint8 *p, guint32 value)
+{
+    p[0] = (guint8)(value & 0xffu);
+    p[1] = (guint8)((value >> 8) & 0xffu);
+    p[2] = (guint8)((value >> 16) & 0xffu);
+    p[3] = (guint8)((value >> 24) & 0xffu);
+}
+
+static void
+p122_write_be16(guint8 *p, guint16 value)
+{
+    p[0] = (guint8)((value >> 8) & 0xffu);
+    p[1] = (guint8)(value & 0xffu);
+}
+
 static void
 p122_door_signal_handler(int signum)
 {
@@ -104,12 +141,12 @@ p122_serialize_door(guint8 out[P122_DOOR_PACKET_LEN])
     p122_door_sequence = previous_sequence + 0x00010000u;
 
     memset(out, 0, P122_DOOR_PACKET_LEN);
-    write_le16(out + 0, 0x1840u);
-    write_le32(out + 2, p122_door_sequence);
-    write_be16(out + 6, 0x000du);
-    write_be16(out + 8, 0x002du);
+    p122_write_le16(out + 0, 0x1840u);
+    p122_write_le32(out + 2, p122_door_sequence);
+    p122_write_be16(out + 6, 0x000du);
+    p122_write_be16(out + 8, 0x002du);
     memcpy(out + 10, V4_ENTRANCE, 8u);
-    write_le32(out + 20, P122_DOOR_RELAY_ENTRANCE);
+    p122_write_le32(out + 20, P122_DOOR_RELAY_ENTRANCE);
     memset(out + 24, 0xff, 4u);
     memcpy(out + 28, V4_FULL_ADDRESS, 9u);
     memcpy(out + 38, V4_APT_ADDRESS, 8u);
@@ -204,7 +241,7 @@ p122_note_control_frame(guint16 request_id, const guint8 *body, guint body_len)
         body_len < 8u)
         return FALSE;
 
-    prefix = read_le16(body + 0);
+    prefix = p122_read_le16(body + 0);
     action = (guint16)((((guint16)body[6]) << 8) | (guint16)body[7]);
 
     if (prefix == 0x1800u && action == 0x0000u) {
