@@ -36,7 +36,8 @@ class P122OnDemandMediaDoorTests(unittest.TestCase):
 
     def test_transform_is_deterministic_and_composes_p121(self) -> None:
         self.assertEqual(self.candidate_a, self.candidate_b)
-        self.assertIn("P121_GATHER_INITIAL_TIMEOUT", self.candidate_a)
+        self.assertIn("GATHER_INITIAL_TIMEOUT_SET_MS=%u", self.candidate_a)
+        self.assertIn("GATHER_INITIAL_TIMEOUT_RESTORED_MS=%u", self.candidate_a)
         self.assertIn(p122.BEGIN, self.candidate_a)
         self.assertIn(p122.END, self.candidate_a)
 
