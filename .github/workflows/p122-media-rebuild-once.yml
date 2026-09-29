@@ -1,0 +1,364 @@
+name: p122-media-rebuild-once
+
+on:
+  push:
+    branches:
+      - feat/on-demand-media-door-single-message
+    paths:
+      - .github/workflows/p122-media-rebuild-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  rebuild:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Generate P122 source twice
+        id: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          MEDIA="$GITHUB_WORKSPACE/safety-poc/research/media/v1"
+          SOURCE="$GITHUB_WORKSPACE/safety-poc/research/door/v1_5_7/comelit-v4-persistent-ctpp-door.c"
+          TRANSFORM="$MEDIA/entrance_p122_on_demand_media_door_transform.py"
+          mkdir -p "$GITHUB_WORKSPACE/.p122"
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$MEDIA"             python3 "$TRANSFORM" --source "$SOURCE"             --output "$GITHUB_WORKSPACE/.p122/a.c" >/dev/null
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$MEDIA"             python3 "$TRANSFORM" --source "$SOURCE"             --output "$GITHUB_WORKSPACE/.p122/b.c" >/dev/null
+          cmp -s "$GITHUB_WORKSPACE/.p122/a.c" "$GITHUB_WORKSPACE/.p122/b.c"
+          SOURCE_SHA="$(sha256sum "$GITHUB_WORKSPACE/.p122/a.c" | awk '{print $1}')"
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          echo "P122_GENERATED_SOURCE_SHA256=$SOURCE_SHA"
+
+      - name: Prepare pinned Alpine APK closure
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.p122-apks"
+          docker run --rm             -v "$GITHUB_WORKSPACE/.p122-apks:/pkgs"             alpine:3.24.1             /bin/sh -eu -c '
+              apk update >/dev/null
+              apk fetch --recursive --output /pkgs                 build-base pkgconf glib-dev libnice-dev binutils >/dev/null
+            '
+          test -n "$(find "$GITHUB_WORKSPACE/.p122-apks" -maxdepth 1 -name '*.apk' -print -quit)"
+
+      - name: Build A
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.p122-out-a"
+          docker run --rm             -v "$GITHUB_WORKSPACE/.p122/a.c:/src/comelit-media.c:ro"             -v "$GITHUB_WORKSPACE/.p122-apks:/pkgs:ro"             -v "$GITHUB_WORKSPACE/.p122-out-a:/out"             alpine:3.24.1             /bin/sh -eu -c '
+              apk add --no-network /pkgs/*.apk >/dev/null
+              cd /
+              cc -O2 -g -Wall -Wextra -Wl,--as-needed                 -o /out/comelit-media /src/comelit-media.c                 $(pkg-config --cflags --libs nice glib-2.0 gio-2.0 gobject-2.0)
+              chmod 755 /out/comelit-media
+              cc --version | head -1 > /out/cc-version.txt
+              pkg-config --modversion nice > /out/libnice-version.txt
+              pkg-config --modversion glib-2.0 > /out/glib-version.txt
+            '
+
+      - name: Build B independently
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.p122-out-b"
+          docker run --rm             -v "$GITHUB_WORKSPACE/.p122/b.c:/src/comelit-media.c:ro"             -v "$GITHUB_WORKSPACE/.p122-apks:/pkgs:ro"             -v "$GITHUB_WORKSPACE/.p122-out-b:/out"             alpine:3.24.1             /bin/sh -eu -c '
+              apk add --no-network /pkgs/*.apk >/dev/null
+              cd /
+              cc -O2 -g -Wall -Wextra -Wl,--as-needed                 -o /out/comelit-media /src/comelit-media.c                 $(pkg-config --cflags --libs nice glib-2.0 gio-2.0 gobject-2.0)
+              chmod 755 /out/comelit-media
+            '
+
+      - name: Verify reproducibility and native contract
+        id: build
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          A="$GITHUB_WORKSPACE/.p122-out-a/comelit-media"
+          B="$GITHUB_WORKSPACE/.p122-out-b/comelit-media"
+          cmp -s "$A" "$B"
+          BIN_SHA="$(sha256sum "$A" | awk '{print $1}')"
+          BIN_SIZE="$(stat -c '%s' "$A")"
+          INTERPRETER="$(readelf -l "$A" | sed -n 's@.*Requesting program interpreter: \(.*\)]@\1@p')"
+          NEEDED="$(readelf -d "$A" | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' | sort | paste -sd, -)"
+          BUILD_ID="$(readelf -n "$A" | sed -n 's/^.*Build ID: //p' | head -1)"
+          test "$INTERPRETER" = "/lib/ld-musl-x86_64.so.1"
+          test "$NEEDED" = "libc.musl-x86_64.so.1,libglib-2.0.so.0,libgobject-2.0.so.0,libnice.so.10"
+          ! printf '%s\n' "$NEEDED" | grep -Fq 'libc.so.6'
+          strings -a "$A" > "$GITHUB_WORKSPACE/.p122/strings.txt"
+          for marker in             '/run/comelit-media'             'P80_MEDIA_ACTIVE=true'             'P80_DOOR_SIGNAL_ENTRYPOINT=true'             'P122_ONDEMAND_DOOR_PROFILE=ACTIVE_MEDIA_SINGLE'             'P122_ONDEMAND_DOOR_PATH=ACTIVE_MEDIA_SINGLE'             'P122_ONDEMAND_DOOR_COMMAND_ACCEPTED=true'             'P122_ONDEMAND_DOOR_WRITE_COUNT=1'             'P122_ONDEMAND_DOOR_AUTOMATIC_RETRY_ALLOWED=false'             'P122_ONDEMAND_DOOR_PHYSICAL_EFFECT_ASSERTED=false'             'P78_SECOND_CTPP_OPEN=false'
+          do
+            grep -Fq "$marker" "$GITHUB_WORKSPACE/.p122/strings.txt"
+          done
+          ! grep -Fq '/run/comelit-p2p' "$GITHUB_WORKSPACE/.p122/strings.txt"
+          echo "binary_sha=$BIN_SHA" >> "$GITHUB_OUTPUT"
+          echo "binary_size=$BIN_SIZE" >> "$GITHUB_OUTPUT"
+          echo "interpreter=$INTERPRETER" >> "$GITHUB_OUTPUT"
+          echo "needed=$NEEDED" >> "$GITHUB_OUTPUT"
+          echo "build_id=$BUILD_ID" >> "$GITHUB_OUTPUT"
+          echo "P122_NATIVE_BINARY_SHA256=$BIN_SHA"
+
+      - name: Promote packaged media helper and current pins
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          BINARY_SHA: ${{ steps.build.outputs.binary_sha }}
+          BINARY_SIZE: ${{ steps.build.outputs.binary_size }}
+          INTERPRETER: ${{ steps.build.outputs.interpreter }}
+          NEEDED: ${{ steps.build.outputs.needed }}
+          BUILD_ID: ${{ steps.build.outputs.build_id }}
+        run: |
+          set -Eeuo pipefail
+          install -m 0755 "$GITHUB_WORKSPACE/.p122-out-a/comelit-media"             custom_components/comelit/native/comelit-media
+
+          python3 - "$SOURCE_SHA" "$BINARY_SHA" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          source_sha, binary_sha = sys.argv[1:3]
+
+          transport = Path("custom_components/comelit/media_transport.py")
+          text = transport.read_text()
+          text, count = re.subn(
+              r'(?s)(MEDIA_NATIVE_BINARY_SHA256 = \(\n\s*")[0-9a-f]{64}("\n\))',
+              rf'\g<1>{binary_sha}\2',
+              text,
+          )
+          if count != 1:
+              raise SystemExit(f"media transport SHA pin count={count}")
+          transport.write_text(text)
+
+          replacements = {
+              "safety-poc/tests/test_p80_media_transport_static_contract.py": [
+                  (r'EXPECTED_SHA256 = "[0-9a-f]{64}"',
+                   f'EXPECTED_SHA256 = "{binary_sha}"'),
+              ],
+              "safety-poc/tests/test_p116_r18_hls_runtime_diagnostics.py": [
+                  (r'(?s)(EXPECTED_NATIVE_SHA256 = \(\n\s*")[0-9a-f]{64}("\n\))',
+                   rf'\g<1>{binary_sha}\2'),
+              ],
+              "safety-poc/tests/test_p116_r20_hls_http_boundary_diagnostics.py": [
+                  (r'(?s)(EXPECTED_NATIVE_SHA256 = \(\n\s*")[0-9a-f]{64}("\n\))',
+                   rf'\g<1>{binary_sha}\2'),
+              ],
+          }
+          for filename, rules in replacements.items():
+              path = Path(filename)
+              body = path.read_text()
+              for pattern, replacement in rules:
+                  body, count = re.subn(pattern, replacement, body)
+                  if count != 1:
+                      raise SystemExit(f"{filename}: replacement count={count}")
+              path.write_text(body)
+
+          p107 = Path("safety-poc/tests/test_p107_musl_package_provenance.py")
+          body = p107.read_text()
+          body, count = re.subn(
+              r'EXPECTED_MUSL_SHA256 = "[0-9a-f]{64}"',
+              f'EXPECTED_MUSL_SHA256 = "{binary_sha}"',
+              body,
+          )
+          if count != 1:
+              raise SystemExit(f"P107 binary pin count={count}")
+          body, count = re.subn(
+              r'PACKAGED_NATIVE_SOURCE_SHA256 = "[0-9a-f]{64}"',
+              f'PACKAGED_NATIVE_SOURCE_SHA256 = "{source_sha}"',
+              body,
+          )
+          if count != 1:
+              raise SystemExit(f"P107 packaged source pin count={count}")
+          body, count = re.subn(
+              r'HEAD_P116_SOURCE_SHA256 = "[0-9a-f]{64}"',
+              f'HEAD_P116_SOURCE_SHA256 = "{source_sha}"',
+              body,
+          )
+          if count != 1:
+              raise SystemExit(f"P107 head source pin count={count}")
+          p107.write_text(body)
+          PY
+
+          cat > safety-poc/research/media/v1/p122_on_demand_media_door_production_media_build_meta.txt <<EOF
+          phase=P122_ON_DEMAND_MEDIA_DOOR_SINGLE_MESSAGE
+          repo_head_at_build=$GITHUB_SHA
+          canonical_generator=safety-poc/research/media/v1/entrance_p122_on_demand_media_door_transform.py
+          GENERATED_SOURCE_SHA256=$SOURCE_SHA
+          NATIVE_BINARY_SHA256=$BINARY_SHA
+          NATIVE_BINARY_SIZE=$BINARY_SIZE
+          build_a_sha256=$BINARY_SHA
+          build_b_sha256=$BINARY_SHA
+          reproducible_binary_cmp_gate=PASS
+          CONTROL_BUILD_REPRODUCES_CURRENT_BINARY=true
+          binary_rebuild_pending_orchestrator=false
+          superseded_native_binary_sha256=9347a973b012d5ca86b406642a5fcd9b86ce44201d0b5144073005ca72ce7712
+          superseded_generated_source_sha256=07468cd74027d02d5f002c1cc63558f68526cf06b9694c5afe94579ea68f9e74
+          superseded_provenance_file=safety-poc/research/media/v1/p121_gather_initial_timeout_production_media_build_meta.txt
+          interpreter=$INTERPRETER
+          needed=$NEEDED
+          elf_build_id=$BUILD_ID
+          toolchain=$(cat "$GITHUB_WORKSPACE/.p122-out-a/cc-version.txt")
+          libnice_version=$(cat "$GITHUB_WORKSPACE/.p122-out-a/libnice-version.txt")
+          glib_version=$(cat "$GITHUB_WORKSPACE/.p122-out-a/glib-version.txt")
+          flags=-O2 -g -Wall -Wextra -Wl,--as-needed
+          p122_profile=ACTIVE_MEDIA_SINGLE_0x1840_0x000D
+          entrance_only=true
+          relay_index=1
+          packet_len=48
+          existing_ctpp_reused=true
+          second_ctpp_open=false
+          second_p2p_session=false
+          automatic_retry=false
+          gate_profile_promoted=false
+          candidate_executed=false
+          production_deploy_performed=false
+          LIVE_INVOCATIONS=0
+          DOOR_ACTIONS=0
+          GATE_ACTIONS=0
+          COMELIT_NETWORK_REQUESTS=0
+          EOF
+
+      - name: Rebase P107 current provenance layer onto P122
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          BINARY_SHA: ${{ steps.build.outputs.binary_sha }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("safety-poc/tests/test_p107_musl_package_provenance.py")
+          text = path.read_text()
+
+          text = text.replace(
+              'BUILD_META = MEDIA_DIR / "p121_gather_initial_timeout_production_media_build_meta.txt"',
+              'BUILD_META = MEDIA_DIR / "p122_on_demand_media_door_production_media_build_meta.txt"\n'
+              'FROZEN_P121_BUILD_META = MEDIA_DIR / "p121_gather_initial_timeout_production_media_build_meta.txt"',
+              1,
+          )
+          old = (
+              'SUPERSEDED_P119_BINARY_SHA256 = "095051f42b7e6393c48fce51eaef73665e722fc852f263beed1b5c433308b0e0"\n'
+              'SUPERSEDED_P119_SOURCE_SHA256 = "2f8137e988437c779a0f3bb1c9904c81cbe2d13641efa2e6a070054116dd43ed"'
+          )
+          new = (
+              'SUPERSEDED_P121_BINARY_SHA256 = "9347a973b012d5ca86b406642a5fcd9b86ce44201d0b5144073005ca72ce7712"\n'
+              'SUPERSEDED_P121_SOURCE_SHA256 = "07468cd74027d02d5f002c1cc63558f68526cf06b9694c5afe94579ea68f9e74"\n'
+              + old
+          )
+          if old not in text:
+              raise SystemExit("P107 predecessor constants anchor missing")
+          text = text.replace(old, new, 1)
+
+          text = text.replace(
+              'frozen_p119_meta = _metadata(FROZEN_P119_BUILD_META)\n'
+              '        # The packaged artifact is always the one the most recent *completed* build',
+              'frozen_p121_meta = _metadata(FROZEN_P121_BUILD_META)\n'
+              '        frozen_p119_meta = _metadata(FROZEN_P119_BUILD_META)\n'
+              '        # The packaged artifact is always the one the most recent *completed* build',
+              1,
+          )
+          text = text.replace(
+              'else frozen_p119_meta\n',
+              'else frozen_p121_meta\n',
+              1,
+          )
+          text = text.replace(
+              'self.assertEqual(meta["superseded_native_binary_sha256"], SUPERSEDED_P119_BINARY_SHA256)',
+              'self.assertEqual(meta["superseded_native_binary_sha256"], SUPERSEDED_P121_BINARY_SHA256)',
+              1,
+          )
+
+          text = text.replace(
+              'from entrance_p121_gather_initial_timeout_transform import transform',
+              'from entrance_p122_on_demand_media_door_transform import transform',
+          )
+          text = text.replace(
+              'candidate = transform(\n'
+              '            SOURCE.read_text(encoding="utf-8"),\n'
+              '            include_p116=True,\n'
+              '        ).encode("utf-8")',
+              'candidate = transform(\n'
+              '            SOURCE.read_text(encoding="utf-8")\n'
+              '        ).encode("utf-8")',
+              1,
+          )
+          text = text.replace(
+              'candidate = transform(\n'
+              '            SOURCE.read_text(encoding="utf-8"),\n'
+              '            include_p116=True,\n'
+              '        )',
+              'candidate = transform(\n'
+              '            SOURCE.read_text(encoding="utf-8")\n'
+              '        )',
+              1,
+          )
+
+          old_current = (
+              'frozen_p119_meta = _metadata(FROZEN_P119_BUILD_META)\n'
+              '        self.assertEqual(head_sha, HEAD_P116_SOURCE_SHA256)'
+          )
+          new_current = (
+              'frozen_p121_meta = _metadata(FROZEN_P121_BUILD_META)\n'
+              '        frozen_p119_meta = _metadata(FROZEN_P119_BUILD_META)\n'
+              '        self.assertEqual(head_sha, HEAD_P116_SOURCE_SHA256)'
+          )
+          if old_current not in text:
+              raise SystemExit("P107 current-source predecessor anchor missing")
+          text = text.replace(old_current, new_current, 1)
+          text = text.replace(
+              'meta["superseded_generated_source_sha256"],\n'
+              '            frozen_p119_meta["GENERATED_SOURCE_SHA256"],',
+              'meta["superseded_generated_source_sha256"],\n'
+              '            frozen_p121_meta["GENERATED_SOURCE_SHA256"],',
+              1,
+          )
+          text = text.replace(
+              'self.assertEqual(\n'
+              '            frozen_p119_meta["NATIVE_BINARY_SHA256"], SUPERSEDED_P119_BINARY_SHA256\n'
+              '        )\n'
+              '        self.assertEqual(meta["superseded_native_binary_sha256"], SUPERSEDED_P119_BINARY_SHA256)',
+              'self.assertEqual(\n'
+              '            frozen_p121_meta["NATIVE_BINARY_SHA256"], SUPERSEDED_P121_BINARY_SHA256\n'
+              '        )\n'
+              '        self.assertEqual(meta["superseded_native_binary_sha256"], SUPERSEDED_P121_BINARY_SHA256)',
+              1,
+          )
+          path.write_text(text)
+          PY
+
+      - name: Verify promoted identity before commit
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          BINARY_SHA: ${{ steps.build.outputs.binary_sha }}
+        run: |
+          set -Eeuo pipefail
+          test "$(sha256sum custom_components/comelit/native/comelit-media | awk '{print $1}')" = "$BINARY_SHA"
+          grep -Fq "$BINARY_SHA" custom_components/comelit/media_transport.py
+          grep -Fx "GENERATED_SOURCE_SHA256=$SOURCE_SHA"             safety-poc/research/media/v1/p122_on_demand_media_door_production_media_build_meta.txt
+          grep -Fx "NATIVE_BINARY_SHA256=$BINARY_SHA"             safety-poc/research/media/v1/p122_on_demand_media_door_production_media_build_meta.txt
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest             safety-poc/tests/test_p122_on_demand_media_door.py             safety-poc/tests/test_p80_media_transport_static_contract.py             safety-poc/tests/test_p107_musl_package_provenance.py
+
+      - name: Commit promoted P122 helper and remove one-shot workflow
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf .p122 .p122-apks .p122-out-a .p122-out-b
+          git rm .github/workflows/p122-media-rebuild-once.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add             custom_components/comelit/native/comelit-media             custom_components/comelit/media_transport.py             safety-poc/research/media/v1/p122_on_demand_media_door_production_media_build_meta.txt             safety-poc/tests/test_p80_media_transport_static_contract.py             safety-poc/tests/test_p107_musl_package_provenance.py             safety-poc/tests/test_p116_r18_hls_runtime_diagnostics.py             safety-poc/tests/test_p116_r20_hls_http_boundary_diagnostics.py
+          git diff --cached --check
+          git commit -m "build(comelit): promote reproducible P122 media helper"
+          git push origin HEAD:feat/on-demand-media-door-single-message
