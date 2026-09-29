@@ -120,13 +120,15 @@ class P122OnDemandDoorTests(unittest.TestCase):
         c = self.generated_a
         self.assertIn("r27_repeat_001a_sequence", c)
         self.assertIn("r27_initial_001a_sequence", c)
-        self.assertIn("next_counter = current_counter + 0x00010000u;", c)
+        self.assertIn("next_counter = p122_next_media_counter(current_counter);", c)
+        self.assertIn("p122_commit_counter_baseline()", c)
         self.assertIn(
             "write_le32(p78_rtpc_client_001a + 2u, p122_door_counter);", c
         )
         self.assertIn(
             "P122_ON_DEMAND_DOOR_COUNTER_BASELINE_ADVANCED=true", c
         )
+        self.assertIn("P122_REFRESH_FAIL_CLOSED=true", c)
 
     def test_refresh_collision_is_deferred_not_concurrent(self) -> None:
         c = self.generated_a
