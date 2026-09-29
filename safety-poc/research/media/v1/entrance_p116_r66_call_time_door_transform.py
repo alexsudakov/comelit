@@ -32,6 +32,7 @@ static unsigned g_r66_call_time_door_sequence_after = 0u;
 static unsigned g_r66_call_time_door_generation = 0u;
 static gboolean g_r66_call_time_door_ack_observed = FALSE;
 static gboolean g_r66_call_time_door_waiting_ack = FALSE;
+static gboolean g_r66_call_time_door_selected = FALSE;
 
 static void v4_door_set_deadline(void);
 static gboolean v4_door_settle_cb(gpointer data);
@@ -105,12 +106,27 @@ r66_call_time_door_eligible(void)
 }
 
 static gboolean
+r66_call_time_door_queue_ready(void)
+{
+    return g_r66_call_time_door_selected &&
+        v4_door_target == V4_DOOR_TARGET_ENTRANCE &&
+        v4_listener_ready &&
+        v4_registered &&
+        v4_ctpp_channel_id != 0 &&
+        p12_stage == P12_STAGE_V4_LISTEN_RING &&
+        v4_door_stage == V4_DOOR_SENDING &&
+        !p12_tx_pending &&
+        r35_call_ready(&g_r35_session) &&
+        r42_media_stage == R42_MEDIA_ACTIVE;
+}
+
+static gboolean
 r66_queue_call_time_door(void)
 {
     unsigned char packet[R66_CALL_TIME_DOOR_PACKET_LEN];
     gboolean queued;
 
-    if (!r66_call_time_door_eligible())
+    if (!r66_call_time_door_queue_ready())
         return FALSE;
     if (!r66_serialize_call_time_door_packet(packet, &g_r35_session))
         return FALSE;
@@ -128,10 +144,14 @@ r66_queue_call_time_door(void)
         R66_CALL_TIME_DOOR_PACKET_LEN,
         P12_TX_CALL_TIME_DOOR);
     memset(packet, 0, sizeof(packet));
-    if (!queued)
+    if (!queued) {
+        g_r66_call_time_door_selected = FALSE;
         return FALSE;
+    }
 
+    g_r66_call_time_door_selected = FALSE;
     v4_door_send_started = TRUE;
+    printf("V4_DOOR_PATH=CALL_TIME_SINGLE\n");
     printf("V4_CALL_TIME_DOOR_QUEUED=true\n");
     printf("CALL_GENERATION=%u\n", g_r66_call_time_door_generation);
     printf("CALL_SEQUENCE_BEFORE=%u\n", g_r66_call_time_door_sequence_before);
@@ -268,12 +288,11 @@ _TICK_ANCHOR = """    printf("V4_DOOR_COMMAND_ACCEPTED=true\\n");
     printf("V4_DOOR_TARGET=%s\\n", v4_door_target_name(v4_door_target));
     printf("V4_DOOR_EXISTING_CTPP_REUSED=true\\n");"""
 
-_TICK_REPLACEMENT = """    printf("V4_DOOR_COMMAND_ACCEPTED=true\\n");
+_TICK_REPLACEMENT = """    g_r66_call_time_door_selected = r66_call_time_door_eligible();
+    printf("V4_DOOR_COMMAND_ACCEPTED=true\\n");
     printf("V4_DOOR_TARGET=%s\\n", v4_door_target_name(v4_door_target));
-    if (r66_call_time_door_eligible()) {
-        printf("V4_DOOR_PATH=CALL_TIME_SINGLE\\n");
+    if (g_r66_call_time_door_selected)
         printf("V4_CALL_TIME_DOOR_COMMAND_ACCEPTED=true\\n");
-    }
     printf("V4_DOOR_EXISTING_CTPP_REUSED=true\\n");"""
 
 _QUEUE_ANCHOR = """    if (!v4_door_queue_write(1)) {
@@ -281,7 +300,7 @@ _QUEUE_ANCHOR = """    if (!v4_door_queue_write(1)) {
             v4_door_send_started ? "UNKNOWN_OUTCOME" : "FAILED_SAFE"
         );"""
 
-_QUEUE_REPLACEMENT = """    if (r66_call_time_door_eligible()) {
+_QUEUE_REPLACEMENT = """    if (g_r66_call_time_door_selected) {
         if (!r66_queue_call_time_door()) {
             v4_door_emit_result(
                 v4_door_send_started ? "UNKNOWN_OUTCOME" : "FAILED_SAFE"
@@ -358,6 +377,8 @@ def transform(source: str) -> str:
         "V4_CALL_TIME_DOOR_WRITE_COUNT=1",
         "CALL_TIME_DOOR_ACK_OBSERVED=%s",
         "r66_call_time_door_note_control_response",
+        "r66_call_time_door_queue_ready",
+        "g_r66_call_time_door_selected",
     ):
         if marker not in candidate:
             raise RuntimeError(f"R66_FINAL_GATE=FAIL missing={marker}")
