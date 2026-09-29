@@ -42,6 +42,39 @@ class P116R62EntranceDoorOutcomeTests(unittest.TestCase):
             )
         )
 
+    def test_call_time_single_unknown_outcome_is_transmitted_locally(self) -> None:
+        self.assertTrue(
+            door_outcome.door_one_shot_sequence_sent(
+                state="UNKNOWN_OUTCOME",
+                write_count=1,
+                existing_ctpp_reused=True,
+                door_path="CALL_TIME_SINGLE",
+                call_time_sequence_committed=True,
+            )
+        )
+
+    def test_call_time_single_requires_sequence_commit_proof(self) -> None:
+        self.assertFalse(
+            door_outcome.door_one_shot_sequence_sent(
+                state="UNKNOWN_OUTCOME",
+                write_count=1,
+                existing_ctpp_reused=True,
+                door_path="CALL_TIME_SINGLE",
+                call_time_sequence_committed=False,
+            )
+        )
+
+    def test_call_time_single_rejects_wrong_write_count(self) -> None:
+        self.assertFalse(
+            door_outcome.door_one_shot_sequence_sent(
+                state="UNKNOWN_OUTCOME",
+                write_count=5,
+                existing_ctpp_reused=True,
+                door_path="CALL_TIME_SINGLE",
+                call_time_sequence_committed=True,
+            )
+        )
+
     def test_partial_write_is_not_complete_transmission(self) -> None:
         self.assertFalse(
             door_outcome.door_one_shot_sequence_sent(

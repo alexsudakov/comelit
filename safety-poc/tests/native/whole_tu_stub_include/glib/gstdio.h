@@ -9,5 +9,6 @@ typedef struct stat GStatBuf;
 
 gint g_mkdir_with_parents();
 gint g_stat();
+gint g_unlink();
 
 #endif /* COMELIT_STUB_GLIB_GSTDIO_H */

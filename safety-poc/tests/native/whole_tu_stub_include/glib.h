@@ -116,9 +116,9 @@ gint64 g_ascii_strtoll();
 /* Checksums */
 gpointer g_checksum_new();
 void g_checksum_update();
-gpointer g_checksum_get_string();
+const gchar *g_checksum_get_string();
 void g_checksum_free();
-gpointer g_compute_checksum_for_data();
+gchar *g_compute_checksum_for_data();
 
 /* Errors, files, memory, misc */
 void g_error_free();

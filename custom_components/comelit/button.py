@@ -127,10 +127,11 @@ class ComelitEntranceDoorButton(ButtonEntity):
         result = await self._runtime.async_open_door(DOOR_ENTRANCE)
         self._last_result = dict(result)
         self.async_write_ha_state()
-        # A complete one-shot TX without a proven Door-specific ACK is an
-        # unconfirmed outcome, not a transport failure.  Do not claim the
-        # physical effect, but do not show a false HA error after all five
-        # validated Door writes crossed the local PseudoTCP TX boundary.
+        # A complete validated Door TX profile without a proven
+        # Door-specific ACK is an unconfirmed outcome, not a transport
+        # failure. Do not claim the physical effect, but do not show a false
+        # HA error after either the standalone five-write profile or the
+        # active-call single-message profile crossed its local TX boundary.
         if (
             result.get("protocol_acked") is True
             or result.get("one_shot_sequence_sent") is True
