@@ -41,7 +41,7 @@ fail() {
 [[ -f "$R66_SOURCE" ]] || fail "R66_SOURCE_MISSING"
 [[ -d "$REPO/.git" || -f "$REPO/.git" ]] || fail "REPO_MISSING"
 
-for c in git sha256sum readelf strings install stat cmp grep awk sort paste; do
+for c in git sha256sum readelf strings install stat cmp grep awk sort paste mktemp cp mv rm; do
     command -v "$c" >/dev/null || fail "COMMAND_MISSING_$c"
 done
 
@@ -83,7 +83,13 @@ NEEDED="$(
 
 STRINGS_TMP="$(mktemp)"
 INFO_TMP="$(mktemp)"
-trap 'rm -f "$STRINGS_TMP" "$INFO_TMP"' EXIT
+TARGET_STAGE="$(mktemp "${TARGET}.r66-stage.XXXXXX")"
+INFO_STAGE="$(mktemp "${BUILD_INFO}.r66-stage.XXXXXX")"
+TARGET_BACKUP="$(mktemp)"
+INFO_BACKUP="$(mktemp)"
+HAD_TARGET=false
+HAD_BUILD_INFO=false
+trap 'rm -f "$STRINGS_TMP" "$INFO_TMP" "$TARGET_STAGE" "$INFO_STAGE" "$TARGET_BACKUP" "$INFO_BACKUP"' EXIT
 
 strings -a "$CANDIDATE" > "$STRINGS_TMP"
 for marker in \
@@ -121,14 +127,20 @@ done
 OLD_SHA256=NONE
 if [[ -f "$TARGET" ]]; then
     OLD_SHA256="$(sha256sum "$TARGET" | awk '{print $1}')"
+    cp -p "$TARGET" "$TARGET_BACKUP"
+    HAD_TARGET=true
+fi
+if [[ -f "$BUILD_INFO" ]]; then
+    cp -p "$BUILD_INFO" "$INFO_BACKUP"
+    HAD_BUILD_INFO=true
 fi
 
-install -m 0755 "$CANDIDATE" "$TARGET"
-PROMOTED_SHA256="$(sha256sum "$TARGET" | awk '{print $1}')"
-[[ "$PROMOTED_SHA256" == "$EXPECTED_SHA256" ]] \
-    || fail "PROMOTED_SHA_MISMATCH"
+install -m 0755 "$CANDIDATE" "$TARGET_STAGE"
+STAGED_SHA256="$(sha256sum "$TARGET_STAGE" | awk '{print $1}')"
+[[ "$STAGED_SHA256" == "$EXPECTED_SHA256" ]] \
+    || fail "STAGED_SHA_MISMATCH"
 
-PROMOTED_BYTES="$(stat -c '%s' "$TARGET")"
+PROMOTED_BYTES="$(stat -c '%s' "$TARGET_STAGE")"
 
 cat > "$INFO_TMP" <<EOF
 phase=P116_R66_CALL_TIME_DOOR_SINGLE_MESSAGE
@@ -152,7 +164,32 @@ candidate_executed=false
 production_deploy_performed=false
 EOF
 
-install -m 0644 "$INFO_TMP" "$BUILD_INFO"
+install -m 0644 "$INFO_TMP" "$INFO_STAGE"
+
+rollback_pair() {
+    if [[ "$HAD_TARGET" == true ]]; then
+        cp -p "$TARGET_BACKUP" "$TARGET" || true
+    else
+        rm -f "$TARGET"
+    fi
+    if [[ "$HAD_BUILD_INFO" == true ]]; then
+        cp -p "$INFO_BACKUP" "$BUILD_INFO" || true
+    else
+        rm -f "$BUILD_INFO"
+    fi
+}
+
+if ! mv -f "$TARGET_STAGE" "$TARGET"; then
+    fail "TARGET_INSTALL_FAILED"
+fi
+if ! mv -f "$INFO_STAGE" "$BUILD_INFO"; then
+    rollback_pair
+    fail "BUILD_INFO_INSTALL_FAILED_ROLLED_BACK"
+fi
+
+PROMOTED_SHA256="$(sha256sum "$TARGET" | awk '{print $1}')"
+[[ "$PROMOTED_SHA256" == "$EXPECTED_SHA256" ]] \
+    || { rollback_pair; fail "PROMOTED_SHA_MISMATCH_ROLLED_BACK"; }
 
 echo '=== COMELIT P116 R66 LISTENER BINARY PROMOTION ==='
 echo "REPO_HEAD=$REPO_HEAD"
