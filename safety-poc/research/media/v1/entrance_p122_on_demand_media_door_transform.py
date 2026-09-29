@@ -292,19 +292,16 @@ _ACK_NEW = """        } else if (p122_door_waiting_ack) {
         } else if (p97_wait_device_ack_000a || p97_wait_device_ack_001a) {
 """
 
-_SIGNAL_OLD = """    signal(SIGTERM, r27_bound_signal_handler);
-    signal(SIGINT, r27_bound_signal_handler);
-    printf("R27_BOUND_SIGNAL_HANDLER_INSTALLED=true\n");
+_SIGNAL_OLD = """    printf("R27_STDOUT_LINE_BUFFERED=true\\n");
     fflush(stdout);
 """
-_SIGNAL_NEW = """    signal(SIGTERM, r27_bound_signal_handler);
-    signal(SIGINT, r27_bound_signal_handler);
+_SIGNAL_NEW = """    printf("R27_STDOUT_LINE_BUFFERED=true\\n");
+    fflush(stdout);
     signal(SIGUSR1, p122_door_signal_handler);
-    printf("R27_BOUND_SIGNAL_HANDLER_INSTALLED=true\n");
-    printf("P122_ONDEMAND_DOOR_SIGNAL_INSTALLED=true\n");
+    printf("P122_ONDEMAND_DOOR_SIGNAL_INSTALLED=true\\n");
     fflush(stdout);
     if (g_timeout_add(100u, p122_door_tick_cb, NULL) == 0u) {
-        fprintf(stderr, "P122_ONDEMAND_DOOR_TIMER_START=FAIL\n");
+        fprintf(stderr, "P122_ONDEMAND_DOOR_TIMER_START=FAIL\\n");
         failed = TRUE;
         if (loop)
             g_main_loop_quit(loop);
