@@ -15,6 +15,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .cloud import ComelitCloudError, async_negotiate_p2p
+from .const import EVENT_DOOR_OPERATION
 from .h264_recovery import H264RecoveryRtpShim
 from .latency_timeline import (
     CameraRequestLatencyTimeline,
@@ -368,7 +369,11 @@ class ComelitEntranceMediaTransport:
             and process.returncode is None
         )
 
-    async def async_open_door(self) -> dict[str, object]:
+    async def async_open_door(
+        self,
+        *,
+        event_id: str | None = None,
+    ) -> dict[str, object]:
         """Send one Entrance Door command on the active on-demand media CTPP."""
         async with self._door_lock:
             process = self._process
@@ -452,6 +457,9 @@ class ComelitEntranceMediaTransport:
                 "physical_effect_asserted": False,
                 "native_result_timeout": native_timeout,
             }
+            if event_id:
+                result["event_id"] = event_id
+            self._hass.bus.async_fire(EVENT_DOOR_OPERATION, dict(result))
             _LOGGER.warning(
                 "Comelit on-demand media Door attempt completed "
                 "operation_id=%s state=%s write_count=%s "
