@@ -7,12 +7,15 @@ import logging
 import os
 from pathlib import Path
 import re
+import signal
+from uuid import uuid4
 
 from aiohttp import ClientSession
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .cloud import ComelitCloudError, async_negotiate_p2p
+from .const import EVENT_DOOR_OPERATION
 from .h264_recovery import H264RecoveryRtpShim
 from .latency_timeline import (
     CameraRequestLatencyTimeline,
@@ -64,7 +67,7 @@ _MEDIA_STARTUP_WINDOW_SECONDS = 45.0
 _MEDIA_LOCAL_SDP_READY_REASON = "local_sdp_ready_timeout"
 
 MEDIA_NATIVE_BINARY_SHA256 = (
-    "9347a973b012d5ca86b406642a5fcd9b86ce44201d0b5144073005ca72ce7712"
+    "25809379aedb21f978f01cd8acbd5f12d819b20950d493293d26d52f86c4f2e6"
 )
 MEDIA_VIDEO_RTP_PORT = 17899
 MEDIA_VIDEO_HA_RTP_PORT = 17999
@@ -75,7 +78,7 @@ _MEDIA_NATIVE_MARKER_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,79}$")
 _MEDIA_NATIVE_MARKER_SAFE_VALUE_RE = re.compile(
     r"^(?:PASS|FAIL|true|false|READY|OPEN|CLOSED|UNKNOWN_OUTCOME|"
     r"REJECTED|REJECTED_NOT_READY|FAILED_SAFE|EXPECTED_TERMINAL_SHUTDOWN|"
-    r"FATAL|NONE|[0-9]{1,20}|[0-9]{1,3}(?:,[0-9]{1,3}){0,127})$"
+    r"FATAL|NONE|MEDIA_SESSION_SINGLE|[0-9]{1,20}|[0-9]{1,3}(?:,[0-9]{1,3}){0,127})$"
 )
 _MEDIA_NATIVE_MARKER_PREFIXES = (
     "ICE_",
@@ -98,6 +101,7 @@ _MEDIA_NATIVE_MARKER_PREFIXES = (
     # the live-proven R27 repeat-0x001A candidate).
     "R27_",
     "R65_",
+    "P122_",
     "REFRESH_",
 )
 _MEDIA_NATIVE_MARKER_TAIL_LIMIT = 40
@@ -119,6 +123,7 @@ _MEDIA_NATIVE_PROTOCOL_MARKER_PREFIXES = (
     "P80_AUDIO_RTP_FORWARDING",
     "R27_",
     "R65_",
+    "P122_",
     "REFRESH_",
 )
 _MEDIA_STATUS_NOTIFY_MIN_INTERVAL_SECONDS = 1.0
@@ -308,9 +313,10 @@ class ComelitEntranceMediaTransport:
     """Own one native entrance media process and its cloud bootstrap.
 
     This class assumes the persistent listener has already been paused by
-    ComelitMediaSessionManager. It never starts/stops the listener and has no
-    Door entrypoint. The native helper unwraps only inbound PT99/PT8 RTP to
-    loopback ports described by local_sdp_path.
+    ComelitMediaSessionManager. It never starts/stops the listener. While this
+    same on-demand media session is ACTIVE it owns the Entrance Door one-shot
+    entrypoint too; the native helper reuses its existing CTPP and never opens
+    a second media/control session. Gate remains unsupported here.
     """
 
     def __init__(
@@ -349,6 +355,10 @@ class ComelitEntranceMediaTransport:
         self._status_notify_handle: asyncio.TimerHandle | None = None
         self._last_status_notify_monotonic: float | None = None
         self._latency_timeline: CameraRequestLatencyTimeline | None = None
+        self._door_lock = asyncio.Lock()
+        self._door_result_future: asyncio.Future[str] | None = None
+        self._door_diagnostic: dict[str, object] = {}
+        self._last_door_result: dict[str, object] | None = None
 
     @property
     def active(self) -> bool:
@@ -577,6 +587,179 @@ class ComelitEntranceMediaTransport:
             p116_markers,
         )
 
+    def _observe_on_demand_door_marker(self, line: str) -> None:
+        """Consume only bounded P122 Door evidence from native stdout."""
+        if line == "P122_ON_DEMAND_DOOR_COMMAND_ACCEPTED=true":
+            self._door_diagnostic["command_accepted"] = True
+        elif line == "P122_ON_DEMAND_DOOR_COMMAND_ACCEPTED=false":
+            self._door_diagnostic["command_accepted"] = False
+        elif line == "P122_ON_DEMAND_DOOR_PATH=MEDIA_SESSION_SINGLE":
+            self._door_diagnostic["door_path"] = "MEDIA_SESSION_SINGLE"
+        elif line == "P122_ON_DEMAND_DOOR_EXISTING_CTPP_REUSED=true":
+            self._door_diagnostic["existing_ctpp_reused"] = True
+        elif line == "P122_ON_DEMAND_DOOR_QUEUED=true":
+            self._door_diagnostic["queued"] = True
+        elif line == "P122_ON_DEMAND_DOOR_SENT=true":
+            self._door_diagnostic["sent"] = True
+        elif line == "P122_ON_DEMAND_DOOR_WRITE_COUNT=1":
+            self._door_diagnostic["write_count"] = 1
+        elif line == "P122_ON_DEMAND_DOOR_ACK_OBSERVED=true":
+            self._door_diagnostic["ack_observed"] = True
+        elif line == "P122_ON_DEMAND_DOOR_ACK_OBSERVED=false":
+            self._door_diagnostic["ack_observed"] = False
+        elif line == "P122_ON_DEMAND_DOOR_DOOR_SPECIFIC_ACK_PROVEN=false":
+            self._door_diagnostic["door_specific_ack_proven"] = False
+        elif line.startswith("P122_ON_DEMAND_DOOR_RESULT="):
+            state = line.split("=", 1)[1]
+            if state not in {
+                "UNKNOWN_OUTCOME",
+                "REJECTED_NOT_READY",
+                "FAILED_SAFE",
+            }:
+                return
+            future = self._door_result_future
+            if future is not None and not future.done():
+                future.set_result(state)
+        else:
+            return
+
+        key, _, value = line.partition("=")
+        _LOGGER.warning(
+            "Comelit on-demand Door evidence marker=%s value=%s",
+            key,
+            value,
+        )
+
+    def _finalize_on_demand_door_operation(
+        self,
+        result: dict[str, object],
+        *,
+        event_id: str | None = None,
+    ) -> dict[str, object]:
+        final = dict(result)
+        if event_id:
+            final["event_id"] = event_id
+        final["automatic_retry_allowed"] = False
+        final["physical_effect_asserted"] = False
+        final["media_session_owned"] = True
+        self._last_door_result = dict(final)
+        self._hass.bus.async_fire(EVENT_DOOR_OPERATION, dict(final))
+        return final
+
+    async def async_open_door(
+        self,
+        *,
+        event_id: str | None = None,
+    ) -> dict[str, object]:
+        """Execute one Entrance Door attempt on the active media-owned CTPP."""
+        async with self._door_lock:
+            process = self._process
+            if (
+                not self.active
+                or process is None
+                or process.returncode is not None
+            ):
+                return self._finalize_on_demand_door_operation(
+                    {
+                        "operation_id": None,
+                        "door": "entrance",
+                        "state": "FAILED_SAFE",
+                        "protocol_acked": False,
+                        "write_count": None,
+                        "door_specific_ack_proven": False,
+                        "existing_ctpp_reused": False,
+                        "one_shot_sequence_sent": False,
+                        "door_path": "MEDIA_SESSION_SINGLE",
+                    },
+                    event_id=event_id,
+                )
+
+            operation_id = f"comelit-ha-media-{uuid4()}"
+            self._door_diagnostic = {}
+            future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+            self._door_result_future = future
+            _LOGGER.warning(
+                "Comelit on-demand Door attempt started operation_id=%s "
+                "door=entrance media_active=%s",
+                operation_id,
+                self.active,
+            )
+
+            try:
+                os.kill(process.pid, signal.SIGUSR1)
+            except ProcessLookupError:
+                if self._door_result_future is future:
+                    self._door_result_future = None
+                return self._finalize_on_demand_door_operation(
+                    {
+                        "operation_id": operation_id,
+                        "door": "entrance",
+                        "state": "FAILED_SAFE",
+                        "protocol_acked": False,
+                        "write_count": None,
+                        "door_specific_ack_proven": False,
+                        "existing_ctpp_reused": False,
+                        "one_shot_sequence_sent": False,
+                        "door_path": "MEDIA_SESSION_SINGLE",
+                    },
+                    event_id=event_id,
+                )
+
+            try:
+                state = await asyncio.wait_for(asyncio.shield(future), timeout=5)
+            except TimeoutError:
+                state = "UNKNOWN_OUTCOME"
+                _LOGGER.warning(
+                    "Comelit on-demand Door native result timeout "
+                    "operation_id=%s",
+                    operation_id,
+                )
+            finally:
+                if self._door_result_future is future:
+                    self._door_result_future = None
+
+            diagnostic = dict(self._door_diagnostic)
+            write_count = diagnostic.get("write_count")
+            if write_count != 1:
+                write_count = None
+            existing_ctpp_reused = (
+                diagnostic.get("existing_ctpp_reused") is True
+            )
+            one_shot_sequence_sent = (
+                state == "UNKNOWN_OUTCOME"
+                and write_count == 1
+                and existing_ctpp_reused
+                and diagnostic.get("door_path") == "MEDIA_SESSION_SINGLE"
+            )
+            result = {
+                "operation_id": operation_id,
+                "door": "entrance",
+                "state": state,
+                "protocol_acked": False,
+                "write_count": write_count,
+                "door_specific_ack_proven": False,
+                "existing_ctpp_reused": existing_ctpp_reused,
+                "one_shot_sequence_sent": one_shot_sequence_sent,
+                "door_path": diagnostic.get("door_path"),
+                "call_time_ack_observed": (
+                    diagnostic.get("ack_observed") is True
+                ),
+            }
+            _LOGGER.warning(
+                "Comelit on-demand Door attempt completed operation_id=%s "
+                "state=%s write_count=%s existing_ctpp_reused=%s "
+                "ack_observed=%s",
+                operation_id,
+                state,
+                write_count,
+                existing_ctpp_reused,
+                diagnostic.get("ack_observed") is True,
+            )
+            return self._finalize_on_demand_door_operation(
+                result,
+                event_id=event_id,
+            )
+
     async def async_start(self, panel: str) -> None:
         if panel != "entrance":
             raise ComelitMediaTransportError("unsupported_media_panel")
@@ -600,6 +783,8 @@ class ComelitEntranceMediaTransport:
         self._video_forwarding.clear()
         self._audio_forwarding.clear()
         self._video_recovery_shim = None
+        self._door_diagnostic = {}
+        self._door_result_future = None
         timeline = self._latency_timeline
         if timeline is not None:
             timeline.mark(
@@ -697,6 +882,10 @@ class ComelitEntranceMediaTransport:
         self._offer_ready.clear()
         self._video_forwarding.clear()
         self._audio_forwarding.clear()
+        future = self._door_result_future
+        if future is not None and not future.done():
+            future.set_result("UNKNOWN_OUTCOME")
+        self._door_result_future = None
         self._cancel_status_notify()
         await self._async_stop_video_recovery_shim()
         await self._hass.async_add_executor_job(_remove_helper_secret)
@@ -906,11 +1095,13 @@ class ComelitEntranceMediaTransport:
             self._remember_native_marker(line)
             self._observe_latency_marker(line)
             self._observe_native_stage_marker(line)
+            self._observe_on_demand_door_marker(line)
 
             if line == "ICE_GATHER=PASS":
                 self._offer_ready.set()
             elif line == "P80_MEDIA_ACTIVE=true":
                 self._media_active.set()
+                self._notify_status_bounded()
                 _LOGGER.info("Comelit entrance media session ACTIVE")
             elif line == "P80_VIDEO_RTP_FORWARDING=PASS":
                 self._video_forwarding.set()

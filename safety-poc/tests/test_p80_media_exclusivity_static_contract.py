@@ -37,22 +37,24 @@ class P80MediaExclusivityStaticContractTests(unittest.TestCase):
         self.assertIn("not self._media_paused", run)
         self.assertIn("self._stopping or self._media_paused", run)
 
-    def test_door_button_fails_closed_during_media_pause(self) -> None:
+    def test_entrance_button_routes_only_active_on_demand_media_owner(self) -> None:
         self.assertIn("if self._supervisor.media_paused:", self.button)
-        self.assertIn('"blocked_by_media_session": self._supervisor.media_paused', self.button)
-        self.assertIn("return not self._supervisor.media_paused", self.button)
+        self.assertIn("self._media_transport.active", self.button)
+        self.assertIn("await self._media_transport.async_open_door()", self.button)
+        self.assertIn('"on_demand_media_door_ready": on_demand_ready', self.button)
+        self.assertIn("self._supervisor.media_paused and not on_demand_ready", self.button)
 
-    def test_direct_door_service_fails_closed_only_for_separate_media(self) -> None:
-        self.assertIn(
-            "if supervisor.media_paused:",
-            self.init,
-        )
+    def test_direct_door_service_routes_only_active_entrance_media_owner(self) -> None:
+        self.assertIn("if supervisor.media_paused:", self.init)
         self.assertNotIn(
             "supervisor.media_paused or supervisor.attached_media_busy",
             self.init,
         )
+        self.assertIn("door == DOOR_ENTRANCE", self.init)
+        self.assertIn("media_transport.active", self.init)
+        self.assertIn("await media_transport.async_open_door(", self.init)
         self.assertIn(
-            "bootstrapped media session owns the exclusive connection",
+            "on-demand media session owns the exclusive connection",
             self.init,
         )
 
