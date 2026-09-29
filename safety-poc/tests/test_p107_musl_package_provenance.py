@@ -48,7 +48,7 @@ SUPERSEDED_P119_SOURCE_SHA256 = "2f8137e988437c779a0f3bb1c9904c81cbe2d13641efa2e
 FROZEN_P117_BUILD_META = MEDIA_DIR / "p117_settle1000_production_media_build_meta.txt"
 FROZEN_R65_BUILD_META = MEDIA_DIR / "p116_r65_production_media_build_meta.txt"
 PRE_R65_BUILD_META = MEDIA_DIR / "p116_media_telemetry_build_meta.txt"
-EXPECTED_MUSL_SHA256 = "a3c95f3ec8c5c00963946c8ff550760fadd792a314bb72692e4281da35a5a6a5"
+EXPECTED_MUSL_SHA256 = "35e968ac0a22951d68c01f3c164cfb8e13bf50a6984df65f50fdc667c8fc0ec7"
 EXPECTED_RUN3_GLIBC_SHA256 = "94063498a35a886dc4cb735c3e629a5097b965224cb3354192723d30e70c16ac"
 # PACKAGED_NATIVE_SOURCE_SHA256 is the source identity actually baked into
 # the packaged EXPECTED_MUSL_SHA256 binary (the P119 rebuild pair: both moved
@@ -59,8 +59,8 @@ EXPECTED_RUN3_GLIBC_SHA256 = "94063498a35a886dc4cb735c3e629a5097b965224cb3354192
 # transform (entrance_p119_remote_sdp_l1_gather_diag_transform.py), composed
 # on top of the still-frozen R65 output. Since the orchestrator rebuild they
 # describe the same pair again, exactly as in the P117 round.
-PACKAGED_NATIVE_SOURCE_SHA256 = "fd375a37e427e680db60984f6d74807e56892a1a042a168032a6dfa42411eff5"
-HEAD_P116_SOURCE_SHA256 = "fd375a37e427e680db60984f6d74807e56892a1a042a168032a6dfa42411eff5"
+PACKAGED_NATIVE_SOURCE_SHA256 = "2ad34b82b9e57d265472709bd05e946aa46ea154564a6be69f101d4af4e0c246"
+HEAD_P116_SOURCE_SHA256 = "2ad34b82b9e57d265472709bd05e946aa46ea154564a6be69f101d4af4e0c246"
 # The P117 pair is now a historical record: these must stay literal values so
 # they keep describing the artifact P117 actually built, not the current pins.
 SUPERSEDED_P117_BINARY_SHA256 = "ff16db0d809135cf5cdf6be4bfe8133fd77b3f41871b6c8f46eea765064537fb"
