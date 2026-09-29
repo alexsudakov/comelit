@@ -78,8 +78,25 @@ _MEDIA_NATIVE_MARKER_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,79}$")
 _MEDIA_NATIVE_MARKER_SAFE_VALUE_RE = re.compile(
     r"^(?:PASS|FAIL|true|false|READY|OPEN|CLOSED|ACTIVE_MEDIA_SINGLE|"
     r"UNKNOWN_OUTCOME|REJECTED|REJECTED_NOT_READY|FAILED_SAFE|EXPECTED_TERMINAL_SHUTDOWN|"
+    r"SIGNAL_STAGE|MEDIA_FORWARDING|RTPC_STAGE|PSEUDOTCP|GRACEFUL_STOP|CTPP|"
+    r"TX_PENDING|REFRESH_OUTSTANDING|REFRESH_FAIL_CLOSED|INITIAL_001A|"
+    r"DOOR_INFLIGHT|DOOR_ALREADY_SENT|"
     r"FATAL|NONE|[0-9]{1,20}|[0-9]{1,3}(?:,[0-9]{1,3}){0,127})$"
 )
+_P122_DOOR_REJECT_GATES = {
+    "SIGNAL_STAGE",
+    "MEDIA_FORWARDING",
+    "RTPC_STAGE",
+    "PSEUDOTCP",
+    "GRACEFUL_STOP",
+    "CTPP",
+    "TX_PENDING",
+    "REFRESH_OUTSTANDING",
+    "REFRESH_FAIL_CLOSED",
+    "INITIAL_001A",
+    "DOOR_INFLIGHT",
+    "DOOR_ALREADY_SENT",
+}
 _MEDIA_NATIVE_MARKER_PREFIXES = (
     "ICE_",
     "REMOTE_SDP_",
@@ -397,6 +414,7 @@ class ComelitEntranceMediaTransport:
                 "ack_observed": False,
                 "relay_event_observed": False,
                 "existing_ctpp_reused": False,
+                "reject_gate": None,
             }
 
             _LOGGER.warning(
@@ -457,18 +475,21 @@ class ComelitEntranceMediaTransport:
                 "physical_effect_asserted": False,
                 "native_result_timeout": native_timeout,
             }
+            if diagnostics.get("reject_gate") in _P122_DOOR_REJECT_GATES:
+                result["reject_gate"] = diagnostics["reject_gate"]
             if event_id:
                 result["event_id"] = event_id
             self._hass.bus.async_fire(EVENT_DOOR_OPERATION, dict(result))
             _LOGGER.warning(
                 "Comelit on-demand media Door attempt completed "
                 "operation_id=%s state=%s write_count=%s "
-                "ack_observed=%s relay_event_observed=%s",
+                "ack_observed=%s relay_event_observed=%s reject_gate=%s",
                 operation_id,
                 state,
                 write_count,
                 result["ack_observed"],
                 result["relay_event_observed"],
+                result.get("reject_gate"),
             )
             return result
 
@@ -1042,6 +1063,11 @@ class ComelitEntranceMediaTransport:
                         self._door_diagnostics["relay_event_observed"] = value == "true"
                     elif key == "P122_ONDEMAND_DOOR_EXISTING_CTPP_REUSED":
                         self._door_diagnostics["existing_ctpp_reused"] = value == "true"
+                    elif (
+                        key == "P122_ONDEMAND_DOOR_REJECT_GATE"
+                        and value in _P122_DOOR_REJECT_GATES
+                    ):
+                        self._door_diagnostics["reject_gate"] = value
                     elif key == "P122_ONDEMAND_DOOR_RESULT":
                         if value in {
                             "UNKNOWN_OUTCOME",
