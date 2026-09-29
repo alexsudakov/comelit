@@ -11,7 +11,7 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.7.9**. This diagnostics-only release adds bounded Home Assistant logging for the native Door one-shot path so a physical attached-call failure can be attributed to command acceptance, individual writes, reject stage, ACK proof, native timeout, and final conservative outcome without exposing payloads, channel IDs, addresses, credentials, or media data. Door protocol behavior and the 1.7.8 attached-Ring routing fix are unchanged. Details are recorded in `docs/releases/1.7.9-door-native-observability.md`.
+Current stable release: **1.7.10**. This release fixes Entrance Door control during an active physical Ring/attached-media call by using the PCAP-derived single-message call-time Door profile on the existing live call transaction instead of the standalone five-write profile. It preserves the standalone Door and Gate paths, opens no second CTPP/P2P session, adds no automatic retry, and keeps physical-effect reporting conservative. Details are recorded in `docs/releases/1.7.10-door-active-call-single-message.md`.
 
 ## Home Assistant Custom Card
 
