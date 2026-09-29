@@ -1,0 +1,175 @@
+name: r66-rebuild-once
+
+on:
+  push:
+    branches:
+      - fix/door-active-call-single-message
+    paths:
+      - .github/workflows/r66-rebuild-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  rebuild:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Generate corrected R66 source and pin builder
+        id: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          MEDIA="$GITHUB_WORKSPACE/safety-poc/research/media/v1"
+          SOURCE="$GITHUB_WORKSPACE/safety-poc/research/door/v1_5_7/comelit-v4-persistent-ctpp-door.c"
+          TRANSFORM="$MEDIA/entrance_p116_r66_call_time_door_transform.py"
+          mkdir -p "$GITHUB_WORKSPACE/.r66-preflight"
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$MEDIA" \
+            python3 "$TRANSFORM" --source "$SOURCE" \
+            --output "$GITHUB_WORKSPACE/.r66-preflight/r66-generated.c" >/dev/null
+          SOURCE_SHA="$(sha256sum "$GITHUB_WORKSPACE/.r66-preflight/r66-generated.c" | awk '{print $1}')"
+          python3 - "$SOURCE_SHA" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          sha = sys.argv[1]
+          path = Path("safety-poc/research/media/v1/ct122_build_p116_r66_call_time_door_candidate.sh")
+          text = path.read_text()
+          text, count = re.subn(
+              r"^EXPECTED_GENERATED_SOURCE_SHA=[0-9a-f]{64}$",
+              f"EXPECTED_GENERATED_SOURCE_SHA={sha}",
+              text,
+              flags=re.M,
+          )
+          if count != 1:
+              raise SystemExit(f"expected one generated-source pin, got {count}")
+          path.write_text(text)
+          PY
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare Alpine APK closure
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.r66-apks"
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE/.r66-apks:/pkgs" \
+            alpine:3.24.1 \
+            /bin/sh -eu -c '
+              apk update >/dev/null
+              apk fetch --recursive --output /pkgs \
+                build-base pkgconf glib-dev libnice-dev binutils >/dev/null
+            '
+          test -n "$(find "$GITHUB_WORKSPACE/.r66-apks" -maxdepth 1 -name '*.apk' -print -quit)"
+
+      - name: Reproducible offline R66 build
+        id: build
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          export REPO="$GITHUB_WORKSPACE"
+          export APK_CLOSURE="$GITHUB_WORKSPACE/.r66-apks"
+          export RUN_ROOT="$GITHUB_WORKSPACE/.r66-run"
+          bash safety-poc/research/media/v1/ct122_build_p116_r66_call_time_door_candidate.sh \
+            > "$GITHUB_WORKSPACE/.r66-build-summary.txt"
+          BUILD_A="$RUN_ROOT/comelit-v4-r66-candidate-a"
+          BUILD_B="$RUN_ROOT/comelit-v4-r66-candidate-b"
+          SOURCE_A="$RUN_ROOT/r66-a.c"
+          cmp -s "$BUILD_A" "$BUILD_B"
+          test "$(sha256sum "$SOURCE_A" | awk '{print $1}')" = "${{ steps.source.outputs.source_sha }}"
+          BIN_SHA="$(sha256sum "$BUILD_A" | awk '{print $1}')"
+          echo "binary_sha=$BIN_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Pin promotion to this exact source and binary
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          BINARY_SHA: ${{ steps.build.outputs.binary_sha }}
+        run: |
+          set -Eeuo pipefail
+          python3 - "$SOURCE_SHA" "$BINARY_SHA" <<'PY'
+          from pathlib import Path
+          import sys
+
+          source_sha, binary_sha = sys.argv[1:3]
+          path = Path("safety-poc/research/media/v1/ct122_promote_p116_r66_call_time_door_candidate.sh")
+          text = path.read_text()
+
+          anchor = "EXPECTED_SOURCE_SHA256=${EXPECTED_SOURCE_SHA256:-}\n"
+          if anchor not in text:
+              raise SystemExit("promotion variable anchor missing")
+          pins = (
+              anchor
+              + f"PINNED_R66_SOURCE_SHA={source_sha}\n"
+              + f"PINNED_R66_BINARY_SHA={binary_sha}\n"
+          )
+          text = text.replace(anchor, pins, 1)
+
+          old = """[[ "$ACTUAL_SOURCE_SHA256" == "$EXPECTED_SOURCE_SHA256" ]] \\\n    || fail "SOURCE_SHA_MISMATCH"\n[[ "$ACTUAL_SHA256" == "$EXPECTED_SHA256" ]] \\\n    || fail "CANDIDATE_SHA_MISMATCH"\n[[ "$PEER_SHA256" == "$EXPECTED_SHA256" ]] \\\n    || fail "REPRODUCIBLE_PEER_SHA_MISMATCH"\n"""
+          new = """[[ "$EXPECTED_SOURCE_SHA256" == "$PINNED_R66_SOURCE_SHA" ]] \\\n    || fail "EXPECTED_SOURCE_SHA_NOT_PINNED"\n[[ "$EXPECTED_SHA256" == "$PINNED_R66_BINARY_SHA" ]] \\\n    || fail "EXPECTED_BINARY_SHA_NOT_PINNED"\n[[ "$ACTUAL_SOURCE_SHA256" == "$PINNED_R66_SOURCE_SHA" ]] \\\n    || fail "SOURCE_SHA_MISMATCH"\n[[ "$ACTUAL_SHA256" == "$PINNED_R66_BINARY_SHA" ]] \\\n    || fail "CANDIDATE_SHA_MISMATCH"\n[[ "$PEER_SHA256" == "$PINNED_R66_BINARY_SHA" ]] \\\n    || fail "REPRODUCIBLE_PEER_SHA_MISMATCH"\n"""
+          if old not in text:
+              raise SystemExit("promotion SHA gate anchor missing")
+          text = text.replace(old, new, 1)
+          path.write_text(text)
+          PY
+
+      - name: Promote exact rebuilt helper
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          BINARY_SHA: ${{ steps.build.outputs.binary_sha }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          REPO="$GITHUB_WORKSPACE" \
+          CANDIDATE="$GITHUB_WORKSPACE/.r66-run/comelit-v4-r66-candidate-a" \
+          REPRODUCIBLE_PEER="$GITHUB_WORKSPACE/.r66-run/comelit-v4-r66-candidate-b" \
+          R66_SOURCE="$GITHUB_WORKSPACE/.r66-run/r66-a.c" \
+          EXPECTED_SHA256="$BINARY_SHA" \
+          EXPECTED_SOURCE_SHA256="$SOURCE_SHA" \
+            bash safety-poc/research/media/v1/ct122_promote_p116_r66_call_time_door_candidate.sh \
+            > "$GITHUB_WORKSPACE/.r66-promotion-summary.txt"
+
+      - name: Verify promoted identity
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          BINARY_SHA: ${{ steps.build.outputs.binary_sha }}
+        run: |
+          set -Eeuo pipefail
+          test "$(sha256sum custom_components/comelit/native/comelit-v4 | awk '{print $1}')" = "$BINARY_SHA"
+          grep -Fx "source_sha256=$SOURCE_SHA" safety-poc/research/media/v1/P116_R66_BUILD_INFO.txt
+          grep -Fx "native_binary_sha256=$BINARY_SHA" safety-poc/research/media/v1/P116_R66_BUILD_INFO.txt
+          grep -Fq "PINNED_R66_SOURCE_SHA=$SOURCE_SHA" safety-poc/research/media/v1/ct122_promote_p116_r66_call_time_door_candidate.sh
+          grep -Fq "PINNED_R66_BINARY_SHA=$BINARY_SHA" safety-poc/research/media/v1/ct122_promote_p116_r66_call_time_door_candidate.sh
+
+      - name: Commit promoted R66 helper and remove one-shot workflow
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf .r66-apks .r66-run .r66-preflight
+          rm -f .r66-build-summary.txt .r66-promotion-summary.txt
+          git rm .github/workflows/r66-rebuild-once.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            custom_components/comelit/native/comelit-v4 \
+            safety-poc/research/media/v1/P116_R66_BUILD_INFO.txt \
+            safety-poc/research/media/v1/ct122_build_p116_r66_call_time_door_candidate.sh \
+            safety-poc/research/media/v1/ct122_promote_p116_r66_call_time_door_candidate.sh
+          git diff --cached --check
+          git commit -m "build(comelit): rebuild corrected R66 listener helper"
+          git push origin HEAD:fix/door-active-call-single-message
