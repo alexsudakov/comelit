@@ -51,7 +51,7 @@ class P80MediaExclusivityStaticContractTests(unittest.TestCase):
         self.assertIn("if supervisor.media_paused:", self.init)
         self.assertIn("door == DOOR_ENTRANCE", self.init)
         self.assertIn("and media_transport.active", self.init)
-        self.assertIn("return await media_transport.async_open_door()", self.init)
+        self.assertIn("return await media_transport.async_open_door(", self.init)
         self.assertNotIn(
             "supervisor.media_paused or supervisor.attached_media_busy",
             self.init,
