@@ -104,7 +104,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 and media_transport is not None
                 and media_transport.active
             ):
-                return await media_transport.async_open_door()
+                event_id = call.data.get(ATTR_EVENT_ID)
+                return await media_transport.async_open_door(
+                    event_id=str(event_id) if event_id else None,
+                )
             raise HomeAssistantError(
                 "Comelit Door is unavailable while the on-demand media "
                 "session owns the exclusive connection"
