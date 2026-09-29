@@ -164,6 +164,14 @@ class P116R60DoorRuntimeStaticContractTests(unittest.TestCase):
         self.assertIn("V4_DOOR_DOOR_SPECIFIC_ACK_PROVEN=", reader)
         self.assertIn("V4_DOOR_WRITE_COUNT=", reader)
         self.assertIn("V4_DOOR_RESULT=", reader)
+        self.assertIn('self._door_diagnostic["door_path"]', reader)
+        self.assertIn("CALL_TIME_DOOR_SEQUENCE_COMMITTED=", reader)
+        self.assertIn("CALL_TIME_DOOR_STALE_GENERATION=", reader)
+        self.assertIn('door_path=diagnostic.get("door_path")', method)
+        self.assertIn(
+            'call_time_sequence_committed=diagnostic.get(',
+            method,
+        )
 
     def test_runtime_logs_bounded_door_evidence_without_raw_channel_ids(self) -> None:
         observer = function_source(self.runtime_text, "_observe_door_log_marker")
