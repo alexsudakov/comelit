@@ -1316,6 +1316,10 @@ class ComelitRingRuntime:
                     state=state,
                     write_count=write_count,
                     existing_ctpp_reused=existing_ctpp_reused,
+                    door_path=diagnostic.get("door_path"),
+                    call_time_sequence_committed=diagnostic.get(
+                        "call_time_sequence_committed"
+                    ),
                 ),
                 "automatic_retry_allowed": False,
                 "physical_effect_asserted": False,
@@ -1333,6 +1337,10 @@ class ComelitRingRuntime:
                 state=state,
                 write_count=write_count,
                 existing_ctpp_reused=existing_ctpp_reused,
+                door_path=result.get("door_path"),
+                call_time_sequence_committed=result.get(
+                    "call_time_sequence_committed"
+                ),
             )
 
             # A raw ACKED state is never enough by itself.
@@ -1558,11 +1566,23 @@ class ComelitRingRuntime:
                 )
                 continue
 
+            if line.startswith("V4_DOOR_PATH="):
+                door_path = line.split("=", 1)[1]
+                if door_path in _DOOR_LOG_PATHS:
+                    self._door_diagnostic["door_path"] = door_path
+                continue
+
             door_boolean_diagnostics = {
                 "V4_DOOR_DOOR_SPECIFIC_ACK_PROVEN=": (
                     "door_specific_ack_proven"
                 ),
                 "V4_DOOR_EXISTING_CTPP_REUSED=": "existing_ctpp_reused",
+                "CALL_TIME_DOOR_SEQUENCE_COMMITTED=": (
+                    "call_time_sequence_committed"
+                ),
+                "CALL_TIME_DOOR_STALE_GENERATION=": (
+                    "call_time_stale_generation"
+                ),
             }
             boolean_diagnostic_consumed = False
             for prefix, result_key in door_boolean_diagnostics.items():
