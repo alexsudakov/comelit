@@ -52,6 +52,7 @@ static gboolean p122_door_waiting_ack = FALSE;
 static gboolean p122_door_ack_observed = FALSE;
 static gboolean p122_door_relay_event_observed = FALSE;
 static guint32 p122_door_sequence = 0u;
+static guint32 p122_door_pending_sequence = 0u;
 
 static gboolean p122_door_tick_cb(gpointer data);
 static gboolean p122_door_settle_cb(gpointer data);
@@ -103,6 +104,8 @@ p122_door_signal_handler(int signum)
 static guint32
 p122_latest_client_sequence(void)
 {
+    if (p122_door_sent)
+        return p122_door_sequence;
     if (r27_repeat_001a_sent_count > 0u)
         return r27_repeat_001a_sequence;
     return r27_initial_001a_sequence;
@@ -122,8 +125,7 @@ p122_door_eligible(void)
         !r27_repeat_outstanding &&
         !r27_refresh_fail_closed &&
         r27_initial_001a_sent_count == 1u &&
-        !p122_door_inflight &&
-        !p122_door_sent;
+        !p122_door_inflight;
 }
 
 static gboolean
@@ -138,11 +140,11 @@ p122_serialize_door(guint8 out[P122_DOOR_PACKET_LEN])
     if (previous_sequence == 0u)
         return FALSE;
 
-    p122_door_sequence = previous_sequence + 0x00010000u;
+    p122_door_pending_sequence = previous_sequence + 0x00010000u;
 
     memset(out, 0, P122_DOOR_PACKET_LEN);
     p122_write_le16(out + 0, 0x1840u);
-    p122_write_le32(out + 2, p122_door_sequence);
+    p122_write_le32(out + 2, p122_door_pending_sequence);
     p122_write_be16(out + 6, 0x000du);
     p122_write_be16(out + 8, 0x002du);
     memcpy(out + 10, V4_ENTRANCE, 8u);
@@ -280,6 +282,8 @@ p122_door_tick_cb(gpointer data)
 
     p122_door_ack_observed = FALSE;
     p122_door_relay_event_observed = FALSE;
+    printf("P122_ONDEMAND_DOOR_SEQUENCE_BEFORE=%u\n",
+        (unsigned)p122_latest_client_sequence());
 
     if (!p122_queue_door()) {
         p122_door_inflight = FALSE;
@@ -294,11 +298,14 @@ p122_door_tick_cb(gpointer data)
 _TX_CASE_ANCHOR = """        case P12_TX_V4_DOOR_WRITE:
 """
 _TX_CASE = r'''        case P122_TX_ONDEMAND_DOOR:
+            p122_door_sequence = p122_door_pending_sequence;
             p122_door_sent = TRUE;
             p122_door_waiting_ack = TRUE;
             printf("P122_ONDEMAND_DOOR_SENT=true\n");
             printf("P122_ONDEMAND_DOOR_WRITE_COUNT=1\n");
             printf("P122_ONDEMAND_DOOR_COUNTER_COMMITTED=true\n");
+            printf("P122_ONDEMAND_DOOR_SEQUENCE_AFTER=%u\n",
+                (unsigned)p122_door_sequence);
             fflush(stdout);
             if (g_timeout_add(P122_DOOR_SETTLE_MS, p122_door_settle_cb, NULL) == 0u) {
                 p122_door_waiting_ack = FALSE;
