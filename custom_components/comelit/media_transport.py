@@ -1101,6 +1101,7 @@ class ComelitEntranceMediaTransport:
                 self._offer_ready.set()
             elif line == "P80_MEDIA_ACTIVE=true":
                 self._media_active.set()
+                self._notify_status_bounded()
                 _LOGGER.info("Comelit entrance media session ACTIVE")
             elif line == "P80_VIDEO_RTP_FORWARDING=PASS":
                 self._video_forwarding.set()
