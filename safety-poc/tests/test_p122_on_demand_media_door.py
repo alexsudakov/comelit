@@ -40,8 +40,8 @@ class P122OnDemandMediaDoorTests(unittest.TestCase):
 
     def test_transform_is_deterministic_and_composes_p121(self) -> None:
         self.assertEqual(self.candidate_a, self.candidate_b)
-        self.assertIn("GATHER_INITIAL_TIMEOUT_SET_MS=%u", self.candidate_a)
-        self.assertIn("GATHER_INITIAL_TIMEOUT_RESTORED_MS=%u", self.candidate_a)
+        self.assertIn("GATHER_INITIAL_TIMEOUT_SET_MS=250", self.candidate_a)
+        self.assertIn("GATHER_INITIAL_TIMEOUT_RESTORED_MS=500", self.candidate_a)
         self.assertIn(p122.BEGIN, self.candidate_a)
         self.assertIn(p122.END, self.candidate_a)
 
@@ -109,7 +109,7 @@ class P122OnDemandMediaDoorTests(unittest.TestCase):
         self.assertNotIn("physical_effect_asserted=true", region)
 
     def test_ha_dispatch_uses_active_media_owner_for_entrance_only(self) -> None:
-        self.assertIn("async def async_open_door(self)", self.transport)
+        self.assertIn("async def async_open_door(", self.transport)
         self.assertIn("os.kill(process.pid, signal.SIGUSR1)", self.transport)
         self.assertIn('"path": "ON_DEMAND_MEDIA_SINGLE"', self.transport)
         self.assertIn('"one_shot_sequence_sent": one_shot_sent', self.transport)
@@ -122,7 +122,7 @@ class P122OnDemandMediaDoorTests(unittest.TestCase):
 
         self.assertIn("door == DOOR_ENTRANCE", self.init_py)
         self.assertIn("and media_transport.active", self.init_py)
-        self.assertIn("return await media_transport.async_open_door()", self.init_py)
+        self.assertIn("return await media_transport.async_open_door(", self.init_py)
 
     def test_gate_is_still_fail_closed_while_media_owns_connection(self) -> None:
         gate = self.button.split("class ComelitGateDoorButton", 1)[1]
