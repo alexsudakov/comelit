@@ -135,6 +135,7 @@ static void case_c_sequence_and_queue_failure(void)
     unsigned after;
     unsigned failure_before;
     unsigned failure_after;
+    unsigned stale_sequence;
 
     reset_world();
     before = g_r35_session.call_sequence & 0xffu;
@@ -159,6 +160,16 @@ static void case_c_sequence_and_queue_failure(void)
         g_queued_frames == 0u && failure_after == failure_before);
     printf("R66_CASE_C_QUEUE_FAILURE_BEFORE=%u\n", failure_before);
     printf("R66_CASE_C_QUEUE_FAILURE_AFTER=%u\n", failure_after);
+
+    reset_world();
+    (void)harness_tick_select_and_queue();
+    g_r35_session.call_generation++;
+    g_r35_session.call_sequence = 0x55u;
+    stale_sequence = g_r35_session.call_sequence;
+    (void)r66_call_time_door_tx_completed();
+    print_passfail(
+        "R66_CASE_C_STALE_GENERATION_DOES_NOT_OVERWRITE",
+        (g_r35_session.call_sequence & 0xffu) == stale_sequence);
 }
 
 static void case_d_media_inactive_falls_back(void)
