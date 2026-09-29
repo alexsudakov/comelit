@@ -78,10 +78,20 @@ class P80MediaTransportStaticContractTests(unittest.TestCase):
         self.assertNotIn("for attempt", self.source)
         self.assertNotIn("while True:\n            remote = await async_negotiate_p2p", self.source)
 
-    def test_transport_has_no_door_or_listener_control_surface(self) -> None:
+    def test_transport_has_bounded_media_owned_door_and_no_listener_control(self) -> None:
+        method = next(
+            node
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name == "async_open_door"
+        )
+        method_source = ast.get_source_segment(self.source, method) or ""
+        self.assertEqual(method_source.count("signal.SIGUSR1"), 1)
+        self.assertIn("if (\n                not self.active", method_source)
+        self.assertNotIn("async_negotiate_p2p", method_source)
+        self.assertNotIn("asyncio.create_subprocess_exec", method_source)
+        self.assertNotIn("async_start(", method_source)
         for forbidden in (
-            "async_open_door",
-            "SIGUSR1",
             "async_pause_for_media",
             "async_resume_after_media",
             "action\":\"stop",
