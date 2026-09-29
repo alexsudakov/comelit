@@ -57,7 +57,11 @@ class P80MediaExclusivityStaticContractTests(unittest.TestCase):
             self.init,
         )
         self.assertIn(
-            "on-demand media session owns the exclusive connection",
+            '"Comelit Door is unavailable while the on-demand media "',
+            self.init,
+        )
+        self.assertIn(
+            '"session owns the exclusive connection"',
             self.init,
         )
 
