@@ -91,12 +91,62 @@ class P122OnDemandMediaDoorTests(unittest.TestCase):
         c = self.candidate_a
         self.assertIn("signal(SIGUSR1, p122_door_signal_handler);", c)
         self.assertIn("g_timeout_add(100u, p122_door_tick_cb, NULL)", c)
-        self.assertIn("!p122_door_sent", c)
+        self.assertIn("!p122_door_inflight", c)
         self.assertIn("p122_door_sent = TRUE;", c)
+        self.assertIn(
+            "if (p122_door_sent)\n        return p122_door_sequence;",
+            c,
+        )
         self.assertIn("r27_repeat_timer_cancelled = TRUE;", c)
         self.assertIn('p122_emit_result("REJECTED_NOT_READY")', c)
         self.assertIn('p122_emit_result("FAILED_SAFE")', c)
         self.assertIn('p122_emit_result("UNKNOWN_OUTCOME")', c)
+
+    def test_manual_second_press_advances_from_last_committed_door_counter(self) -> None:
+        region = self.candidate_a.split(p122.BEGIN, 1)[1].split(p122.END, 1)[0]
+        self.assertIn(
+            "p122_door_pending_sequence = previous_sequence + 0x00010000u;",
+            region,
+        )
+        self.assertIn(
+            "p122_door_sequence = p122_door_pending_sequence;",
+            self.candidate_a,
+        )
+        self.assertIn(
+            "if (p122_door_sent)\n        return p122_door_sequence;",
+            region,
+        )
+        eligibility = region.split(
+            "p122_door_eligible(void)", 1
+        )[1].split("static gboolean\np122_serialize_door", 1)[0]
+        self.assertIn("!p122_door_inflight", eligibility)
+        self.assertNotIn("!p122_door_sent", eligibility)
+
+        serializer = region.split(
+            "p122_serialize_door", 1
+        )[1].split("static void\np122_emit_result", 1)[0]
+        self.assertNotIn(
+            "p122_door_sequence = p122_door_pending_sequence;",
+            serializer,
+        )
+
+        tx_case = self.candidate_a.split(
+            "case P122_TX_ONDEMAND_DOOR:", 1
+        )[1].split("break;", 1)[0]
+        self.assertLess(
+            tx_case.index(
+                "p122_door_sequence = p122_door_pending_sequence;"
+            ),
+            tx_case.index("p122_door_sent = TRUE;"),
+        )
+        self.assertIn(
+            "P122_ONDEMAND_DOOR_COUNTER_COMMITTED=true",
+            tx_case,
+        )
+        self.assertIn(
+            "P122_ONDEMAND_DOOR_SEQUENCE_AFTER=%u",
+            tx_case,
+        )
 
     def test_ack_is_observable_but_not_promoted_to_physical_proof(self) -> None:
         region = self.candidate_a.split(p122.BEGIN, 1)[1].split(p122.END, 1)[0]
