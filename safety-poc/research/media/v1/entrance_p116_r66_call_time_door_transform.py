@@ -200,13 +200,27 @@ r66_call_time_door_emit_settle_result(void)
 static gboolean
 r66_call_time_door_tx_completed(void)
 {
-    g_r35_session.call_sequence = g_r66_call_time_door_sequence_after & 0xffu;
+    gboolean sequence_committed = FALSE;
+
+    if (g_r35_session.call_generation == g_r66_call_time_door_generation &&
+        r35_call_ready(&g_r35_session) &&
+        (g_r35_session.call_sequence & 0xffu) ==
+            g_r66_call_time_door_sequence_before) {
+        g_r35_session.call_sequence =
+            g_r66_call_time_door_sequence_after & 0xffu;
+        sequence_committed = TRUE;
+    } else {
+        printf("CALL_TIME_DOOR_STALE_GENERATION=true\n");
+    }
+
     v4_door_writes_sent = 1;
     v4_door_stage = V4_DOOR_WAIT_SETTLE;
     g_r66_call_time_door_waiting_ack = TRUE;
     v4_door_set_deadline();
     printf("V4_CALL_TIME_DOOR_SENT=true\n");
     printf("V4_CALL_TIME_DOOR_WRITE_COUNT=1\n");
+    printf("CALL_TIME_DOOR_SEQUENCE_COMMITTED=%s\n",
+        sequence_committed ? "true" : "false");
     printf("CALL_SEQUENCE_AFTER=%u\n", g_r35_session.call_sequence & 0xffu);
     fflush(stdout);
     if (g_timeout_add(V4_DOOR_SETTLE_MS, v4_door_settle_cb, NULL) == 0) {
