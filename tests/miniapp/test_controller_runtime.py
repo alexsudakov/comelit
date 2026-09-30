@@ -838,6 +838,7 @@ def test_go2rtc_state_json_log_preserves_media_but_redacts_secrets():
                 "url": "rtsp://test-user:test-password@192.0.2.10/example",
                 "remote_addr": "192.0.2.10:554",
                 "sdp": "v=0\\r\\nm=video 0 RTP/AVP 96",
+                "debug": "rtsp://test-user:test-password@192.0.2.10/example",
                 "medias": [
                     "video, recvonly, H264",
                     "audio, recvonly, PCMA/8000",
@@ -891,6 +892,9 @@ def test_go2rtc_state_json_log_preserves_media_but_redacts_secrets():
     assert "senders" in line
     assert "12345" in line
     assert "<redacted>" in line
+    assert '"url"' not in line
+    assert '"remote_addr"' not in line
+    assert '"sdp"' not in line
     assert "test-user" not in line
     assert "test-password" not in line
     assert "192.0.2.10" not in line
