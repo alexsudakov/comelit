@@ -37,37 +37,56 @@ def _parse_version(value: object) -> tuple[int, int, int] | None:
         return None
 
 
+def _normalize_base(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    base = value.strip()
+    if not (base.startswith("http://") or base.startswith("https://")):
+        return None
+    return base.rstrip("/") + "/"
+
+
 class MiniAppGo2RTCAdapter:
     """Narrow client for the Home Assistant-managed go2rtc instance."""
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
 
-    def _base_url(self) -> str | None:
+    def _runtime(self) -> tuple[str, Any] | None:
         value = getattr(self._hass, "data", {}).get("go2rtc")
-        if not isinstance(value, str):
-            _LOGGER.debug("Mini App MSE unavailable: go2rtc_unavailable")
-            return None
-        base = value.strip()
-        if not (base.startswith("http://") or base.startswith("https://")):
-            _LOGGER.debug("Mini App MSE unavailable: go2rtc_unavailable")
-            return None
-        return base.rstrip("/") + "/"
 
-    async def _ensure_available(self) -> str:
-        base = self._base_url()
-        if base is None:
+        # Current Home Assistant stores a Go2RtcConfig object in hass.data.
+        # Its ClientSession is authoritative: for HA-managed go2rtc it carries
+        # the UnixConnector and generated Basic auth while the TCP HTTP listener
+        # is intentionally disabled.
+        base = _normalize_base(getattr(value, "url", None))
+        session = getattr(value, "session", None)
+        if base is not None and session is not None:
+            return base, session
+
+        # Keep a bounded compatibility path for older/test runtimes that exposed
+        # only a URL string.
+        base = _normalize_base(value)
+        if base is not None:
+            return base, async_get_clientsession(self._hass)
+
+        _LOGGER.debug("Mini App MSE unavailable: go2rtc_unavailable")
+        return None
+
+    async def _ensure_available(self) -> tuple[str, Any]:
+        runtime = self._runtime()
+        if runtime is None:
             raise MiniAppGo2RTCError("go2rtc_unavailable")
+        base, client = runtime
 
-        client = async_get_clientsession(self._hass)
         try:
             async with client.get(urljoin(base, "/api"), timeout=_TIMEOUT) as response:
-                if response.status >= 500:
+                if response.status >= 400:
                     raise MiniAppGo2RTCError("go2rtc_http_error")
                 try:
                     info: Any = await response.json()
                 except (ClientError, ValueError, TypeError):
-                    return base
+                    return base, client
         except MiniAppGo2RTCError:
             raise
         except (asyncio.TimeoutError, ClientError):
@@ -76,11 +95,10 @@ class MiniAppGo2RTCAdapter:
         version = _parse_version(info.get("version") if isinstance(info, dict) else None)
         if version is not None and not (_MIN_VERSION <= version < _MAX_VERSION):
             raise MiniAppGo2RTCError("go2rtc_incompatible")
-        return base
+        return base, client
 
     async def register_stream(self, internal_name: str, source: str) -> None:
-        base = await self._ensure_available()
-        client = async_get_clientsession(self._hass)
+        base, client = await self._ensure_available()
         params = urlencode({"name": internal_name, "src": source})
         try:
             async with client.put(
@@ -95,10 +113,10 @@ class MiniAppGo2RTCAdapter:
             raise MiniAppGo2RTCError("go2rtc_http_error") from None
 
     async def unregister_stream(self, internal_name: str) -> None:
-        base = self._base_url()
-        if base is None:
+        runtime = self._runtime()
+        if runtime is None:
             return
-        client = async_get_clientsession(self._hass)
+        base, client = runtime
         params = urlencode({"src": internal_name})
         try:
             async with client.delete(
@@ -111,8 +129,7 @@ class MiniAppGo2RTCAdapter:
             _LOGGER.debug("Mini App MSE unregister failed: go2rtc_http_error")
 
     async def open_mse_ws(self, internal_name: str):
-        base = await self._ensure_available()
-        client = async_get_clientsession(self._hass)
+        base, client = await self._ensure_available()
         params = urlencode({"src": internal_name})
         try:
             return await client.ws_connect(

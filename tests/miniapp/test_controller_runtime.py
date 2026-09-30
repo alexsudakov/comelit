@@ -692,14 +692,14 @@ def test_mse_stream_rejects_intercom_unlisted_none_and_unsupported_source():
 def test_mse_protocol_accepts_only_closed_codec_command():
     validate = views_mod._validate_mse_command
 
-    assert validate('{"type":"mse","value":"h264,aac"}') == "h264,aac"
+    assert validate('{"type":"mse","value":"avc1.640029,mp4a.40.2"}') == "avc1.640029,mp4a.40.2"
 
     for unsafe in (
         '{"type":"webrtc","value":"h264"}',
         '{"type":"mse","value":"h264,delete"}',
         '{"type":"mse","value":"h264,h265,hevc,av1,vp8,vp9,aac,mp4a,opus"}',
         '{"type":"mse","value":"rtsp://test-user:test-password@192.0.2.10/example"}',
-        '{"type":"mse","value":"h264","extra":1}',
+        '{"type":"mse","value":"avc1.640029","extra":1}',
         "x" * 300,
     ):
         assert validate(unsafe) is None
@@ -743,7 +743,7 @@ def test_mse_view_happy_path_relays_text_binary_and_releases(monkeypatch):
     async def run():
         with _MSEWebSocketPatch(
             monkeypatch,
-            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"h264,aac"}'),
+            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"avc1.640029,mp4a.40.2"}'),
             [
                 ("sleep", 0.01),
                 _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"close"}'),
@@ -757,7 +757,7 @@ def test_mse_view_happy_path_relays_text_binary_and_releases(monkeypatch):
     websocket = _CaptureWebSocket.instances[0]
     assert go2rtc.registers == [(controller.mse_internal_stream_name("camera.driveway"), source)]
     assert go2rtc.opened == [controller.mse_internal_stream_name("camera.driveway")]
-    assert upstream.sent_json == [{"type": "mse", "value": "h264,aac"}]
+    assert upstream.sent_json == [{"type": "mse", "value": "avc1.640029,mp4a.40.2"}]
     assert _json_texts(websocket) == [
         {"type": "mse", "value": 'video/mp4; codecs="avc1.42E01E"'}
     ]
@@ -781,7 +781,7 @@ def test_mse_view_expired_session_rejects_without_acquiring(monkeypatch):
     with pytest.raises(Exception) as exc:
         with _MSEWebSocketPatch(
             monkeypatch,
-            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"h264"}'),
+            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"avc1.640029"}'),
         ):
             asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
 
@@ -803,7 +803,7 @@ def test_mse_view_session_expiry_midstream_releases_lease(monkeypatch):
     async def run():
         with _MSEWebSocketPatch(
             monkeypatch,
-            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"h264"}'),
+            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"avc1.640029"}'),
             ["wait_forever"],
         ):
             await view.get(_mse_request(controller, token), "camera.driveway")
@@ -831,7 +831,7 @@ def test_mse_view_upstream_close_releases_and_reports_bounded_error(monkeypatch)
     async def run():
         with _MSEWebSocketPatch(
             monkeypatch,
-            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"h264"}'),
+            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"avc1.640029"}'),
             ["wait_forever"],
         ):
             await view.get(_mse_request(controller, token), "camera.driveway")
@@ -856,7 +856,7 @@ def test_mse_view_client_disconnect_without_close_frame_cleans_up(monkeypatch):
     async def run():
         with _MSEWebSocketPatch(
             monkeypatch,
-            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"h264"}'),
+            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"avc1.640029"}'),
             [],
         ):
             await view.get(_mse_request(controller, token), "camera.driveway")
@@ -878,7 +878,7 @@ def test_mse_view_rejects_missing_and_unsupported_stream_source_without_leak(mon
         hass.cameras["camera.driveway"] = FakeCamera(set(), source)
         with _MSEWebSocketPatch(
             monkeypatch,
-            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"h264"}'),
+            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"avc1.640029"}'),
         ):
             asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
         assert _json_texts(_CaptureWebSocket.instances[-1]) == [
@@ -888,6 +888,77 @@ def test_mse_view_rejects_missing_and_unsupported_stream_source_without_leak(mon
     assert go2rtc.registers == []
     assert go2rtc.opened == []
     assert go2rtc.unregisters == []
+
+
+def test_go2rtc_adapter_uses_home_assistant_runtime_session(monkeypatch):
+    controller, hass = _controller(surveillance_label="Outside")
+    calls: list[tuple[str, str]] = []
+
+    class _Response:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def json(self):
+            return {"version": "1.9.14"}
+
+    class _RuntimeSession:
+        def get(self, url, **kwargs):
+            calls.append(("get", url))
+            return _Response()
+
+        def put(self, url, **kwargs):
+            calls.append(("put", url))
+            return _Response()
+
+        def delete(self, url, **kwargs):
+            calls.append(("delete", url))
+            return _Response()
+
+        async def ws_connect(self, url, **kwargs):
+            calls.append(("ws_connect", url))
+            return object()
+
+    runtime_session = _RuntimeSession()
+    hass.data["go2rtc"] = types.SimpleNamespace(
+        url="http://localhost:11984/",
+        session=runtime_session,
+    )
+
+    def unexpected_default_session(_hass):
+        raise AssertionError("HA-managed go2rtc must reuse Go2RtcConfig.session")
+
+    monkeypatch.setattr(
+        go2rtc_mod,
+        "async_get_clientsession",
+        unexpected_default_session,
+    )
+    adapter = go2rtc_mod.MiniAppGo2RTCAdapter(hass)
+
+    async def run():
+        await adapter.register_stream(
+            "opaque-stream",
+            "rtsp://test-user:test-password@192.0.2.10/example",
+        )
+        upstream = await adapter.open_mse_ws("opaque-stream")
+        await adapter.unregister_stream("opaque-stream")
+        return upstream
+
+    upstream = asyncio.run(run())
+
+    assert upstream is not None
+    assert [method for method, _url in calls] == [
+        "get",
+        "put",
+        "get",
+        "ws_connect",
+        "delete",
+    ]
+    assert all(url.startswith("http://localhost:11984/") for _method, url in calls)
 
 
 def test_go2rtc_unavailable_and_incompatible_errors_are_bounded(monkeypatch):
@@ -970,7 +1041,7 @@ def test_mse_view_protocol_rejects_bad_commands_and_filters_upstream_text(monkey
     controller.go2rtc = _FakeGo2RTCWithUpstream(upstream)
     with _MSEWebSocketPatch(
         monkeypatch,
-        _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"h264"}'),
+        _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"avc1.640029"}'),
         [("sleep", 0.01), _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"close"}')],
     ):
         asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
@@ -1045,7 +1116,7 @@ def test_fixture_camera_secret_never_reaches_payloads_logs_or_serializer(monkeyp
     async def run():
         with _MSEWebSocketPatch(
             monkeypatch,
-            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"h264"}'),
+            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"avc1.640029"}'),
             [("sleep", 0.01), _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"close"}')],
         ):
             await mse_view.get(_mse_request(controller, token), "camera.driveway")
@@ -1059,7 +1130,7 @@ def test_fixture_camera_secret_never_reaches_payloads_logs_or_serializer(monkeyp
         controller.go2rtc = failing_go2rtc
         with _MSEWebSocketPatch(
             monkeypatch,
-            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"h264"}'),
+            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"avc1.640029"}'),
         ):
             await mse_view.get(_mse_request(controller, token), "camera.driveway")
             websocket_texts.extend(_CaptureWebSocket.instances[0].texts)

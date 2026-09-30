@@ -807,17 +807,23 @@
 
     _mseCodecs() {
       const MediaSourceClass = window.ManagedMediaSource || window.MediaSource;
+      // Keep this list aligned with go2rtc's own VideoRTC MSE client. go2rtc
+      // expects MP4 codec identifiers here, not generic tokens like "h264".
       const candidates = [
-        ["h264", 'video/mp4; codecs="avc1.42E01E,mp4a.40.2"'],
-        ["h265", 'video/mp4; codecs="hvc1.1.6.L93.B0,mp4a.40.2"'],
-        ["av1", 'video/mp4; codecs="av01.0.01M.08,mp4a.40.2"'],
-        ["vp9", 'video/mp4; codecs="vp09.00.50.08,opus"'],
+        "avc1.640029",
+        "avc1.64002A",
+        "avc1.640033",
+        "hvc1.1.6.L153.B0",
+        "mp4a.40.2",
+        "mp4a.40.5",
+        "flac",
+        "opus",
       ];
       const supported = [];
-      for (const [token, mime] of candidates) {
+      for (const codec of candidates) {
         try {
-          if (MediaSourceClass.isTypeSupported(mime)) {
-            supported.push(token);
+          if (MediaSourceClass.isTypeSupported(`video/mp4; codecs="${codec}"`)) {
+            supported.push(codec);
           }
         } catch (_) {
           // Ignore codec probes that this WebView cannot parse.
@@ -826,7 +832,7 @@
       if (!supported.length) {
         return null;
       }
-      return supported.slice(0, 4).join(",");
+      return supported.join(",");
     }
 
     _mseCounters(mse) {
