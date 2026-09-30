@@ -139,12 +139,16 @@ class P122OnDemandMediaDoorTests(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, region)
 
-    def test_door_signal_is_media_helper_owned_and_one_shot(self) -> None:
+    def test_door_signal_is_media_helper_owned_and_one_write_per_manual_press(self) -> None:
         c = self.candidate_a
         self.assertIn("signal(SIGUSR1, p122_door_signal_handler);", c)
         self.assertIn("g_timeout_add(100u, p122_door_tick_cb, NULL)", c)
-        self.assertIn("if (p122_door_sent)", c)
-        self.assertIn("P122_DOOR_GATE_DOOR_ALREADY_SENT", c)
+        self.assertIn("#define P122_DOOR_SETTLE_MS 1000u", c)
+        self.assertIn("if (p122_door_inflight)", c)
+        self.assertNotIn("P122_DOOR_GATE_DOOR_ALREADY_SENT", c)
+        self.assertIn("if (p122_door_sent)", c)  # historical flag for sequence only
+        self.assertIn("return p122_door_last_sent_sequence;", c)
+        self.assertIn("p122_door_last_sent_sequence = p122_door_sequence;", c)
         self.assertIn("p122_door_sent = TRUE;", c)
         self.assertIn("r27_repeat_timer_cancelled = TRUE;", c)
         self.assertIn('p122_emit_result("REJECTED_NOT_READY")', c)
