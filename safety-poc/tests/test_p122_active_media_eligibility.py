@@ -338,7 +338,7 @@ class P122ActiveMediaEligibilityTests(unittest.TestCase):
 
     def test_second_explicit_press_only_after_one_second_settle_advances_sequence(self) -> None:
         """Two separate native signals: one write each; no second write while inflight."""
-        probe = r'''
+        probe = '''
                 reset_ready();
                 p122_door_signal_pending = 1;
                 p122_door_tick_cb(NULL);
