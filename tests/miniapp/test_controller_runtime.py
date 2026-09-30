@@ -932,7 +932,7 @@ def test_go2rtc_ws_log_preserves_error_and_redacts_network_material():
     line = diagnostics_mod.format_go2rtc_ws_line(
         "camera.driveway",
         elapsed_ms=777,
-        message_type="error",
+        frame_type="error",
         value=(
             "mse: streams: dial rtsp://user:pass@192.0.2.10/live failed; "
             "connect 192.0.2.10:554"
@@ -1300,7 +1300,10 @@ def test_go2rtc_unavailable_and_operation_errors_are_bounded(monkeypatch):
     asyncio.run(operation_error())
 
 
-def test_mse_view_protocol_rejects_bad_commands_and_filters_upstream_text(monkeypatch):
+def test_mse_view_protocol_rejects_bad_commands_and_filters_upstream_text(
+    monkeypatch,
+    caplog,
+):
     controller, hass = _controller(surveillance_label="Outside")
     token, _session = controller.sessions.create(424242, 12345678)
     hass.cameras["camera.driveway"] = FakeCamera(set(), "rtsp://192.0.2.10/example")
