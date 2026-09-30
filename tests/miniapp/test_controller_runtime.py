@@ -643,6 +643,28 @@ class FakeGo2RTC:
         self.unregisters.append(internal_name)
 
 
+def test_mse_stream_progress_marks_source_and_registration():
+    controller, hass = _controller(surveillance_label="Outside")
+    fake_go2rtc = FakeGo2RTC()
+    controller.go2rtc = fake_go2rtc
+    hass.cameras["camera.driveway"] = FakeCamera(
+        set(),
+        "rtsp://192.0.2.10/example",
+    )
+    progress: list[str] = []
+
+    async def run():
+        lease = await controller.acquire_mse_stream(
+            "camera.driveway",
+            progress=progress.append,
+        )
+        await controller.release_mse_stream("camera.driveway")
+
+    asyncio.run(run())
+
+    assert progress == ["mse_source_resolved", "mse_stream_registered"]
+
+
 def test_mse_stream_uses_public_stream_source_and_opaque_refcounted_name():
     controller, hass = _controller(surveillance_label="Outside")
     fake_go2rtc = FakeGo2RTC()
@@ -708,6 +730,27 @@ def test_mse_stream_rejects_intercom_unlisted_none_and_unsupported_source():
             await controller.acquire_mse_stream("camera.driveway")
 
     asyncio.run(run())
+
+
+def test_server_mse_diagnostics_are_closed_and_secret_free():
+    line = diagnostics_mod.format_server_log_line(
+        "camera.driveway",
+        "mse_stream_registered",
+        elapsed_ms=12,
+        stage_ms=7,
+    )
+    assert line == (
+        "COMELIT_MINIAPP_DIAG_SERVER entity=camera.driveway "
+        "event=mse_stream_registered elapsed_ms=12 stage_ms=7 "
+        "state=- reason=- counters=-"
+    )
+    with pytest.raises(diagnostics_mod.MiniAppDiagnosticsError):
+        diagnostics_mod.format_server_log_line(
+            "camera.driveway",
+            "rtsp://secret",
+            elapsed_ms=12,
+            stage_ms=7,
+        )
 
 
 def test_mse_protocol_accepts_only_closed_codec_command():

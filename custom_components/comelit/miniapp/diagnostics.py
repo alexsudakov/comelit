@@ -30,6 +30,16 @@ EVENTS = (
     "hls_error",
     "hls_blocked",
 )
+SERVER_EVENTS = (
+    "mse_command_received",
+    "mse_source_resolved",
+    "mse_stream_registered",
+    "mse_upstream_ws_open",
+    "mse_negotiation_forwarded",
+    "mse_upstream_reply",
+    "mse_upstream_chunk",
+)
+
 PLAYER_STATES = (
     "new",
     "checking",
@@ -283,6 +293,36 @@ def format_log_line(entity_id: str, payload: dict[str, Any]) -> str:
 def format_summary_line(entity_id: str, payload: dict[str, Any]) -> str:
     _assert_not_sensitive({"entity": entity_id, **payload})
     return _format_line("COMELIT_MINIAPP_DIAG_SUMMARY", entity_id, payload)
+
+
+def format_server_log_line(
+    entity_id: str,
+    event: str,
+    *,
+    elapsed_ms: int,
+    stage_ms: int,
+) -> str:
+    """Format a closed, secret-free server-side MSE milestone."""
+    if event not in SERVER_EVENTS:
+        raise MiniAppDiagnosticsError("invalid_server_event")
+    if (
+        not isinstance(elapsed_ms, int)
+        or isinstance(elapsed_ms, bool)
+        or not isinstance(stage_ms, int)
+        or isinstance(stage_ms, bool)
+        or elapsed_ms < 0
+        or stage_ms < 0
+        or elapsed_ms > MAX_MS
+        or stage_ms > MAX_MS
+    ):
+        raise MiniAppDiagnosticsError("invalid_server_timing")
+    payload = {
+        "event": event,
+        "elapsed_ms": elapsed_ms,
+        "stage_ms": stage_ms,
+    }
+    _assert_not_sensitive({"entity": entity_id, **payload})
+    return _format_line("COMELIT_MINIAPP_DIAG_SERVER", entity_id, payload)
 
 
 def _format_line(marker: str, entity_id: str, payload: dict[str, Any]) -> str:
