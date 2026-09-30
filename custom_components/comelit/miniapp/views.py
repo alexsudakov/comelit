@@ -40,7 +40,16 @@ MINIAPP_MARKER_HEADER = "X-Comelit-MiniApp-Request"
 ACTION_NONCE_HEADER = "X-Comelit-Action-Nonce"
 MSE_MAX_COMMAND_BYTES = 256
 _MSE_CODECS = frozenset(
-    {"h264", "h265", "hevc", "av1", "vp8", "vp9", "aac", "mp4a", "opus", "pcmu", "pcma"}
+    {
+        "avc1.640029",
+        "avc1.64002a",
+        "avc1.640033",
+        "hvc1.1.6.l153.b0",
+        "mp4a.40.2",
+        "mp4a.40.5",
+        "flac",
+        "opus",
+    }
 )
 
 
@@ -437,12 +446,12 @@ def _validate_mse_command(data: str) -> str | None:
     if payload.get("type") != "mse":
         return None
     value = payload.get("value")
-    if not isinstance(value, str) or len(value) > 64:
+    if not isinstance(value, str) or len(value) > 128:
         return None
-    tokens = [token.strip().lower() for token in value.split(",") if token.strip()]
+    tokens = [token.strip() for token in value.split(",") if token.strip()]
     if not tokens or len(tokens) > 8:
         return None
-    if any(token not in _MSE_CODECS for token in tokens):
+    if any(token.lower() not in _MSE_CODECS for token in tokens):
         return None
     return ",".join(tokens)
 
