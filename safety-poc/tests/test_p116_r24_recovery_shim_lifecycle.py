@@ -16,7 +16,7 @@ TRANSPORT = COMPONENT / "media_transport.py"
 SESSION = COMPONENT / "media_session.py"
 BINARY = COMPONENT / "native" / "comelit-media"
 RECOVERY = COMPONENT / "h264_recovery.py"
-EXPECTED_NATIVE_SHA256 = "a3c95f3ec8c5c00963946c8ff550760fadd792a314bb72692e4281da35a5a6a5"
+EXPECTED_NATIVE_SHA256 = "5811415a95bbeb687e7f91d5a1ed70c67473086ddefa4bfb602eba2798ad0573"
 
 spec = importlib.util.spec_from_file_location("h264_recovery_lifecycle", RECOVERY)
 h264_recovery = importlib.util.module_from_spec(spec)

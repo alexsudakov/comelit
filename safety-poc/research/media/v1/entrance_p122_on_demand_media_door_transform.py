@@ -53,6 +53,22 @@ static gboolean p122_door_ack_observed = FALSE;
 static gboolean p122_door_relay_event_observed = FALSE;
 static guint32 p122_door_sequence = 0u;
 
+typedef enum {
+    P122_DOOR_GATE_READY = 0,
+    P122_DOOR_GATE_SIGNAL_STAGE,
+    P122_DOOR_GATE_MEDIA_FORWARDING,
+    P122_DOOR_GATE_RTPC_STAGE,
+    P122_DOOR_GATE_PSEUDOTCP,
+    P122_DOOR_GATE_GRACEFUL_STOP,
+    P122_DOOR_GATE_CTPP,
+    P122_DOOR_GATE_TX_PENDING,
+    P122_DOOR_GATE_REFRESH_OUTSTANDING,
+    P122_DOOR_GATE_REFRESH_FAIL_CLOSED,
+    P122_DOOR_GATE_INITIAL_001A,
+    P122_DOOR_GATE_DOOR_INFLIGHT,
+    P122_DOOR_GATE_DOOR_ALREADY_SENT
+} P122DoorGate;
+
 static gboolean p122_door_tick_cb(gpointer data);
 static gboolean p122_door_settle_cb(gpointer data);
 
@@ -108,22 +124,75 @@ p122_latest_client_sequence(void)
     return r27_initial_001a_sequence;
 }
 
+static P122DoorGate
+p122_door_evaluate_gate(void)
+{
+    if (entrance_signal_stage != ENTRANCE_SIGNAL_DONE)
+        return P122_DOOR_GATE_SIGNAL_STAGE;
+    if (!p80_media_forwarding_enabled)
+        return P122_DOOR_GATE_MEDIA_FORWARDING;
+    if (p78_rtpc_stage != P78_RTPC_COMPLETE)
+        return P122_DOOR_GATE_RTPC_STAGE;
+    if (!pseudo_tcp || !pseudotcp_open)
+        return P122_DOOR_GATE_PSEUDOTCP;
+    if (pseudotcp_graceful_stop_started)
+        return P122_DOOR_GATE_GRACEFUL_STOP;
+    if (v4_ctpp_channel_id == 0u)
+        return P122_DOOR_GATE_CTPP;
+    if (p12_tx_pending)
+        return P122_DOOR_GATE_TX_PENDING;
+    if (r27_repeat_outstanding)
+        return P122_DOOR_GATE_REFRESH_OUTSTANDING;
+    if (r27_refresh_fail_closed)
+        return P122_DOOR_GATE_REFRESH_FAIL_CLOSED;
+    if (r27_initial_001a_sent_count != 1u)
+        return P122_DOOR_GATE_INITIAL_001A;
+    if (p122_door_inflight)
+        return P122_DOOR_GATE_DOOR_INFLIGHT;
+    if (p122_door_sent)
+        return P122_DOOR_GATE_DOOR_ALREADY_SENT;
+    return P122_DOOR_GATE_READY;
+}
+
+static const char *
+p122_door_gate_name(P122DoorGate gate)
+{
+    switch (gate) {
+    case P122_DOOR_GATE_SIGNAL_STAGE:
+        return "SIGNAL_STAGE";
+    case P122_DOOR_GATE_MEDIA_FORWARDING:
+        return "MEDIA_FORWARDING";
+    case P122_DOOR_GATE_RTPC_STAGE:
+        return "RTPC_STAGE";
+    case P122_DOOR_GATE_PSEUDOTCP:
+        return "PSEUDOTCP";
+    case P122_DOOR_GATE_GRACEFUL_STOP:
+        return "GRACEFUL_STOP";
+    case P122_DOOR_GATE_CTPP:
+        return "CTPP";
+    case P122_DOOR_GATE_TX_PENDING:
+        return "TX_PENDING";
+    case P122_DOOR_GATE_REFRESH_OUTSTANDING:
+        return "REFRESH_OUTSTANDING";
+    case P122_DOOR_GATE_REFRESH_FAIL_CLOSED:
+        return "REFRESH_FAIL_CLOSED";
+    case P122_DOOR_GATE_INITIAL_001A:
+        return "INITIAL_001A";
+    case P122_DOOR_GATE_DOOR_INFLIGHT:
+        return "DOOR_INFLIGHT";
+    case P122_DOOR_GATE_DOOR_ALREADY_SENT:
+        return "DOOR_ALREADY_SENT";
+    case P122_DOOR_GATE_READY:
+        return "READY";
+    default:
+        return "SIGNAL_STAGE";
+    }
+}
+
 static gboolean
 p122_door_eligible(void)
 {
-    return entrance_signal_stage == ENTRANCE_SIGNAL_OBSERVE_MEDIA &&
-        p80_media_forwarding_enabled &&
-        p78_rtpc_stage == P78_RTPC_COMPLETE &&
-        pseudo_tcp &&
-        pseudotcp_open &&
-        !pseudotcp_graceful_stop_started &&
-        v4_ctpp_channel_id != 0u &&
-        !p12_tx_pending &&
-        !r27_repeat_outstanding &&
-        !r27_refresh_fail_closed &&
-        r27_initial_001a_sent_count == 1u &&
-        !p122_door_inflight &&
-        !p122_door_sent;
+    return p122_door_evaluate_gate() == P122_DOOR_GATE_READY;
 }
 
 static gboolean
@@ -272,8 +341,10 @@ p122_door_tick_cb(gpointer data)
 
     p122_door_signal_pending = 0;
 
-    if (!p122_door_eligible()) {
+    P122DoorGate gate = p122_door_evaluate_gate();
+    if (gate != P122_DOOR_GATE_READY) {
         printf("P122_ONDEMAND_DOOR_COMMAND_ACCEPTED=false\n");
+        printf("P122_ONDEMAND_DOOR_REJECT_GATE=%s\n", p122_door_gate_name(gate));
         p122_emit_result("REJECTED_NOT_READY");
         return G_SOURCE_CONTINUE;
     }
@@ -358,8 +429,8 @@ def _replace_once(text: str, old: str, new: str, label: str) -> str:
     return text.replace(old, new, 1)
 
 
-def transform(source: str) -> str:
-    candidate = p121.transform(source)
+def transform(source: str, *, include_p116: bool = True) -> str:
+    candidate = p121.transform(source, include_p116=include_p116)
     if BEGIN in candidate:
         raise RuntimeError("P122_REAPPLY_GATE=FAIL")
 
@@ -440,6 +511,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--report", action="store_true")
     parser.add_argument("--sha256", action="store_true")
+    p116 = parser.add_mutually_exclusive_group()
+    p116.add_argument("--include-p116", dest="include_p116", action="store_true")
+    p116.add_argument("--no-include-p116", dest="include_p116", action="store_false")
+    parser.set_defaults(include_p116=True)
     args = parser.parse_args(argv)
 
     if args.report:
@@ -449,7 +524,14 @@ def main(argv: list[str] | None = None) -> int:
     source_path = args.source
     if not source_path.exists() and str(source_path).startswith("safety-poc/"):
         source_path = Path(str(source_path)[len("safety-poc/"):])
-    generated = transform(source_path.read_text(encoding="utf-8"))
+
+    if not args.include_p116:
+        parser.error("P122 requires --include-p116; --no-include-p116 is fail-closed")
+
+    generated = transform(
+        source_path.read_text(encoding="utf-8"),
+        include_p116=args.include_p116,
+    )
 
     if args.sha256:
         print(hashlib.sha256(generated.encode("utf-8")).hexdigest())

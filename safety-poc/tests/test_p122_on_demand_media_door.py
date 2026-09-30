@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import shutil
 import subprocess
@@ -19,6 +20,10 @@ sys.path.insert(0, str(MEDIA))
 
 import entrance_p121_gather_initial_timeout_transform as p121  # noqa: E402
 import entrance_p122_on_demand_media_door_transform as p122  # noqa: E402
+
+EXPECTED_GENERATED_SOURCE_SHA256 = (
+    "fa5f3fef61b6673718d677e150770c2af6fe2c752d0756034c9ad5e1864a384c"
+)
 
 
 class P122OnDemandMediaDoorTests(unittest.TestCase):
@@ -40,10 +45,56 @@ class P122OnDemandMediaDoorTests(unittest.TestCase):
 
     def test_transform_is_deterministic_and_composes_p121(self) -> None:
         self.assertEqual(self.candidate_a, self.candidate_b)
+        self.assertEqual(
+            hashlib.sha256(self.candidate_a.encode("utf-8")).hexdigest(),
+            EXPECTED_GENERATED_SOURCE_SHA256,
+        )
         self.assertIn("GATHER_INITIAL_TIMEOUT_SET_MS=250", self.candidate_a)
         self.assertIn("GATHER_INITIAL_TIMEOUT_RESTORED_MS=500", self.candidate_a)
         self.assertIn(p122.BEGIN, self.candidate_a)
         self.assertIn(p122.END, self.candidate_a)
+
+    def test_cli_include_p116_matches_transform_and_no_include_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p122-cli-") as tmp:
+            out = Path(tmp) / "generated.c"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(MEDIA / "entrance_p122_on_demand_media_door_transform.py"),
+                    "--source",
+                    str(SOURCE),
+                    "--output",
+                    str(out),
+                    "--include-p116",
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            generated = out.read_text(encoding="utf-8")
+            self.assertEqual(generated, self.candidate_a)
+            self.assertEqual(
+                hashlib.sha256(generated.encode("utf-8")).hexdigest(),
+                EXPECTED_GENERATED_SOURCE_SHA256,
+            )
+
+            fail_out = Path(tmp) / "no-include-generated.c"
+            fail = subprocess.run(
+                [
+                    sys.executable,
+                    str(MEDIA / "entrance_p122_on_demand_media_door_transform.py"),
+                    "--source",
+                    str(SOURCE),
+                    "--output",
+                    str(fail_out),
+                    "--no-include-p116",
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(fail.returncode, 0)
+            self.assertFalse(fail_out.exists())
+            self.assertIn("--no-include-p116 is fail-closed", fail.stderr)
 
     def test_active_media_profile_is_one_single_existing_ctpp_tx(self) -> None:
         c = self.candidate_a
@@ -54,9 +105,10 @@ class P122OnDemandMediaDoorTests(unittest.TestCase):
             "P122_ONDEMAND_DOOR_EXISTING_CTPP_REUSED=true",
             "P122_ONDEMAND_DOOR_AUTOMATIC_RETRY_ALLOWED=false",
             "P122_ONDEMAND_DOOR_PHYSICAL_EFFECT_ASSERTED=false",
-            "entrance_signal_stage == ENTRANCE_SIGNAL_OBSERVE_MEDIA",
+            "entrance_signal_stage != ENTRANCE_SIGNAL_DONE",
+            "P122_ONDEMAND_DOOR_REJECT_GATE=%s",
             "p80_media_forwarding_enabled",
-            "p78_rtpc_stage == P78_RTPC_COMPLETE",
+            "p78_rtpc_stage != P78_RTPC_COMPLETE",
             "!p12_tx_pending",
             "!r27_repeat_outstanding",
         ):
@@ -91,7 +143,8 @@ class P122OnDemandMediaDoorTests(unittest.TestCase):
         c = self.candidate_a
         self.assertIn("signal(SIGUSR1, p122_door_signal_handler);", c)
         self.assertIn("g_timeout_add(100u, p122_door_tick_cb, NULL)", c)
-        self.assertIn("!p122_door_sent", c)
+        self.assertIn("if (p122_door_sent)", c)
+        self.assertIn("P122_DOOR_GATE_DOOR_ALREADY_SENT", c)
         self.assertIn("p122_door_sent = TRUE;", c)
         self.assertIn("r27_repeat_timer_cancelled = TRUE;", c)
         self.assertIn('p122_emit_result("REJECTED_NOT_READY")', c)

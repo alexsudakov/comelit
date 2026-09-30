@@ -11,6 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "safety-poc" / "research" / "media" / "v1" / "ct120_build_p80_haos_media_helper.sh"
+PROFILE_GATE = ROOT / "safety-poc" / "research" / "media" / "v1" / "p80_media_build_profile_gate.sh"
 
 
 def _builder_function(name: str) -> str:
@@ -25,6 +26,7 @@ class P116BuildProvenanceGateTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.script = SCRIPT.read_text(encoding="utf-8")
+        cls.profile_gate = PROFILE_GATE.read_text(encoding="utf-8")
         cls.resolve_function = _builder_function("p80_rootfs_library_realpath")
 
     def _resolve_lib(self, rootfs: Path, needed: str) -> subprocess.CompletedProcess[str]:
@@ -227,7 +229,9 @@ class P116BuildProvenanceGateTests(unittest.TestCase):
             "P80_AUDIO_RTP_FORWARDING=PASS",
             "P78_SECOND_CTPP_OPEN=false",
         ):
-            self.assertIn(marker, self.script)
+            self.assertIn(marker, self.profile_gate)
+        self.assertIn('bash "$REPO/$P80_BUILD_PROFILE_GATE"', self.script)
+        self.assertIn('--generated-source "$GENERATED"', self.script)
 
         meta_append = self.script.index('echo "NATIVE_BINARY_SHA256=$CANDIDATE_SHA"')
         meta_print = self.script.index('cat "$META"')

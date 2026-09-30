@@ -15,10 +15,12 @@ P80_BUILD_EXPECTED_SHA=${P80_BUILD_EXPECTED_SHA:-}
 P80_BUILD_EXPECTED_SOURCE_SHA=${P80_BUILD_EXPECTED_SOURCE_SHA:-}
 P80_BUILD_ALLOW_DETACHED=${P80_BUILD_ALLOW_DETACHED:-0}
 P80_BUILD_INCLUDE_P116=${P80_BUILD_INCLUDE_P116:-0}
+P80_BUILD_PROFILE=${P80_BUILD_PROFILE:-LEGACY}
 SOURCE_REL=safety-poc/research/door/v1_5_7/comelit-v4-persistent-ctpp-door.c
 # Canonical P80/P106 native media source generator. Override only for explicit
 # provenance experiments; gates below validate the source emitted by this path.
 P80_BUILD_TRANSFORM=${P80_BUILD_TRANSFORM:-safety-poc/research/media/v1/entrance_p106_teardown_state_classification_transform.py}
+P80_BUILD_PROFILE_GATE=safety-poc/research/media/v1/p80_media_build_profile_gate.sh
 OUTPUT=${OUTPUT:-/root/comelit-media-p80}
 EXPECTED_ARCH=x86_64
 EXPECTED_INTERPRETER=/lib/ld-musl-x86_64.so.1
@@ -74,6 +76,7 @@ summary() {
     echo "P80_BUILD_BRANCH=${CURRENT_BRANCH:-UNKNOWN}"
     echo "P80_BUILD_TRANSFORM=$P80_BUILD_TRANSFORM"
     echo "P80_BUILD_INCLUDE_P116=$P80_BUILD_INCLUDE_P116"
+    echo "P80_BUILD_PROFILE=$P80_BUILD_PROFILE"
     echo "P80_BUILD_EXPECTED_SOURCE_SHA=$P80_BUILD_EXPECTED_SOURCE_SHA"
     echo "P80_TRANSFORM_RC=${TRANSFORM_RC:-NOT_REACHED}"
     echo "P80_GENERATED_SOURCE_SHA256=${GENERATED_SOURCE_SHA256:-NOT_REACHED}"
@@ -127,16 +130,22 @@ fi
 [ -z "$(git -C "$REPO" status --porcelain)" ] || fail 'P80_BUILD_WORKTREE_CLEAN=FAIL'
 [ -f "$REPO/$SOURCE_REL" ] || fail 'P80_BUILD_SOURCE=ABSENT'
 [ -f "$REPO/$P80_BUILD_TRANSFORM" ] || fail 'P80_BUILD_TRANSFORM=ABSENT'
+[ -f "$REPO/$P80_BUILD_PROFILE_GATE" ] || fail 'P80_BUILD_PROFILE_GATE=ABSENT'
 case "$P80_BUILD_INCLUDE_P116" in
     0) P80_GENERATOR_P116_ARG=--no-include-p116 ;;
     1) P80_GENERATOR_P116_ARG=--include-p116 ;;
     *) fail "P80_BUILD_INCLUDE_P116=INVALID value=$P80_BUILD_INCLUDE_P116" ;;
+esac
+case "$P80_BUILD_PROFILE" in
+    LEGACY|P122) ;;
+    *) fail "P80_BUILD_PROFILE=INVALID value=$P80_BUILD_PROFILE" ;;
 esac
 [ "$FAIL" -eq 0 ] || exit 1
 
 echo "P80_BUILD_REPO_HEAD=$REPO_HEAD"
 echo "P80_BUILD_TRANSFORM=$P80_BUILD_TRANSFORM"
 echo "P80_BUILD_INCLUDE_P116=$P80_BUILD_INCLUDE_P116"
+echo "P80_BUILD_PROFILE=$P80_BUILD_PROFILE"
 if [ -n "$P80_BUILD_EXPECTED_SHA" ]; then
     echo "P80_BUILD_EXPECTED_SHA_GATE=PASS $REPO_HEAD"
 fi
@@ -171,12 +180,9 @@ if [ "$FAIL" -eq 0 ]; then
             fail "P80_BUILD_EXPECTED_SOURCE_SHA_GATE=FAIL expected=$P80_BUILD_EXPECTED_SOURCE_SHA actual=$GENERATED_SOURCE_SHA256"
         fi
     fi
-    grep -Fq '#define RUN_DIR     "/run/comelit-media"' "$GENERATED" || fail 'P80_RUN_DIR_GATE=FAIL'
-    ! grep -Fq 'signal(SIGUSR1, v4_door_signal_handler);' "$GENERATED" || fail 'P80_DOOR_SIGNAL_GATE=FAIL'
-    grep -Fq 'P80_MEDIA_ACTIVE=true' "$GENERATED" || fail 'P80_MEDIA_ACTIVE_MARKER_SOURCE=FAIL'
-    grep -Fq 'P80_VIDEO_RTP_FORWARDING=PASS' "$GENERATED" || fail 'P80_VIDEO_FORWARD_MARKER_SOURCE=FAIL'
-    grep -Fq 'P80_AUDIO_RTP_FORWARDING=PASS' "$GENERATED" || fail 'P80_AUDIO_FORWARD_MARKER_SOURCE=FAIL'
-    grep -Fq 'P78_SECOND_CTPP_OPEN=false' "$GENERATED" || fail 'P80_SECOND_CTPP_OPEN_GATE=FAIL'
+    bash "$REPO/$P80_BUILD_PROFILE_GATE" \
+      --profile "$P80_BUILD_PROFILE" \
+      --generated-source "$GENERATED" || fail "P80_PROFILE_SOURCE_GATE=FAIL profile=$P80_BUILD_PROFILE"
 fi
 [ "$FAIL" -eq 0 ] || exit 1
 
@@ -295,6 +301,7 @@ CANDIDATE_SHA="$(sha256sum "$CANDIDATE" | awk '{print $1}')"
 {
     echo "P80_BUILD_TRANSFORM=$P80_BUILD_TRANSFORM"
     echo "P80_BUILD_INCLUDE_P116=$P80_BUILD_INCLUDE_P116"
+    echo "P80_BUILD_PROFILE=$P80_BUILD_PROFILE"
     echo "P80_BUILD_EXPECTED_SOURCE_SHA=$P80_BUILD_EXPECTED_SOURCE_SHA"
     echo "GENERATED_SOURCE_SHA256=$GENERATED_SOURCE_SHA256"
     echo "NATIVE_BINARY_SHA256=$CANDIDATE_SHA"
@@ -315,20 +322,9 @@ esac
 file "$CANDIDATE" | sed 's#^.*: #P80_BINARY_FILE=#'
 strings -a "$CANDIDATE" > "$BUILD/candidate.strings"
 
-for marker in \
-  '/run/comelit-media' \
-  'P80_MEDIA_ACTIVE=true' \
-  'P80_MEDIA_LIFETIME_OWNER=HOME_ASSISTANT' \
-  'P80_MEDIA_AUTO_CLOSE_3000MS=false' \
-  'P80_DOOR_SIGNAL_ENTRYPOINT=false' \
-  'P80_VIDEO_RTP_FORWARDING=PASS' \
-  'P80_AUDIO_RTP_FORWARDING=PASS' \
-  'P80_WRAPPER_PROFILE_MISMATCH=true' \
-  'P78_SECOND_CTPP_OPEN=false' \
-  'ENTRANCE_SIGNALING_DOOR_ACTION_SENT=false'
-do
-    grep -Fq "$marker" "$BUILD/candidate.strings" || fail "P80_BINARY_MARKER_GATE=FAIL marker=$marker"
-done
+bash "$REPO/$P80_BUILD_PROFILE_GATE" \
+  --profile "$P80_BUILD_PROFILE" \
+  --strings-file "$BUILD/candidate.strings" || fail "P80_BINARY_MARKER_GATE=FAIL profile=$P80_BUILD_PROFILE"
 
 if grep -Fq '/run/comelit-p2p' "$BUILD/candidate.strings"; then
     fail 'P80_BINARY_LISTENER_RUN_DIR_LEAK=FAIL'
