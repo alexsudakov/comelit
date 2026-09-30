@@ -890,6 +890,77 @@ def test_mse_view_rejects_missing_and_unsupported_stream_source_without_leak(mon
     assert go2rtc.unregisters == []
 
 
+def test_go2rtc_adapter_uses_home_assistant_runtime_session(monkeypatch):
+    controller, hass = _controller(surveillance_label="Outside")
+    calls: list[tuple[str, str]] = []
+
+    class _Response:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def json(self):
+            return {"version": "1.9.14"}
+
+    class _RuntimeSession:
+        def get(self, url, **kwargs):
+            calls.append(("get", url))
+            return _Response()
+
+        def put(self, url, **kwargs):
+            calls.append(("put", url))
+            return _Response()
+
+        def delete(self, url, **kwargs):
+            calls.append(("delete", url))
+            return _Response()
+
+        async def ws_connect(self, url, **kwargs):
+            calls.append(("ws_connect", url))
+            return object()
+
+    runtime_session = _RuntimeSession()
+    hass.data["go2rtc"] = types.SimpleNamespace(
+        url="http://localhost:11984/",
+        session=runtime_session,
+    )
+
+    def unexpected_default_session(_hass):
+        raise AssertionError("HA-managed go2rtc must reuse Go2RtcConfig.session")
+
+    monkeypatch.setattr(
+        go2rtc_mod,
+        "async_get_clientsession",
+        unexpected_default_session,
+    )
+    adapter = go2rtc_mod.MiniAppGo2RTCAdapter(hass)
+
+    async def run():
+        await adapter.register_stream(
+            "opaque-stream",
+            "rtsp://test-user:test-password@192.0.2.10/example",
+        )
+        upstream = await adapter.open_mse_ws("opaque-stream")
+        await adapter.unregister_stream("opaque-stream")
+        return upstream
+
+    upstream = asyncio.run(run())
+
+    assert upstream is not None
+    assert [method for method, _url in calls] == [
+        "get",
+        "put",
+        "get",
+        "ws_connect",
+        "delete",
+    ]
+    assert all(url.startswith("http://localhost:11984/") for _method, url in calls)
+
+
 def test_go2rtc_unavailable_and_incompatible_errors_are_bounded(monkeypatch):
     controller, hass = _controller(surveillance_label="Outside")
     adapter = go2rtc_mod.MiniAppGo2RTCAdapter(hass)
