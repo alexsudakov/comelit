@@ -11,7 +11,7 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.7.14**. This patch release makes MSE/fMP4 over a restricted same-origin WebSocket the primary Telegram Mini App transport for ordinary surveillance cameras. The integration resolves the existing Home Assistant `Camera.stream_source()`, registers an opaque source with the already-running HA-managed go2rtc instance, and proxies only the narrow MSE protocol without exposing the camera URL, credentials, go2rtc management endpoint, or media capability outside the authenticated Mini App session. Playback falls back `MSE -> WebRTC -> HLS`; the Comelit entrance-camera media lifecycle is unchanged. Details are recorded in `docs/releases/1.7.14-miniapp-direct-mse.md`.
+Current stable release: **1.7.15**. This patch release fixes two production defects in the 1.7.14 Mini App MSE path: it now binds to Home Assistant's real `Go2RtcConfig(url, session)` runtime and reuses the authoritative HA-managed go2rtc session/UnixConnector, and it negotiates MSE with concrete MP4 codec identifiers (`avc1...`, `hvc1...`, `mp4a...`) expected by go2rtc instead of generic `h264`/`h265` tokens. The intended fallback remains `MSE -> WebRTC -> HLS`; the Comelit entrance-camera media lifecycle is unchanged. Details are recorded in `docs/releases/1.7.15-miniapp-mse-runtime-fix.md`.
 
 ## Home Assistant Custom Card
 
