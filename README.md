@@ -11,7 +11,7 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.7.11**. This release extends the single-message active-video Entrance Door profile to the separately bootstrapped on-demand camera session. While an on-demand entrance video session owns the Comelit connection, Entrance Door is now dispatched to that live media helper and reuses its existing CTPP instead of being blocked. The physical Ring/attached-media profile from 1.7.10 remains unchanged, Gate remains fail-closed in on-demand media, there is no second P2P/CTPP bootstrap and no automatic Door retry. Details are recorded in `docs/releases/1.7.11-on-demand-media-door.md`.
+Current stable release: **1.7.12**. This patch release fixes the P122 on-demand Entrance Door eligibility gate introduced with 1.7.11: production media transitions to `ENTRANCE_SIGNAL_DONE` when the camera session becomes active, while the Door path was still checking the obsolete `ENTRANCE_SIGNAL_OBSERVE_MEDIA` state and therefore rejected the command before any network write. The corrected gate uses the actual active-media state, adds bounded reject-gate diagnostics, and ships a reproducibly rebuilt native helper. Gate remains fail-closed in on-demand media, the one-shot/no-retry contract is unchanged, and physical opening is still validated separately. Details are recorded in `docs/releases/1.7.12-p122-active-media-eligibility.md`.
 
 ## Home Assistant Custom Card
 
