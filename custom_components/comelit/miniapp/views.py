@@ -24,6 +24,7 @@ from .controller import ComelitMiniAppController, MiniAppOperationError
 from .diagnostics import (
     MiniAppDiagnosticsRateLimiter,
     MiniAppDiagnosticsError,
+    format_go2rtc_state_json_line,
     format_go2rtc_state_line,
     format_log_line,
     format_server_log_line,
@@ -522,11 +523,12 @@ class MiniAppCameraMSEView(_MiniAppView):
             if lease is None:
                 return
             try:
-                counters = await self.controller.go2rtc.inspect_stream(
+                counters, raw_state = await self.controller.go2rtc.inspect_stream(
                     lease.internal_name
                 )
             except MiniAppGo2RTCError:
                 counters = {"inspect_ok": 0}
+                raw_state = {"inspect_error": "go2rtc_http_error"}
             elapsed_ms = max(0, round((time.monotonic() - server_started) * 1000))
             _LOGGER.info(
                 format_go2rtc_state_line(
@@ -534,6 +536,14 @@ class MiniAppCameraMSEView(_MiniAppView):
                     event,
                     elapsed_ms=elapsed_ms,
                     counters=counters,
+                )
+            )
+            _LOGGER.info(
+                format_go2rtc_state_json_line(
+                    entity_id,
+                    event,
+                    elapsed_ms=elapsed_ms,
+                    state=raw_state,
                 )
             )
 
