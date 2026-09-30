@@ -768,6 +768,166 @@ def test_server_mse_diagnostics_are_closed_and_secret_free():
         )
 
 
+def test_go2rtc_stream_state_summary_is_closed_and_secret_free():
+    raw = {
+        "producers": [
+            {
+                "id": 7,
+                "url": "rtsp://test-user:test-password@192.0.2.10/example",
+                "remote_addr": "192.0.2.10:554",
+                "medias": [
+                    "video, recvonly, H264",
+                    "audio, recvonly, PCMA/8000",
+                ],
+                "receivers": [{}, {}],
+                "bytes_recv": 32768,
+            },
+            {
+                "id": 8,
+                "source": "ffmpeg:opaque-stream#audio=opus",
+                "medias": [
+                    "video, recvonly, H264",
+                    "audio, recvonly, OPUS/48000/2",
+                ],
+                "receivers": [{}],
+                "bytes_recv": 8192,
+            },
+        ],
+        "consumers": [
+            {
+                "remote_addr": "secret",
+                "senders": [{}, {}],
+            }
+        ],
+    }
+
+    summary = go2rtc_mod.summarize_stream_state(raw)
+
+    assert summary == {
+        "inspect_ok": 1,
+        "producer_count": 2,
+        "consumer_count": 1,
+        "p0_active": 1,
+        "p0_media": 2,
+        "p0_receivers": 2,
+        "p0_h264": 1,
+        "p0_pcma": 1,
+        "p0_recv_kb": 32,
+        "p1_active": 1,
+        "p1_media": 2,
+        "p1_receivers": 1,
+        "p1_h264": 1,
+        "p1_opus": 1,
+        "p1_recv_kb": 8,
+        "consumer_senders": 2,
+    }
+    text = repr(summary)
+    assert "test-user" not in text
+    assert "test-password" not in text
+    assert "192.0.2.10" not in text
+    assert "rtsp://" not in text
+
+
+def test_go2rtc_state_json_log_preserves_media_but_redacts_secrets():
+    raw = {
+        "producers": [
+            {
+                "id": 7,
+                "format_name": "rtsp",
+                "protocol": "tcp",
+                "url": "rtsp://test-user:test-password@192.0.2.10/example",
+                "remote_addr": "192.0.2.10:554",
+                "sdp": "v=0\\r\\nm=video 0 RTP/AVP 96",
+                "debug": "rtsp://test-user:test-password@192.0.2.10/example",
+                "medias": [
+                    "video, recvonly, H264",
+                    "audio, recvonly, PCMA/8000",
+                ],
+                "receivers": [
+                    {
+                        "id": 11,
+                        "codec": {
+                            "codec_name": "h264",
+                            "codec_type": "video",
+                            "profile": "High",
+                            "level": 41,
+                        },
+                        "bytes": 12345,
+                        "packets": 123,
+                    }
+                ],
+            }
+        ],
+        "consumers": [
+            {
+                "id": 22,
+                "format_name": "mp4",
+                "protocol": "ws",
+                "remote_addr": "192.0.2.20:12345",
+                "senders": [
+                    {
+                        "id": 23,
+                        "codec": {"codec_name": "h264", "codec_type": "video"},
+                        "bytes": 4096,
+                        "packets": 40,
+                        "drops": 1,
+                    }
+                ],
+            }
+        ],
+    }
+
+    line = diagnostics_mod.format_go2rtc_state_json_line(
+        "camera.driveway",
+        "stream_state_250ms",
+        elapsed_ms=333,
+        state=raw,
+    )
+
+    assert "format_name" in line
+    assert "rtsp" in line
+    assert "H264" in line
+    assert "PCMA/8000" in line
+    assert "receivers" in line
+    assert "senders" in line
+    assert "12345" in line
+    assert "<redacted>" in line
+    assert '"url"' not in line
+    assert '"remote_addr"' not in line
+    assert '"sdp"' not in line
+    assert "test-user" not in line
+    assert "test-password" not in line
+    assert "192.0.2.10" not in line
+    assert "192.0.2.20" not in line
+    assert "rtsp://" not in line
+    assert "v=0" not in line
+
+
+def test_go2rtc_state_log_schema_rejects_unknown_counters():
+    line = diagnostics_mod.format_go2rtc_state_line(
+        "camera.driveway",
+        "stream_state_250ms",
+        elapsed_ms=310,
+        counters={
+            "inspect_ok": 1,
+            "producer_count": 2,
+            "consumer_count": 1,
+            "p0_active": 1,
+        },
+    )
+    assert line.startswith(
+        "COMELIT_MINIAPP_DIAG_GO2RTC entity=camera.driveway "
+        "event=stream_state_250ms elapsed_ms=310"
+    )
+    with pytest.raises(diagnostics_mod.MiniAppDiagnosticsError):
+        diagnostics_mod.format_go2rtc_state_line(
+            "camera.driveway",
+            "stream_state_250ms",
+            elapsed_ms=310,
+            counters={"url": 1},
+        )
+
+
 def test_mse_protocol_accepts_only_closed_codec_command():
     validate = views_mod._validate_mse_command
 

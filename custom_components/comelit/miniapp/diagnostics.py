@@ -39,6 +39,30 @@ SERVER_EVENTS = (
     "mse_upstream_reply",
     "mse_upstream_chunk",
 )
+GO2RTC_STATE_EVENTS = (
+    "stream_state_250ms",
+    "stream_state_4000ms",
+)
+GO2RTC_STATE_COUNTERS = frozenset(
+    {
+        "inspect_ok",
+        "producer_count",
+        "consumer_count",
+        "p0_active",
+        "p0_media",
+        "p0_receivers",
+        "p0_h264",
+        "p0_pcma",
+        "p0_recv_kb",
+        "p1_active",
+        "p1_media",
+        "p1_receivers",
+        "p1_h264",
+        "p1_opus",
+        "p1_recv_kb",
+        "consumer_senders",
+    }
+)
 
 PLAYER_STATES = (
     "new",
@@ -122,6 +146,21 @@ MAX_EVENTS_PER_SESSION = 160
 MAX_EVENTS_PER_SESSION_ENTITY = 80
 MAX_RATE_LIMIT_SESSIONS = 128
 MAX_RATE_LIMIT_ENTITIES_PER_SESSION = 8
+MAX_GO2RTC_STATE_LOG_CHARS = 16_384
+_GO2RTC_SECRET_KEYS = frozenset(
+    {
+        "url",
+        "source",
+        "remote_addr",
+        "sdp",
+        "user_agent",
+        "username",
+        "password",
+        "token",
+        "cookie",
+        "authorization",
+    }
+)
 _ALLOWED_KEYS = frozenset(
     {"event", "elapsed_ms", "stage_ms", "state", "reason", "counters"}
 )
@@ -323,6 +362,104 @@ def format_server_log_line(
     }
     _assert_not_sensitive({"entity": entity_id, **payload})
     return _format_line("COMELIT_MINIAPP_DIAG_SERVER", entity_id, payload)
+
+
+def format_go2rtc_state_line(
+    entity_id: str,
+    event: str,
+    *,
+    elapsed_ms: int,
+    counters: dict[str, int],
+) -> str:
+    """Format a closed, secret-free go2rtc stream-state snapshot."""
+    if event not in GO2RTC_STATE_EVENTS:
+        raise MiniAppDiagnosticsError("invalid_go2rtc_state_event")
+    if (
+        not isinstance(elapsed_ms, int)
+        or isinstance(elapsed_ms, bool)
+        or elapsed_ms < 0
+        or elapsed_ms > MAX_MS
+    ):
+        raise MiniAppDiagnosticsError("invalid_go2rtc_state_timing")
+    if not isinstance(counters, dict) or set(counters) - GO2RTC_STATE_COUNTERS:
+        raise MiniAppDiagnosticsError("invalid_go2rtc_state_counters")
+    clean: dict[str, int] = {}
+    for key, value in counters.items():
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+            or value > MAX_COUNTER_VALUE
+        ):
+            raise MiniAppDiagnosticsError("invalid_go2rtc_state_counter")
+        clean[key] = value
+    payload = {
+        "event": event,
+        "elapsed_ms": elapsed_ms,
+        "stage_ms": 0,
+        "counters": clean,
+    }
+    _assert_not_sensitive({"entity": entity_id, **payload})
+    return _format_line("COMELIT_MINIAPP_DIAG_GO2RTC", entity_id, payload)
+
+
+def sanitize_go2rtc_state(value: Any, *, depth: int = 0) -> Any:
+    """Preserve useful go2rtc state while removing network/credential material."""
+    if depth > 8:
+        return "<truncated>"
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        if _REDACTION_GUARD.search(value):
+            return "<redacted>"
+        return value[:512]
+    if isinstance(value, list):
+        return [sanitize_go2rtc_state(item, depth=depth + 1) for item in value[:64]]
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in list(value.items())[:96]:
+            key_text = str(key)[:128]
+            if key_text.lower() in _GO2RTC_SECRET_KEYS:
+                continue
+            result[key_text] = sanitize_go2rtc_state(item, depth=depth + 1)
+        return result
+    return str(value)[:256]
+
+
+def format_go2rtc_state_json_line(
+    entity_id: str,
+    event: str,
+    *,
+    elapsed_ms: int,
+    state: Any,
+) -> str:
+    """Format a bounded, sanitized go2rtc stream JSON snapshot."""
+    if event not in GO2RTC_STATE_EVENTS:
+        raise MiniAppDiagnosticsError("invalid_go2rtc_state_event")
+    if (
+        not isinstance(elapsed_ms, int)
+        or isinstance(elapsed_ms, bool)
+        or elapsed_ms < 0
+        or elapsed_ms > MAX_MS
+    ):
+        raise MiniAppDiagnosticsError("invalid_go2rtc_state_timing")
+    safe = sanitize_go2rtc_state(state)
+    serialized = json.dumps(
+        safe,
+        separators=(",", ":"),
+        sort_keys=True,
+        ensure_ascii=True,
+    )
+    if len(serialized) > MAX_GO2RTC_STATE_LOG_CHARS:
+        serialized = serialized[:MAX_GO2RTC_STATE_LOG_CHARS] + "...<truncated>"
+    # Assert the final line does not accidentally contain a raw secret pattern.
+    _assert_not_sensitive(entity_id)
+    if _REDACTION_GUARD.search(serialized):
+        raise MiniAppDiagnosticsError("redacted_value")
+    return (
+        f"COMELIT_MINIAPP_DIAG_GO2RTC_STATE entity={entity_id} "
+        f"event={event} elapsed_ms={elapsed_ms} snapshot={serialized}"
+    )
 
 
 def _format_line(marker: str, entity_id: str, payload: dict[str, Any]) -> str:
