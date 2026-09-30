@@ -24,6 +24,7 @@ from .controller import ComelitMiniAppController, MiniAppOperationError
 from .diagnostics import (
     MiniAppDiagnosticsRateLimiter,
     MiniAppDiagnosticsError,
+    format_go2rtc_state_line,
     format_log_line,
     format_server_log_line,
     loads_limited,
@@ -514,6 +515,27 @@ class MiniAppCameraMSEView(_MiniAppView):
         lease = None
         upstream = None
         pump_task: asyncio.Task[None] | None = None
+        state_tasks: list[asyncio.Task[None]] = []
+
+        async def log_go2rtc_state(delay: float, event: str) -> None:
+            await asyncio.sleep(delay)
+            if lease is None:
+                return
+            try:
+                counters = await self.controller.go2rtc.inspect_stream(
+                    lease.internal_name
+                )
+            except MiniAppGo2RTCError:
+                counters = {"inspect_ok": 0}
+            elapsed_ms = max(0, round((time.monotonic() - server_started) * 1000))
+            _LOGGER.info(
+                format_go2rtc_state_line(
+                    entity_id,
+                    event,
+                    elapsed_ms=elapsed_ms,
+                    counters=counters,
+                )
+            )
 
         async def close_with_error(code: str) -> None:
             if not websocket.closed:
@@ -582,6 +604,14 @@ class MiniAppCameraMSEView(_MiniAppView):
             await upstream.send_json({"type": "mse", "value": codecs})
             log_server_milestone("mse_negotiation_forwarded")
             pump_task = self.controller.hass.async_create_task(pump_upstream())
+            state_tasks = [
+                self.controller.hass.async_create_task(
+                    log_go2rtc_state(0.25, "stream_state_250ms")
+                ),
+                self.controller.hass.async_create_task(
+                    log_go2rtc_state(4.0, "stream_state_4000ms")
+                ),
+            ]
 
             remaining = max(0.0, float(session.expires_at) - time.time())
             async with asyncio.timeout(remaining):
@@ -599,6 +629,10 @@ class MiniAppCameraMSEView(_MiniAppView):
         except (json.JSONDecodeError, ValueError, TimeoutError):
             await close_with_error("mse_ws_closed")
         finally:
+            for task in state_tasks:
+                task.cancel()
+            if state_tasks:
+                await asyncio.gather(*state_tasks, return_exceptions=True)
             if pump_task is not None:
                 pump_task.cancel()
                 await asyncio.gather(pump_task, return_exceptions=True)
