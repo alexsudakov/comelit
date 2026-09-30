@@ -34,7 +34,6 @@ REJECT_GATES = (
     ("REFRESH_FAIL_CLOSED", "r27_refresh_fail_closed = TRUE;"),
     ("INITIAL_001A", "r27_initial_001a_sent_count = 2u;"),
     ("DOOR_INFLIGHT", "p122_door_inflight = TRUE;"),
-    ("DOOR_ALREADY_SENT", "p122_door_sent = TRUE;"),
 )
 
 
@@ -188,6 +187,7 @@ class P122ActiveMediaEligibilityTests(unittest.TestCase):
             {{
                 flush_count++;
                 if (queued_kind == P122_TX_ONDEMAND_DOOR) {{
+                    p122_door_last_sent_sequence = p122_door_sequence;
                     p122_door_sent = TRUE;
                     p122_door_waiting_ack = TRUE;
                     write_count++;
@@ -218,6 +218,7 @@ class P122ActiveMediaEligibilityTests(unittest.TestCase):
                 p122_door_signal_pending = 0;
                 p122_door_inflight = FALSE;
                 p122_door_sent = FALSE;
+                p122_door_last_sent_sequence = 0u;
                 p122_door_waiting_ack = FALSE;
                 p122_door_ack_observed = FALSE;
                 p122_door_relay_event_observed = FALSE;
@@ -245,7 +246,6 @@ class P122ActiveMediaEligibilityTests(unittest.TestCase):
                 else if (strcmp(expected, "REFRESH_FAIL_CLOSED") == 0) r27_refresh_fail_closed = TRUE;
                 else if (strcmp(expected, "INITIAL_001A") == 0) r27_initial_001a_sent_count = 2u;
                 else if (strcmp(expected, "DOOR_INFLIGHT") == 0) p122_door_inflight = TRUE;
-                else if (strcmp(expected, "DOOR_ALREADY_SENT") == 0) p122_door_sent = TRUE;
                 p122_door_signal_pending = 1;
                 printf("CASE=%s STATEMENT=%s REAL=%s\\n",
                     expected, statement, p122_door_gate_name(p122_door_evaluate_gate()));
@@ -335,6 +335,60 @@ class P122ActiveMediaEligibilityTests(unittest.TestCase):
         for gate, statement in REJECT_GATES:
             self.assertIn(f"CASE={gate} STATEMENT={statement} REAL={gate}", stdout)
             self.assertIn(f"P122_ONDEMAND_DOOR_REJECT_GATE={gate}", stdout)
+
+    def test_second_explicit_press_only_after_one_second_settle_advances_sequence(self) -> None:
+        """Two separate native signals: one write each; no second write while inflight."""
+        probe = '''
+                reset_ready();
+                p122_door_signal_pending = 1;
+                p122_door_tick_cb(NULL);
+                guint32 first_sequence = p122_door_last_sent_sequence;
+                printf("FIRST_MANUAL_WRITE_COUNT=%u\\n", write_count);
+                printf("FIRST_MANUAL_SEQUENCE=%u\\n", first_sequence);
+
+                p122_door_signal_pending = 1;
+                p122_door_tick_cb(NULL);
+                printf("BEFORE_SETTLE_GATE=%s\\n", p122_door_gate_name(p122_door_evaluate_gate()));
+                printf("BEFORE_SETTLE_WRITE_COUNT=%u\\n", write_count);
+
+                /* The existing native settle callback is armed for 1000 ms. */
+                p122_door_settle_cb(NULL);
+                printf("AFTER_SETTLE_GATE=%s\\n", p122_door_gate_name(p122_door_evaluate_gate()));
+                p122_door_signal_pending = 1;
+                p122_door_tick_cb(NULL);
+                printf("SECOND_MANUAL_WRITE_COUNT=%u\\n", write_count);
+                printf("SECOND_MANUAL_SEQUENCE=%u\\n", p122_door_last_sent_sequence);
+                printf("SEQUENCE_STEP=%u\\n", p122_door_last_sent_sequence - first_sequence);
+                printf("SECOND_MEDIA_FORWARDING=%s\\n", p80_media_forwarding_enabled ? "true" : "false");
+        '''
+        rc, stdout, stderr = _compile_and_run(
+            self._harness_source(mutation=probe, run_reject_cases=False),
+            name="p122-two-manual-",
+        )
+        self.assertEqual(rc, 0, stderr[:4000])
+        markers = _parse_markers(stdout)
+        self.assertEqual(markers["FIRST_MANUAL_WRITE_COUNT"], "1")
+        self.assertEqual(markers["FIRST_MANUAL_SEQUENCE"], str(0x20000))
+        self.assertEqual(markers["BEFORE_SETTLE_GATE"], "DOOR_INFLIGHT")
+        self.assertEqual(markers["BEFORE_SETTLE_WRITE_COUNT"], "1")
+        self.assertEqual(markers["AFTER_SETTLE_GATE"], "READY")
+        self.assertEqual(markers["SECOND_MANUAL_WRITE_COUNT"], "2")
+        self.assertEqual(markers["SECOND_MANUAL_SEQUENCE"], str(0x30000))
+        self.assertEqual(markers["SEQUENCE_STEP"], str(0x10000))
+        self.assertEqual(markers["SECOND_MEDIA_FORWARDING"], "true")
+        self.assertEqual(stdout.count("P122_ONDEMAND_DOOR_SENT=true"), 3)  # initial harness + two explicit presses
+        self.assertIn("P122_ONDEMAND_DOOR_REJECT_GATE=DOOR_INFLIGHT", stdout)
+        self.assertNotIn("DOOR_ALREADY_SENT", stdout)
+
+    def test_legacy_session_wide_reject_is_absent_but_no_retry_guarantee_remains(self) -> None:
+        self.assertNotIn("P122_DOOR_GATE_DOOR_ALREADY_SENT", self.region)
+        self.assertNotIn('return "DOOR_ALREADY_SENT";', self.region)
+        self.assertIn("#define P122_DOOR_SETTLE_MS 1000u", self.region)
+        self.assertIn("if (p122_door_inflight)", self.region)
+        self.assertIn("p122_door_last_sent_sequence = p122_door_sequence;", self.generated)
+        self.assertIn("if (p122_door_sent)", self.region)
+        self.assertIn("return p122_door_last_sent_sequence;", self.region)
+        self.assertIn("P122_ONDEMAND_DOOR_AUTOMATIC_RETRY_ALLOWED=false", self.region)
 
     def test_signal_stage_predicate_flip_moves_ready_state_to_reject_path(self) -> None:
         real_probe = (
