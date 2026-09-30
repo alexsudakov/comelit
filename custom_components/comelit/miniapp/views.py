@@ -25,6 +25,7 @@ from .diagnostics import (
     MiniAppDiagnosticsRateLimiter,
     MiniAppDiagnosticsError,
     format_log_line,
+    format_server_log_line,
     loads_limited,
 )
 from .go2rtc import MiniAppGo2RTCError
@@ -492,6 +493,24 @@ class MiniAppCameraMSEView(_MiniAppView):
         )
         await websocket.prepare(request)
 
+        server_started = time.monotonic()
+        server_last = server_started
+
+        def log_server_milestone(event: str) -> None:
+            nonlocal server_last
+            now = time.monotonic()
+            elapsed_ms = max(0, round((now - server_started) * 1000))
+            stage_ms = max(0, round((now - server_last) * 1000))
+            server_last = now
+            _LOGGER.info(
+                format_server_log_line(
+                    entity_id,
+                    event,
+                    elapsed_ms=elapsed_ms,
+                    stage_ms=stage_ms,
+                )
+            )
+
         lease = None
         upstream = None
         pump_task: asyncio.Task[None] | None = None
@@ -503,15 +522,23 @@ class MiniAppCameraMSEView(_MiniAppView):
 
         async def pump_upstream() -> None:
             assert upstream is not None
+            reply_logged = False
+            chunk_logged = False
             async for message in upstream:
                 if websocket.closed:
                     break
                 if message.type == WSMsgType.BINARY:
+                    if not chunk_logged:
+                        chunk_logged = True
+                        log_server_milestone("mse_upstream_chunk")
                     await websocket.send_bytes(message.data)
                     continue
                 if message.type == WSMsgType.TEXT:
                     payload = _sanitize_mse_upstream_text(message.data)
                     if payload is not None:
+                        if not reply_logged:
+                            reply_logged = True
+                            log_server_milestone("mse_upstream_reply")
                         await websocket.send_json(payload)
                     continue
                 if message.type in (WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR):
@@ -531,12 +558,17 @@ class MiniAppCameraMSEView(_MiniAppView):
             if codecs is None:
                 await close_with_error("invalid_mse_command")
                 return websocket
+            log_server_milestone("mse_command_received")
 
             try:
-                lease = await self.controller.acquire_mse_stream(entity_id)
+                lease = await self.controller.acquire_mse_stream(
+                    entity_id,
+                    progress=log_server_milestone,
+                )
                 upstream = await self.controller.go2rtc.open_mse_ws(
                     lease.internal_name
                 )
+                log_server_milestone("mse_upstream_ws_open")
             except MiniAppOperationError as exc:
                 await close_with_error(str(exc))
                 return websocket
@@ -548,6 +580,7 @@ class MiniAppCameraMSEView(_MiniAppView):
                 return websocket
 
             await upstream.send_json({"type": "mse", "value": codecs})
+            log_server_milestone("mse_negotiation_forwarded")
             pump_task = self.controller.hass.async_create_task(pump_upstream())
 
             remaining = max(0.0, float(session.expires_at) - time.time())
