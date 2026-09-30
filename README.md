@@ -11,7 +11,7 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.7.20**. This diagnostic patch keeps playback behavior unchanged and adds two read-only HA-managed go2rtc stream-state snapshots during MSE startup: about 250 ms and 4 s after negotiation is forwarded. The logs include compact counters plus rich sanitized producer/consumer JSON (media/codecs, connection IDs, protocols, receiver/sender structures and byte/packet/drop counters) while omitting source URLs, remote addresses, SDP and credential material. Details are recorded in `docs/releases/1.7.20-go2rtc-stream-state.md`.
+Current stable release: **1.7.21**. This diagnostic patch keeps playback behavior unchanged, logs every upstream go2rtc WebSocket text response after MSE negotiation (including sanitized `type=error` values), and adds a third go2rtc stream-state snapshot at about 7 s before the existing 8 s negotiation timeout. This closes a diagnostic blind spot where go2rtc handler errors could previously be discarded while the Mini App waited for timeout. Details are recorded in `docs/releases/1.7.21-go2rtc-upstream-errors.md`.
 
 ## Home Assistant Custom Card
 
