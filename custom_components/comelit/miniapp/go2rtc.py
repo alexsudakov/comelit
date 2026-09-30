@@ -65,11 +65,13 @@ class MiniAppGo2RTCAdapter:
             raise MiniAppGo2RTCError("go2rtc_unavailable")
         return runtime
 
-    async def register_stream(self, internal_name: str, source: str) -> None:
+    async def register_stream(self, internal_name: str, sources: list[str]) -> None:
         # The concrete operation is the compatibility check. Avoid a separate
         # /api health/version round-trip on every cold viewer startup.
+        if not sources:
+            raise MiniAppGo2RTCError("go2rtc_http_error")
         base, client = self._require_runtime()
-        params = urlencode({"name": internal_name, "src": source})
+        params = urlencode({"name": internal_name, "src": sources}, doseq=True)
         try:
             async with client.put(
                 urljoin(base, "/api/streams") + "?" + params,
