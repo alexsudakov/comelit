@@ -707,6 +707,80 @@ async function main() {
       }
     }
 
+    {
+      const {page, posts} = await setupPage(browser);
+      try {
+        await page.clock.install();
+        await installMSEFakes(page);
+        await createLiveViewer(page);
+        await flush(page, 1);
+        await waitForSocket(page, "(socket) => socket.sent.length > 0");
+
+        // 1.7.15 production evidence showed a cold backend can take >3 s.
+        await flush(page, 7000);
+        assert.equal(event(posts, "mse_fallback"), undefined, JSON.stringify(posts));
+
+        await page.evaluate(() => {
+          window.__mseSockets[0].receive(JSON.stringify({
+            type: "mse",
+            value: 'video/mp4; codecs="avc1.42E01E"',
+          }));
+        });
+        await flush(page, 300);
+        assert.equal(event(posts, "mse_ready")?.event, "mse_ready");
+
+        // First-chunk budget starts at mse_ready.
+        await flush(page, 7000);
+        assert.equal(event(posts, "mse_fallback"), undefined, JSON.stringify(posts));
+
+        await page.evaluate(() => {
+          window.__mseSockets[0].receive(new Uint8Array([4, 5, 6]).buffer);
+        });
+        await flush(page, 300);
+        assert.equal(event(posts, "mse_first_chunk")?.event, "mse_first_chunk");
+
+        // First-frame budget starts at the first chunk.
+        await flush(page, 7000);
+        assert.equal(event(posts, "mse_fallback"), undefined, JSON.stringify(posts));
+
+        await page.evaluate(() => {
+          if (window.__mseFrameCallback) {
+            window.__mseFrameCallback(performance.now(), {});
+          }
+        });
+        await flush(page, 300);
+        assert.equal(event(posts, "mse_first_frame")?.event, "mse_first_frame");
+        await finishScenario(posts);
+      } finally {
+        await page.close();
+      }
+    }
+
+    {
+      const {page, posts} = await setupPage(browser);
+      try {
+        await page.clock.install();
+        await installMSEFakes(page);
+        await createLiveViewer(page);
+        await flush(page, 1);
+        await waitForSocket(page, "(socket) => socket.sent.length > 0");
+        await flush(page, 8100);
+        const fallback = await waitForEventReason(
+          page,
+          posts,
+          "mse_fallback",
+          "mse_negotiation_failed",
+        );
+        assert.ok(
+          fallback.elapsed_ms >= 8000 && fallback.elapsed_ms <= 8300,
+          JSON.stringify(fallback),
+        );
+        await finishScenario(posts);
+      } finally {
+        await page.close();
+      }
+    }
+
     for (const [name, driveFailure, reason] of [
       ["server error", (page) => page.evaluate(() => {
         window.__mseSockets[0].receive(JSON.stringify({
