@@ -11,7 +11,7 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.7.13**. This patch release removes the session-wide `DOOR_ALREADY_SENT` lockout from the P122 on-demand Entrance Door path while preserving the per-operation safety boundary. A later explicit manual press is allowed only after the previous operation's 1000 ms inflight/settle window completes; each accepted press advances the last completed Door TX sequence and still maps to exactly one native write with no automatic retry. The existing active media CTPP is reused, Gate remains fail-closed, and physical effect is never inferred from protocol ACK alone. Details are recorded in `docs/releases/1.7.13-repeat-manual-p122-door.md`.
+Current stable release: **1.7.14**. This patch release makes MSE/fMP4 over a restricted same-origin WebSocket the primary Telegram Mini App transport for ordinary surveillance cameras. The integration resolves the existing Home Assistant `Camera.stream_source()`, registers an opaque source with the already-running HA-managed go2rtc instance, and proxies only the narrow MSE protocol without exposing the camera URL, credentials, go2rtc management endpoint, or media capability outside the authenticated Mini App session. Playback falls back `MSE -> WebRTC -> HLS`; the Comelit entrance-camera media lifecycle is unchanged. Details are recorded in `docs/releases/1.7.14-miniapp-direct-mse.md`.
 
 ## Home Assistant Custom Card
 
@@ -80,10 +80,13 @@ action nonce, and one accepted request maps to exactly one existing Comelit
 
 Camera viewing uses two deliberately separate paths. The Comelit entrance
 camera keeps Home Assistant HLS and its existing validated camera-owned media
-lifecycle. Ordinary surveillance cameras first use Home Assistant WebRTC,
-normally backed by the HA-managed go2rtc provider, and fall back to the
-session-bound HLS proxy if WebRTC is unavailable. No Mini App camera preload is
-enabled. Raw HA/go2rtc management credentials are never exposed to Telegram.
+lifecycle. Ordinary surveillance cameras resolve their existing Home Assistant
+`Camera.stream_source()` server-side, register an opaque stream with the
+HA-managed go2rtc instance, and use a restricted same-origin MSE/fMP4 WebSocket
+proxy as the primary transport. Playback falls back to the existing Home
+Assistant WebRTC path and then to the session-bound HLS proxy. No Mini App
+camera preload is enabled. Camera source URLs, source credentials and raw
+go2rtc management access are never exposed to Telegram.
 
 Architecture and deployment boundary: `docs/miniapp-architecture.md`.
 
