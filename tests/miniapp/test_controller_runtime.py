@@ -952,16 +952,14 @@ def test_go2rtc_adapter_uses_home_assistant_runtime_session(monkeypatch):
 
     assert upstream is not None
     assert [method for method, _url in calls] == [
-        "get",
         "put",
-        "get",
         "ws_connect",
         "delete",
     ]
     assert all(url.startswith("http://localhost:11984/") for _method, url in calls)
 
 
-def test_go2rtc_unavailable_and_incompatible_errors_are_bounded(monkeypatch):
+def test_go2rtc_unavailable_and_operation_errors_are_bounded(monkeypatch):
     controller, hass = _controller(surveillance_label="Outside")
     adapter = go2rtc_mod.MiniAppGo2RTCAdapter(hass)
 
@@ -976,8 +974,8 @@ def test_go2rtc_unavailable_and_incompatible_errors_are_bounded(monkeypatch):
 
     asyncio.run(unavailable())
 
-    class _FakeAPIResponse:
-        status = 200
+    class _FailingResponse:
+        status = 503
 
         async def __aenter__(self):
             return self
@@ -985,27 +983,30 @@ def test_go2rtc_unavailable_and_incompatible_errors_are_bounded(monkeypatch):
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
-        async def json(self):
-            return {"version": "2.0.0", "url": "rtsp://test-user:test-password@192.0.2.10/example"}
-
     class _FakeClient:
         def get(self, *args, **kwargs):
-            return _FakeAPIResponse()
+            raise AssertionError("hot path must not perform a separate /api probe")
+
+        def put(self, *args, **kwargs):
+            return _FailingResponse()
 
     hass.data["go2rtc"] = "http://127.0.0.1:1984"
     monkeypatch.setattr(go2rtc_mod, "async_get_clientsession", lambda hass: _FakeClient())
 
-    async def incompatible():
+    async def operation_error():
         with pytest.raises(go2rtc_mod.MiniAppGo2RTCError) as exc:
-            await adapter.open_mse_ws("internal")
-        assert exc.value.code == "go2rtc_incompatible"
+            await adapter.register_stream(
+                "internal",
+                "rtsp://test-user:test-password@192.0.2.10/example",
+            )
+        assert exc.value.code == "go2rtc_http_error"
         message = str(exc.value)
-        assert message == "go2rtc_incompatible"
+        assert message == "go2rtc_http_error"
         assert "test-user" not in message
         assert "test-password" not in message
         assert "192.0.2.10" not in message
 
-    asyncio.run(incompatible())
+    asyncio.run(operation_error())
 
 
 def test_mse_view_protocol_rejects_bad_commands_and_filters_upstream_text(monkeypatch):
