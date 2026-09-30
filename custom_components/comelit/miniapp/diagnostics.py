@@ -163,10 +163,10 @@ _GO2RTC_SECRET_KEYS = frozenset(
     }
 )
 _GO2RTC_URL_RE = re.compile(
-    r"(?i)\\b(?:rtsp|rtsps|http|https|ws|wss)://[^\\s\"']+"
+    r"(?i)\b(?:rtsp|rtsps|http|https|ws|wss)://[^\s\"']+"
 )
 _GO2RTC_IPV4_RE = re.compile(
-    r"(?<![0-9])(?:[0-9]{1,3}\\.){3}[0-9]{1,3}(?::[0-9]{1,5})?"
+    r"(?<![0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?::[0-9]{1,5})?"
 )
 _MAX_GO2RTC_WS_VALUE_CHARS = 2048
 _ALLOWED_KEYS = frozenset(
@@ -494,7 +494,7 @@ def format_go2rtc_ws_line(
     entity_id: str,
     *,
     elapsed_ms: int,
-    message_type: str,
+    frame_type: str,
     value: Any,
 ) -> str:
     """Format sanitized upstream go2rtc WebSocket text."""
@@ -505,9 +505,9 @@ def format_go2rtc_ws_line(
         or elapsed_ms > MAX_MS
     ):
         raise MiniAppDiagnosticsError("invalid_go2rtc_ws_timing")
-    if not isinstance(message_type, str):
+    if not isinstance(frame_type, str):
         raise MiniAppDiagnosticsError("invalid_go2rtc_ws_type")
-    safe_type = re.sub(r"[^a-zA-Z0-9_.-]", "_", message_type[:64]) or "unknown"
+    safe_type = re.sub(r"[^a-zA-Z0-9_.-]", "_", frame_type[:64]) or "unknown"
     safe_value = sanitize_go2rtc_ws_value(value)
     return (
         f"COMELIT_MINIAPP_DIAG_GO2RTC_WS entity={entity_id} "
