@@ -11,7 +11,7 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.7.19**. This patch completes Generic Camera parity with Home Assistant core for HA-managed go2rtc: Generic Camera streams are now registered with both the ffmpeg-wrapped camera source and the loopback `#audio=opus` producer used by HA, while other ordinary camera integrations keep a single unchanged source. The 1.7.18 server-side MSE milestones remain active for live validation. The intended fallback remains `MSE -> WebRTC -> HLS`; the Comelit entrance-camera lifecycle is unchanged. Details are recorded in `docs/releases/1.7.19-generic-camera-opus-producer.md`.
+Current stable release: **1.7.20**. This diagnostic patch keeps playback behavior unchanged and adds two read-only HA-managed go2rtc stream-state snapshots during MSE startup: about 250 ms and 4 s after negotiation is forwarded. The logs include compact counters plus rich sanitized producer/consumer JSON (media/codecs, connection IDs, protocols, receiver/sender structures and byte/packet/drop counters) while omitting source URLs, remote addresses, SDP and credential material. Details are recorded in `docs/releases/1.7.20-go2rtc-stream-state.md`.
 
 ## Home Assistant Custom Card
 
