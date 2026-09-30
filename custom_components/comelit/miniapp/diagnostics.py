@@ -420,7 +420,6 @@ def sanitize_go2rtc_state(value: Any, *, depth: int = 0) -> Any:
         for key, item in list(value.items())[:96]:
             key_text = str(key)[:128]
             if key_text.lower() in _GO2RTC_SECRET_KEYS:
-                result[key_text] = "<redacted>"
                 continue
             result[key_text] = sanitize_go2rtc_state(item, depth=depth + 1)
         return result
