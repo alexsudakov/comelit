@@ -13,8 +13,6 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 _LOGGER = logging.getLogger(__name__)
 _TIMEOUT = ClientTimeout(total=5)
-_MIN_VERSION = (1, 9, 13)
-_MAX_VERSION = (2, 0, 0)
 
 
 class MiniAppGo2RTCError(RuntimeError):
@@ -23,18 +21,6 @@ class MiniAppGo2RTCError(RuntimeError):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
-
-
-def _parse_version(value: object) -> tuple[int, int, int] | None:
-    if not isinstance(value, str):
-        return None
-    parts = value.split(".")
-    if len(parts) < 3:
-        return None
-    try:
-        return tuple(int(part) for part in parts[:3])
-    except ValueError:
-        return None
 
 
 def _normalize_base(value: object) -> str | None:
@@ -73,32 +59,16 @@ class MiniAppGo2RTCAdapter:
         _LOGGER.debug("Mini App MSE unavailable: go2rtc_unavailable")
         return None
 
-    async def _ensure_available(self) -> tuple[str, Any]:
+    def _require_runtime(self) -> tuple[str, Any]:
         runtime = self._runtime()
         if runtime is None:
             raise MiniAppGo2RTCError("go2rtc_unavailable")
-        base, client = runtime
-
-        try:
-            async with client.get(urljoin(base, "/api"), timeout=_TIMEOUT) as response:
-                if response.status >= 400:
-                    raise MiniAppGo2RTCError("go2rtc_http_error")
-                try:
-                    info: Any = await response.json()
-                except (ClientError, ValueError, TypeError):
-                    return base, client
-        except MiniAppGo2RTCError:
-            raise
-        except (asyncio.TimeoutError, ClientError):
-            raise MiniAppGo2RTCError("go2rtc_unavailable") from None
-
-        version = _parse_version(info.get("version") if isinstance(info, dict) else None)
-        if version is not None and not (_MIN_VERSION <= version < _MAX_VERSION):
-            raise MiniAppGo2RTCError("go2rtc_incompatible")
-        return base, client
+        return runtime
 
     async def register_stream(self, internal_name: str, source: str) -> None:
-        base, client = await self._ensure_available()
+        # The concrete operation is the compatibility check. Avoid a separate
+        # /api health/version round-trip on every cold viewer startup.
+        base, client = self._require_runtime()
         params = urlencode({"name": internal_name, "src": source})
         try:
             async with client.put(
@@ -129,7 +99,7 @@ class MiniAppGo2RTCAdapter:
             _LOGGER.debug("Mini App MSE unregister failed: go2rtc_http_error")
 
     async def open_mse_ws(self, internal_name: str):
-        base, client = await self._ensure_available()
+        base, client = self._require_runtime()
         params = urlencode({"src": internal_name})
         try:
             return await client.ws_connect(
