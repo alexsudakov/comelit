@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 import re
 from typing import Any
@@ -33,6 +35,7 @@ from .session import (
     MiniAppSessionError,
     MiniAppSessionStore,
 )
+from .go2rtc import MiniAppGo2RTCAdapter
 
 
 INTERCOM_UNIQUE_IDS = frozenset(
@@ -66,6 +69,8 @@ _HLS_PROXY_TAIL = re.compile(
     r"^(?:master_playlist\.m3u8|playlist\.m3u8|init\.mp4|"
     r"segment/[0-9]+(?:\.[0-9]+)?\.m4s)$"
 )
+_DIRECT_SOURCE = re.compile(r"^(?:rtsp|rtsps|http|https)://[^\r\n\t ]+$")
+_MAX_MSE_STREAMS = 32
 
 
 class MiniAppOperationError(HomeAssistantError):
@@ -89,6 +94,19 @@ class MiniAppSettings:
             and self.bot_id > 0
             and bool(self.allowed_user_ids)
         )
+
+
+@dataclass(slots=True)
+class _MiniAppMSEStream:
+    internal_name: str
+    register_task: asyncio.Task[None]
+    refcount: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class MiniAppMSEStreamLease:
+    entity_id: str
+    internal_name: str
 
 
 def _parse_allowed_user_ids(value: object) -> frozenset[int]:
@@ -127,6 +145,9 @@ class ComelitMiniAppController:
         self.frontend_dir = frontend_dir
         self.sessions = MiniAppSessionStore()
         self.media_grants = MiniAppMediaGrantStore()
+        self.go2rtc = MiniAppGo2RTCAdapter(hass)
+        self._mse_lock = asyncio.Lock()
+        self._mse_streams: dict[str, _MiniAppMSEStream] = {}
         self._entry: ConfigEntry | None = None
 
     def set_entry(self, entry: ConfigEntry) -> None:
@@ -317,6 +338,73 @@ class ComelitMiniAppController:
         if StreamType.WEB_RTC not in camera.camera_capabilities.frontend_stream_types:
             raise MiniAppOperationError("camera WebRTC is unavailable")
         return camera
+
+    def _get_allowed_ordinary_camera(self, entity_id: str):
+        if entity_id not in self._allowed_camera_entity_ids():
+            raise MiniAppOperationError("camera is not allowed for the Mini App")
+
+        registry = er.async_get(self.hass)
+        entry = registry.async_get(entity_id)
+        if (
+            entry is not None
+            and entry.platform == DOMAIN
+            and entry.unique_id in INTERCOM_UNIQUE_IDS
+        ):
+            raise MiniAppOperationError("intercom camera direct stream is not enabled")
+
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state == STATE_UNAVAILABLE:
+            raise MiniAppOperationError("camera is unavailable")
+
+        return get_camera_from_entity_id(self.hass, entity_id)
+
+    @staticmethod
+    def mse_internal_stream_name(entity_id: str) -> str:
+        digest = hashlib.sha256(entity_id.encode("utf-8")).hexdigest()[:16]
+        return f"comelit_miniapp_{digest}"
+
+    async def acquire_mse_stream(self, entity_id: str) -> MiniAppMSEStreamLease:
+        camera = self._get_allowed_ordinary_camera(entity_id)
+        stream_source = await camera.stream_source()
+        if not isinstance(stream_source, str) or not _DIRECT_SOURCE.fullmatch(stream_source):
+            raise MiniAppOperationError("stream_source_unavailable")
+
+        internal_name = self.mse_internal_stream_name(entity_id)
+        async with self._mse_lock:
+            stream = self._mse_streams.get(entity_id)
+            if stream is None:
+                if len(self._mse_streams) >= _MAX_MSE_STREAMS:
+                    raise MiniAppOperationError("mse_registry_full")
+                stream = _MiniAppMSEStream(
+                    internal_name=internal_name,
+                    register_task=self.hass.async_create_task(
+                        self.go2rtc.register_stream(internal_name, stream_source)
+                    ),
+                    refcount=0,
+                )
+                self._mse_streams[entity_id] = stream
+            stream.refcount += 1
+
+        try:
+            await stream.register_task
+        except Exception:
+            await self.release_mse_stream(entity_id)
+            raise
+        return MiniAppMSEStreamLease(entity_id=entity_id, internal_name=internal_name)
+
+    async def release_mse_stream(self, entity_id: str) -> None:
+        unregister_name: str | None = None
+        async with self._mse_lock:
+            stream = self._mse_streams.get(entity_id)
+            if stream is None:
+                return
+            stream.refcount = max(0, stream.refcount - 1)
+            if stream.refcount == 0:
+                self._mse_streams.pop(entity_id, None)
+                unregister_name = stream.internal_name
+
+        if unregister_name is not None:
+            await self.go2rtc.unregister_stream(unregister_name)
 
     async def async_create_camera_media(
         self,

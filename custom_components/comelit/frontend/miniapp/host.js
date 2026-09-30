@@ -12,21 +12,35 @@
   let refreshTimer = null;
   let refreshInFlight = false;
   const MAX_DIAGNOSTICS_COUNTERS = 16;
+  const MSE_NEGOTIATION_TIMEOUT_MS = 3000;
+  const MSE_FIRST_CHUNK_TIMEOUT_MS = 6000;
+  const MSE_FIRST_FRAME_TIMEOUT_MS = 12000;
+  const MSE_LIVE_BACK_BUFFER_SECONDS = 30;
   const WEBRTC_COUNTER_PRIORITY = [
     "bytes_received",
     "frames_decoded",
     "ice_gathering_state",
-    "cand_host",
-    "cand_srflx",
-    "cand_prflx",
-    "cand_relay",
-    "cand_udp",
-    "cand_tcp",
     "pair_waiting",
     "pair_in_progress",
     "pair_succeeded",
     "pair_failed",
     "pair_nominated",
+    "pair_selected",
+    "selected_pair_succeeded",
+    "selected_pair_nominated",
+    "cand_host",
+    "cand_srflx",
+    "cand_relay",
+    "cand_udp",
+    "cand_tcp",
+  ];
+  const MSE_COUNTER_PRIORITY = [
+    "chunks",
+    "bytes",
+    "queue",
+    "buffered_count",
+    "buffered_s",
+    "ready_state",
   ];
   const HLS_COUNTER_PRIORITY = [
     "paused",
@@ -131,6 +145,7 @@
       this._labelElement = null;
       this._displayName = "";
       this._hls = null;
+      this._mse = null;
       this._peerConnection = null;
       this._websocket = null;
       this._remoteStream = null;
@@ -170,6 +185,8 @@
     disconnectedCallback() {
       if (this._playbackMode === "webrtc" && !this._webrtcFallbackStarted) {
         this._reportDiagnostics("fallback", {reason: "navigate"});
+      } else if (this._playbackMode === "mse") {
+        this._reportDiagnostics("mse_fallback", {reason: "navigate"});
       }
       this._requestGeneration += 1;
       this._destroyPlayback();
@@ -237,8 +254,41 @@
       }
     }
 
+    _destroyMSE() {
+      const mse = this._mse;
+      this._mse = null;
+      if (!mse) {
+        return;
+      }
+      for (const timer of mse.timers) {
+        clearTimeout(timer);
+      }
+      if (mse.sourceBuffer) {
+        try {
+          mse.sourceBuffer.removeEventListener("updateend", mse.onUpdateEnd);
+          mse.sourceBuffer.removeEventListener("error", mse.onError);
+        } catch (_) {
+          // Best-effort cleanup.
+        }
+      }
+      if (mse.socket && mse.socket.readyState === WebSocket.OPEN) {
+        try {
+          mse.socket.send(JSON.stringify({type: "close"}));
+        } catch (_) {
+          // Closing the socket is authoritative.
+        }
+      }
+      if (mse.socket && mse.socket.readyState < WebSocket.CLOSING) {
+        mse.socket.close();
+      }
+      if (mse.objectUrl) {
+        URL.revokeObjectURL(mse.objectUrl);
+      }
+    }
+
     _destroyPlayback() {
       this._playbackMode = null;
+      this._destroyMSE();
       this._destroyWebRTC();
 
       if (this._hls) {
@@ -320,14 +370,27 @@
       ) {
         return;
       }
+      const limitedCounters = options.counters
+        ? this._limitDiagnosticCounters(event, options.counters)
+        : null;
+      const counterFingerprint =
+        limitedCounters && ["ice", "rtp"].includes(event)
+          ? "|" + JSON.stringify(limitedCounters)
+          : "";
       const triple =
-        event + "|" + (options.state || "") + "|" + (options.reason || "");
+        event +
+        "|" +
+        (options.state || "") +
+        "|" +
+        (options.reason || "") +
+        counterFingerprint;
       const now = performance.now();
       if (triple === diagnostics.lastTriple) {
         return;
       }
       const immediate =
-        event === "fallback" && options.reason === "navigate";
+        (event === "fallback" || event === "mse_fallback") &&
+        options.reason === "navigate";
       if (!immediate && diagnostics.count > 0 && now - diagnostics.lastAt < 250) {
         if (!diagnostics.queuedTriples.has(triple)) {
           const queuedEntityId = diagnostics.entityId;
@@ -364,8 +427,8 @@
       if (options.reason) {
         payload.reason = options.reason;
       }
-      if (options.counters) {
-        payload.counters = this._limitDiagnosticCounters(event, options.counters);
+      if (limitedCounters) {
+        payload.counters = limitedCounters;
       }
       fetch(
         "/api/comelit/miniapp/camera/" +
@@ -386,7 +449,9 @@
     _limitDiagnosticCounters(event, counters) {
       const priority = ["ice", "rtp"].includes(event)
         ? WEBRTC_COUNTER_PRIORITY
-        : HLS_COUNTER_PRIORITY;
+        : event.startsWith("mse_")
+          ? MSE_COUNTER_PRIORITY
+          : HLS_COUNTER_PRIORITY;
       const result = {};
       for (const key of priority) {
         if (Object.prototype.hasOwnProperty.call(counters, key)) {
@@ -491,6 +556,14 @@
         bytes_received: 0,
         frames_decoded: 0,
         ice_gathering_state: this._iceGatheringStateCode(peer.iceGatheringState),
+        pair_waiting: 0,
+        pair_in_progress: 0,
+        pair_succeeded: 0,
+        pair_failed: 0,
+        pair_nominated: 0,
+        pair_selected: 0,
+        selected_pair_succeeded: 0,
+        selected_pair_nominated: 0,
       };
       const candidateTypes = new Set(["host", "srflx", "prflx", "relay"]);
       const protocols = new Set(["udp", "tcp"]);
@@ -502,6 +575,16 @@
       ]);
       try {
         const stats = await peer.getStats();
+        let selectedPairId = null;
+        stats.forEach((report) => {
+          if (
+            report.type === "transport" &&
+            typeof report.selectedCandidatePairId === "string" &&
+            report.selectedCandidatePairId
+          ) {
+            selectedPairId = report.selectedCandidatePairId;
+          }
+        });
         stats.forEach((report) => {
           if (
             report.type === "inbound-rtp" &&
@@ -531,7 +614,19 @@
               counters[key] = (counters[key] || 0) + 1;
             }
             if (report.nominated) {
-              counters.pair_nominated = (counters.pair_nominated || 0) + 1;
+              counters.pair_nominated += 1;
+            }
+            const selected =
+              (selectedPairId && report.id === selectedPairId) ||
+              report.selected === true;
+            if (selected) {
+              counters.pair_selected += 1;
+              if (state === "succeeded") {
+                counters.selected_pair_succeeded += 1;
+              }
+              if (report.nominated) {
+                counters.selected_pair_nominated += 1;
+              }
             }
           }
         });
@@ -702,6 +797,333 @@
         clearInterval(this._webrtcDiagnosticTimer);
         this._webrtcDiagnosticTimer = null;
       }
+    }
+
+    _mseSupported() {
+      const MediaSourceClass = window.ManagedMediaSource || window.MediaSource;
+      return MediaSourceClass &&
+        typeof MediaSourceClass.isTypeSupported === "function";
+    }
+
+    _mseCodecs() {
+      const MediaSourceClass = window.ManagedMediaSource || window.MediaSource;
+      const candidates = [
+        ["h264", 'video/mp4; codecs="avc1.42E01E,mp4a.40.2"'],
+        ["h265", 'video/mp4; codecs="hvc1.1.6.L93.B0,mp4a.40.2"'],
+        ["av1", 'video/mp4; codecs="av01.0.01M.08,mp4a.40.2"'],
+        ["vp9", 'video/mp4; codecs="vp09.00.50.08,opus"'],
+      ];
+      const supported = [];
+      for (const [token, mime] of candidates) {
+        try {
+          if (MediaSourceClass.isTypeSupported(mime)) {
+            supported.push(token);
+          }
+        } catch (_) {
+          // Ignore codec probes that this WebView cannot parse.
+        }
+      }
+      if (!supported.length) {
+        return null;
+      }
+      return supported.slice(0, 4).join(",");
+    }
+
+    _mseCounters(mse) {
+      const counters = {
+        chunks: this._boundedCounter(mse.chunks),
+        bytes: this._boundedCounter(mse.bytes),
+        queue: this._boundedCounter(mse.queue.length),
+        ready_state: this._boundedCounter(this._video?.readyState || 0),
+      };
+      const buffered = this._video?.buffered;
+      counters.buffered_count = this._boundedCounter(buffered?.length || 0);
+      let bufferedSeconds = 0;
+      for (let index = 0; index < (buffered?.length || 0); index += 1) {
+        bufferedSeconds += Math.max(0, buffered.end(index) - buffered.start(index));
+      }
+      counters.buffered_s = this._boundedCounter(bufferedSeconds);
+      return counters;
+    }
+
+    _mseFallback(entityId, generation, reason) {
+      if (
+        generation !== this._requestGeneration ||
+        !this.isConnected ||
+        !this._video ||
+        this._playbackMode !== "mse"
+      ) {
+        return;
+      }
+      this._reportDiagnostics("mse_fallback", {reason});
+      this._destroyMSE();
+      this._openWebRTC(entityId, generation);
+    }
+
+    _evictMSEBackBuffer(mse) {
+      const video = this._video;
+      if (!video || !mse.sourceBuffer || mse.sourceBuffer.updating) {
+        return;
+      }
+      const buffered = video.buffered;
+      if (!buffered?.length) {
+        return;
+      }
+      const removeEnd = Number(video.currentTime || 0) - MSE_LIVE_BACK_BUFFER_SECONDS;
+      if (removeEnd <= 0 || buffered.start(0) >= removeEnd) {
+        return;
+      }
+      try {
+        mse.sourceBuffer.remove(buffered.start(0), removeEnd);
+      } catch (_) {
+        // Buffer eviction is opportunistic; append flow remains authoritative.
+      }
+    }
+
+    _pumpMSEQueue(mse) {
+      if (
+        this._mse !== mse ||
+        !mse.sourceBuffer ||
+        mse.sourceBuffer.updating ||
+        !mse.queue.length
+      ) {
+        return;
+      }
+      try {
+        this._evictMSEBackBuffer(mse);
+        if (mse.sourceBuffer.updating) {
+          return;
+        }
+        mse.sourceBuffer.appendBuffer(mse.queue.shift());
+      } catch (_) {
+        this._mseFallback(mse.entityId, mse.generation, "mse_append_error");
+      }
+    }
+
+    _markFirstMSEFrame(mse) {
+      if (
+        this._mse !== mse ||
+        mse.firstFrame ||
+        mse.generation !== this._requestGeneration ||
+        this._playbackMode !== "mse" ||
+        !this.isConnected
+      ) {
+        return;
+      }
+      mse.firstFrame = true;
+      for (const timer of mse.timers.splice(0)) {
+        clearTimeout(timer);
+      }
+      const elapsed = this._viewStartTime
+        ? (performance.now() - this._viewStartTime) / 1000
+        : 0;
+      this._setTransportLabel("MSE · первый кадр " + elapsed.toFixed(1) + " с");
+      this._reportDiagnostics("mse_first_frame", {
+        counters: this._mseCounters(mse),
+      });
+    }
+
+    _openMSE(entityId, generation) {
+      if (!this._mseSupported()) {
+        this._reportDiagnostics("mse_fallback", {reason: "no_mediasource"});
+        this._openWebRTC(entityId, generation);
+        return;
+      }
+      const codecs = this._mseCodecs();
+      if (!codecs) {
+        this._reportDiagnostics("mse_fallback", {reason: "mse_unsupported_codec"});
+        this._openWebRTC(entityId, generation);
+        return;
+      }
+
+      const MediaSourceClass = window.ManagedMediaSource || window.MediaSource;
+      const mediaSource = new MediaSourceClass();
+      const objectUrl = URL.createObjectURL(mediaSource);
+      const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const url =
+        scheme +
+        "//" +
+        window.location.host +
+        "/api/comelit/miniapp/camera/" +
+        encodeURIComponent(entityId) +
+        "/mse";
+      let socket;
+      try {
+        socket = new WebSocket(url);
+      } catch (_) {
+        URL.revokeObjectURL(objectUrl);
+        this._reportDiagnostics("mse_fallback", {reason: "mse_ws_error"});
+        this._openWebRTC(entityId, generation);
+        return;
+      }
+
+      this._playbackMode = "mse";
+      this._setTransportLabel("MSE · подключение…");
+      socket.binaryType = "arraybuffer";
+      const mse = {
+        entityId,
+        generation,
+        mediaSource,
+        objectUrl,
+        socket,
+        sourceBuffer: null,
+        queue: [],
+        timers: [],
+        chunks: 0,
+        bytes: 0,
+        firstChunk: false,
+        firstFrame: false,
+        ready: false,
+        sourceOpen: false,
+        negotiationTimer: null,
+        firstChunkTimer: null,
+        firstFrameTimer: null,
+        onUpdateEnd: null,
+        onError: null,
+      };
+      this._mse = mse;
+      this._video.src = objectUrl;
+      this._reportDiagnostics("mse_connect");
+
+      const sendNegotiation = () => {
+        if (
+          this._mse === mse &&
+          mse.sourceOpen &&
+          socket.readyState === WebSocket.OPEN
+        ) {
+          socket.send(JSON.stringify({type: "mse", value: codecs}));
+        }
+      };
+
+      const scheduleFallback = (delay, reason) => {
+        const timer = setTimeout(() => {
+          this._mseFallback(entityId, generation, reason);
+        }, delay);
+        mse.timers.push(timer);
+        return timer;
+      };
+      mse.negotiationTimer = scheduleFallback(
+        MSE_NEGOTIATION_TIMEOUT_MS,
+        "mse_negotiation_failed",
+      );
+      mse.firstChunkTimer = scheduleFallback(
+        MSE_FIRST_CHUNK_TIMEOUT_MS,
+        "mse_first_chunk_timeout",
+      );
+      mse.firstFrameTimer = scheduleFallback(
+        MSE_FIRST_FRAME_TIMEOUT_MS,
+        "mse_first_frame_timeout",
+      );
+
+      mediaSource.addEventListener("sourceopen", () => {
+        if (this._mse !== mse) {
+          return;
+        }
+        mse.sourceOpen = true;
+        sendNegotiation();
+      }, {once: true});
+
+      socket.onopen = () => {
+        if (this._mse !== mse) {
+          return;
+        }
+        this._setTransportLabel("MSE · согласование…");
+        sendNegotiation();
+      };
+
+      socket.onmessage = (event) => {
+        if (
+          this._mse !== mse ||
+          generation !== this._requestGeneration ||
+          !this.isConnected
+        ) {
+          return;
+        }
+        if (typeof event.data === "string") {
+          let message;
+          try {
+            message = JSON.parse(event.data);
+          } catch (_) {
+            this._mseFallback(entityId, generation, "mse_negotiation_failed");
+            return;
+          }
+          if (message.type === "error") {
+            this._mseFallback(entityId, generation, message.code || "mse_ws_error");
+            return;
+          }
+          if (message.type !== "mse" || typeof message.value !== "string") {
+            this._mseFallback(entityId, generation, "mse_negotiation_failed");
+            return;
+          }
+          try {
+            mse.sourceBuffer = mediaSource.addSourceBuffer(message.value);
+          } catch (_) {
+            this._mseFallback(entityId, generation, "mse_unsupported_codec");
+            return;
+          }
+          mse.ready = true;
+          if (mse.negotiationTimer) {
+            clearTimeout(mse.negotiationTimer);
+            mse.negotiationTimer = null;
+          }
+          mse.onUpdateEnd = () => this._pumpMSEQueue(mse);
+          mse.onError = () => this._mseFallback(entityId, generation, "mse_append_error");
+          mse.sourceBuffer.addEventListener("updateend", mse.onUpdateEnd);
+          mse.sourceBuffer.addEventListener("error", mse.onError);
+          this._reportDiagnostics("mse_ready");
+          this._setTransportLabel("MSE · ожидание кадра…");
+          return;
+        }
+
+        if (!mse.sourceBuffer) {
+          return;
+        }
+        const chunk = event.data instanceof ArrayBuffer
+          ? event.data
+          : event.data?.arrayBuffer
+            ? null
+            : null;
+        if (!chunk) {
+          return;
+        }
+        mse.chunks += 1;
+        mse.bytes += chunk.byteLength || 0;
+        mse.queue.push(chunk);
+        if (!mse.firstChunk) {
+          mse.firstChunk = true;
+          if (mse.firstChunkTimer) {
+            clearTimeout(mse.firstChunkTimer);
+            mse.firstChunkTimer = null;
+          }
+          this._reportDiagnostics("mse_first_chunk", {
+            counters: this._mseCounters(mse),
+          });
+          this._video.play().catch((error) => {
+            const state = this._playErrorState(error);
+            this._reportDiagnostics("mse_error", {
+              reason: "mse_append_error",
+              state,
+              counters: this._mseCounters(mse),
+            });
+          });
+          const mark = () => this._markFirstMSEFrame(mse);
+          if (typeof this._video.requestVideoFrameCallback === "function") {
+            this._video.requestVideoFrameCallback(mark);
+          } else {
+            this._video.addEventListener("loadeddata", mark, {once: true});
+          }
+        }
+        this._pumpMSEQueue(mse);
+      };
+
+      socket.onerror = () => {
+        this._mseFallback(entityId, generation, "mse_ws_error");
+      };
+      socket.onclose = () => {
+        if (this._mse === mse && !mse.firstFrame) {
+          this._mseFallback(entityId, generation, "mse_ws_closed");
+        }
+      };
     }
 
     async _startHlsPlayback(source, generation) {
@@ -1217,7 +1639,7 @@
       if (isIntercomCameraEntity(entityId)) {
         this._openHls(entityId, generation);
       } else {
-        this._openWebRTC(entityId, generation);
+        this._openMSE(entityId, generation);
       }
     }
   }

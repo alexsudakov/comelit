@@ -27,6 +27,7 @@ from .diagnostics import (
     format_log_line,
     loads_limited,
 )
+from .go2rtc import MiniAppGo2RTCError
 from .session import MiniAppSession, MiniAppSessionError
 
 
@@ -37,6 +38,10 @@ AUTH_FUTURE_SKEW_SECONDS = 30
 MAX_AUTH_BODY_BYTES = 20_000
 MINIAPP_MARKER_HEADER = "X-Comelit-MiniApp-Request"
 ACTION_NONCE_HEADER = "X-Comelit-Action-Nonce"
+MSE_MAX_COMMAND_BYTES = 256
+_MSE_CODECS = frozenset(
+    {"h264", "h265", "hevc", "av1", "vp8", "vp9", "aac", "mp4a", "opus", "pcmu", "pcma"}
+)
 
 
 def _security_headers(response: web.StreamResponse) -> web.StreamResponse:
@@ -420,6 +425,149 @@ class MiniAppCameraWebRTCView(_MiniAppView):
         return websocket
 
 
+def _validate_mse_command(data: str) -> str | None:
+    if len(data.encode("utf-8", "ignore")) > MSE_MAX_COMMAND_BYTES:
+        return None
+    try:
+        payload = json.loads(data)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or set(payload) != {"type", "value"}:
+        return None
+    if payload.get("type") != "mse":
+        return None
+    value = payload.get("value")
+    if not isinstance(value, str) or len(value) > 64:
+        return None
+    tokens = [token.strip().lower() for token in value.split(",") if token.strip()]
+    if not tokens or len(tokens) > 8:
+        return None
+    if any(token not in _MSE_CODECS for token in tokens):
+        return None
+    return ",".join(tokens)
+
+
+def _sanitize_mse_upstream_text(data: str) -> dict[str, object] | None:
+    try:
+        payload = json.loads(data)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("type") != "mse":
+        return None
+    value = payload.get("value")
+    if not isinstance(value, str) or len(value) > 128:
+        return None
+    if not value.startswith("video/mp4; codecs="):
+        return None
+    return {"type": "mse", "value": value}
+
+
+class MiniAppCameraMSEView(_MiniAppView):
+    url = r"/api/comelit/miniapp/camera/{entity_id}/mse"
+    name = "api:comelit:miniapp:camera_mse"
+
+    async def get(
+        self,
+        request: web.Request,
+        entity_id: str,
+    ) -> web.StreamResponse:
+        _token, session = self._require_session(request)
+        if not entity_id.startswith("camera."):
+            raise web.HTTPNotFound
+
+        websocket = web.WebSocketResponse(
+            heartbeat=20,
+            max_msg_size=MSE_MAX_COMMAND_BYTES,
+        )
+        await websocket.prepare(request)
+
+        lease = None
+        upstream = None
+        pump_task: asyncio.Task[None] | None = None
+
+        async def close_with_error(code: str) -> None:
+            if not websocket.closed:
+                await websocket.send_json({"type": "error", "code": code})
+                await websocket.close()
+
+        async def pump_upstream() -> None:
+            assert upstream is not None
+            async for message in upstream:
+                if websocket.closed:
+                    break
+                if message.type == WSMsgType.BINARY:
+                    await websocket.send_bytes(message.data)
+                    continue
+                if message.type == WSMsgType.TEXT:
+                    payload = _sanitize_mse_upstream_text(message.data)
+                    if payload is not None:
+                        await websocket.send_json(payload)
+                    continue
+                if message.type in (WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR):
+                    await close_with_error("mse_ws_closed")
+                    break
+
+        try:
+            try:
+                first = await websocket.receive(timeout=5)
+            except TimeoutError:
+                await close_with_error("mse_negotiation_failed")
+                return websocket
+            if first.type != WSMsgType.TEXT:
+                await close_with_error("invalid_mse_command")
+                return websocket
+            codecs = _validate_mse_command(first.data)
+            if codecs is None:
+                await close_with_error("invalid_mse_command")
+                return websocket
+
+            try:
+                lease = await self.controller.acquire_mse_stream(entity_id)
+                upstream = await self.controller.go2rtc.open_mse_ws(
+                    lease.internal_name
+                )
+            except MiniAppOperationError as exc:
+                await close_with_error(str(exc))
+                return websocket
+            except MiniAppGo2RTCError as exc:
+                await close_with_error(exc.code)
+                return websocket
+            except (HomeAssistantError, TimeoutError):
+                await close_with_error("stream_source_unavailable")
+                return websocket
+
+            await upstream.send_json({"type": "mse", "value": codecs})
+            pump_task = self.controller.hass.async_create_task(pump_upstream())
+
+            remaining = max(0.0, float(session.expires_at) - time.time())
+            async with asyncio.timeout(remaining):
+                async for message in websocket:
+                    if message.type in (WSMsgType.ERROR, WSMsgType.CLOSE, WSMsgType.CLOSED):
+                        break
+                    if message.type != WSMsgType.TEXT:
+                        await close_with_error("invalid_mse_command")
+                        break
+                    payload = json.loads(message.data) if message.data else {}
+                    if isinstance(payload, dict) and payload.get("type") == "close":
+                        break
+                    await close_with_error("invalid_mse_command")
+                    break
+        except (json.JSONDecodeError, ValueError, TimeoutError):
+            await close_with_error("mse_ws_closed")
+        finally:
+            if pump_task is not None:
+                pump_task.cancel()
+                await asyncio.gather(pump_task, return_exceptions=True)
+            if upstream is not None and not upstream.closed:
+                await upstream.close()
+            if lease is not None:
+                await self.controller.release_mse_stream(lease.entity_id)
+
+        return websocket
+
+
 class MiniAppCameraDiagnosticsView(_MiniAppView):
     url = r"/api/comelit/miniapp/camera/{entity_id}/diagnostics"
     name = "api:comelit:miniapp:camera_diagnostics"
@@ -546,6 +694,7 @@ def async_register_miniapp_views(
     hass.http.register_view(MiniAppStateView(controller))
     hass.http.register_view(MiniAppDoorView(controller))
     hass.http.register_view(MiniAppCameraStreamView(controller))
+    hass.http.register_view(MiniAppCameraMSEView(controller))
     hass.http.register_view(MiniAppCameraWebRTCView(controller))
     hass.http.register_view(MiniAppCameraDiagnosticsView(controller))
     hass.http.register_view(MiniAppMediaView(controller))

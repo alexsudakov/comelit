@@ -154,6 +154,29 @@ def test_surveillance_prefers_session_bound_ha_webrtc_with_hls_fallback():
     assert "isIntercomCameraEntity(entityId)" in host
 
 
+def test_surveillance_prefers_mse_then_webrtc_then_hls_for_ordinary_cameras():
+    controller = _read("custom_components/comelit/miniapp/controller.py")
+    views = _read("custom_components/comelit/miniapp/views.py")
+    go2rtc = _read("custom_components/comelit/miniapp/go2rtc.py")
+    host = _read("custom_components/comelit/frontend/miniapp/host.js")
+    docs = _read("docs/miniapp-architecture.md")
+
+    assert "camera.stream_source()" in docs
+    assert "HA-managed go2rtc" in docs
+    assert "MSE -> WebRTC -> HLS" in docs
+    assert "MiniAppCameraMSEView" in views
+    assert "/api/comelit/miniapp/camera/{entity_id}/mse" in views
+    assert "MSE_MAX_COMMAND_BYTES" in views
+    assert "invalid_mse_command" in views
+    assert "stream_source = await camera.stream_source()" in controller
+    assert "comelit_miniapp_" in controller
+    assert 'getattr(self._hass, "data", {})' in go2rtc
+    assert "go2rtc_client" not in go2rtc
+    assert "_openMSE(entityId, generation)" in host
+    assert "_openWebRTC(entityId, generation)" in host
+    assert "_fallbackToHls" in host
+
+
 def test_webrtc_status_waits_for_actual_first_decoded_frame():
     host = _read("custom_components/comelit/frontend/miniapp/host.js")
 

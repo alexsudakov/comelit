@@ -29,6 +29,8 @@ const hostPath = path.resolve(
 );
 const ENTITY_ID = "camera.parking_6048";
 const SECOND_ENTITY_ID = "camera.second_6048";
+const ENTRANCE_ENTITY_ID = "camera.comelit_entrance";
+const ORDINARY_BOOTSTRAP_ENTITY_ID = "camera.comelit_side";
 const MAX_COUNTERS = 16;
 const COUNTER_KEY = /^[a-z][a-z0-9_]{0,39}$/;
 
@@ -98,7 +100,9 @@ async function setupPage(browser) {
 
     window.makeViewer = (selectedEntityId = entityId) => {
       const Viewer = customElements.get("miniapp-picture-entity");
+      const originalOpenMSE = Viewer.prototype._openMSE;
       const originalOpenWebRTC = Viewer.prototype._openWebRTC;
+      Viewer.prototype._openMSE = function () {};
       Viewer.prototype._openWebRTC = function () {};
       const outer = document.createElement("div");
       outer.attachShadow({ mode: "open" });
@@ -116,6 +120,7 @@ async function setupPage(browser) {
         },
       };
       outer.shadowRoot.appendChild(viewer);
+      Viewer.prototype._openMSE = originalOpenMSE;
       Viewer.prototype._openWebRTC = originalOpenWebRTC;
       viewer._openHls = function () {};
       window.testViewer = viewer;
@@ -125,12 +130,208 @@ async function setupPage(browser) {
   return { page, posts };
 }
 
+async function setupBootstrappedPage(browser, registryEntry) {
+  const page = await browser.newPage({ viewport: { width: 390, height: 780 } });
+  const posts = [];
+  const entityId = registryEntry.entity_id;
+  const states = {
+    [entityId]: {
+      attributes: { friendly_name: registryEntry.name || entityId },
+    },
+  };
+  const bootstrapPayload = {
+    states,
+    entity_registry: [registryEntry],
+    label_registry: [
+      {
+        label_id: "surveillance",
+        name: "Surveillance",
+      },
+    ],
+    surveillance_entities: [entityId],
+    action_nonce: "nonce-browser-1",
+  };
+
+  await page.addInitScript(() => {
+    window.Telegram = {
+      WebApp: {
+        initData: "query_id=test&user=%7B%22id%22%3A1%7D&hash=test",
+        ready() {},
+        expand() {},
+        setHeaderColor() {},
+        setBackgroundColor() {},
+        enableClosingConfirmation() {},
+        disableClosingConfirmation() {},
+        MainButton: {
+          show() {},
+          hide() {},
+          setText() {},
+          onClick() {},
+          offClick() {},
+        },
+        BackButton: {
+          show() {},
+          hide() {},
+          onClick() {},
+          offClick() {},
+        },
+      },
+    };
+
+    if (!customElements.get("comelit-card")) {
+      customElements.define(
+        "comelit-card",
+        class extends HTMLElement {
+          setConfig(config) {
+            this.config = config;
+            window.__miniappCardConfig = config;
+          }
+
+          set hass(value) {
+            this._hass = value;
+            window.__miniappCardHass = value;
+          }
+
+          get hass() {
+            return this._hass;
+          }
+        },
+      );
+    }
+  });
+
+  await page.route("**/*", async (route) => {
+    const request = route.request();
+    const url = request.url();
+    if (url.includes("/diagnostics")) {
+      const payload = JSON.parse(request.postData() || "{}");
+      Object.defineProperty(payload, "__url", {
+        value: url,
+        enumerable: false,
+      });
+      posts.push(payload);
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: '{"ok":true}',
+      });
+      return;
+    }
+    if (url.includes("/api/comelit/miniapp/session")) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: '{"ok":true}',
+      });
+      return;
+    }
+    if (url.includes("/api/comelit/miniapp/bootstrap")) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(bootstrapPayload),
+      });
+      return;
+    }
+    if (url.includes("/api/comelit/miniapp/state")) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ states }),
+      });
+      return;
+    }
+    if (url.includes("/api/comelit/miniapp/camera/") && url.includes("/stream")) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ url: "https://streams.test/" + entityId + ".m3u8" }),
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body:
+        '<comelit-card id="comelitCard"></comelit-card>' +
+        '<div id="startupStatus"></div><div id="fatalError"></div>',
+    });
+  });
+
+  await page.goto("http://miniapp.test/");
+  await page.addScriptTag({ path: hostPath });
+  await page.waitForFunction(
+    () =>
+      document.getElementById("startupStatus")?.classList.contains("ready") &&
+      window.__miniappCardHass?.states,
+    null,
+    { timeout: 1500 },
+  );
+  return { page, posts };
+}
+
 function event(posts, name) {
   return posts.find((payload) => payload.event === name);
 }
 
 function events(posts, name) {
   return posts.filter((payload) => payload.event === name);
+}
+
+function eventNames(posts) {
+  return posts.map((payload) => payload.event);
+}
+
+function assertInOrder(posts, expected) {
+  const names = eventNames(posts);
+  let cursor = -1;
+  for (const name of expected) {
+    const index = names.indexOf(name, cursor + 1);
+    assert.notEqual(index, -1, name + " missing from " + JSON.stringify(names));
+    cursor = index;
+  }
+}
+
+async function waitForEvent(page, posts, name, timeoutMs = 1500) {
+  await waitForEvents(page, posts, [name], timeoutMs);
+  return event(posts, name);
+}
+
+async function waitForEventReason(page, posts, name, reason, timeoutMs = 1500) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    const match = posts.find(
+      (payload) => payload.event === name && payload.reason === reason,
+    );
+    if (match) {
+      return match;
+    }
+    await page.waitForTimeout(10);
+  }
+  assert.fail(
+    "timed out waiting for " +
+      name +
+      " reason " +
+      JSON.stringify(reason) +
+      "; collected events: " +
+      JSON.stringify(eventNames(posts)),
+  );
+}
+
+async function waitForEvents(page, posts, names, timeoutMs = 1500) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    if (names.every((name) => posts.some((payload) => payload.event === name))) {
+      return;
+    }
+    await page.waitForTimeout(10);
+  }
+  assert.fail(
+    "timed out waiting for " +
+      JSON.stringify(names) +
+      "; collected events: " +
+      JSON.stringify(eventNames(posts)),
+  );
 }
 
 function assertSchemaBudget(posts) {
@@ -160,6 +361,195 @@ async function startViewer(page) {
     viewer._playbackMode = "webrtc";
     viewer._webrtcStartTime = performance.now();
   }, ENTITY_ID);
+}
+
+async function installMSEFakes(page, {mediaSource = true, supported = true} = {}) {
+  await page.evaluate(({mediaSource, supported}) => {
+    window.__mseSockets = [];
+    window.__mseObjectUrls = [];
+    window.__mseRevokedUrls = [];
+    window.__peerConnectionCount = 0;
+    window.__hlsOpenCount = 0;
+
+    URL.createObjectURL = (object) => {
+      const url = "blob:mse-" + window.__mseObjectUrls.length;
+      window.__mseObjectUrls.push({url, object});
+      return url;
+    };
+    URL.revokeObjectURL = (url) => {
+      window.__mseRevokedUrls.push(url);
+    };
+    HTMLMediaElement.prototype.play = () => Promise.resolve();
+    HTMLMediaElement.prototype.pause = () => {};
+    HTMLMediaElement.prototype.load = () => {};
+    HTMLVideoElement.prototype.requestVideoFrameCallback = function (callback) {
+      window.__mseFrameCallback = callback;
+      return 1;
+    };
+
+    class FakeSourceBuffer {
+      constructor() {
+        this.updating = false;
+        this.appended = [];
+        this.listeners = {};
+      }
+      addEventListener(name, callback) {
+        this.listeners[name] = callback;
+      }
+      removeEventListener(name, callback) {
+        if (this.listeners[name] === callback) {
+          delete this.listeners[name];
+        }
+      }
+      appendBuffer(chunk) {
+        this.appended.push(Array.from(new Uint8Array(chunk)));
+        if (this.listeners.updateend) {
+          setTimeout(() => this.listeners.updateend(), 0);
+        }
+      }
+      remove() {}
+    }
+
+    class FakeMediaSource {
+      constructor() {
+        this.listeners = {};
+        this.sourceBuffers = [];
+        window.__lastMediaSource = this;
+        setTimeout(() => {
+          if (this.listeners.sourceopen) {
+            this.listeners.sourceopen();
+          }
+        }, 0);
+      }
+      static isTypeSupported(mime) {
+        return supported && mime.includes("avc1");
+      }
+      addEventListener(name, callback) {
+        this.listeners[name] = callback;
+      }
+      addSourceBuffer(mime) {
+        this.mime = mime;
+        const buffer = new FakeSourceBuffer();
+        this.sourceBuffers.push(buffer);
+        return buffer;
+      }
+    }
+
+    if (mediaSource) {
+      Object.defineProperty(window, "MediaSource", {
+        value: FakeMediaSource,
+        configurable: true,
+      });
+      Object.defineProperty(window, "ManagedMediaSource", {
+        value: undefined,
+        configurable: true,
+      });
+    } else {
+      Object.defineProperty(window, "MediaSource", {
+        value: undefined,
+        configurable: true,
+      });
+      Object.defineProperty(window, "ManagedMediaSource", {
+        value: undefined,
+        configurable: true,
+      });
+    }
+
+    class CountingPeer {
+      constructor() {
+        window.__peerConnectionCount += 1;
+        this.iceConnectionState = "new";
+        this.connectionState = "new";
+        this.iceGatheringState = "new";
+      }
+      addTransceiver() {}
+      async createOffer() {
+        return {type: "offer", sdp: "v=0\r\n"};
+      }
+      async setLocalDescription() {}
+      async setRemoteDescription() {}
+      async addIceCandidate() {}
+      async getStats() {
+        return new Map();
+      }
+      close() {
+        this.connectionState = "closed";
+      }
+    }
+    window.RTCPeerConnection = CountingPeer;
+
+    class FakeWebSocket {
+      constructor(url) {
+        this.url = url;
+        this.readyState = FakeWebSocket.CONNECTING;
+        this.sent = [];
+        this.closed = false;
+        window.__mseSockets.push(this);
+        setTimeout(() => {
+          this.readyState = FakeWebSocket.OPEN;
+          if (this.onopen) {
+            this.onopen();
+          }
+        }, 0);
+      }
+      send(data) {
+        this.sent.push(data);
+      }
+      close() {
+        this.closed = true;
+        this.readyState = FakeWebSocket.CLOSED;
+        if (this.onclose) {
+          this.onclose();
+        }
+      }
+      receive(data) {
+        if (this.onmessage) {
+          this.onmessage({data});
+        }
+      }
+      fail() {
+        if (this.onerror) {
+          this.onerror(new Event("error"));
+        }
+      }
+    }
+    FakeWebSocket.CONNECTING = 0;
+    FakeWebSocket.OPEN = 1;
+    FakeWebSocket.CLOSING = 2;
+    FakeWebSocket.CLOSED = 3;
+    window.WebSocket = FakeWebSocket;
+  }, {mediaSource, supported});
+}
+
+async function createLiveViewer(page, entityId = ENTITY_ID) {
+  await page.evaluate((selectedEntityId) => {
+    const Viewer = customElements.get("miniapp-picture-entity");
+    const outer = document.createElement("div");
+    outer.attachShadow({mode: "open"});
+    document.body.appendChild(outer);
+    const viewer = new Viewer();
+    viewer.setConfig({entity: selectedEntityId, show_name: true});
+    viewer.hass = {
+      states: {
+        [selectedEntityId]: {
+          attributes: {friendly_name: selectedEntityId},
+        },
+      },
+    };
+    const originalOpenHls = viewer._openHls.bind(viewer);
+    viewer._openHls = function (...args) {
+      window.__hlsOpenCount += 1;
+      return originalOpenHls(...args);
+    };
+    outer.shadowRoot.appendChild(viewer);
+    window.testViewer = viewer;
+  }, entityId);
+}
+
+async function waitForSocket(page, predicate = "() => true") {
+  await page.waitForFunction(
+    "window.__mseSockets && window.__mseSockets.length && (" + predicate + ")(window.__mseSockets[window.__mseSockets.length - 1])",
+  );
 }
 
 async function finishScenario(posts) {
@@ -248,8 +638,239 @@ async function main() {
   const browser = await chromium.launch({
     headless: true,
     executablePath: chromium.executablePath(),
+    args: ["--disable-crash-reporter"],
   });
   try {
+    {
+      const {page, posts} = await setupPage(browser);
+      try {
+        await page.clock.install();
+        await installMSEFakes(page);
+        await createLiveViewer(page);
+        await flush(page, 1);
+        await waitForSocket(page, "(socket) => socket.url.includes('/mse') && socket.sent.length > 0");
+        const result = await page.evaluate(() => ({
+          sent: window.__mseSockets[0].sent.map((value) => JSON.parse(value)),
+          peers: window.__peerConnectionCount,
+        }));
+        assert.deepEqual(result.sent, [{type: "mse", value: "h264"}]);
+        assert.equal(result.peers, 0);
+        await waitForEvent(page, posts, "mse_connect");
+        assert.equal(event(posts, "mse_connect")?.event, "mse_connect");
+        await finishScenario(posts);
+      } finally {
+        await page.close();
+      }
+    }
+
+    {
+      const {page, posts} = await setupPage(browser);
+      try {
+        await page.clock.install();
+        await installMSEFakes(page);
+        await createLiveViewer(page);
+        await flush(page, 1);
+        await waitForSocket(page, "(socket) => socket.sent.length > 0");
+        await page.evaluate(() => {
+          const socket = window.__mseSockets[0];
+          socket.receive(JSON.stringify({
+            type: "mse",
+            value: 'video/mp4; codecs="avc1.42E01E,mp4a.40.2"',
+          }));
+          socket.receive(new Uint8Array([0, 1, 2, 3]).buffer);
+          if (window.__mseFrameCallback) {
+            window.__mseFrameCallback(performance.now(), {});
+          }
+        });
+        await flush(page, 300);
+        await waitForEvents(page, posts, [
+          "mse_connect",
+          "mse_ready",
+          "mse_first_chunk",
+          "mse_first_frame",
+        ]);
+        assertInOrder(posts, [
+          "mse_connect",
+          "mse_ready",
+          "mse_first_chunk",
+          "mse_first_frame",
+        ]);
+        const state = await page.evaluate(() => ({
+          peers: window.__peerConnectionCount,
+          appended: window.__lastMediaSource.sourceBuffers[0].appended,
+        }));
+        assert.equal(state.peers, 0);
+        assert.deepEqual(state.appended, [[0, 1, 2, 3]]);
+        await finishScenario(posts);
+      } finally {
+        await page.close();
+      }
+    }
+
+    for (const [name, driveFailure, reason] of [
+      ["server error", (page) => page.evaluate(() => {
+        window.__mseSockets[0].receive(JSON.stringify({
+          type: "error",
+          code: "go2rtc_unavailable",
+        }));
+      }), "go2rtc_unavailable"],
+      ["bad negotiation", (page) => page.evaluate(() => {
+        window.__mseSockets[0].receive(JSON.stringify({type: "streams"}));
+      }), "mse_negotiation_failed"],
+      ["socket error", (page) => page.evaluate(() => {
+        window.__mseSockets[0].fail();
+      }), "mse_ws_error"],
+    ]) {
+      const {page, posts} = await setupPage(browser);
+      try {
+        await page.clock.install();
+        await installMSEFakes(page);
+        await createLiveViewer(page);
+        await waitForSocket(page, "(socket) => socket.url.includes('/mse')");
+        await driveFailure(page);
+        await waitForSocket(page, "(socket) => socket.url.includes('/webrtc')");
+        await page.evaluate(() => {
+          const socket = window.__mseSockets[window.__mseSockets.length - 1];
+          socket.receive(JSON.stringify({type: "config", configuration: {}}));
+        });
+        await page.waitForFunction(() => window.__peerConnectionCount === 1);
+        await flush(page, 300);
+        const fallback = await waitForEventReason(page, posts, "mse_fallback", reason);
+        assert.equal(fallback.reason, reason, name);
+        await finishScenario(posts);
+      } finally {
+        await page.close();
+      }
+    }
+
+    {
+      const {page, posts} = await setupPage(browser);
+      try {
+        await page.clock.install();
+        await installMSEFakes(page, {mediaSource: false});
+        await createLiveViewer(page);
+        await waitForSocket(page, "(socket) => socket.url.includes('/webrtc')");
+        await page.evaluate(() => {
+          window.__mseSockets[0].receive(JSON.stringify({type: "config", configuration: {}}));
+        });
+        await page.waitForFunction(() => window.__peerConnectionCount === 1);
+        await flush(page, 300);
+        const fallback = await waitForEventReason(
+          page,
+          posts,
+          "mse_fallback",
+          "no_mediasource",
+        );
+        assert.equal(fallback.reason, "no_mediasource");
+        const urls = await page.evaluate(() => window.__mseSockets.map((socket) => socket.url));
+        assert.equal(urls.some((url) => url.includes("/mse")), false);
+        await finishScenario(posts);
+      } finally {
+        await page.close();
+      }
+    }
+
+    {
+      const {page, posts} = await setupPage(browser);
+      try {
+        await page.clock.install();
+        await installMSEFakes(page);
+        await createLiveViewer(page);
+        await waitForSocket(page, "(socket) => socket.url.includes('/mse')");
+        await page.evaluate(() => {
+          const viewer = window.testViewer;
+          const socket = window.__mseSockets[0];
+          viewer.disconnectedCallback();
+          if (window.__mseFrameCallback) {
+            window.__mseFrameCallback(performance.now(), {});
+          }
+          socket.receive(JSON.stringify({
+            type: "mse",
+            value: 'video/mp4; codecs="avc1.42E01E"',
+          }));
+          socket.receive(new Uint8Array([9]).buffer);
+        });
+        const fallback = await waitForEventReason(
+          page,
+          posts,
+          "mse_fallback",
+          "navigate",
+        );
+        const teardown = await page.evaluate(() => ({
+          closed: window.__mseSockets[0].closed,
+          revoked: window.__mseRevokedUrls.slice(),
+          urls: window.__mseObjectUrls.map((entry) => entry.url),
+          sockets: window.__mseSockets.length,
+          peers: window.__peerConnectionCount,
+        }));
+        assert.equal(teardown.closed, true);
+        assert.deepEqual(teardown.revoked, teardown.urls);
+        assert.equal(teardown.sockets, 1);
+        assert.equal(teardown.peers, 0);
+        assert.equal(events(posts, "mse_first_frame").length, 0, JSON.stringify(posts));
+        assert.equal(events(posts, "mse_fallback").length, 1, JSON.stringify(posts));
+        assert.equal(fallback.reason, "navigate");
+        await finishScenario(posts);
+      } finally {
+        await page.close();
+      }
+    }
+
+    {
+      const {page, posts} = await setupBootstrappedPage(browser, {
+        entity_id: ENTRANCE_ENTITY_ID,
+        platform: "comelit",
+        unique_id: "comelit_entrance_camera",
+        labels: ["surveillance"],
+        name: "Entrance",
+      });
+      try {
+        await page.clock.install();
+        await installMSEFakes(page);
+        await createLiveViewer(page, ENTRANCE_ENTITY_ID);
+        await page.waitForFunction(() => window.__hlsOpenCount === 1);
+        const state = await page.evaluate(() => ({
+          hls: window.__hlsOpenCount,
+          sockets: window.__mseSockets.map((socket) => socket.url),
+        }));
+        assert.equal(state.hls, 1);
+        assert.deepEqual(state.sockets, []);
+        assert.equal(event(posts, "mse_connect"), undefined);
+        await finishScenario(posts);
+      } finally {
+        await page.close();
+      }
+    }
+
+    {
+      const {page, posts} = await setupBootstrappedPage(browser, {
+        entity_id: ORDINARY_BOOTSTRAP_ENTITY_ID,
+        platform: "comelit",
+        unique_id: "comelit_side_camera",
+        labels: ["surveillance"],
+        name: "Side Camera",
+      });
+      try {
+        await page.clock.install();
+        await installMSEFakes(page);
+        await createLiveViewer(page, ORDINARY_BOOTSTRAP_ENTITY_ID);
+        await flush(page, 1);
+        await waitForSocket(page, "(socket) => socket.url.includes('/mse') && socket.sent.length > 0");
+        const state = await page.evaluate(() => ({
+          hls: window.__hlsOpenCount,
+          sockets: window.__mseSockets.map((socket) => socket.url),
+          sent: window.__mseSockets[0].sent.map((value) => JSON.parse(value)),
+        }));
+        assert.equal(state.hls, 0);
+        assert.equal(state.sockets.some((url) => url.includes("/mse")), true);
+        assert.deepEqual(state.sent, [{type: "mse", value: "h264"}]);
+        assert.equal(event(posts, "mse_connect")?.event, "mse_connect");
+        await finishScenario(posts);
+      } finally {
+        await page.close();
+      }
+    }
+
     await runWithPage(browser, async (page, posts) => {
       await installSignallingTimer(page, false);
       // Playwright's fake clock may deliver the 6000 ms timer on the next
