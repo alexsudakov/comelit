@@ -1173,8 +1173,20 @@ def test_mse_lease_name_has_no_secrets_or_entity_and_is_stable():
     assert "test-user" not in first_name
     assert "test-password" not in first_name
     assert fake_go2rtc.registers == [
-        (first_name, "ffmpeg:" + source),
-        (second_name, "ffmpeg:" + source),
+        (
+            first_name,
+            [
+                "ffmpeg:" + source,
+                f"ffmpeg:{first_name}#audio=opus#query=log_level=debug",
+            ],
+        ),
+        (
+            second_name,
+            [
+                "ffmpeg:" + source,
+                f"ffmpeg:{second_name}#audio=opus#query=log_level=debug",
+            ],
+        ),
     ]
 
 
@@ -1260,13 +1272,17 @@ def test_fixture_camera_secret_never_reaches_payloads_logs_or_serializer(monkeyp
 
     invalid_response, ok_response = asyncio.run(run())
 
+    internal_name = controller.mse_internal_stream_name("camera.driveway")
     assert go2rtc.registers == [
         (
-            controller.mse_internal_stream_name("camera.driveway"),
-            "ffmpeg:" + fixture_url,
+            internal_name,
+            [
+                "ffmpeg:" + fixture_url,
+                f"ffmpeg:{internal_name}#audio=opus#query=log_level=debug",
+            ],
         )
     ]
-    assert "ffmpeg:" + fixture_url == go2rtc.registers[0][1]
+    assert "ffmpeg:" + fixture_url == go2rtc.registers[0][1][0]
     compared = [
         invalid_response.text,
         ok_response.text,
