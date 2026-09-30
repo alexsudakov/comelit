@@ -11,7 +11,7 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.7.15**. This patch release fixes two production defects in the 1.7.14 Mini App MSE path: it now binds to Home Assistant's real `Go2RtcConfig(url, session)` runtime and reuses the authoritative HA-managed go2rtc session/UnixConnector, and it negotiates MSE with concrete MP4 codec identifiers (`avc1...`, `hvc1...`, `mp4a...`) expected by go2rtc instead of generic `h264`/`h265` tokens. The intended fallback remains `MSE -> WebRTC -> HLS`; the Comelit entrance-camera media lifecycle is unchanged. Details are recorded in `docs/releases/1.7.15-miniapp-mse-runtime-fix.md`.
+Current stable release: **1.7.16**. This patch release fixes the production MSE startup deadline exposed by a live `camera.parking_6048` capture: 1.7.15 aborted MSE at 3.001 s before the cold HA/go2rtc path could finish negotiation. MSE startup now uses an 8 s negotiation budget followed by separate 8 s budgets from `mse_ready` to first chunk and from first chunk to first frame; later-stage budgets are no longer consumed while an earlier stage is still starting. The go2rtc adapter also removes duplicate `/api` hot-path probes. The intended fallback remains `MSE -> WebRTC -> HLS`; the Comelit entrance-camera lifecycle is unchanged. Details are recorded in `docs/releases/1.7.16-miniapp-mse-stage-deadlines.md`.
 
 ## Home Assistant Custom Card
 
