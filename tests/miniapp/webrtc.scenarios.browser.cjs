@@ -653,7 +653,7 @@ async function main() {
           sent: window.__mseSockets[0].sent.map((value) => JSON.parse(value)),
           peers: window.__peerConnectionCount,
         }));
-        assert.deepEqual(result.sent, [{type: "mse", value: "h264"}]);
+        assert.deepEqual(result.sent, [{type: "mse", value: "avc1.640029,avc1.64002A,avc1.640033"}]);
         assert.equal(result.peers, 0);
         await waitForEvent(page, posts, "mse_connect");
         assert.equal(event(posts, "mse_connect")?.event, "mse_connect");
@@ -863,7 +863,7 @@ async function main() {
         }));
         assert.equal(state.hls, 0);
         assert.equal(state.sockets.some((url) => url.includes("/mse")), true);
-        assert.deepEqual(state.sent, [{type: "mse", value: "h264"}]);
+        assert.deepEqual(state.sent, [{type: "mse", value: "avc1.640029,avc1.64002A,avc1.640033"}]);
         assert.equal(event(posts, "mse_connect")?.event, "mse_connect");
         await finishScenario(posts);
       } finally {
