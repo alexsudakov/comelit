@@ -11,7 +11,7 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.7.12**. This patch release fixes the P122 on-demand Entrance Door eligibility gate introduced with 1.7.11: production media transitions to `ENTRANCE_SIGNAL_DONE` when the camera session becomes active, while the Door path was still checking the obsolete `ENTRANCE_SIGNAL_OBSERVE_MEDIA` state and therefore rejected the command before any network write. The corrected gate uses the actual active-media state, adds bounded reject-gate diagnostics, and ships a reproducibly rebuilt native helper. Gate remains fail-closed in on-demand media, the one-shot/no-retry contract is unchanged, and physical opening is still validated separately. Details are recorded in `docs/releases/1.7.12-p122-active-media-eligibility.md`.
+Current stable release: **1.7.13**. This patch release removes the session-wide `DOOR_ALREADY_SENT` lockout from the P122 on-demand Entrance Door path while preserving the per-operation safety boundary. A later explicit manual press is allowed only after the previous operation's 1000 ms inflight/settle window completes; each accepted press advances the last completed Door TX sequence and still maps to exactly one native write with no automatic retry. The existing active media CTPP is reused, Gate remains fail-closed, and physical effect is never inferred from protocol ACK alone. Details are recorded in `docs/releases/1.7.13-repeat-manual-p122-door.md`.
 
 ## Home Assistant Custom Card
 
