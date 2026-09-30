@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import hashlib
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Callable
 
 from homeassistant.components.camera import async_request_stream, get_camera_from_entity_id
 from homeassistant.components.camera.const import StreamType
@@ -363,7 +363,12 @@ class ComelitMiniAppController:
         digest = hashlib.sha256(entity_id.encode("utf-8")).hexdigest()[:16]
         return f"comelit_miniapp_{digest}"
 
-    async def acquire_mse_stream(self, entity_id: str) -> MiniAppMSEStreamLease:
+    async def acquire_mse_stream(
+        self,
+        entity_id: str,
+        *,
+        progress: Callable[[str], None] | None = None,
+    ) -> MiniAppMSEStreamLease:
         camera = self._get_allowed_ordinary_camera(entity_id)
         stream_source = await camera.stream_source()
         if not isinstance(stream_source, str) or not _DIRECT_SOURCE.fullmatch(stream_source):
@@ -377,6 +382,8 @@ class ComelitMiniAppController:
         entry = registry.async_get(entity_id)
         if entry is not None and entry.platform == "generic":
             stream_source = "ffmpeg:" + stream_source
+        if progress is not None:
+            progress("mse_source_resolved")
 
         internal_name = self.mse_internal_stream_name(entity_id)
         async with self._mse_lock:
@@ -399,6 +406,8 @@ class ComelitMiniAppController:
         except Exception:
             await self.release_mse_stream(entity_id)
             raise
+        if progress is not None:
+            progress("mse_stream_registered")
         return MiniAppMSEStreamLease(entity_id=entity_id, internal_name=internal_name)
 
     async def release_mse_stream(self, entity_id: str) -> None:
