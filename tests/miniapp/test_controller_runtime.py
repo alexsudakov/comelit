@@ -665,8 +665,29 @@ def test_mse_stream_uses_public_stream_source_and_opaque_refcounted_name():
     asyncio.run(run())
 
     assert fake_go2rtc.registers == [
-        (controller.mse_internal_stream_name("camera.driveway"), source)
+        (controller.mse_internal_stream_name("camera.driveway"), "ffmpeg:" + source)
     ]
+
+
+def test_mse_stream_wraps_only_generic_camera_source_like_ha_core():
+    controller, hass = _controller(surveillance_label="Outside")
+    fake_go2rtc = FakeGo2RTC()
+    controller.go2rtc = fake_go2rtc
+    source = "rtsp://192.0.2.10/example"
+    hass.cameras["camera.driveway"] = FakeCamera(set(), source)
+
+    async def acquire_and_release():
+        lease = await controller.acquire_mse_stream("camera.driveway")
+        await controller.release_mse_stream("camera.driveway")
+        return lease.internal_name
+
+    internal_name = asyncio.run(acquire_and_release())
+    assert fake_go2rtc.registers == [(internal_name, "ffmpeg:" + source)]
+
+    fake_go2rtc.registers.clear()
+    hass.entity_registry.entities["camera.driveway"].platform = "other"
+    internal_name = asyncio.run(acquire_and_release())
+    assert fake_go2rtc.registers == [(internal_name, source)]
 
 
 def test_mse_stream_rejects_intercom_unlisted_none_and_unsupported_source():
@@ -755,7 +776,9 @@ def test_mse_view_happy_path_relays_text_binary_and_releases(monkeypatch):
     asyncio.run(run())
 
     websocket = _CaptureWebSocket.instances[0]
-    assert go2rtc.registers == [(controller.mse_internal_stream_name("camera.driveway"), source)]
+    assert go2rtc.registers == [
+        (controller.mse_internal_stream_name("camera.driveway"), "ffmpeg:" + source)
+    ]
     assert go2rtc.opened == [controller.mse_internal_stream_name("camera.driveway")]
     assert upstream.sent_json == [{"type": "mse", "value": "avc1.640029,mp4a.40.2"}]
     assert _json_texts(websocket) == [
@@ -1070,7 +1093,10 @@ def test_mse_lease_name_has_no_secrets_or_entity_and_is_stable():
     assert "driveway" not in first_name
     assert "test-user" not in first_name
     assert "test-password" not in first_name
-    assert fake_go2rtc.registers == [(first_name, source), (second_name, source)]
+    assert fake_go2rtc.registers == [
+        (first_name, "ffmpeg:" + source),
+        (second_name, "ffmpeg:" + source),
+    ]
 
 
 def _assert_no_fixture_secret(values):
@@ -1155,8 +1181,13 @@ def test_fixture_camera_secret_never_reaches_payloads_logs_or_serializer(monkeyp
 
     invalid_response, ok_response = asyncio.run(run())
 
-    assert go2rtc.registers == [(controller.mse_internal_stream_name("camera.driveway"), fixture_url)]
-    assert fixture_url == go2rtc.registers[0][1]
+    assert go2rtc.registers == [
+        (
+            controller.mse_internal_stream_name("camera.driveway"),
+            "ffmpeg:" + fixture_url,
+        )
+    ]
+    assert "ffmpeg:" + fixture_url == go2rtc.registers[0][1]
     compared = [
         invalid_response.text,
         ok_response.text,
