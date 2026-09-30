@@ -321,11 +321,17 @@ Assistant camera contract:
 await camera.stream_source()
 ```
 
+For Home Assistant `generic` camera entities, Comelit mirrors the compatibility
+workaround used by HA core's go2rtc provider and registers the resolved source as
+`ffmpeg:<stream_source>`. Other ordinary camera integrations keep their resolved
+source unchanged. The raw camera source is still validated before this internal
+server-side wrapper is applied.
+
 Credentials remain owned by the original Home Assistant camera integration.
 Comelit does not add options-flow URL/login/password fields, does not duplicate
 credentials into the ConfigEntry, and does not persist the resolved source. The
-resolved source exists only long enough to register a viewer-scoped stream in
-HA-managed go2rtc.
+resolved source and any internal `ffmpeg:` wrapper exist only long enough to
+register a viewer-scoped stream in HA-managed go2rtc.
 
 The internal go2rtc stream name is opaque and namespaced:
 
