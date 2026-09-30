@@ -369,6 +369,15 @@ class ComelitMiniAppController:
         if not isinstance(stream_source, str) or not _DIRECT_SOURCE.fullmatch(stream_source):
             raise MiniAppOperationError("stream_source_unavailable")
 
+        # Mirror Home Assistant's go2rtc workaround for Generic Camera.
+        # HA core intentionally routes Generic Camera sources through ffmpeg
+        # before registering them in go2rtc; using the raw RTSP/HTTP source here
+        # bypasses that compatibility path and can prevent MSE negotiation.
+        registry = er.async_get(self.hass)
+        entry = registry.async_get(entity_id)
+        if entry is not None and entry.platform == "generic":
+            stream_source = "ffmpeg:" + stream_source
+
         internal_name = self.mse_internal_stream_name(entity_id)
         async with self._mse_lock:
             stream = self._mse_streams.get(entity_id)
