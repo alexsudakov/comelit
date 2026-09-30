@@ -2,7 +2,7 @@
 """P122: Entrance Door on the active on-demand/self-activation media CTPP.
 
 This overlay composes the currently shipped P121 production media lineage and
-adds one Entrance-only one-shot Door surface to the already-running
+adds one Entrance-only Door write per explicit manual operation to the already-running
 `comelit-media` helper.  It intentionally does not touch the persistent
 listener R66 path.
 
@@ -48,6 +48,7 @@ _STATE = r'''/* P122_ONDEMAND_MEDIA_DOOR_BEGIN */
 static volatile sig_atomic_t p122_door_signal_pending = 0;
 static gboolean p122_door_inflight = FALSE;
 static gboolean p122_door_sent = FALSE;
+static guint32 p122_door_last_sent_sequence = 0u;
 static gboolean p122_door_waiting_ack = FALSE;
 static gboolean p122_door_ack_observed = FALSE;
 static gboolean p122_door_relay_event_observed = FALSE;
@@ -65,8 +66,7 @@ typedef enum {
     P122_DOOR_GATE_REFRESH_OUTSTANDING,
     P122_DOOR_GATE_REFRESH_FAIL_CLOSED,
     P122_DOOR_GATE_INITIAL_001A,
-    P122_DOOR_GATE_DOOR_INFLIGHT,
-    P122_DOOR_GATE_DOOR_ALREADY_SENT
+    P122_DOOR_GATE_DOOR_INFLIGHT
 } P122DoorGate;
 
 static gboolean p122_door_tick_cb(gpointer data);
@@ -119,6 +119,10 @@ p122_door_signal_handler(int signum)
 static guint32
 p122_latest_client_sequence(void)
 {
+    /* A later manual Door request must advance the last completed Door TX,
+     * never reuse the earlier media-refresh sequence. */
+    if (p122_door_sent)
+        return p122_door_last_sent_sequence;
     if (r27_repeat_001a_sent_count > 0u)
         return r27_repeat_001a_sequence;
     return r27_initial_001a_sequence;
@@ -147,10 +151,10 @@ p122_door_evaluate_gate(void)
         return P122_DOOR_GATE_REFRESH_FAIL_CLOSED;
     if (r27_initial_001a_sent_count != 1u)
         return P122_DOOR_GATE_INITIAL_001A;
+    /* Inflight is cleared by the bounded 1000 ms settle callback. A new
+     * intentional SIGUSR1 is eligible only after the prior operation ends. */
     if (p122_door_inflight)
         return P122_DOOR_GATE_DOOR_INFLIGHT;
-    if (p122_door_sent)
-        return P122_DOOR_GATE_DOOR_ALREADY_SENT;
     return P122_DOOR_GATE_READY;
 }
 
@@ -180,8 +184,6 @@ p122_door_gate_name(P122DoorGate gate)
         return "INITIAL_001A";
     case P122_DOOR_GATE_DOOR_INFLIGHT:
         return "DOOR_INFLIGHT";
-    case P122_DOOR_GATE_DOOR_ALREADY_SENT:
-        return "DOOR_ALREADY_SENT";
     case P122_DOOR_GATE_READY:
         return "READY";
     default:
@@ -259,9 +261,10 @@ p122_queue_door(void)
         return FALSE;
 
     /*
-     * Prevent the periodic 0x001A refresh timer from racing this one-shot.
-     * Door is a terminal user action for this media transaction; after it,
-     * device-side CALL_END/relay behavior owns what happens next.
+     * Prevent the periodic 0x001A refresh timer from racing user Door TX.
+     * The existing active CTPP remains the only upstream connection. A
+     * subsequent explicit manual press may send another Door write if media
+     * remains active, the prior 1000 ms settle completed and no TX overlaps.
      */
     r27_repeat_timer_cancelled = TRUE;
 
@@ -365,6 +368,8 @@ p122_door_tick_cb(gpointer data)
 _TX_CASE_ANCHOR = """        case P12_TX_V4_DOOR_WRITE:
 """
 _TX_CASE = r'''        case P122_TX_ONDEMAND_DOOR:
+            /* Commit sequence only after this TX completed, not at queue time. */
+            p122_door_last_sent_sequence = p122_door_sequence;
             p122_door_sent = TRUE;
             p122_door_waiting_ack = TRUE;
             printf("P122_ONDEMAND_DOOR_SENT=true\n");
