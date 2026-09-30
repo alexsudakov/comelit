@@ -633,11 +633,11 @@ def test_webrtc_surveillance_camera_falls_back_when_provider_missing():
 
 class FakeGo2RTC:
     def __init__(self):
-        self.registers: list[tuple[str, str]] = []
+        self.registers: list[tuple[str, list[str]]] = []
         self.unregisters: list[str] = []
 
-    async def register_stream(self, internal_name: str, source: str):
-        self.registers.append((internal_name, source))
+    async def register_stream(self, internal_name: str, sources: list[str]):
+        self.registers.append((internal_name, list(sources)))
 
     async def unregister_stream(self, internal_name: str):
         self.unregisters.append(internal_name)
@@ -686,8 +686,15 @@ def test_mse_stream_uses_public_stream_source_and_opaque_refcounted_name():
 
     asyncio.run(run())
 
+    internal_name = controller.mse_internal_stream_name("camera.driveway")
     assert fake_go2rtc.registers == [
-        (controller.mse_internal_stream_name("camera.driveway"), "ffmpeg:" + source)
+        (
+            internal_name,
+            [
+                "ffmpeg:" + source,
+                f"ffmpeg:{internal_name}#audio=opus#query=log_level=debug",
+            ],
+        )
     ]
 
 
@@ -704,12 +711,20 @@ def test_mse_stream_wraps_only_generic_camera_source_like_ha_core():
         return lease.internal_name
 
     internal_name = asyncio.run(acquire_and_release())
-    assert fake_go2rtc.registers == [(internal_name, "ffmpeg:" + source)]
+    assert fake_go2rtc.registers == [
+        (
+            internal_name,
+            [
+                "ffmpeg:" + source,
+                f"ffmpeg:{internal_name}#audio=opus#query=log_level=debug",
+            ],
+        )
+    ]
 
     fake_go2rtc.registers.clear()
     hass.entity_registry.entities["camera.driveway"].platform = "other"
     internal_name = asyncio.run(acquire_and_release())
-    assert fake_go2rtc.registers == [(internal_name, source)]
+    assert fake_go2rtc.registers == [(internal_name, [source])]
 
 
 def test_mse_stream_rejects_intercom_unlisted_none_and_unsupported_source():
@@ -819,8 +834,15 @@ def test_mse_view_happy_path_relays_text_binary_and_releases(monkeypatch):
     asyncio.run(run())
 
     websocket = _CaptureWebSocket.instances[0]
+    internal_name = controller.mse_internal_stream_name("camera.driveway")
     assert go2rtc.registers == [
-        (controller.mse_internal_stream_name("camera.driveway"), "ffmpeg:" + source)
+        (
+            internal_name,
+            [
+                "ffmpeg:" + source,
+                f"ffmpeg:{internal_name}#audio=opus#query=log_level=debug",
+            ],
+        )
     ]
     assert go2rtc.opened == [controller.mse_internal_stream_name("camera.driveway")]
     assert upstream.sent_json == [{"type": "mse", "value": "avc1.640029,mp4a.40.2"}]
@@ -1008,7 +1030,7 @@ def test_go2rtc_adapter_uses_home_assistant_runtime_session(monkeypatch):
     async def run():
         await adapter.register_stream(
             "opaque-stream",
-            "rtsp://test-user:test-password@192.0.2.10/example",
+            ["rtsp://test-user:test-password@192.0.2.10/example"],
         )
         upstream = await adapter.open_mse_ws("opaque-stream")
         await adapter.unregister_stream("opaque-stream")
@@ -1024,6 +1046,20 @@ def test_go2rtc_adapter_uses_home_assistant_runtime_session(monkeypatch):
     ]
     assert all(url.startswith("http://localhost:11984/") for _method, url in calls)
 
+    calls.clear()
+    asyncio.run(
+        adapter.register_stream(
+            "opaque-stream",
+            [
+                "ffmpeg:rtsp://192.0.2.10/example",
+                "ffmpeg:opaque-stream#audio=opus#query=log_level=debug",
+            ],
+        )
+    )
+    put_url = calls[0][1]
+    assert put_url.count("src=") == 2
+    assert "name=opaque-stream" in put_url
+
 
 def test_go2rtc_unavailable_and_operation_errors_are_bounded(monkeypatch):
     controller, hass = _controller(surveillance_label="Outside")
@@ -1033,7 +1069,7 @@ def test_go2rtc_unavailable_and_operation_errors_are_bounded(monkeypatch):
         with pytest.raises(go2rtc_mod.MiniAppGo2RTCError) as exc:
             await adapter.register_stream(
                 "internal",
-                "rtsp://test-user:test-password@192.0.2.10/example",
+                ["rtsp://test-user:test-password@192.0.2.10/example"],
             )
         assert exc.value.code == "go2rtc_unavailable"
         assert str(exc.value) == "go2rtc_unavailable"
@@ -1063,7 +1099,7 @@ def test_go2rtc_unavailable_and_operation_errors_are_bounded(monkeypatch):
         with pytest.raises(go2rtc_mod.MiniAppGo2RTCError) as exc:
             await adapter.register_stream(
                 "internal",
-                "rtsp://test-user:test-password@192.0.2.10/example",
+                ["rtsp://test-user:test-password@192.0.2.10/example"],
             )
         assert exc.value.code == "go2rtc_http_error"
         message = str(exc.value)
@@ -1378,8 +1414,8 @@ class _FakeGo2RTCWithUpstream:
         self.upstream = upstream or _FakeUpstreamWebSocket()
         self.opened: list[str] = []
 
-    async def register_stream(self, internal_name: str, source: str):
-        self.registers.append((internal_name, source))
+    async def register_stream(self, internal_name: str, sources: list[str]):
+        self.registers.append((internal_name, list(sources)))
 
     async def unregister_stream(self, internal_name: str):
         self.unregisters.append(internal_name)
