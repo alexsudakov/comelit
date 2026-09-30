@@ -589,7 +589,7 @@ class MiniAppCameraMSEView(_MiniAppView):
                         format_go2rtc_ws_line(
                             entity_id,
                             elapsed_ms=elapsed_ms,
-                            message_type=message_type,
+                            frame_type=message_type,
                             value=value,
                         )
                     )
