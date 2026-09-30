@@ -26,6 +26,7 @@ from .diagnostics import (
     MiniAppDiagnosticsError,
     format_go2rtc_state_json_line,
     format_go2rtc_state_line,
+    format_go2rtc_ws_line,
     format_log_line,
     format_server_log_line,
     loads_limited,
@@ -476,6 +477,19 @@ def _sanitize_mse_upstream_text(data: str) -> dict[str, object] | None:
     return {"type": "mse", "value": value}
 
 
+def _parse_go2rtc_upstream_text(data: str) -> tuple[str, object]:
+    try:
+        payload = json.loads(data)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return "non_json", data
+    if not isinstance(payload, dict):
+        return "non_object", payload
+    message_type = payload.get("type")
+    if not isinstance(message_type, str):
+        message_type = "unknown"
+    return message_type, payload.get("value")
+
+
 class MiniAppCameraMSEView(_MiniAppView):
     url = r"/api/comelit/miniapp/camera/{entity_id}/mse"
     name = "api:comelit:miniapp:camera_mse"
@@ -566,6 +580,19 @@ class MiniAppCameraMSEView(_MiniAppView):
                     await websocket.send_bytes(message.data)
                     continue
                 if message.type == WSMsgType.TEXT:
+                    message_type, value = _parse_go2rtc_upstream_text(message.data)
+                    elapsed_ms = max(
+                        0,
+                        round((time.monotonic() - server_started) * 1000),
+                    )
+                    _LOGGER.info(
+                        format_go2rtc_ws_line(
+                            entity_id,
+                            elapsed_ms=elapsed_ms,
+                            frame_type=message_type,
+                            value=value,
+                        )
+                    )
                     payload = _sanitize_mse_upstream_text(message.data)
                     if payload is not None:
                         if not reply_logged:
@@ -620,6 +647,9 @@ class MiniAppCameraMSEView(_MiniAppView):
                 ),
                 self.controller.hass.async_create_task(
                     log_go2rtc_state(4.0, "stream_state_4000ms")
+                ),
+                self.controller.hass.async_create_task(
+                    log_go2rtc_state(7.0, "stream_state_7000ms")
                 ),
             ]
 

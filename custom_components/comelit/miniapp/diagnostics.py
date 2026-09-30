@@ -42,6 +42,7 @@ SERVER_EVENTS = (
 GO2RTC_STATE_EVENTS = (
     "stream_state_250ms",
     "stream_state_4000ms",
+    "stream_state_7000ms",
 )
 GO2RTC_STATE_COUNTERS = frozenset(
     {
@@ -161,6 +162,13 @@ _GO2RTC_SECRET_KEYS = frozenset(
         "authorization",
     }
 )
+_GO2RTC_URL_RE = re.compile(
+    r"(?i)\b(?:rtsp|rtsps|http|https|ws|wss)://[^\s\"']+"
+)
+_GO2RTC_IPV4_RE = re.compile(
+    r"(?<![0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?::[0-9]{1,5})?"
+)
+_MAX_GO2RTC_WS_VALUE_CHARS = 2048
 _ALLOWED_KEYS = frozenset(
     {"event", "elapsed_ms", "stage_ms", "state", "reason", "counters"}
 )
@@ -459,6 +467,51 @@ def format_go2rtc_state_json_line(
     return (
         f"COMELIT_MINIAPP_DIAG_GO2RTC_STATE entity={entity_id} "
         f"event={event} elapsed_ms={elapsed_ms} snapshot={serialized}"
+    )
+
+
+def sanitize_go2rtc_ws_value(value: Any) -> str:
+    """Preserve useful upstream text while removing network/credential material."""
+    if isinstance(value, str):
+        text = value
+    else:
+        try:
+            text = json.dumps(value, separators=(",", ":"), ensure_ascii=True)
+        except (TypeError, ValueError):
+            text = str(value)
+    text = _GO2RTC_URL_RE.sub("<url_redacted>", text)
+    text = _GO2RTC_IPV4_RE.sub("<ip_redacted>", text)
+    # Remove common credential-style fragments that may occur outside URLs.
+    text = re.sub(
+        r"(?i)\\b(?:password|passwd|token|authorization|cookie)=?[^,;\\s]*",
+        "<credential_redacted>",
+        text,
+    )
+    return text[:_MAX_GO2RTC_WS_VALUE_CHARS]
+
+
+def format_go2rtc_ws_line(
+    entity_id: str,
+    *,
+    elapsed_ms: int,
+    frame_type: str,
+    value: Any,
+) -> str:
+    """Format sanitized upstream go2rtc WebSocket text."""
+    if (
+        not isinstance(elapsed_ms, int)
+        or isinstance(elapsed_ms, bool)
+        or elapsed_ms < 0
+        or elapsed_ms > MAX_MS
+    ):
+        raise MiniAppDiagnosticsError("invalid_go2rtc_ws_timing")
+    if not isinstance(frame_type, str):
+        raise MiniAppDiagnosticsError("invalid_go2rtc_ws_type")
+    safe_type = re.sub(r"[^a-zA-Z0-9_.-]", "_", frame_type[:64]) or "unknown"
+    safe_value = sanitize_go2rtc_ws_value(value)
+    return (
+        f"COMELIT_MINIAPP_DIAG_GO2RTC_WS entity={entity_id} "
+        f"elapsed_ms={elapsed_ms} type={safe_type} value={safe_value}"
     )
 
 
