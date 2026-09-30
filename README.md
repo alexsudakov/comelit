@@ -11,7 +11,7 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.7.18**. This diagnostic patch does not change Mini App playback behavior. It adds a closed, secret-free server-side MSE milestone trace (`COMELIT_MINIAPP_DIAG_SERVER`) covering command receipt, source resolution, go2rtc stream registration, upstream WebSocket open, negotiation forwarding, upstream MSE reply, and first upstream binary chunk. This is intended to localize the remaining `mse_negotiation_failed` path observed on `camera.parking_6048`. Details are recorded in `docs/releases/1.7.18-mse-server-milestones.md`.
+Current stable release: **1.7.19**. This patch completes Generic Camera parity with Home Assistant core for HA-managed go2rtc: Generic Camera streams are now registered with both the ffmpeg-wrapped camera source and the loopback `#audio=opus` producer used by HA, while other ordinary camera integrations keep a single unchanged source. The 1.7.18 server-side MSE milestones remain active for live validation. The intended fallback remains `MSE -> WebRTC -> HLS`; the Comelit entrance-camera lifecycle is unchanged. Details are recorded in `docs/releases/1.7.19-generic-camera-opus-producer.md`.
 
 ## Home Assistant Custom Card
 
