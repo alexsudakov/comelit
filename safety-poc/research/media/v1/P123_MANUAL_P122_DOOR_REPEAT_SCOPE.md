@@ -63,3 +63,30 @@ validation after offline checks and native promotion.
 Physical effect of an intentionally repeated Door operation during a single
 on-demand media session is **NOT_PROVEN**. The observed rejected second press
 provides no second transmitted protocol message to assess.
+
+
+## Reproducible native promotion evidence
+
+CT120 canonical P122-profile Build A/B completed after the source candidate:
+
+- build head: `fee0ce6b9a8b43b1de400aa25f992aa06e446e9f`
+- generated source SHA256: `ec39399ade72cb4800131d5a0995e0053a3f9af22560fd40894af057994d6d47`
+- Build A SHA256: `04bb610e02562fb4a301813001616308dd22dbabe5507b397a5abdc7194075b2`
+- Build B SHA256: `04bb610e02562fb4a301813001616308dd22dbabe5507b397a5abdc7194075b2`
+- packaged size: `311528` bytes
+- reproducible binary comparison: PASS
+- P122 binary marker gate: PASS
+- `DOOR_ALREADY_SENT` binary marker: absent
+- `DOOR_INFLIGHT` binary marker: present
+- targeted P123 tests: PASS
+- static safety: PASS
+- compileall: PASS
+- live Door/Gate actions during build/promotion: 0
+
+The P122 active-media provenance record remains frozen. This round is recorded
+separately in
+`p123_manual_p122_door_repeat_production_media_build_meta.txt`.
+
+Physical behavior of a second intentional Door press during the same active
+on-demand media session remains `NOT_PROVEN` until a later user-driven live
+acceptance test.

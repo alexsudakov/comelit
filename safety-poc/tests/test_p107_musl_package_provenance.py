@@ -28,7 +28,10 @@ SOURCE = SAFETY_ROOT / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-c
 # P122 active-media eligibility has a completed native promotion: the packaged
 # binary and HEAD's regenerated source identity are again the same provenance
 # pair, with the on-demand Door record kept frozen as historical evidence.
-BUILD_META = MEDIA_DIR / "p122_active_media_eligibility_production_media_build_meta.txt"
+BUILD_META = MEDIA_DIR / "p123_manual_p122_door_repeat_production_media_build_meta.txt"
+FROZEN_P122_ACTIVE_BUILD_META = (
+    MEDIA_DIR / "p122_active_media_eligibility_production_media_build_meta.txt"
+)
 FROZEN_P122_ON_DEMAND_BUILD_META = (
     MEDIA_DIR / "p122_on_demand_media_door_production_media_build_meta.txt"
 )
@@ -42,19 +45,21 @@ SUPERSEDED_P121_BINARY_SHA256 = "9347a973b012d5ca86b406642a5fcd9b86ce44201d0b514
 SUPERSEDED_P121_SOURCE_SHA256 = "07468cd74027d02d5f002c1cc63558f68526cf06b9694c5afe94579ea68f9e74"
 SUPERSEDED_P119_BINARY_SHA256 = "095051f42b7e6393c48fce51eaef73665e722fc852f263beed1b5c433308b0e0"
 SUPERSEDED_P119_SOURCE_SHA256 = "2f8137e988437c779a0f3bb1c9904c81cbe2d13641efa2e6a070054116dd43ed"
+SUPERSEDED_P122_ACTIVE_BINARY_SHA256 = "5811415a95bbeb687e7f91d5a1ed70c67473086ddefa4bfb602eba2798ad0573"
 SUPERSEDED_P122_ON_DEMAND_BINARY_SHA256 = "a3c95f3ec8c5c00963946c8ff550760fadd792a314bb72692e4281da35a5a6a5"
+SUPERSEDED_P122_ACTIVE_SOURCE_SHA256 = "fa5f3fef61b6673718d677e150770c2af6fe2c752d0756034c9ad5e1864a384c"
 SUPERSEDED_P122_ON_DEMAND_SOURCE_SHA256 = "fd375a37e427e680db60984f6d74807e56892a1a042a168032a6dfa42411eff5"
 FROZEN_P117_BUILD_META = MEDIA_DIR / "p117_settle1000_production_media_build_meta.txt"
 FROZEN_R65_BUILD_META = MEDIA_DIR / "p116_r65_production_media_build_meta.txt"
 PRE_R65_BUILD_META = MEDIA_DIR / "p116_media_telemetry_build_meta.txt"
-EXPECTED_MUSL_SHA256 = "5811415a95bbeb687e7f91d5a1ed70c67473086ddefa4bfb602eba2798ad0573"
+EXPECTED_MUSL_SHA256 = "04bb610e02562fb4a301813001616308dd22dbabe5507b397a5abdc7194075b2"
 EXPECTED_RUN3_GLIBC_SHA256 = "94063498a35a886dc4cb735c3e629a5097b965224cb3354192723d30e70c16ac"
 # PACKAGED_NATIVE_SOURCE_SHA256 is the source identity actually baked into the
 # packaged EXPECTED_MUSL_SHA256 binary. HEAD_P116_SOURCE_SHA256 is what
 # regenerating HEAD's canonical candidate produces right now; after the P122
 # native promotion, these must remain equivalent.
-PACKAGED_NATIVE_SOURCE_SHA256 = "fa5f3fef61b6673718d677e150770c2af6fe2c752d0756034c9ad5e1864a384c"
-HEAD_P116_SOURCE_SHA256 = "fa5f3fef61b6673718d677e150770c2af6fe2c752d0756034c9ad5e1864a384c"
+PACKAGED_NATIVE_SOURCE_SHA256 = "ec39399ade72cb4800131d5a0995e0053a3f9af22560fd40894af057994d6d47"
+HEAD_P116_SOURCE_SHA256 = "ec39399ade72cb4800131d5a0995e0053a3f9af22560fd40894af057994d6d47"
 # The P117 pair is now a historical record: these must stay literal values so
 # they keep describing the artifact P117 actually built, not the current pins.
 SUPERSEDED_P117_BINARY_SHA256 = "ff16db0d809135cf5cdf6be4bfe8133fd77b3f41871b6c8f46eea765064537fb"
@@ -230,6 +235,7 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         self.assertEqual(_transport_sha_pin(self.transport_source), EXPECTED_MUSL_SHA256)
         frozen_p121_meta = _metadata(FROZEN_P121_BUILD_META)
         frozen_p119_meta = _metadata(FROZEN_P119_BUILD_META)
+        frozen_p122_active_meta = _metadata(FROZEN_P122_ACTIVE_BUILD_META)
         frozen_p122_on_demand_meta = _metadata(FROZEN_P122_ON_DEMAND_BUILD_META)
         # The packaged artifact is always the one the most recent *completed* build
         # record documents; that record is identified by carrying the packaged
@@ -264,10 +270,10 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         )
         self.assertEqual(meta["NATIVE_BINARY_SHA256"], EXPECTED_MUSL_SHA256)
         self.assertEqual(
-            meta["superseded_native_binary_sha256"], SUPERSEDED_P122_ON_DEMAND_BINARY_SHA256
+            meta["superseded_native_binary_sha256"], SUPERSEDED_P122_ACTIVE_BINARY_SHA256
         )
         self.assertEqual(
-            meta["superseded_generated_source_sha256"], SUPERSEDED_P122_ON_DEMAND_SOURCE_SHA256
+            meta["superseded_generated_source_sha256"], SUPERSEDED_P122_ACTIVE_SOURCE_SHA256
         )
         self.assertEqual(
             frozen_p122_on_demand_meta["NATIVE_BINARY_SHA256"],
@@ -275,6 +281,22 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         )
         self.assertEqual(
             frozen_p122_on_demand_meta["GENERATED_SOURCE_SHA256"],
+            SUPERSEDED_P122_ON_DEMAND_SOURCE_SHA256,
+        )
+        self.assertEqual(
+            frozen_p122_active_meta["NATIVE_BINARY_SHA256"],
+            SUPERSEDED_P122_ACTIVE_BINARY_SHA256,
+        )
+        self.assertEqual(
+            frozen_p122_active_meta["GENERATED_SOURCE_SHA256"],
+            SUPERSEDED_P122_ACTIVE_SOURCE_SHA256,
+        )
+        self.assertEqual(
+            frozen_p122_active_meta["superseded_native_binary_sha256"],
+            SUPERSEDED_P122_ON_DEMAND_BINARY_SHA256,
+        )
+        self.assertEqual(
+            frozen_p122_active_meta["superseded_generated_source_sha256"],
             SUPERSEDED_P122_ON_DEMAND_SOURCE_SHA256,
         )
         self.assertEqual(
@@ -370,6 +392,7 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         frozen_p117_meta = _metadata(FROZEN_P117_BUILD_META)
         native_rebuild_required = head_sha != PACKAGED_NATIVE_SOURCE_SHA256
         current_packaged_matches_head = head_sha == PACKAGED_NATIVE_SOURCE_SHA256
+        frozen_p122_active_meta = _metadata(FROZEN_P122_ACTIVE_BUILD_META)
         frozen_p122_on_demand_meta = _metadata(FROZEN_P122_ON_DEMAND_BUILD_META)
         self.assertEqual(head_sha, HEAD_P116_SOURCE_SHA256)
         self.assertEqual(meta["GENERATED_SOURCE_SHA256"], PACKAGED_NATIVE_SOURCE_SHA256)
@@ -378,14 +401,14 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         # the packaged binary belongs to HEAD's rebuilt active-media pair.
         self.assertEqual(
             meta["superseded_generated_source_sha256"],
-            frozen_p122_on_demand_meta["GENERATED_SOURCE_SHA256"],
+            frozen_p122_active_meta["GENERATED_SOURCE_SHA256"],
         )
         self.assertEqual(
             frozen_p122_on_demand_meta["NATIVE_BINARY_SHA256"],
             SUPERSEDED_P122_ON_DEMAND_BINARY_SHA256,
         )
         self.assertEqual(
-            meta["superseded_native_binary_sha256"], SUPERSEDED_P122_ON_DEMAND_BINARY_SHA256
+            meta["superseded_native_binary_sha256"], SUPERSEDED_P122_ACTIVE_BINARY_SHA256
         )
         self.assertEqual(meta["binary_rebuild_pending_orchestrator"], "false")
         self.assertEqual(head_sha, PACKAGED_NATIVE_SOURCE_SHA256)
