@@ -374,18 +374,28 @@ class ComelitMiniAppController:
         if not isinstance(stream_source, str) or not _DIRECT_SOURCE.fullmatch(stream_source):
             raise MiniAppOperationError("stream_source_unavailable")
 
-        # Mirror Home Assistant's go2rtc workaround for Generic Camera.
-        # HA core intentionally routes Generic Camera sources through ffmpeg
-        # before registering them in go2rtc; using the raw RTSP/HTTP source here
-        # bypasses that compatibility path and can prevent MSE negotiation.
+        internal_name = self.mse_internal_stream_name(entity_id)
+
+        # Mirror Home Assistant's Generic Camera go2rtc producer set. HA core
+        # registers the direct source through ffmpeg and adds a loopback ffmpeg
+        # producer that can transcode camera audio to Opus while reusing the same
+        # go2rtc stream. This matters for cameras whose native audio codec is not
+        # directly compatible with browser MSE/WebRTC playback.
         registry = er.async_get(self.hass)
         entry = registry.async_get(entity_id)
         if entry is not None and entry.platform == "generic":
-            stream_source = "ffmpeg:" + stream_source
+            stream_sources = [
+                "ffmpeg:" + stream_source,
+                (
+                    f"ffmpeg:{internal_name}"
+                    "#audio=opus#query=log_level=debug"
+                ),
+            ]
+        else:
+            stream_sources = [stream_source]
         if progress is not None:
             progress("mse_source_resolved")
 
-        internal_name = self.mse_internal_stream_name(entity_id)
         async with self._mse_lock:
             stream = self._mse_streams.get(entity_id)
             if stream is None:
@@ -394,7 +404,7 @@ class ComelitMiniAppController:
                 stream = _MiniAppMSEStream(
                     internal_name=internal_name,
                     register_task=self.hass.async_create_task(
-                        self.go2rtc.register_stream(internal_name, stream_source)
+                        self.go2rtc.register_stream(internal_name, stream_sources)
                     ),
                     refcount=0,
                 )

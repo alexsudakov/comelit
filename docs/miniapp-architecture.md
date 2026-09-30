@@ -322,10 +322,13 @@ await camera.stream_source()
 ```
 
 For Home Assistant `generic` camera entities, Comelit mirrors the compatibility
-workaround used by HA core's go2rtc provider and registers the resolved source as
-`ffmpeg:<stream_source>`. Other ordinary camera integrations keep their resolved
-source unchanged. The raw camera source is still validated before this internal
-server-side wrapper is applied.
+producer set used by HA core's go2rtc provider: the resolved source is registered
+as `ffmpeg:<stream_source>` together with a second loopback producer,
+`ffmpeg:<internal_stream>#audio=opus#query=log_level=debug`, so browser-facing
+consumers can use an Opus audio variant when the camera's native audio codec is
+not directly compatible. Other ordinary camera integrations keep a single
+unchanged resolved source. The raw camera source is still validated before these
+internal server-side wrappers are applied.
 
 Credentials remain owned by the original Home Assistant camera integration.
 Comelit does not add options-flow URL/login/password fields, does not duplicate
