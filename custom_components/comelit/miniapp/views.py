@@ -506,6 +506,7 @@ class MiniAppCameraMSEView(_MiniAppView):
                         await websocket.send_json(payload)
                     continue
                 if message.type in (WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR):
+                    await close_with_error("mse_ws_closed")
                     break
 
         try:

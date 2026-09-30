@@ -6,6 +6,7 @@ import json
 import logging
 from pathlib import Path
 import sys
+import time
 import types
 
 import pytest
@@ -242,6 +243,7 @@ views_mod = _load(
     MINIAPP_ROOT / "views.py",
     "custom_components.comelit.miniapp.views",
 )
+go2rtc_mod = sys.modules["custom_components.comelit.miniapp.go2rtc"]
 
 
 class FakeState:
@@ -719,6 +721,388 @@ def test_mse_upstream_text_sanitizer_never_relays_free_text_or_urls():
         assert sanitize(unsafe) is None
 
 
+def test_mse_view_happy_path_relays_text_binary_and_releases(monkeypatch):
+    controller, hass = _controller(surveillance_label="Outside")
+    token, _session = controller.sessions.create(424242, 12345678)
+    source = "rtsp://192.0.2.10/example"
+    hass.cameras["camera.driveway"] = FakeCamera(set(), source)
+    upstream = _FakeUpstreamWebSocket(
+        [
+            _FakeWSMessage(
+                views_mod.WSMsgType.TEXT,
+                '{"type":"mse","value":"video/mp4; codecs=\\"avc1.42E01E\\""}',
+            ),
+            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"log","value":"no"}'),
+            _FakeWSMessage(views_mod.WSMsgType.BINARY, b"\x00\x01fmp4"),
+        ]
+    )
+    go2rtc = _FakeGo2RTCWithUpstream(upstream)
+    controller.go2rtc = go2rtc
+    view = views_mod.MiniAppCameraMSEView(controller)
+
+    async def run():
+        with _MSEWebSocketPatch(
+            monkeypatch,
+            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"h264,aac"}'),
+            [
+                ("sleep", 0.01),
+                _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"close"}'),
+            ],
+        ) as capture:
+            websocket = await view.get(_mse_request(controller, token), "camera.driveway")
+            assert websocket is capture.instances[0]
+
+    asyncio.run(run())
+
+    websocket = _CaptureWebSocket.instances[0]
+    assert go2rtc.registers == [(controller.mse_internal_stream_name("camera.driveway"), source)]
+    assert go2rtc.opened == [controller.mse_internal_stream_name("camera.driveway")]
+    assert upstream.sent_json == [{"type": "mse", "value": "h264,aac"}]
+    assert _json_texts(websocket) == [
+        {"type": "mse", "value": 'video/mp4; codecs="avc1.42E01E"'}
+    ]
+    assert websocket.binaries == [b"\x00\x01fmp4"]
+    assert upstream.close_count == 1
+    assert go2rtc.unregisters == [controller.mse_internal_stream_name("camera.driveway")]
+
+
+def test_mse_view_expired_session_rejects_without_acquiring(monkeypatch):
+    controller, hass = _controller(surveillance_label="Outside")
+    token, _session = controller.sessions.create(
+        424242,
+        12345678,
+        now=int(time.time()) - session_mod.SESSION_TTL_SECONDS - 10,
+    )
+    hass.cameras["camera.driveway"] = FakeCamera(set(), "rtsp://192.0.2.10/example")
+    go2rtc = _FakeGo2RTCWithUpstream()
+    controller.go2rtc = go2rtc
+    view = views_mod.MiniAppCameraMSEView(controller)
+
+    with pytest.raises(Exception) as exc:
+        with _MSEWebSocketPatch(
+            monkeypatch,
+            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"h264"}'),
+        ):
+            asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
+
+    assert exc.value.status == 403
+    assert go2rtc.registers == []
+    assert _CaptureWebSocket.instances == []
+
+
+def test_mse_view_session_expiry_midstream_releases_lease(monkeypatch):
+    controller, hass = _controller(surveillance_label="Outside")
+    token, session = controller.sessions.create(424242, 12345678)
+    session.expires_at = int(time.time()) + 1
+    hass.cameras["camera.driveway"] = FakeCamera(set(), "rtsp://192.0.2.10/example")
+    upstream = _FakeUpstreamWebSocket([("sleep", 2)])
+    go2rtc = _FakeGo2RTCWithUpstream(upstream)
+    controller.go2rtc = go2rtc
+    view = views_mod.MiniAppCameraMSEView(controller)
+
+    async def run():
+        with _MSEWebSocketPatch(
+            monkeypatch,
+            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"h264"}'),
+            ["wait_forever"],
+        ):
+            await view.get(_mse_request(controller, token), "camera.driveway")
+
+    asyncio.run(run())
+
+    websocket = _CaptureWebSocket.instances[0]
+    assert _json_texts(websocket)[-1] == {"type": "error", "code": "mse_ws_closed"}
+    assert websocket.closed
+    assert upstream.close_count == 1
+    assert go2rtc.unregisters == [controller.mse_internal_stream_name("camera.driveway")]
+
+
+def test_mse_view_upstream_close_releases_and_reports_bounded_error(monkeypatch):
+    controller, hass = _controller(surveillance_label="Outside")
+    token, _session = controller.sessions.create(424242, 12345678)
+    hass.cameras["camera.driveway"] = FakeCamera(set(), "rtsp://192.0.2.10/example")
+    upstream = _FakeUpstreamWebSocket([
+        _FakeWSMessage(views_mod.WSMsgType.CLOSED),
+    ])
+    go2rtc = _FakeGo2RTCWithUpstream(upstream)
+    controller.go2rtc = go2rtc
+    view = views_mod.MiniAppCameraMSEView(controller)
+
+    async def run():
+        with _MSEWebSocketPatch(
+            monkeypatch,
+            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"h264"}'),
+            ["wait_forever"],
+        ):
+            await view.get(_mse_request(controller, token), "camera.driveway")
+
+    asyncio.run(run())
+
+    websocket = _CaptureWebSocket.instances[0]
+    assert _json_texts(websocket) == [{"type": "error", "code": "mse_ws_closed"}]
+    assert websocket.closed is True
+    assert go2rtc.unregisters == [controller.mse_internal_stream_name("camera.driveway")]
+
+
+def test_mse_view_client_disconnect_without_close_frame_cleans_up(monkeypatch):
+    controller, hass = _controller(surveillance_label="Outside")
+    token, _session = controller.sessions.create(424242, 12345678)
+    hass.cameras["camera.driveway"] = FakeCamera(set(), "rtsp://192.0.2.10/example")
+    upstream = _FakeUpstreamWebSocket([("sleep", 1)])
+    go2rtc = _FakeGo2RTCWithUpstream(upstream)
+    controller.go2rtc = go2rtc
+    view = views_mod.MiniAppCameraMSEView(controller)
+
+    async def run():
+        with _MSEWebSocketPatch(
+            monkeypatch,
+            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"h264"}'),
+            [],
+        ):
+            await view.get(_mse_request(controller, token), "camera.driveway")
+
+    asyncio.run(run())
+
+    assert upstream.close_count == 1
+    assert go2rtc.unregisters == [controller.mse_internal_stream_name("camera.driveway")]
+
+
+def test_mse_view_rejects_missing_and_unsupported_stream_source_without_leak(monkeypatch):
+    controller, hass = _controller(surveillance_label="Outside")
+    token, _session = controller.sessions.create(424242, 12345678)
+    go2rtc = _FakeGo2RTCWithUpstream()
+    controller.go2rtc = go2rtc
+    view = views_mod.MiniAppCameraMSEView(controller)
+
+    for source in (None, "ffmpeg:camera.driveway"):
+        hass.cameras["camera.driveway"] = FakeCamera(set(), source)
+        with _MSEWebSocketPatch(
+            monkeypatch,
+            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"h264"}'),
+        ):
+            asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
+        assert _json_texts(_CaptureWebSocket.instances[-1]) == [
+            {"type": "error", "code": "stream_source_unavailable"}
+        ]
+
+    assert go2rtc.registers == []
+    assert go2rtc.opened == []
+    assert go2rtc.unregisters == []
+
+
+def test_go2rtc_unavailable_and_incompatible_errors_are_bounded(monkeypatch):
+    controller, hass = _controller(surveillance_label="Outside")
+    adapter = go2rtc_mod.MiniAppGo2RTCAdapter(hass)
+
+    async def unavailable():
+        with pytest.raises(go2rtc_mod.MiniAppGo2RTCError) as exc:
+            await adapter.register_stream(
+                "internal",
+                "rtsp://test-user:test-password@192.0.2.10/example",
+            )
+        assert exc.value.code == "go2rtc_unavailable"
+        assert str(exc.value) == "go2rtc_unavailable"
+
+    asyncio.run(unavailable())
+
+    class _FakeAPIResponse:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def json(self):
+            return {"version": "2.0.0", "url": "rtsp://test-user:test-password@192.0.2.10/example"}
+
+    class _FakeClient:
+        def get(self, *args, **kwargs):
+            return _FakeAPIResponse()
+
+    hass.data["go2rtc"] = "http://127.0.0.1:1984"
+    monkeypatch.setattr(go2rtc_mod, "async_get_clientsession", lambda hass: _FakeClient())
+
+    async def incompatible():
+        with pytest.raises(go2rtc_mod.MiniAppGo2RTCError) as exc:
+            await adapter.open_mse_ws("internal")
+        assert exc.value.code == "go2rtc_incompatible"
+        message = str(exc.value)
+        assert message == "go2rtc_incompatible"
+        assert "test-user" not in message
+        assert "test-password" not in message
+        assert "192.0.2.10" not in message
+
+    asyncio.run(incompatible())
+
+
+def test_mse_view_protocol_rejects_bad_commands_and_filters_upstream_text(monkeypatch):
+    controller, hass = _controller(surveillance_label="Outside")
+    token, _session = controller.sessions.create(424242, 12345678)
+    hass.cameras["camera.driveway"] = FakeCamera(set(), "rtsp://192.0.2.10/example")
+    view = views_mod.MiniAppCameraMSEView(controller)
+
+    bad_first_frames = [
+        _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webrtc","value":"h264"}'),
+        _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"streams","value":"h264"}'),
+        _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"add","value":"h264"}'),
+        _FakeWSMessage(views_mod.WSMsgType.TEXT, "x" * (views_mod.MSE_MAX_COMMAND_BYTES + 1)),
+        _FakeWSMessage(views_mod.WSMsgType.TEXT, "{not json"),
+        _FakeWSMessage(views_mod.WSMsgType.BINARY, b"\x00"),
+    ]
+    for first in bad_first_frames:
+        go2rtc = _FakeGo2RTCWithUpstream()
+        controller.go2rtc = go2rtc
+        with _MSEWebSocketPatch(monkeypatch, first):
+            asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
+        assert _json_texts(_CaptureWebSocket.instances[-1]) == [
+            {"type": "error", "code": "invalid_mse_command"}
+        ]
+        assert go2rtc.registers == []
+
+    upstream = _FakeUpstreamWebSocket(
+        [
+            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"log","value":"secret"}'),
+            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"rtsp://secret"}'),
+        ]
+    )
+    controller.go2rtc = _FakeGo2RTCWithUpstream(upstream)
+    with _MSEWebSocketPatch(
+        monkeypatch,
+        _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"h264"}'),
+        [("sleep", 0.01), _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"close"}')],
+    ):
+        asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
+    assert _json_texts(_CaptureWebSocket.instances[-1]) == []
+
+
+def test_mse_lease_name_has_no_secrets_or_entity_and_is_stable():
+    controller, hass = _controller(surveillance_label="Outside")
+    fake_go2rtc = FakeGo2RTC()
+    controller.go2rtc = fake_go2rtc
+    source = "rtsp://test-user:test-password@192.0.2.10/example"
+    hass.cameras["camera.driveway"] = FakeCamera(set(), source)
+
+    async def run():
+        first = await controller.acquire_mse_stream("camera.driveway")
+        await controller.release_mse_stream("camera.driveway")
+        second = await controller.acquire_mse_stream("camera.driveway")
+        await controller.release_mse_stream("camera.driveway")
+        return first.internal_name, second.internal_name
+
+    first_name, second_name = asyncio.run(run())
+
+    assert first_name == second_name
+    assert "camera.driveway" not in first_name
+    assert "driveway" not in first_name
+    assert "test-user" not in first_name
+    assert "test-password" not in first_name
+    assert fake_go2rtc.registers == [(first_name, source), (second_name, source)]
+
+
+def _assert_no_fixture_secret(values):
+    text = "\n".join(str(value) for value in values)
+    forbidden = [
+        "test-user",
+        "test-password",
+        "rtsp://test-user:test-password@192.0.2.10/example",
+    ]
+    leaked = [secret for secret in forbidden if secret in text]
+    assert not leaked, leaked
+
+
+def test_fixture_camera_secret_never_reaches_payloads_logs_or_serializer(monkeypatch, caplog):
+    fixture_url = "rtsp://test-user:test-password@192.0.2.10/example"
+    controller, hass = _controller(surveillance_label="Outside")
+    token, _session = controller.sessions.create(424242, 12345678)
+    hass.cameras["camera.driveway"] = FakeCamera(set(), fixture_url)
+    upstream = _FakeUpstreamWebSocket(
+        [
+            _FakeWSMessage(
+                views_mod.WSMsgType.TEXT,
+                '{"type":"mse","value":"video/mp4; codecs=\\"avc1.42E01E\\""}',
+            ),
+            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"log","value":"' + fixture_url + '"}'),
+        ]
+    )
+    go2rtc = _FakeGo2RTCWithUpstream(upstream)
+    controller.go2rtc = go2rtc
+    mse_view = views_mod.MiniAppCameraMSEView(controller)
+    diagnostics_view = views_mod.MiniAppCameraDiagnosticsView(controller)
+    serializer_values: list[object] = []
+    websocket_texts: list[str] = []
+    original_loads_limited = views_mod.loads_limited
+
+    def capture_serializer(body):
+        serializer_values.append(body)
+        payload = original_loads_limited(body)
+        serializer_values.append(payload)
+        return payload
+
+    monkeypatch.setattr(views_mod, "loads_limited", capture_serializer)
+
+    async def run():
+        with _MSEWebSocketPatch(
+            monkeypatch,
+            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"h264"}'),
+            [("sleep", 0.01), _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"close"}')],
+        ):
+            await mse_view.get(_mse_request(controller, token), "camera.driveway")
+            websocket_texts.extend(_CaptureWebSocket.instances[0].texts)
+        class _FailOpenGo2RTC(_FakeGo2RTCWithUpstream):
+            async def open_mse_ws(self, internal_name: str):
+                self.opened.append(internal_name)
+                raise go2rtc_mod.MiniAppGo2RTCError("go2rtc_ws_error")
+
+        failing_go2rtc = _FailOpenGo2RTC()
+        controller.go2rtc = failing_go2rtc
+        with _MSEWebSocketPatch(
+            monkeypatch,
+            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"h264"}'),
+        ):
+            await mse_view.get(_mse_request(controller, token), "camera.driveway")
+            websocket_texts.extend(_CaptureWebSocket.instances[0].texts)
+        invalid_response = await diagnostics_view.post(
+            _FakeRequest({"event": "rtp", "state": "invalid_state"}, token=token),
+            "camera.driveway",
+        )
+        with caplog.at_level(logging.INFO, logger="custom_components.comelit.miniapp.views"):
+            ok_response = await diagnostics_view.post(
+                _FakeRequest(
+                    {
+                        "event": "mse_fallback",
+                        "reason": "mse_ws_error",
+                        "counters": {"bytes": 7},
+                    },
+                    token=token,
+                ),
+                "camera.driveway",
+            )
+        return invalid_response, ok_response
+
+    invalid_response, ok_response = asyncio.run(run())
+
+    assert go2rtc.registers == [(controller.mse_internal_stream_name("camera.driveway"), fixture_url)]
+    assert fixture_url == go2rtc.registers[0][1]
+    compared = [
+        invalid_response.text,
+        ok_response.text,
+        *websocket_texts,
+        diagnostics_mod.format_log_line(
+            "camera.driveway",
+            {"event": "mse_fallback", "reason": "mse_ws_error", "counters": {"bytes": 7}},
+        ),
+        *[record.getMessage() for record in caplog.records],
+        *serializer_values,
+    ]
+    assert json.loads(invalid_response.text) == {"error": "invalid_diagnostics_event"}
+    assert json.loads(ok_response.text) == {"ok": True}
+    _assert_no_fixture_secret(compared)
+    with pytest.raises(AssertionError):
+        _assert_no_fixture_secret([*compared, "deliberate leak " + fixture_url])
+
+
 class _FakeContent:
     def __init__(self, body: bytes):
         self._body = body
@@ -741,6 +1125,130 @@ class _FakeRequest:
         self.headers = {views_mod.MINIAPP_MARKER_HEADER: "1"} if marker else {}
         raw = body if isinstance(body, bytes) else json.dumps(body).encode("utf-8")
         self.content = _FakeContent(raw)
+
+
+class _FakeWSMessage:
+    def __init__(self, message_type, data=None):
+        self.type = message_type
+        self.data = data
+
+
+class _CaptureWebSocket:
+    instances: list["_CaptureWebSocket"] = []
+    next_first = _FakeWSMessage("close")
+    next_messages: list[object] = []
+
+    def __init__(self, *args, **kwargs):
+        self.closed = False
+        self.prepared = False
+        self.texts: list[str] = []
+        self.binaries: list[bytes] = []
+        self.close_count = 0
+        self.first = self.__class__.next_first
+        self.messages = list(self.__class__.next_messages)
+        self.__class__.instances.append(self)
+
+    async def prepare(self, request):
+        self.prepared = True
+
+    async def receive(self, timeout=None):
+        return self.first
+
+    async def send_json(self, payload):
+        self.texts.append(json.dumps(payload, separators=(",", ":")))
+
+    async def send_bytes(self, payload):
+        self.binaries.append(bytes(payload))
+
+    async def close(self):
+        self.closed = True
+        self.close_count += 1
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self.messages:
+            raise StopAsyncIteration
+        message = self.messages.pop(0)
+        if isinstance(message, tuple) and message[0] == "sleep":
+            await asyncio.sleep(message[1])
+            return await self.__anext__()
+        if message == "wait_forever":
+            while not self.closed:
+                await asyncio.sleep(0.01)
+            raise StopAsyncIteration
+        return message
+
+
+class _FakeUpstreamWebSocket:
+    def __init__(self, messages=None):
+        self.closed = False
+        self.messages = list(messages or [])
+        self.sent_json: list[dict] = []
+        self.close_count = 0
+
+    async def send_json(self, payload):
+        self.sent_json.append(payload)
+
+    async def close(self):
+        self.closed = True
+        self.close_count += 1
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self.messages:
+            raise StopAsyncIteration
+        message = self.messages.pop(0)
+        if isinstance(message, tuple) and message[0] == "sleep":
+            await asyncio.sleep(message[1])
+            return await self.__anext__()
+        return message
+
+
+class _MSEWebSocketPatch:
+    def __init__(self, monkeypatch, first, messages=()):
+        self.monkeypatch = monkeypatch
+        self.first = first
+        self.messages = list(messages)
+
+    def __enter__(self):
+        _CaptureWebSocket.instances = []
+        _CaptureWebSocket.next_first = self.first
+        _CaptureWebSocket.next_messages = self.messages
+        self.monkeypatch.setattr(views_mod.web, "WebSocketResponse", _CaptureWebSocket)
+        return _CaptureWebSocket
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeGo2RTCWithUpstream:
+    def __init__(self, upstream: _FakeUpstreamWebSocket | None = None):
+        self.registers: list[tuple[str, str]] = []
+        self.unregisters: list[str] = []
+        self.upstream = upstream or _FakeUpstreamWebSocket()
+        self.opened: list[str] = []
+
+    async def register_stream(self, internal_name: str, source: str):
+        self.registers.append((internal_name, source))
+
+    async def unregister_stream(self, internal_name: str):
+        self.unregisters.append(internal_name)
+
+    async def open_mse_ws(self, internal_name: str):
+        self.opened.append(internal_name)
+        return self.upstream
+
+
+def _mse_request(controller, token: str):
+    return _FakeRequest({}, token=token, marker=True)
+
+
+def _json_texts(websocket: _CaptureWebSocket):
+    return [json.loads(text) for text in websocket.texts]
 
 
 def test_diagnostics_endpoint_requires_session():

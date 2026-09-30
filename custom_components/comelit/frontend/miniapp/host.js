@@ -389,7 +389,8 @@
         return;
       }
       const immediate =
-        event === "fallback" && options.reason === "navigate";
+        (event === "fallback" || event === "mse_fallback") &&
+        options.reason === "navigate";
       if (!immediate && diagnostics.count > 0 && now - diagnostics.lastAt < 250) {
         if (!diagnostics.queuedTriples.has(triple)) {
           const queuedEntityId = diagnostics.entityId;

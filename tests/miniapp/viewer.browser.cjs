@@ -126,13 +126,63 @@ async function main() {
       '<div id="comelitCard"></div><div id="startupStatus"></div>' +
       '<div id="fatalError"></div>',
     );
+    await priorityPage.evaluate(() => {
+      window.__peerConnectionCount = 0;
+      window.__mseSocketCount = 0;
+      window.RTCPeerConnection = class {
+        constructor() {
+          window.__peerConnectionCount += 1;
+        }
+      };
+      URL.createObjectURL = () => "blob:priority-mse";
+      URL.revokeObjectURL = () => {};
+      class FakeMediaSource {
+        constructor() {
+          this.listeners = {};
+          setTimeout(() => this.listeners.sourceopen?.(), 0);
+        }
+        static isTypeSupported(mime) {
+          return mime.includes("avc1");
+        }
+        addEventListener(name, callback) {
+          this.listeners[name] = callback;
+        }
+        addSourceBuffer() {
+          return {
+            updating: false,
+            addEventListener() {},
+            removeEventListener() {},
+            appendBuffer() {},
+          };
+        }
+      }
+      Object.defineProperty(window, "MediaSource", {
+        value: FakeMediaSource,
+        configurable: true,
+      });
+      Object.defineProperty(window, "ManagedMediaSource", {
+        value: undefined,
+        configurable: true,
+      });
+      class FakeWebSocket {
+        constructor() {
+          window.__mseSocketCount += 1;
+          this.readyState = FakeWebSocket.OPEN;
+          setTimeout(() => this.onopen?.(), 0);
+        }
+        send() {}
+        close() {
+          this.readyState = FakeWebSocket.CLOSED;
+        }
+      }
+      FakeWebSocket.OPEN = 1;
+      FakeWebSocket.CLOSING = 2;
+      FakeWebSocket.CLOSED = 3;
+      window.WebSocket = FakeWebSocket;
+    });
     await priorityPage.addScriptTag({ path: hostPath });
-    const priority = await priorityPage.evaluate(() => {
-      let mse = 0;
-      let webrtc = 0;
+    await priorityPage.evaluate(() => {
       const Viewer = customElements.get("miniapp-picture-entity");
-      Viewer.prototype._openMSE = function () { mse += 1; };
-      Viewer.prototype._openWebRTC = function () { webrtc += 1; };
 
       const ordinary = new Viewer();
       ordinary.setConfig({entity: "camera.parking_6048", show_name: true});
@@ -140,9 +190,13 @@ async function main() {
         states: {"camera.parking_6048": {attributes: {friendly_name: "Parking"}}},
       };
       document.body.appendChild(ordinary);
-      return {mse, webrtc};
     });
-    assert.deepEqual(priority, {mse: 1, webrtc: 0});
+    await priorityPage.waitForFunction(() => window.__mseSocketCount === 1);
+    const priority = await priorityPage.evaluate(() => ({
+      sockets: window.__mseSocketCount,
+      peers: window.__peerConnectionCount,
+    }));
+    assert.deepEqual(priority, {sockets: 1, peers: 0});
     await priorityPage.close();
 
     console.log("viewer shadow layout and stalled-ICE fallback: PASS");
