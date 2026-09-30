@@ -39,6 +39,30 @@ SERVER_EVENTS = (
     "mse_upstream_reply",
     "mse_upstream_chunk",
 )
+GO2RTC_STATE_EVENTS = (
+    "stream_state_250ms",
+    "stream_state_4000ms",
+)
+GO2RTC_STATE_COUNTERS = frozenset(
+    {
+        "inspect_ok",
+        "producer_count",
+        "consumer_count",
+        "p0_active",
+        "p0_media",
+        "p0_receivers",
+        "p0_h264",
+        "p0_pcma",
+        "p0_recv_kb",
+        "p1_active",
+        "p1_media",
+        "p1_receivers",
+        "p1_h264",
+        "p1_opus",
+        "p1_recv_kb",
+        "consumer_senders",
+    }
+)
 
 PLAYER_STATES = (
     "new",
@@ -323,6 +347,45 @@ def format_server_log_line(
     }
     _assert_not_sensitive({"entity": entity_id, **payload})
     return _format_line("COMELIT_MINIAPP_DIAG_SERVER", entity_id, payload)
+
+
+def format_go2rtc_state_line(
+    entity_id: str,
+    event: str,
+    *,
+    elapsed_ms: int,
+    counters: dict[str, int],
+) -> str:
+    """Format a closed, secret-free go2rtc stream-state snapshot."""
+    if event not in GO2RTC_STATE_EVENTS:
+        raise MiniAppDiagnosticsError("invalid_go2rtc_state_event")
+    if (
+        not isinstance(elapsed_ms, int)
+        or isinstance(elapsed_ms, bool)
+        or elapsed_ms < 0
+        or elapsed_ms > MAX_MS
+    ):
+        raise MiniAppDiagnosticsError("invalid_go2rtc_state_timing")
+    if not isinstance(counters, dict) or set(counters) - GO2RTC_STATE_COUNTERS:
+        raise MiniAppDiagnosticsError("invalid_go2rtc_state_counters")
+    clean: dict[str, int] = {}
+    for key, value in counters.items():
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+            or value > MAX_COUNTER_VALUE
+        ):
+            raise MiniAppDiagnosticsError("invalid_go2rtc_state_counter")
+        clean[key] = value
+    payload = {
+        "event": event,
+        "elapsed_ms": elapsed_ms,
+        "stage_ms": 0,
+        "counters": clean,
+    }
+    _assert_not_sensitive({"entity": entity_id, **payload})
+    return _format_line("COMELIT_MINIAPP_DIAG_GO2RTC", entity_id, payload)
 
 
 def _format_line(marker: str, entity_id: str, payload: dict[str, Any]) -> str:
