@@ -692,7 +692,7 @@ def test_mse_stream_rejects_intercom_unlisted_none_and_unsupported_source():
 def test_mse_protocol_accepts_only_closed_codec_command():
     validate = views_mod._validate_mse_command
 
-    assert validate('{"type":"mse","value":"h264,aac"}') == "h264,aac"
+    assert validate('{"type":"mse","value":"avc1.640029,mp4a.40.2"}') == "avc1.640029,mp4a.40.2"
 
     for unsafe in (
         '{"type":"webrtc","value":"h264"}',
@@ -743,7 +743,7 @@ def test_mse_view_happy_path_relays_text_binary_and_releases(monkeypatch):
     async def run():
         with _MSEWebSocketPatch(
             monkeypatch,
-            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"h264,aac"}'),
+            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"avc1.640029,mp4a.40.2"}'),
             [
                 ("sleep", 0.01),
                 _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"close"}'),
@@ -757,7 +757,7 @@ def test_mse_view_happy_path_relays_text_binary_and_releases(monkeypatch):
     websocket = _CaptureWebSocket.instances[0]
     assert go2rtc.registers == [(controller.mse_internal_stream_name("camera.driveway"), source)]
     assert go2rtc.opened == [controller.mse_internal_stream_name("camera.driveway")]
-    assert upstream.sent_json == [{"type": "mse", "value": "h264,aac"}]
+    assert upstream.sent_json == [{"type": "mse", "value": "avc1.640029,mp4a.40.2"}]
     assert _json_texts(websocket) == [
         {"type": "mse", "value": 'video/mp4; codecs="avc1.42E01E"'}
     ]
