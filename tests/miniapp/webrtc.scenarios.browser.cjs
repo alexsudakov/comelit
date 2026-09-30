@@ -953,7 +953,13 @@ async function main() {
       assert.equal(event(posts, "config")?.event, "config");
       assert.equal(event(posts, "answer"), undefined);
       assert.equal(event(posts, "track"), undefined);
-      assert.equal(event(posts, "fallback")?.reason, "stats_deadline_other");
+      const fallback = await waitForEventReason(
+        page,
+        posts,
+        "fallback",
+        "stats_deadline_other",
+      );
+      assert.equal(fallback.reason, "stats_deadline_other");
       await finishScenario(posts);
     });
 
@@ -962,7 +968,13 @@ async function main() {
       await flush(page, 7000);
       assert.equal(event(posts, "answer")?.event, "answer");
       assert.equal(event(posts, "track"), undefined);
-      assert.equal(event(posts, "fallback")?.reason, "stats_deadline_other");
+      const fallback = await waitForEventReason(
+        page,
+        posts,
+        "fallback",
+        "stats_deadline_other",
+      );
+      assert.equal(fallback.reason, "stats_deadline_other");
       await finishScenario(posts);
     });
 
@@ -1150,8 +1162,9 @@ async function main() {
       );
       await flush(page, 9000);
       assert.equal(event(posts, "fallback"), undefined);
-      assert.ok(event(posts, "rtp").counters.bytes_received > 0);
-      assert.equal(event(posts, "rtp").counters.frames_decoded, 0);
+      const rtp = await waitForEvent(page, posts, "rtp");
+      assert.ok(rtp.counters.bytes_received > 0);
+      assert.equal(rtp.counters.frames_decoded, 0);
       await finishScenario(posts);
     });
 
@@ -1221,6 +1234,7 @@ async function main() {
       // before advancing the fake clock that releases those timers.
       await page.waitForTimeout(0);
       await flush(page, 1000);
+      await waitForEvents(page, posts, ["hls_play", "hls_blocked", "hls_manifest"]);
       assert.equal(event(posts, "hls_play")?.state, "NotAllowedError");
       assert.equal(event(posts, "hls_blocked")?.state, "NotAllowedError");
       assert.ok(events(posts, "hls_manifest").length >= 1);
