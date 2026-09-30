@@ -768,6 +768,91 @@ def test_server_mse_diagnostics_are_closed_and_secret_free():
         )
 
 
+def test_go2rtc_stream_state_summary_is_closed_and_secret_free():
+    raw = {
+        "producers": [
+            {
+                "id": 7,
+                "url": "rtsp://test-user:test-password@192.0.2.10/example",
+                "remote_addr": "192.0.2.10:554",
+                "medias": [
+                    "video, recvonly, H264",
+                    "audio, recvonly, PCMA/8000",
+                ],
+                "receivers": [{}, {}],
+                "bytes_recv": 32768,
+            },
+            {
+                "id": 8,
+                "source": "ffmpeg:opaque-stream#audio=opus",
+                "medias": [
+                    "video, recvonly, H264",
+                    "audio, recvonly, OPUS/48000/2",
+                ],
+                "receivers": [{}],
+                "bytes_recv": 8192,
+            },
+        ],
+        "consumers": [
+            {
+                "remote_addr": "secret",
+                "senders": [{}, {}],
+            }
+        ],
+    }
+
+    summary = go2rtc_mod.summarize_stream_state(raw)
+
+    assert summary == {
+        "inspect_ok": 1,
+        "producer_count": 2,
+        "consumer_count": 1,
+        "p0_active": 1,
+        "p0_media": 2,
+        "p0_receivers": 2,
+        "p0_h264": 1,
+        "p0_pcma": 1,
+        "p0_recv_kb": 32,
+        "p1_active": 1,
+        "p1_media": 2,
+        "p1_receivers": 1,
+        "p1_h264": 1,
+        "p1_opus": 1,
+        "p1_recv_kb": 8,
+        "consumer_senders": 2,
+    }
+    text = repr(summary)
+    assert "test-user" not in text
+    assert "test-password" not in text
+    assert "192.0.2.10" not in text
+    assert "rtsp://" not in text
+
+
+def test_go2rtc_state_log_schema_rejects_unknown_counters():
+    line = diagnostics_mod.format_go2rtc_state_line(
+        "camera.driveway",
+        "stream_state_250ms",
+        elapsed_ms=310,
+        counters={
+            "inspect_ok": 1,
+            "producer_count": 2,
+            "consumer_count": 1,
+            "p0_active": 1,
+        },
+    )
+    assert line.startswith(
+        "COMELIT_MINIAPP_DIAG_GO2RTC entity=camera.driveway "
+        "event=stream_state_250ms elapsed_ms=310"
+    )
+    with pytest.raises(diagnostics_mod.MiniAppDiagnosticsError):
+        diagnostics_mod.format_go2rtc_state_line(
+            "camera.driveway",
+            "stream_state_250ms",
+            elapsed_ms=310,
+            counters={"url": 1},
+        )
+
+
 def test_mse_protocol_accepts_only_closed_codec_command():
     validate = views_mod._validate_mse_command
 
