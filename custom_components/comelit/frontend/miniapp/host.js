@@ -12,9 +12,9 @@
   let refreshTimer = null;
   let refreshInFlight = false;
   const MAX_DIAGNOSTICS_COUNTERS = 16;
-  const MSE_NEGOTIATION_TIMEOUT_MS = 3000;
-  const MSE_FIRST_CHUNK_TIMEOUT_MS = 6000;
-  const MSE_FIRST_FRAME_TIMEOUT_MS = 12000;
+  const MSE_NEGOTIATION_TIMEOUT_MS = 8000;
+  const MSE_FIRST_CHUNK_TIMEOUT_MS = 8000;
+  const MSE_FIRST_FRAME_TIMEOUT_MS = 8000;
   const MSE_LIVE_BACK_BUFFER_SECONDS = 30;
   const WEBRTC_COUNTER_PRIORITY = [
     "bytes_received",
@@ -1008,17 +1008,12 @@
         mse.timers.push(timer);
         return timer;
       };
+      // Only negotiation is timed from viewer start. Later deadlines are
+      // stage-relative so a slow cold producer does not consume the chunk/frame
+      // budgets before those stages are even reachable.
       mse.negotiationTimer = scheduleFallback(
         MSE_NEGOTIATION_TIMEOUT_MS,
         "mse_negotiation_failed",
-      );
-      mse.firstChunkTimer = scheduleFallback(
-        MSE_FIRST_CHUNK_TIMEOUT_MS,
-        "mse_first_chunk_timeout",
-      );
-      mse.firstFrameTimer = scheduleFallback(
-        MSE_FIRST_FRAME_TIMEOUT_MS,
-        "mse_first_frame_timeout",
       );
 
       mediaSource.addEventListener("sourceopen", () => {
@@ -1072,6 +1067,10 @@
             clearTimeout(mse.negotiationTimer);
             mse.negotiationTimer = null;
           }
+          mse.firstChunkTimer = scheduleFallback(
+            MSE_FIRST_CHUNK_TIMEOUT_MS,
+            "mse_first_chunk_timeout",
+          );
           mse.onUpdateEnd = () => this._pumpMSEQueue(mse);
           mse.onError = () => this._mseFallback(entityId, generation, "mse_append_error");
           mse.sourceBuffer.addEventListener("updateend", mse.onUpdateEnd);
@@ -1101,6 +1100,10 @@
             clearTimeout(mse.firstChunkTimer);
             mse.firstChunkTimer = null;
           }
+          mse.firstFrameTimer = scheduleFallback(
+            MSE_FIRST_FRAME_TIMEOUT_MS,
+            "mse_first_frame_timeout",
+          );
           this._reportDiagnostics("mse_first_chunk", {
             counters: this._mseCounters(mse),
           });
