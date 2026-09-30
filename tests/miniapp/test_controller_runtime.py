@@ -828,6 +828,77 @@ def test_go2rtc_stream_state_summary_is_closed_and_secret_free():
     assert "rtsp://" not in text
 
 
+def test_go2rtc_state_json_log_preserves_media_but_redacts_secrets():
+    raw = {
+        "producers": [
+            {
+                "id": 7,
+                "format_name": "rtsp",
+                "protocol": "tcp",
+                "url": "rtsp://test-user:test-password@192.0.2.10/example",
+                "remote_addr": "192.0.2.10:554",
+                "sdp": "v=0\\r\\nm=video 0 RTP/AVP 96",
+                "medias": [
+                    "video, recvonly, H264",
+                    "audio, recvonly, PCMA/8000",
+                ],
+                "receivers": [
+                    {
+                        "id": 11,
+                        "codec": {
+                            "codec_name": "h264",
+                            "codec_type": "video",
+                            "profile": "High",
+                            "level": 41,
+                        },
+                        "bytes": 12345,
+                        "packets": 123,
+                    }
+                ],
+            }
+        ],
+        "consumers": [
+            {
+                "id": 22,
+                "format_name": "mp4",
+                "protocol": "ws",
+                "remote_addr": "192.0.2.20:12345",
+                "senders": [
+                    {
+                        "id": 23,
+                        "codec": {"codec_name": "h264", "codec_type": "video"},
+                        "bytes": 4096,
+                        "packets": 40,
+                        "drops": 1,
+                    }
+                ],
+            }
+        ],
+    }
+
+    line = diagnostics_mod.format_go2rtc_state_json_line(
+        "camera.driveway",
+        "stream_state_250ms",
+        elapsed_ms=333,
+        state=raw,
+    )
+
+    assert "format_name" in line
+    assert "rtsp" in line
+    assert "H264" in line
+    assert "PCMA/8000" in line
+    assert "receivers" in line
+    assert "senders" in line
+    assert "12345" in line
+    assert "<redacted>" in line
+    assert "test-user" not in line
+    assert "test-password" not in line
+    assert "192.0.2.10" not in line
+    assert "192.0.2.20" not in line
+    assert "rtsp://" not in line
+    assert "v=0" not in line
+
+
 def test_go2rtc_state_log_schema_rejects_unknown_counters():
     line = diagnostics_mod.format_go2rtc_state_line(
         "camera.driveway",
