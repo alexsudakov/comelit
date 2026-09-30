@@ -177,8 +177,8 @@ class MiniAppGo2RTCAdapter:
         except (asyncio.TimeoutError, ClientError):
             _LOGGER.debug("Mini App MSE unregister failed: go2rtc_http_error")
 
-    async def inspect_stream(self, internal_name: str) -> dict[str, int]:
-        """Return only closed counters derived from go2rtc stream state."""
+    async def inspect_stream(self, internal_name: str) -> tuple[dict[str, int], Any]:
+        """Return closed counters plus raw state for local sanitization/logging."""
         base, client = self._require_runtime()
         params = urlencode({"src": internal_name})
         try:
@@ -193,7 +193,7 @@ class MiniAppGo2RTCAdapter:
             raise
         except (asyncio.TimeoutError, ClientError, ValueError, TypeError):
             raise MiniAppGo2RTCError("go2rtc_http_error") from None
-        return summarize_stream_state(payload)
+        return summarize_stream_state(payload), payload
 
     async def open_mse_ws(self, internal_name: str):
         base, client = self._require_runtime()
