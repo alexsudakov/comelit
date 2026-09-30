@@ -15,6 +15,7 @@ async function newViewer(page) {
   await page.addScriptTag({ path: hostPath });
   await page.evaluate(() => {
     const Viewer = customElements.get("miniapp-picture-entity");
+    Viewer.prototype._openMSE = function () {};
     Viewer.prototype._openWebRTC = function () {};
     const outer = document.createElement("div");
     outer.attachShadow({ mode: "open" });
@@ -37,6 +38,7 @@ async function main() {
   const browser = await chromium.launch({
     headless: true,
     executablePath: chromium.executablePath(),
+    args: ["--disable-crash-reporter"],
   });
   try {
     const page = await browser.newPage({ viewport: { width: 390, height: 780 } });
@@ -118,6 +120,31 @@ async function main() {
     }
     await verifyFallback("checking", 5000, 6000);
     await verifyFallback("connected", 8000, 9000);
+
+    const priorityPage = await browser.newPage();
+    await priorityPage.setContent(
+      '<div id="comelitCard"></div><div id="startupStatus"></div>' +
+      '<div id="fatalError"></div>',
+    );
+    await priorityPage.addScriptTag({ path: hostPath });
+    const priority = await priorityPage.evaluate(() => {
+      let mse = 0;
+      let webrtc = 0;
+      const Viewer = customElements.get("miniapp-picture-entity");
+      Viewer.prototype._openMSE = function () { mse += 1; };
+      Viewer.prototype._openWebRTC = function () { webrtc += 1; };
+
+      const ordinary = new Viewer();
+      ordinary.setConfig({entity: "camera.parking_6048", show_name: true});
+      ordinary.hass = {
+        states: {"camera.parking_6048": {attributes: {friendly_name: "Parking"}}},
+      };
+      document.body.appendChild(ordinary);
+      return {mse, webrtc};
+    });
+    assert.deepEqual(priority, {mse: 1, webrtc: 0});
+    await priorityPage.close();
+
     console.log("viewer shadow layout and stalled-ICE fallback: PASS");
   } finally {
     await browser.close();

@@ -131,7 +131,14 @@ _aiohttp_web = types.SimpleNamespace(
 _install_module(
     "aiohttp",
     ClientError=Exception,
-    WSMsgType=types.SimpleNamespace(ERROR="error", TEXT="text"),
+    ClientTimeout=lambda **kwargs: kwargs,
+    WSMsgType=types.SimpleNamespace(
+        ERROR="error",
+        TEXT="text",
+        BINARY="binary",
+        CLOSE="close",
+        CLOSED="closed",
+    ),
     web=_aiohttp_web,
 )
 _install_module("mashumaro", MissingField=ValueError)
@@ -314,8 +321,12 @@ class FakeCameraCapabilities:
 
 
 class FakeCamera:
-    def __init__(self, frontend_stream_types):
+    def __init__(self, frontend_stream_types, stream_source: str | None = None):
         self.camera_capabilities = FakeCameraCapabilities(frontend_stream_types)
+        self.stream_source_value = stream_source
+
+    async def stream_source(self):
+        return self.stream_source_value
 
 
 class FakeServices:
@@ -339,6 +350,10 @@ class FakeHass:
         self.label_registry = FakeLabelRegistry(labels)
         self.services = FakeServices()
         self.cameras = {}
+        self.data = {}
+
+    def async_create_task(self, coro):
+        return asyncio.create_task(coro)
 
 
 _entity_registry_module.async_get = lambda hass: hass.entity_registry
@@ -612,6 +627,96 @@ def test_webrtc_surveillance_camera_falls_back_when_provider_missing():
         match="camera WebRTC is unavailable",
     ):
         controller.get_webrtc_surveillance_camera("camera.driveway")
+
+
+class FakeGo2RTC:
+    def __init__(self):
+        self.registers: list[tuple[str, str]] = []
+        self.unregisters: list[str] = []
+
+    async def register_stream(self, internal_name: str, source: str):
+        self.registers.append((internal_name, source))
+
+    async def unregister_stream(self, internal_name: str):
+        self.unregisters.append(internal_name)
+
+
+def test_mse_stream_uses_public_stream_source_and_opaque_refcounted_name():
+    controller, hass = _controller(surveillance_label="Outside")
+    fake_go2rtc = FakeGo2RTC()
+    controller.go2rtc = fake_go2rtc
+    source = "rtsp://test-user:test-password@192.0.2.10/example"
+    hass.cameras["camera.driveway"] = FakeCamera(set(), source)
+
+    async def run():
+        first = await controller.acquire_mse_stream("camera.driveway")
+        second = await controller.acquire_mse_stream("camera.driveway")
+        assert first.internal_name == second.internal_name
+        assert first.internal_name.startswith("comelit_miniapp_")
+        assert "driveway" not in first.internal_name
+        assert "test-user" not in first.internal_name
+        await controller.release_mse_stream("camera.driveway")
+        assert fake_go2rtc.unregisters == []
+        await controller.release_mse_stream("camera.driveway")
+        assert fake_go2rtc.unregisters == [first.internal_name]
+
+    asyncio.run(run())
+
+    assert fake_go2rtc.registers == [
+        (controller.mse_internal_stream_name("camera.driveway"), source)
+    ]
+
+
+def test_mse_stream_rejects_intercom_unlisted_none_and_unsupported_source():
+    controller, hass = _controller(surveillance_label="Outside")
+    controller.go2rtc = FakeGo2RTC()
+    hass.cameras["camera.comelit_entrance"] = FakeCamera(set(), "rtsp://example/live")
+    hass.cameras["camera.driveway"] = FakeCamera(set(), None)
+
+    async def run():
+        with pytest.raises(controller_mod.MiniAppOperationError, match="intercom"):
+            await controller.acquire_mse_stream("camera.comelit_entrance")
+        with pytest.raises(controller_mod.MiniAppOperationError, match="not allowed"):
+            await controller.acquire_mse_stream("camera.unlisted")
+        with pytest.raises(controller_mod.MiniAppOperationError, match="stream_source"):
+            await controller.acquire_mse_stream("camera.driveway")
+        hass.cameras["camera.driveway"] = FakeCamera(set(), "ffmpeg:camera.driveway")
+        with pytest.raises(controller_mod.MiniAppOperationError, match="stream_source"):
+            await controller.acquire_mse_stream("camera.driveway")
+
+    asyncio.run(run())
+
+
+def test_mse_protocol_accepts_only_closed_codec_command():
+    validate = views_mod._validate_mse_command
+
+    assert validate('{"type":"mse","value":"h264,aac"}') == "h264,aac"
+
+    for unsafe in (
+        '{"type":"webrtc","value":"h264"}',
+        '{"type":"mse","value":"h264,delete"}',
+        '{"type":"mse","value":"h264,h265,hevc,av1,vp8,vp9,aac,mp4a,opus"}',
+        '{"type":"mse","value":"rtsp://test-user:test-password@192.0.2.10/example"}',
+        '{"type":"mse","value":"h264","extra":1}',
+        "x" * 300,
+    ):
+        assert validate(unsafe) is None
+
+
+def test_mse_upstream_text_sanitizer_never_relays_free_text_or_urls():
+    sanitize = views_mod._sanitize_mse_upstream_text
+
+    assert sanitize('{"type":"mse","value":"video/mp4; codecs=\\"avc1\\""}') == {
+        "type": "mse",
+        "value": 'video/mp4; codecs="avc1"',
+    }
+
+    for unsafe in (
+        '{"type":"log","value":"rtsp://test-user:test-password@192.0.2.10/example"}',
+        '{"type":"error","value":"go2rtc said http://127.0.0.1:11984"}',
+        '{"type":"mse","value":"rtsp://test-user:test-password@192.0.2.10/example"}',
+    ):
+        assert sanitize(unsafe) is None
 
 
 class _FakeContent:

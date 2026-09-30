@@ -230,10 +230,12 @@ A successful software call never asserts the physical Door effect.
 
 ## 9. Camera lifecycle
 
-The Mini App does not implement a second camera transport.
+The entrance camera and ordinary surveillance cameras have deliberately
+separate media lifecycles.
 
-After validating the requested camera against the embedded allowlist, the
-integration calls Home Assistant's normal camera stream API:
+For the Comelit entrance camera, after validating the requested camera against
+the embedded allowlist, the integration calls Home Assistant's normal camera
+stream API:
 
 ```text
 async_request_stream(hass, entity_id, HLS_PROVIDER)
@@ -286,6 +288,70 @@ the WebView.
 The media grant expires with the Mini App session. Removing a user from the
 allowlist or changing the configured bot ID also prevents further proxy
 requests from that session.
+
+Ordinary labelled surveillance cameras are excluded from the Comelit entrance
+media manager. Their fast live view path is:
+
+```text
+camera.stream_source()
+-> Home Assistant Camera object
+-> HA-managed go2rtc already running inside Home Assistant
+-> restricted same-origin Comelit MSE/WSS proxy
+-> Telegram Mini App video element
+```
+
+The browser endpoint is:
+
+```text
+GET /api/comelit/miniapp/camera/{entity_id}/mse
+```
+
+It is an authenticated Mini App WebSocket endpoint. The browser may send only
+the closed MSE negotiation command
+`{"type":"mse","value":"<bounded codec list>"}`. It never receives the camera
+stream source, go2rtc base URL, go2rtc management API, internal upstream URL,
+credentials, or Home Assistant HLS capability token. Upstream free-text
+messages are not relayed blindly; only the bounded MSE MIME response and binary
+fMP4 chunks can cross back to the WebView.
+
+Comelit obtains the ordinary camera source only through the public Home
+Assistant camera contract:
+
+```text
+await camera.stream_source()
+```
+
+Credentials remain owned by the original Home Assistant camera integration.
+Comelit does not add options-flow URL/login/password fields, does not duplicate
+credentials into the ConfigEntry, and does not persist the resolved source. The
+resolved source exists only long enough to register a viewer-scoped stream in
+HA-managed go2rtc.
+
+The internal go2rtc stream name is opaque and namespaced:
+
+```text
+comelit_miniapp_<sha256(entity_id)[:16]>
+```
+
+This avoids collision with Home Assistant's own `camera.entity_id` go2rtc
+stream names and does not contain URLs, credentials, or entity-derived secrets.
+The server process refcounts viewers per ordinary camera: the first viewer
+registers the source with go2rtc, concurrent viewers reuse the same producer,
+and the last release unregisters the Mini App stream in a `finally` cleanup
+path.
+
+There is no standalone Comelit application server, Docker container, add-on,
+VM, or separate go2rtc instance in this path.
+
+The ordinary-camera client fallback chain is:
+
+```text
+MSE -> WebRTC -> HLS
+```
+
+The success criterion for MSE and WebRTC is the first decoded/rendered video
+frame, not WebSocket open, MIME negotiation, SDP answer, or remote-track
+announcement.
 
 The Mini App host provides a small `picture-entity` compatibility element
 using an HTML5 `video` element.
@@ -347,34 +413,37 @@ Repository implementation does not by itself:
 Those remain explicit deployment and acceptance steps.
 
 
-## Surveillance live view: on-demand WebRTC via Home Assistant go2rtc
+## Surveillance live view: MSE and WebRTC via Home Assistant go2rtc
 
 Ordinary Home Assistant surveillance cameras use a different live-view path from
 the Comelit entrance camera.
 
-For ordinary cameras, the Mini App first attempts Home Assistant's registered
-WebRTC provider. On HAOS/default-config installations this is normally the
-Home Assistant-managed go2rtc provider. The source is registered with go2rtc
-on demand when the viewer opens; Comelit does not enable camera preload.
+For ordinary cameras, the Mini App first attempts MSE/fMP4 through the
+restricted same-origin proxy backed by HA-managed go2rtc. If MSE is unsupported
+or fails one of its bounded startup milestones, the Mini App falls back to Home
+Assistant's registered WebRTC provider. On HAOS/default-config installations
+this is normally the Home Assistant-managed go2rtc provider. If WebRTC is
+unavailable or produces no decoded frame, the existing session-bound HLS proxy
+remains the final fallback.
 
 Conceptual path:
 
 ```text
 Telegram Mini App
-  -> session-bound Comelit WebSocket signaling endpoint
-  -> Home Assistant Camera WebRTC API/provider
+  -> session-bound Comelit MSE WebSocket endpoint
+  -> camera.stream_source()
   -> Home Assistant-managed go2rtc
   -> camera RTSP source
 ```
 
-The browser receives only WebRTC signaling through the authenticated Mini App
-route. It does not receive go2rtc credentials or direct go2rtc management API
-access.
+The browser receives only the closed MSE protocol through the authenticated
+Mini App route. It does not receive go2rtc credentials or direct go2rtc
+management API access.
 
-When the viewer is removed or the Mini App WebSocket closes, the Home Assistant
-camera WebRTC session is explicitly closed. If WebRTC is unavailable for a
-particular ordinary camera/client, the existing session-bound Home Assistant
-HLS proxy remains the fallback.
+When the MSE viewer is removed or the Mini App WebSocket closes, the upstream
+go2rtc WebSocket is closed and the server releases the refcounted stream. When
+the WebRTC fallback viewer is removed, the Home Assistant camera WebRTC session
+is explicitly closed.
 
 The Mini App treats WebRTC signaling, remote-track announcement, and the first
 decoded/rendered video frame as separate milestones. A remote track alone is
@@ -408,8 +477,9 @@ The accepted event enum is:
 
 ```text
 config, offer, answer, track, ice, rtp, first_frame,
-first_moving_frame, fallback, hls_manifest, hls_play, hls_state,
-hls_first_frame, hls_seek, hls_error, hls_blocked
+first_moving_frame, mse_connect, mse_ready, mse_first_chunk,
+mse_first_frame, mse_error, mse_fallback, fallback, hls_manifest,
+hls_play, hls_state, hls_first_frame, hls_seek, hls_error, hls_blocked
 ```
 
 Payload fields are closed and optional except `event`:
@@ -429,7 +499,11 @@ Fallback reasons are:
 stats_deadline_checking, stats_deadline_other, ice_failed,
 connection_failed, websocket_error, websocket_closed, offer_error,
 answer_error, candidate_error, no_rtcpeerconnection, session_expired,
-navigate
+navigate, no_mediasource, mse_ws_error, mse_ws_closed,
+mse_negotiation_failed, mse_unsupported_codec, mse_first_chunk_timeout,
+mse_first_frame_timeout, mse_append_error, go2rtc_unavailable,
+go2rtc_incompatible, go2rtc_http_error, go2rtc_ws_error,
+stream_source_unavailable, invalid_mse_command, mse_registry_full
 ```
 
 The diagnostics module has no free-text field. Unknown keys, unknown enum
@@ -444,12 +518,15 @@ matching:
 (?i)(sdp|a=candidate|\d{1,3}(\.\d{1,3}){3}|https?://|wss?://|rtsp://|bearer|cookie|initdata|token|ice-ufrag|ice-pwd|v=0|o=-|m=audio|m=video|hash=|signature|candidate:)
 ```
 
-The browser reports only enums and integers. WebRTC candidate diagnostics count
+The browser reports only enums and integers. MSE diagnostics report bounded
+milestones, fallback reasons, chunk counts, byte counts, queue length and
+buffer length. WebRTC candidate diagnostics count
 candidate types and transports from `getStats()` reports (`host`, `srflx`,
-`prflx`, `relay`, `udp`, `tcp`) plus candidate-pair states, nomination counts,
-ICE gathering state, inbound RTP bytes and decoded-frame counts. It never reads
-or posts ICE candidate strings, SDP, IP addresses, URLs, cookies, `initData`,
-Telegram user data, RTSP URLs, or media bytes.
+`relay`, `udp`, `tcp`) plus candidate-pair states, nomination counts, selected
+pair counters, ICE gathering state, inbound RTP bytes and decoded-frame counts.
+It never reads or posts ICE candidate strings, SDP, IP addresses, URLs,
+cookies, `initData`, Telegram user data, RTSP URLs, go2rtc URLs, credentials,
+or media bytes.
 
 Accepted diagnostics are rate limited server-side using constants from
 `custom_components/comelit/miniapp/diagnostics.py`:

@@ -98,7 +98,9 @@ async function setupPage(browser) {
 
     window.makeViewer = (selectedEntityId = entityId) => {
       const Viewer = customElements.get("miniapp-picture-entity");
+      const originalOpenMSE = Viewer.prototype._openMSE;
       const originalOpenWebRTC = Viewer.prototype._openWebRTC;
+      Viewer.prototype._openMSE = function () {};
       Viewer.prototype._openWebRTC = function () {};
       const outer = document.createElement("div");
       outer.attachShadow({ mode: "open" });
@@ -116,6 +118,7 @@ async function setupPage(browser) {
         },
       };
       outer.shadowRoot.appendChild(viewer);
+      Viewer.prototype._openMSE = originalOpenMSE;
       Viewer.prototype._openWebRTC = originalOpenWebRTC;
       viewer._openHls = function () {};
       window.testViewer = viewer;
@@ -248,6 +251,7 @@ async function main() {
   const browser = await chromium.launch({
     headless: true,
     executablePath: chromium.executablePath(),
+    args: ["--disable-crash-reporter"],
   });
   try {
     await runWithPage(browser, async (page, posts) => {
