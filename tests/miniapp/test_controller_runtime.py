@@ -928,6 +928,35 @@ def test_go2rtc_state_log_schema_rejects_unknown_counters():
         )
 
 
+def test_go2rtc_ws_log_preserves_error_and_redacts_network_material():
+    line = diagnostics_mod.format_go2rtc_ws_line(
+        "camera.driveway",
+        elapsed_ms=777,
+        message_type="error",
+        value=(
+            "mse: streams: dial rtsp://user:pass@192.0.2.10/live failed; "
+            "connect 192.0.2.10:554"
+        ),
+    )
+    assert "type=error" in line
+    assert "mse: streams: dial" in line
+    assert "failed" in line
+    assert "rtsp://" not in line
+    assert "user:pass" not in line
+    assert "192.0.2.10" not in line
+    assert "<url_redacted>" in line
+
+
+def test_go2rtc_ws_parser_keeps_error_type_and_value():
+    assert views_mod._parse_go2rtc_upstream_text(
+        '{"type":"error","value":"mse: streams: codecs not matched"}'
+    ) == ("error", "mse: streams: codecs not matched")
+    assert views_mod._parse_go2rtc_upstream_text("not-json") == (
+        "non_json",
+        "not-json",
+    )
+
+
 def test_mse_protocol_accepts_only_closed_codec_command():
     validate = views_mod._validate_mse_command
 
@@ -1297,18 +1326,36 @@ def test_mse_view_protocol_rejects_bad_commands_and_filters_upstream_text(monkey
 
     upstream = _FakeUpstreamWebSocket(
         [
+            _FakeWSMessage(
+                views_mod.WSMsgType.TEXT,
+                '{"type":"error","value":"mse: streams: codecs not matched"}',
+            ),
             _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"log","value":"secret"}'),
             _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"rtsp://secret"}'),
         ]
     )
     controller.go2rtc = _FakeGo2RTCWithUpstream(upstream)
-    with _MSEWebSocketPatch(
-        monkeypatch,
-        _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"avc1.640029"}'),
-        [("sleep", 0.01), _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"close"}')],
+    with caplog.at_level(
+        logging.INFO,
+        logger="custom_components.comelit.miniapp.views",
     ):
-        asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
+        with _MSEWebSocketPatch(
+            monkeypatch,
+            _FakeWSMessage(
+                views_mod.WSMsgType.TEXT,
+                '{"type":"mse","value":"avc1.640029"}',
+            ),
+            [
+                ("sleep", 0.01),
+                _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"close"}'),
+            ],
+        ):
+            asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
     assert _json_texts(_CaptureWebSocket.instances[-1]) == []
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "COMELIT_MINIAPP_DIAG_GO2RTC_WS" in logged
+    assert "type=error" in logged
+    assert "codecs not matched" in logged
 
 
 def test_mse_lease_name_has_no_secrets_or_entity_and_is_stable():
