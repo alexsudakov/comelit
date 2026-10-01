@@ -513,6 +513,7 @@ def webcodecs_log_line(
     allowed = {
         "session_open",
         "source_resolved",
+        "intercom_media_ready",
         "source_open",
         "first_source_packet",
         "first_binary",
@@ -547,6 +548,9 @@ def webcodecs_summary_line(
         "source_open_failed",
         "backlog_exceeded",
         "session_limit",
+        "intercom_media_busy",
+        "intercom_media_start_failed",
+        "intercom_media_unavailable",
         "cancelled",
     }
     if reason not in allowed_reasons:
