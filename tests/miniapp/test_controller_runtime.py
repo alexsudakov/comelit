@@ -1784,9 +1784,10 @@ def test_webcodecs_non_rtsp_unit_too_large_duration_and_source_failure(monkeypat
         _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
     ):
         asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
-    assert _json_texts(_CaptureWebSocket.instances[-1]) == [
-        {"type": "error", "code": "unit_too_large"}
-    ]
+    too_large_texts = _json_texts(_CaptureWebSocket.instances[-1])
+    assert too_large_texts[0]["type"] == "source_open"
+    assert too_large_texts[1]["type"] == "source_packet"
+    assert too_large_texts[-1] == {"type": "error", "code": "unit_too_large"}
 
     async def failing(_source):
         raise webcodecs_mod.WebCodecsSourceError("source_open_failed")
