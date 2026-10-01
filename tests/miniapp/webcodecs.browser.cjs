@@ -630,8 +630,8 @@ async function main() {
       hasResult: false,
     });
 
-    await page.evaluate(() => {
-      const socket = window.__webcodecs.sockets[surveillanceSocketBase];
+    await page.evaluate((index) => {
+      const socket = window.__webcodecs.sockets[index];
       socket.emitText({ type: "source_open", server_elapsed_ms: 4700 });
       socket.emitText({ type: "source_packet", server_elapsed_ms: 4720 });
       socket.emitText({
@@ -647,7 +647,7 @@ async function main() {
         comelit_media_started: false,
       });
       socket.emitBinary(window.__frame());
-    });
+    }, surveillanceSocketBase);
     await page.waitForFunction(() => window.__webcodecs.drawCount === 4);
 
     const preservedSurveillanceViewer = await page.evaluate(() => {
@@ -671,12 +671,12 @@ async function main() {
       sockets: surveillanceSocketBase + 1,
     });
 
-    await page.evaluate(() => {
-      window.__webcodecs.sockets[surveillanceSocketBase].emitText({
+    await page.evaluate((index) => {
+      window.__webcodecs.sockets[index].emitText({
         type: "error",
         code: "source_open_failed",
       });
-    });
+    }, surveillanceSocketBase);
     await page.waitForFunction(() => window.__webcodecs.legacyMounts === 1);
     const surveillanceFallback = await page.evaluate(() => {
       const card = document.getElementById("card");
