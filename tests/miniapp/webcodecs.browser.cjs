@@ -182,6 +182,8 @@ async function main() {
       const select = root.querySelector("[data-camera]");
       const result = root.querySelector("[data-result]");
       const canvas = root.querySelector("[data-canvas]");
+      window.__webcodecs.uiCanvas = canvas;
+      window.__webcodecs.uiResult = result;
       select.value = "camera.dvor_1";
       select.dispatchEvent(new Event("change", { bubbles: true }));
       result.textContent = Array.from({ length: 80 }, (_, index) => `line-${index}`).join("\n");
@@ -246,6 +248,30 @@ async function main() {
       return card.shadowRoot.querySelector("miniapp-webcodecs-viewer")
         .shadowRoot.querySelector("[data-result]").textContent.includes("RESULT=PASS");
     });
+
+    const postRunRefresh = await page.evaluate(() => {
+      const card = document.getElementById("card");
+      const root = card.shadowRoot.querySelector("miniapp-webcodecs-viewer").shadowRoot;
+      const result = root.querySelector("[data-result]");
+      result.scrollTop = 60;
+      const beforeScroll = result.scrollTop;
+      const baseHass = card._hass;
+      for (let index = 0; index < 10; index += 1) {
+        card.hass = {
+          ...baseHass,
+          states: { ...baseHass.states },
+        };
+      }
+      return {
+        sameCanvas: root.querySelector("[data-canvas]") === window.__webcodecs.uiCanvas,
+        sameResult: root.querySelector("[data-result]") === window.__webcodecs.uiResult,
+        beforeScroll,
+        afterScroll: root.querySelector("[data-result]").scrollTop,
+      };
+    });
+    assert.equal(postRunRefresh.sameCanvas, true);
+    assert.equal(postRunRefresh.sameResult, true);
+    assert.equal(postRunRefresh.afterScroll, postRunRefresh.beforeScroll);
 
     const state = await page.evaluate(() => ({
       supportChecks: window.__webcodecs.supportChecks,
