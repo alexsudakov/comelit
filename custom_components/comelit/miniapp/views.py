@@ -703,7 +703,7 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
             raise web.HTTPNotFound
 
         try:
-            camera = self.controller.get_webcodecs_ordinary_camera(entity_id)
+            target = self.controller.get_webcodecs_camera_target(entity_id)
         except MiniAppOperationError as exc:
             return _json_response({"error": str(exc)}, status=HTTPStatus.CONFLICT)
 
@@ -723,6 +723,7 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
         first_source_logged = False
         first_binary_logged = False
         source_task: asyncio.Task[None] | None = None
+        entrance_lease = None
         queued_bytes = 0
         queued_units = 0
         queue: asyncio.Queue[object] = asyncio.Queue(
@@ -767,7 +768,14 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
         async def close_with_error(code: str) -> None:
             nonlocal errors, reason
             errors += 1
-            if code in {"session_limit", "backlog_exceeded", "source_open_failed"}:
+            if code in {
+                "session_limit",
+                "backlog_exceeded",
+                "source_open_failed",
+                "intercom_media_busy",
+                "intercom_media_start_failed",
+                "intercom_media_unavailable",
+            }:
                 reason = code
             if not websocket.closed:
                 await send_json({"type": "error", "code": code})
