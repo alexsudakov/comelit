@@ -431,10 +431,12 @@
         this._stats = this._newStats();
         this._stats.error = "webcodecs_unavailable";
         this._emitFinal("codec_unsupported");
+        this._notifyEmbeddedTerminal("codec_unsupported");
         return;
       }
       this._running = true;
       this._finalEmitted = false;
+      this._terminalNotified = false;
       this._stats = this._newStats();
       this._pendingReceives = [];
       this._pendingDecodeStarts = [];
@@ -454,7 +456,12 @@
       const socket = new WebSocket(url);
       socket.binaryType = "arraybuffer";
       this._socket = socket;
-      this._timer = setTimeout(() => this._stop("duration_60s", true), CANARY_MS);
+      if (!this._embedded) {
+        this._timer = setTimeout(
+          () => this._stop("duration_60s", true),
+          CANARY_MS,
+        );
+      }
 
       socket.onopen = () => {
         this._stats.wsOpenAt = performance.now();
@@ -724,6 +731,12 @@
       this._setStatus("остановлено");
       if (emit) {
         this._emitFinal(reason);
+        if (
+          this._embedded &&
+          !["manual_stop", "duration_60s", "duration_limit", "source_eof"].includes(reason)
+        ) {
+          this._notifyEmbeddedTerminal(reason);
+        }
       }
       this._syncControls();
     }
