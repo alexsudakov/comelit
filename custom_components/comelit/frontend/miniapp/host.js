@@ -1816,6 +1816,7 @@
     await customElements.whenDefined("comelit-card");
     card.setConfig({
       default_tab: "intercom",
+      webcodecs: { enabled: true },
       surveillance: {
         include: bootstrap.surveillance_entities || [],
       },

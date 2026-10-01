@@ -28,16 +28,33 @@ Implementation architecture for the Home Assistant card is fixed separately in:
 
 ## 2. Общая структура страницы
 
-Интерфейс MUST иметь две верхнеуровневые вкладки:
+Default Home Assistant / Lovelace surface MUST have exactly two top-level tabs:
 
 ```text
 [ Домофон ] [ Видеонаблюдение ]
 ```
 
-Обе реализации — Home Assistant Custom Card и Telegram Mini App — MUST использовать одинаковую логическую структуру, но источники данных для двух вкладок различаются:
+Обе реализации — Home Assistant Custom Card и Telegram Mini App — MUST использовать одинаковую логическую структуру for the default production surface, but data sources for the two default tabs differ:
 
 - «Домофон» получает состояние, capabilities и semantic actions из `custom_components/comelit`;
 - «Видеонаблюдение» работает со стандартными Home Assistant `camera.*` entities и не требует, чтобы обычная камера была известна интеграции Comelit.
+
+The Telegram Mini App MAY expose an optional third experimental tab:
+
+```text
+[ WebCodecs ]
+```
+
+This tab MUST be hidden by default and MUST exist only when the Mini App host
+passes the explicit shared-card config flag:
+
+```text
+webcodecs.enabled === true
+```
+
+Ordinary Home Assistant / Lovelace usage MUST keep exactly the two default tabs,
+with no WebCodecs panel, no WebCodecs DOM, and no reachable WebCodecs runtime
+path unless that explicit Mini App flag is present.
 
 Frontend MUST NOT требовать изменения собственного кода при добавлении новой surveillance camera, уже опубликованной в Home Assistant как стандартная `camera.*` entity и включённой в configured surveillance set.
 

@@ -48,6 +48,7 @@ INTERCOM_UNIQUE_IDS = frozenset(
         "comelit_call_state",
     }
 )
+WEBCODECS_INTERCOM_UNIQUE_IDS = INTERCOM_UNIQUE_IDS | {"comelit_gate_camera"}
 SAFE_STATE_ATTRIBUTES = frozenset(
     {
         "friendly_name",
@@ -355,6 +356,25 @@ class ComelitMiniAppController:
         state = self.hass.states.get(entity_id)
         if state is None or state.state == STATE_UNAVAILABLE:
             raise MiniAppOperationError("camera is unavailable")
+
+        return get_camera_from_entity_id(self.hass, entity_id)
+
+    def get_webcodecs_ordinary_camera(self, entity_id: str):
+        if entity_id not in self._allowed_camera_entity_ids():
+            raise MiniAppOperationError("camera_not_allowed")
+
+        registry = er.async_get(self.hass)
+        entry = registry.async_get(entity_id)
+        if (
+            entry is not None
+            and entry.platform == DOMAIN
+            and entry.unique_id in WEBCODECS_INTERCOM_UNIQUE_IDS
+        ):
+            raise MiniAppOperationError("intercom_camera_not_allowed")
+
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state == STATE_UNAVAILABLE:
+            raise MiniAppOperationError("camera_unavailable")
 
         return get_camera_from_entity_id(self.hass, entity_id)
 

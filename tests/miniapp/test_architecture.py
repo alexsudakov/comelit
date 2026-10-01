@@ -243,6 +243,39 @@ def test_miniapp_frontend_assets_are_release_versioned_and_stage_is_contained():
     assert "styles.css?v=1.7.5" in html
     assert "comelit-card.js?v=1.7.5" in html
     assert "hls.min.js?v=1.7.5" in html
+    assert "webcodecs.js?v=1.7.5" in html
     assert "host.js?v=1.7.5" in html
     assert "contain: layout paint size" in host
     assert "overflow: hidden" in host
+
+
+def test_webcodecs_tab_is_miniapp_flag_gated_and_canvas_only():
+    card = _read("custom_components/comelit/frontend/comelit-card.js")
+    host = _read("custom_components/comelit/frontend/miniapp/host.js")
+    viewer = _read("custom_components/comelit/frontend/miniapp/webcodecs.js")
+    html = _read("custom_components/comelit/miniapp/index.html")
+
+    assert 'webcodecs: { enabled: true }' in host
+    assert 'config.webcodecs?.enabled === true' in card
+    assert 'customElements.get("miniapp-webcodecs-viewer")' in card
+    assert "<miniapp-webcodecs-viewer>" in card
+    assert "grid-template-columns: repeat(${webcodecsEnabled ? 3 : 2}, 1fr)" in card
+    assert "WebCodecs" in card
+    assert "/api/comelit/frontend/miniapp/webcodecs.js" in html
+
+    assert "Запустить тест" in viewer
+    assert "Остановить" in viewer
+    assert "<canvas" in viewer
+    assert "<video" not in viewer
+    for token in ("MediaSource", "Hls", "RTCPeerConnection", "/mse", "/webrtc"):
+        assert token not in viewer
+
+
+def test_shared_card_default_config_preserves_two_top_level_tabs():
+    card = _read("custom_components/comelit/frontend/comelit-card.js")
+
+    assert 'webcodecs: {' in card
+    assert 'enabled: webcodecsEnabled' in card
+    assert 'webcodecsEnabled ? `' in card
+    assert 'data-tab="webcodecs"' in card
+    assert '!(nextTab === "webcodecs" && this._webcodecsEnabled())' in card

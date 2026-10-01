@@ -60,6 +60,9 @@ jobs:
       - name: Parse Mini App host
         run: node --check custom_components/comelit/frontend/miniapp/host.js
 
+      - name: Parse Mini App WebCodecs viewer
+        run: node --check custom_components/comelit/frontend/miniapp/webcodecs.js
+
       - name: Parse bundled hls.js
         run: node --check custom_components/comelit/frontend/miniapp/vendor/hls.min.js
 
@@ -73,6 +76,9 @@ jobs:
 
       - name: Verify viewer layout and stalled ICE fallback
         run: node tests/miniapp/viewer.browser.cjs
+
+      - name: Verify WebCodecs mock canary
+        run: node tests/miniapp/webcodecs.browser.cjs
 
       - name: Verify WebRTC and HLS diagnostics scenarios
         run: node tests/miniapp/webrtc.scenarios.browser.cjs

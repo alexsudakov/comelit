@@ -226,6 +226,10 @@ def _load(path: Path, name: str):
     return module
 
 
+def _read_file(relative: str) -> str:
+    return (ROOT / relative).read_text(encoding="utf-8")
+
+
 _load(PKG_ROOT / "const.py", "custom_components.comelit.const")
 session_mod = _load(
     MINIAPP_ROOT / "session.py",
@@ -238,6 +242,10 @@ controller_mod = _load(
 diagnostics_mod = _load(
     MINIAPP_ROOT / "diagnostics.py",
     "custom_components.comelit.miniapp.diagnostics",
+)
+webcodecs_mod = _load(
+    MINIAPP_ROOT / "webcodecs.py",
+    "custom_components.comelit.miniapp.webcodecs",
 )
 views_mod = _load(
     MINIAPP_ROOT / "views.py",
@@ -326,8 +334,10 @@ class FakeCamera:
     def __init__(self, frontend_stream_types, stream_source: str | None = None):
         self.camera_capabilities = FakeCameraCapabilities(frontend_stream_types)
         self.stream_source_value = stream_source
+        self.stream_source_calls = 0
 
     async def stream_source(self):
+        self.stream_source_calls += 1
         return self.stream_source_value
 
 
@@ -749,6 +759,31 @@ def test_mse_stream_rejects_intercom_unlisted_none_and_unsupported_source():
             await controller.acquire_mse_stream("camera.driveway")
 
     asyncio.run(run())
+
+
+def test_intercom_unique_ids_preserve_existing_mse_gate_camera_admission():
+    assert "comelit_gate_camera" not in controller_mod.INTERCOM_UNIQUE_IDS
+    assert "comelit_gate_camera" in controller_mod.WEBCODECS_INTERCOM_UNIQUE_IDS
+
+    controller, hass = _controller(surveillance_label="Outside")
+    controller.go2rtc = FakeGo2RTC()
+    source = "rtsp://192.0.2.10/gate"
+    hass.entity_registry.entities["camera.comelit_gate"] = FakeRegistryEntry(
+        "camera.comelit_gate",
+        "comelit",
+        "comelit_gate_camera",
+        labels={"outside"},
+    )
+    hass.states._values["camera.comelit_gate"] = FakeState("idle")
+    hass.cameras["camera.comelit_gate"] = FakeCamera(set(), source)
+
+    async def run():
+        lease = await controller.acquire_mse_stream("camera.comelit_gate")
+        await controller.release_mse_stream("camera.comelit_gate")
+        return lease.internal_name
+
+    internal_name = asyncio.run(run())
+    assert controller.go2rtc.registers == [(internal_name, [source])]
 
 
 def test_server_mse_diagnostics_are_closed_and_secret_free():
@@ -1489,6 +1524,495 @@ def test_fixture_camera_secret_never_reaches_payloads_logs_or_serializer(monkeyp
         _assert_no_fixture_secret([*compared, "deliberate leak " + fixture_url])
 
 
+def test_webcodecs_framing_round_trip_and_malformed_rejection():
+    frame = webcodecs_mod.WebCodecsFrame(
+        sequence=1,
+        media_pts_us=123456,
+        pts_valid=True,
+        keyframe=True,
+        payload=b"\x00\x00\x00\x01\x65idr",
+    )
+    encoded = webcodecs_mod.encode_webcodecs_frame(frame)
+    assert len(encoded) == webcodecs_mod.WEBCODECS_HEADER_BYTES + len(frame.payload)
+    assert encoded[:4] == b"\x01\x05\x00\x00"
+    decoded = webcodecs_mod.decode_webcodecs_frame(encoded)
+    assert decoded == frame
+
+    second = webcodecs_mod.decode_webcodecs_frame(
+        webcodecs_mod.encode_webcodecs_frame(
+            webcodecs_mod.WebCodecsFrame(
+                sequence=2,
+                media_pts_us=0,
+                pts_valid=False,
+                keyframe=False,
+                payload=b"\x00\x00\x00\x01\x41p",
+            )
+        )
+    )
+    assert second.sequence == decoded.sequence + 1
+
+    malformed = [
+        b"\x02" + encoded[1:],
+        encoded[:2] + b"\x00\x01" + encoded[4:],
+        b"\x01\x03" + encoded[2:],
+        encoded[:-1],
+        encoded[:16] + (webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES + 1).to_bytes(4, "big"),
+    ]
+    for payload in malformed:
+        with pytest.raises(webcodecs_mod.WebCodecsProtocolError):
+            webcodecs_mod.decode_webcodecs_frame(payload)
+
+
+def test_webcodecs_annexb_avcc_extradata_sps_pps_and_codec_derivation():
+    sps = b"\x67\x64\x00\x29\xac"
+    pps = b"\x68\xee\x3c"
+    idr = b"\x65\x88\x84"
+    annexb = b"\x00\x00\x00\x01" + idr
+    avcc = len(idr).to_bytes(4, "big") + idr
+    extradata = (
+        b"\x01\x64\x00\x29\xff\xe1"
+        + len(sps).to_bytes(2, "big")
+        + sps
+        + b"\x01"
+        + len(pps).to_bytes(2, "big")
+        + pps
+    )
+
+    assert webcodecs_mod.annexb_normalize(annexb) == annexb
+    assert webcodecs_mod.annexb_normalize(avcc) == annexb
+    parsed_sps, parsed_pps = webcodecs_mod.avcc_extradata_to_annexb_nals(extradata)
+    assert parsed_sps == [sps]
+    assert parsed_pps == [pps]
+    injected = webcodecs_mod.prepend_parameter_sets(annexb, parsed_sps, parsed_pps)
+    assert injected == (
+        b"\x00\x00\x00\x01" + sps
+        + b"\x00\x00\x00\x01" + pps
+        + annexb
+    )
+    assert webcodecs_mod.derive_avc1_codec_from_sps(sps) == "avc1.640029"
+
+
+def test_webcodecs_endpoint_requires_session_before_upgrade(monkeypatch):
+    controller, _hass = _controller(surveillance_label="Outside")
+    view = views_mod.MiniAppCameraWebCodecsView(controller)
+
+    with pytest.raises(Exception) as exc:
+        with _MSEWebSocketPatch(
+            monkeypatch,
+            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+        ):
+            asyncio.run(view.get(_mse_request(controller, ""), "camera.driveway"))
+
+    assert exc.value.status == 403
+    assert _CaptureWebSocket.instances == []
+
+
+def test_webcodecs_endpoint_rejects_camera_guard_errors_as_closed_json():
+    controller, hass = _controller(surveillance_label="Outside")
+    token, _session = controller.sessions.create(424242, 12345678)
+    view = views_mod.MiniAppCameraWebCodecsView(controller)
+
+    response = asyncio.run(view.get(_mse_request(controller, token), "camera.unlisted"))
+    assert response.status == 409
+    assert json.loads(response.text) == {"error": "camera_not_allowed"}
+
+    hass.cameras["camera.comelit_entrance"] = FakeCamera(set(), "rtsp://example/live")
+    response = asyncio.run(
+        view.get(_mse_request(controller, token), "camera.comelit_entrance")
+    )
+    assert response.status == 409
+    assert json.loads(response.text) == {"error": "intercom_camera_not_allowed"}
+
+    hass.entity_registry.entities["camera.comelit_gate"] = FakeRegistryEntry(
+        "camera.comelit_gate",
+        "comelit",
+        "comelit_gate_camera",
+        labels={"outside"},
+    )
+    hass.states._values["camera.comelit_gate"] = FakeState("idle")
+    hass.cameras["camera.comelit_gate"] = FakeCamera(set(), "rtsp://example/live")
+    response = asyncio.run(
+        view.get(_mse_request(controller, token), "camera.comelit_gate")
+    )
+    assert json.loads(response.text) == {"error": "intercom_camera_not_allowed"}
+
+    hass.states._values["camera.driveway"] = FakeState("unavailable")
+    response = asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
+    assert json.loads(response.text) == {"error": "camera_unavailable"}
+
+
+def test_webcodecs_invalid_or_missing_start_command_does_not_open_camera(monkeypatch):
+    controller, hass = _controller(surveillance_label="Outside")
+    token, _session = controller.sessions.create(424242, 12345678)
+    source = "rtsp://" + "alpha" + ":" + "bravo" + "@example.invalid/live"
+    camera = FakeCamera(set(), source)
+    hass.cameras["camera.driveway"] = camera
+    view = views_mod.MiniAppCameraWebCodecsView(controller)
+
+    for first in (
+        _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"mse","value":"h264"}'),
+        _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"vp8"}'),
+        _FakeWSMessage(views_mod.WSMsgType.BINARY, b"\x00"),
+    ):
+        with _MSEWebSocketPatch(monkeypatch, first):
+            asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
+        assert _json_texts(_CaptureWebSocket.instances[-1]) == [
+            {"type": "error", "code": "invalid_webcodecs_command"}
+        ]
+    assert camera.stream_source_calls == 0
+
+
+async def _single_webcodecs_unit(_source):
+    yield webcodecs_mod.H264AccessUnit(
+        payload=(
+            b"\x00\x00\x00\x01\x67\x64\x00\x29"
+            b"\x00\x00\x00\x01\x68\xee\x3c"
+            b"\x00\x00\x00\x01\x65\x88"
+        ),
+        keyframe=True,
+        media_pts_us=33333,
+        codec="avc1.640029",
+    )
+
+
+class _AsyncUnitSource:
+    def __init__(self, units):
+        self.units = list(units)
+        self.closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self.units:
+            raise StopAsyncIteration
+        return self.units.pop(0)
+
+    async def aclose(self):
+        self.closed = True
+
+
+async def _single_webcodecs_source(_source):
+    return _AsyncUnitSource([unit async for unit in _single_webcodecs_unit(_source)])
+
+
+def test_webcodecs_view_happy_path_secret_free_logs_and_messages(monkeypatch, caplog):
+    fixture_url = "rtsp://" + "alpha" + ":" + "bravo" + "@example.invalid/live"
+    controller, hass = _controller(surveillance_label="Outside")
+    token, _session = controller.sessions.create(424242, 12345678)
+    hass.cameras["camera.driveway"] = FakeCamera(set(), fixture_url)
+    monkeypatch.setattr(
+        views_mod.webcodecs_mod,
+        "open_h264_access_unit_source",
+        _single_webcodecs_source,
+    )
+    view = views_mod.MiniAppCameraWebCodecsView(controller)
+
+    with caplog.at_level(logging.INFO, logger="custom_components.comelit.miniapp.views"):
+        with _MSEWebSocketPatch(
+            monkeypatch,
+            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+        ):
+            asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
+
+    websocket = _CaptureWebSocket.instances[0]
+    texts = _json_texts(websocket)
+    assert texts[:2] == [
+        {
+            "type": "hello",
+            "protocol": 1,
+            "entity_id": "camera.driveway",
+            "codec": "avc1.640029",
+            "max_unit_bytes": webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES,
+            "session_max_seconds": webcodecs_mod.WEBCODECS_MAX_SESSION_SECONDS,
+            "zero_transcode": True,
+        },
+        {"type": "source"},
+    ]
+    assert texts[-1] == {"type": "eos", "reason": "source_eof"}
+    frame = webcodecs_mod.decode_webcodecs_frame(websocket.binaries[0])
+    assert frame.sequence == 1
+    assert frame.keyframe is True
+    assert frame.pts_valid is True
+    compared = [
+        *websocket.texts,
+        *[record.getMessage() for record in caplog.records],
+    ]
+    _assert_no_fixture_secret(compared)
+
+
+def test_webcodecs_non_rtsp_unit_too_large_duration_and_source_failure(monkeypatch):
+    controller, hass = _controller(surveillance_label="Outside")
+    token, session = controller.sessions.create(424242, 12345678)
+    view = views_mod.MiniAppCameraWebCodecsView(controller)
+
+    hass.cameras["camera.driveway"] = FakeCamera(set(), "http://example.invalid/live")
+    with _MSEWebSocketPatch(
+        monkeypatch,
+        _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+    ):
+        asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
+    assert _json_texts(_CaptureWebSocket.instances[-1]) == [
+        {"type": "error", "code": "source_not_h264_rtsp"}
+    ]
+
+    async def too_large(_source):
+        return _AsyncUnitSource(
+            [
+                webcodecs_mod.H264AccessUnit(
+                    payload=b"x" * (webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES + 1),
+                    keyframe=True,
+                    media_pts_us=1,
+                    codec="avc1.640029",
+                )
+            ]
+        )
+
+    hass.cameras["camera.driveway"] = FakeCamera(set(), "rtsp://192.0.2.10/live")
+    monkeypatch.setattr(
+        views_mod.webcodecs_mod,
+        "open_h264_access_unit_source",
+        too_large,
+    )
+    with _MSEWebSocketPatch(
+        monkeypatch,
+        _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+    ):
+        asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
+    assert _json_texts(_CaptureWebSocket.instances[-1]) == [
+        {"type": "error", "code": "unit_too_large"}
+    ]
+
+    async def failing(_source):
+        raise webcodecs_mod.WebCodecsSourceError("source_open_failed")
+
+    monkeypatch.setattr(
+        views_mod.webcodecs_mod,
+        "open_h264_access_unit_source",
+        failing,
+    )
+    with _MSEWebSocketPatch(
+        monkeypatch,
+        _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+    ):
+        asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
+    assert _json_texts(_CaptureWebSocket.instances[-1]) == [
+        {"type": "error", "code": "source_open_failed"}
+    ]
+
+    async def slow_after_one(_source):
+        class _SlowSource(_AsyncUnitSource):
+            async def __anext__(self):
+                if self.units:
+                    return self.units.pop(0)
+                await asyncio.sleep(1)
+                raise StopAsyncIteration
+
+        return _SlowSource([unit async for unit in _single_webcodecs_unit(_source)])
+
+    session.expires_at = int(time.time()) + 60
+    monkeypatch.setattr(views_mod.webcodecs_mod, "WEBCODECS_MAX_SESSION_SECONDS", 0.01)
+    monkeypatch.setattr(
+        views_mod.webcodecs_mod,
+        "open_h264_access_unit_source",
+        slow_after_one,
+    )
+    with _MSEWebSocketPatch(
+        monkeypatch,
+        _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+    ):
+        asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
+    assert _json_texts(_CaptureWebSocket.instances[-1])[-1] == {
+        "type": "eos",
+        "reason": "duration_limit",
+    }
+
+
+def test_webcodecs_session_limit_and_backlog_cleanup(monkeypatch):
+    controller, hass = _controller(surveillance_label="Outside")
+    token, _session = controller.sessions.create(424242, 12345678)
+    hass.cameras["camera.driveway"] = FakeCamera(set(), "rtsp://192.0.2.10/live")
+    registry = webcodecs_mod.WebCodecsSessionRegistry(max_sessions=1)
+    monkeypatch.setattr(views_mod.webcodecs_mod, "SESSION_REGISTRY", registry)
+    view = views_mod.MiniAppCameraWebCodecsView(controller)
+
+    async def session_limited():
+        lease = await registry.acquire("camera.driveway")
+        try:
+            with _MSEWebSocketPatch(
+                monkeypatch,
+                _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+            ):
+                await view.get(_mse_request(controller, token), "camera.driveway")
+        finally:
+            await lease.release()
+
+    asyncio.run(session_limited())
+    assert _json_texts(_CaptureWebSocket.instances[-1]) == [
+        {"type": "error", "code": "session_limit"}
+    ]
+
+    async def many_units(_source):
+        return _AsyncUnitSource(
+            [
+                webcodecs_mod.H264AccessUnit(
+                    payload=b"\x00\x00\x00\x01\x67\x64\x00\x29"
+                    if index == 0
+                    else b"\x00\x00\x00\x01\x41\x9a",
+                    keyframe=index == 0,
+                    media_pts_us=index * 33333,
+                    codec="avc1.640029",
+                )
+                for index in range(webcodecs_mod.WEBCODECS_MAX_QUEUE_UNITS + 4)
+            ]
+        )
+
+    monkeypatch.setattr(
+        views_mod.webcodecs_mod,
+        "open_h264_access_unit_source",
+        many_units,
+    )
+    with _MSEWebSocketPatch(
+        monkeypatch,
+        _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+    ):
+        _CaptureWebSocket.send_delay = 0.02
+        asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
+    assert {"type": "error", "code": "backlog_exceeded"} in _json_texts(
+        _CaptureWebSocket.instances[-1]
+    )
+    assert registry.active_count() == 0
+
+
+def test_webcodecs_send_connection_error_is_clean_client_close(monkeypatch):
+    controller, hass = _controller(surveillance_label="Outside")
+    token, _session = controller.sessions.create(424242, 12345678)
+    hass.cameras["camera.driveway"] = FakeCamera(set(), "rtsp://192.0.2.10/live")
+    monkeypatch.setattr(
+        views_mod.webcodecs_mod,
+        "open_h264_access_unit_source",
+        _single_webcodecs_source,
+    )
+    view = views_mod.MiniAppCameraWebCodecsView(controller)
+
+    class _ClosingWebSocket(_CaptureWebSocket):
+        async def send_bytes(self, payload):
+            raise ConnectionResetError("closed")
+
+    with _MSEWebSocketPatch(
+        monkeypatch,
+        _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+    ):
+        monkeypatch.setattr(views_mod.web, "WebSocketResponse", _ClosingWebSocket)
+        asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
+
+    websocket = _ClosingWebSocket.instances[-1]
+    assert _json_texts(websocket)[:2] == [
+        {
+            "type": "hello",
+            "protocol": 1,
+            "entity_id": "camera.driveway",
+            "codec": "avc1.640029",
+            "max_unit_bytes": webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES,
+            "session_max_seconds": webcodecs_mod.WEBCODECS_MAX_SESSION_SECONDS,
+            "zero_transcode": True,
+        },
+        {"type": "source"},
+    ]
+    assert websocket.binaries == []
+
+
+def test_h264_access_unit_source_closes_container_once_on_cancel(monkeypatch):
+    close_count = 0
+
+    class _Packet:
+        pts = 1
+        time_base = 1 / 90000
+        is_keyframe = True
+
+        def __bytes__(self):
+            return b"\x00\x00\x00\x01\x67\x64\x00\x29\x00\x00\x00\x01\x65\x88"
+
+    class _CodecContext:
+        name = "h264"
+        extradata = None
+
+    class _Stream:
+        type = "video"
+        codec_context = _CodecContext()
+
+    class _Container:
+        streams = [_Stream()]
+
+        def demux(self, _stream):
+            return iter([_Packet(), _Packet()])
+
+        def close(self):
+            nonlocal close_count
+            close_count += 1
+
+    monkeypatch.setitem(
+        sys.modules,
+        "av",
+        types.SimpleNamespace(open=lambda *args, **kwargs: _Container()),
+    )
+
+    async def immediate_to_thread(func, /, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(webcodecs_mod.asyncio, "to_thread", immediate_to_thread)
+
+    async def run():
+        started = asyncio.Event()
+
+        async def consume():
+            source = await webcodecs_mod.open_h264_access_unit_source(
+                "rtsp://192.0.2.10/live"
+            )
+            try:
+                await source.__anext__()
+                started.set()
+                await asyncio.sleep(10)
+            finally:
+                await source.aclose()
+
+        task = asyncio.create_task(consume())
+        await asyncio.wait_for(started.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    assert close_count == 1
+
+
+def test_webcodecs_zero_transcode_and_no_forbidden_media_paths_static():
+    backend = _read_file("custom_components/comelit/miniapp/webcodecs.py")
+    frontend = _read_file("custom_components/comelit/frontend/miniapp/webcodecs.js")
+    view_slice = _read_file("custom_components/comelit/miniapp/views.py").split(
+        "class MiniAppCameraWebCodecsView", 1
+    )[1].split("class MiniAppCameraDiagnosticsView", 1)[0]
+
+    forbidden_backend = ("decode(", "libx264", "scale=", "async_request_stream", "HLS_PROVIDER")
+    for token in forbidden_backend:
+        assert token not in backend
+        assert token not in view_slice
+    assert "container.demux(video_stream)" in backend
+    assert "import av" in backend
+
+    forbidden_frontend = (
+        "MediaSource",
+        "Hls",
+        "RTCPeerConnection",
+        "/mse",
+        "/webrtc",
+        "button.press",
+        "async_press_door",
+    )
+    for token in forbidden_frontend:
+        assert token not in frontend
+
+
 class _FakeContent:
     def __init__(self, body: bytes):
         self._body = body
@@ -1523,6 +2047,7 @@ class _CaptureWebSocket:
     instances: list["_CaptureWebSocket"] = []
     next_first = _FakeWSMessage("close")
     next_messages: list[object] = []
+    send_delay = 0.0
 
     def __init__(self, *args, **kwargs):
         self.closed = False
@@ -1544,6 +2069,8 @@ class _CaptureWebSocket:
         self.texts.append(json.dumps(payload, separators=(",", ":")))
 
     async def send_bytes(self, payload):
+        if self.__class__.send_delay:
+            await asyncio.sleep(self.__class__.send_delay)
         self.binaries.append(bytes(payload))
 
     async def close(self):
@@ -1604,6 +2131,7 @@ class _MSEWebSocketPatch:
         _CaptureWebSocket.instances = []
         _CaptureWebSocket.next_first = self.first
         _CaptureWebSocket.next_messages = self.messages
+        _CaptureWebSocket.send_delay = 0.0
         self.monkeypatch.setattr(views_mod.web, "WebSocketResponse", _CaptureWebSocket)
         return _CaptureWebSocket
 

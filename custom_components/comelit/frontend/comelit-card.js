@@ -58,6 +58,7 @@ class ComelitCard extends HTMLElement {
     this._selectedCamera = undefined;
     this._viewerGeneration = 0;
     this._viewerElement = undefined;
+    this._webcodecsViewerElement = undefined;
     this._intercomViewerGeneration = 0;
     this._intercomViewerElement = undefined;
     this._intercomViewerOpen = false;
@@ -84,10 +85,17 @@ class ComelitCard extends HTMLElement {
     }
 
     const defaultTab =
-      config.default_tab === "surveillance" ? "surveillance" : "intercom";
+      config.default_tab === "surveillance" || config.default_tab === "webcodecs"
+        ? config.default_tab
+        : "intercom";
+    const webcodecsEnabled = config.webcodecs?.enabled === true;
 
     this._config = {
       ...config,
+      webcodecs: {
+        ...(config.webcodecs || {}),
+        enabled: webcodecsEnabled,
+      },
       surveillance: {
         ...(config.surveillance || {}),
         include: Array.isArray(config.surveillance?.include)
@@ -99,7 +107,8 @@ class ComelitCard extends HTMLElement {
       },
     };
 
-    this._activeTab = defaultTab;
+    this._activeTab =
+      defaultTab === "webcodecs" && !webcodecsEnabled ? "intercom" : defaultTab;
     this._selectedCamera = undefined;
     this._render();
   }
@@ -262,6 +271,10 @@ class ComelitCard extends HTMLElement {
     return result;
   }
 
+  _webcodecsEnabled() {
+    return this._config.webcodecs?.enabled === true;
+  }
+
   _intercomModel() {
     const resolve = (key) => {
       const entry = this._resolveByUniqueId(INTERCOM_UNIQUE_IDS[key]);
@@ -332,6 +345,7 @@ class ComelitCard extends HTMLElement {
 
     this._viewerGeneration += 1;
     this._viewerElement = undefined;
+    this._webcodecsViewerElement = undefined;
     this._intercomViewerGeneration += 1;
     this._intercomViewerElement = undefined;
 
@@ -348,6 +362,10 @@ class ComelitCard extends HTMLElement {
 
     const intercomContent = this._renderIntercom();
     const surveillanceContent = this._renderSurveillance(cameras);
+    const webcodecsEnabled = this._webcodecsEnabled();
+    const webcodecsContent = webcodecsEnabled
+      ? this._renderWebCodecs()
+      : "";
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -363,7 +381,7 @@ class ComelitCard extends HTMLElement {
 
         .tabs {
           display: grid;
-          grid-template-columns: 1fr 1fr;
+          grid-template-columns: repeat(${webcodecsEnabled ? 3 : 2}, 1fr);
           gap: 4px;
           padding: 8px;
           border-bottom: 1px solid var(--divider-color);
@@ -614,6 +632,12 @@ class ComelitCard extends HTMLElement {
             class="tab ${this._activeTab === "surveillance" ? "active" : ""}"
             data-tab="surveillance"
           >Видеонаблюдение</button>
+          ${webcodecsEnabled ? `
+          <button
+            class="tab ${this._activeTab === "webcodecs" ? "active" : ""}"
+            data-tab="webcodecs"
+          >WebCodecs</button>
+          ` : ""}
         </div>
         <div
           class="content tab-content"
@@ -629,6 +653,15 @@ class ComelitCard extends HTMLElement {
         >
           ${surveillanceContent}
         </div>
+        ${webcodecsEnabled ? `
+        <div
+          class="content tab-content"
+          data-tab-panel="webcodecs"
+          ${this._activeTab === "webcodecs" ? "" : "hidden"}
+        >
+          ${webcodecsContent}
+        </div>
+        ` : ""}
       </ha-card>
     `;
 
@@ -646,6 +679,10 @@ class ComelitCard extends HTMLElement {
       this._mountViewer(this._selectedCamera);
     }
 
+    if (this._activeTab === "webcodecs" && webcodecsEnabled) {
+      this._mountWebCodecsViewer(cameras);
+    }
+
     this._updateDynamicState();
   }
 
@@ -659,6 +696,10 @@ class ComelitCard extends HTMLElement {
     }
     if (this._intercomViewerElement) {
       this._intercomViewerElement.hass = this._hass;
+    }
+    if (this._webcodecsViewerElement) {
+      this._webcodecsViewerElement.hass = this._hass;
+      this._webcodecsViewerElement.cameras = this._surveillanceEntities();
     }
 
     for (const button of this.shadowRoot.querySelectorAll("[data-camera]")) {
@@ -812,6 +853,17 @@ class ComelitCard extends HTMLElement {
       <div class="camera-grid">${choices}</div>
       <div id="viewer"></div>
     `;
+  }
+
+  _renderWebCodecs() {
+    if (!customElements.get("miniapp-webcodecs-viewer")) {
+      return `
+        <div class="notice">
+          Экспериментальный WebCodecs модуль доступен только внутри Mini App.
+        </div>
+      `;
+    }
+    return '<miniapp-webcodecs-viewer></miniapp-webcodecs-viewer>';
   }
 
   _renderIntercom() {
@@ -1020,7 +1072,11 @@ class ComelitCard extends HTMLElement {
 
   _setActiveTab(nextTab) {
     if (
-      (nextTab !== "intercom" && nextTab !== "surveillance") ||
+      (
+        nextTab !== "intercom" &&
+        nextTab !== "surveillance" &&
+        !(nextTab === "webcodecs" && this._webcodecsEnabled())
+      ) ||
       nextTab === this._activeTab
     ) {
       return;
@@ -1061,6 +1117,10 @@ class ComelitCard extends HTMLElement {
       ) {
         this._mountIntercomViewer();
       }
+    }
+
+    if (nextTab === "webcodecs") {
+      this._mountWebCodecsViewer(this._surveillanceEntities());
     }
 
     this._updateDynamicState();
@@ -1266,6 +1326,16 @@ class ComelitCard extends HTMLElement {
         `;
       }
     }
+  }
+
+  _mountWebCodecsViewer(cameras) {
+    const target = this.shadowRoot?.querySelector("miniapp-webcodecs-viewer");
+    if (!target || !this._webcodecsEnabled()) {
+      return;
+    }
+    target.cameras = cameras;
+    target.hass = this._hass;
+    this._webcodecsViewerElement = target;
   }
 }
 
