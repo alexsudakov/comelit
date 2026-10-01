@@ -364,6 +364,8 @@ class ComelitCard extends HTMLElement {
     if (call.panel === "entrance" || call.panel === "gate") {
       if (this._selectedIntercomPanel !== call.panel) {
         this._intercomViewerOpen = false;
+        this._intercomViewerMode = "webcodecs";
+        this._intercomViewerFallbackReason = undefined;
       }
       this._selectedIntercomPanel = call.panel;
     }
@@ -1073,6 +1075,8 @@ class ComelitCard extends HTMLElement {
         }
         if (panel !== this._selectedIntercomPanel) {
           this._intercomViewerOpen = false;
+          this._intercomViewerMode = "webcodecs";
+          this._intercomViewerFallbackReason = undefined;
         }
         this._selectedIntercomPanel = panel;
         this._doorActionMessage = undefined;
@@ -1089,6 +1093,10 @@ class ComelitCard extends HTMLElement {
         const camera = this._cameraPresentation(model);
         if (!camera.available || this._selectedIntercomPanel !== "entrance") {
           return;
+        }
+        if (!this._intercomViewerOpen) {
+          this._intercomViewerMode = "webcodecs";
+          this._intercomViewerFallbackReason = undefined;
         }
         this._intercomViewerOpen = !this._intercomViewerOpen;
         this._render();
