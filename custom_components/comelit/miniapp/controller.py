@@ -433,6 +433,11 @@ class ComelitMiniAppController:
         transport = domain_data.get(DATA_MEDIA_TRANSPORTS, {}).get(entry_id)
         if manager is None or transport is None:
             raise MiniAppOperationError("intercom_media_unavailable")
+
+        try:
+            await self._await_webcodecs_manager_cleanup(manager)
+        except MiniAppOperationError as exc:
+            raise MiniAppOperationError("intercom_media_busy") from exc
         if getattr(manager, "phase", None) != "inactive":
             raise MiniAppOperationError("intercom_media_busy")
 
@@ -542,39 +547,12 @@ class ComelitMiniAppController:
         if unregister_name is not None:
             await self.go2rtc.unregister_stream(unregister_name)
 
-    async def _await_webcodecs_entrance_cleanup(
-        self,
-        entity_id: str,
-    ) -> None:
-        """Wait only for an in-flight Entrance WebCodecs teardown.
+    async def _await_webcodecs_manager_cleanup(self, manager: Any) -> None:
+        """Synchronize with one in-flight miniapp_webcodecs teardown.
 
-        This is a local ownership barrier, not a media retry. It prevents the
-        HLS fallback from creating a second Comelit session while the
-        miniapp_webcodecs lease is still stopping.
+        Waiting is a local ownership barrier only. It never re-sends or retries
+        a Comelit operation.
         """
-        registry = er.async_get(self.hass)
-        registry_entry = registry.async_get(entity_id)
-        if (
-            registry_entry is None
-            or registry_entry.platform != DOMAIN
-            or registry_entry.unique_id != ENTRANCE_CAMERA_UNIQUE_ID
-        ):
-            return
-
-        config_entry = self._entry
-        entry_id = (
-            getattr(config_entry, "entry_id", None)
-            if config_entry is not None
-            else None
-        )
-        if not isinstance(entry_id, str) or not entry_id:
-            return
-
-        manager = (
-            self.hass.data.get(DOMAIN, {})
-            .get(DATA_MEDIA_SESSIONS, {})
-            .get(entry_id)
-        )
         status_getter = getattr(manager, "status", None)
         if manager is None or not callable(status_getter):
             return
@@ -614,6 +592,36 @@ class ComelitMiniAppController:
             if remaining <= 0:
                 raise MiniAppOperationError("webcodecs_cleanup_timeout")
             await asyncio.sleep(min(0.05, remaining))
+
+    async def _await_webcodecs_entrance_cleanup(
+        self,
+        entity_id: str,
+    ) -> None:
+        """Wait for prior Entrance WebCodecs ownership before HLS fallback."""
+        registry = er.async_get(self.hass)
+        registry_entry = registry.async_get(entity_id)
+        if (
+            registry_entry is None
+            or registry_entry.platform != DOMAIN
+            or registry_entry.unique_id != ENTRANCE_CAMERA_UNIQUE_ID
+        ):
+            return
+
+        config_entry = self._entry
+        entry_id = (
+            getattr(config_entry, "entry_id", None)
+            if config_entry is not None
+            else None
+        )
+        if not isinstance(entry_id, str) or not entry_id:
+            return
+
+        manager = (
+            self.hass.data.get(DOMAIN, {})
+            .get(DATA_MEDIA_SESSIONS, {})
+            .get(entry_id)
+        )
+        await self._await_webcodecs_manager_cleanup(manager)
 
     async def async_create_camera_media(
         self,

@@ -2631,3 +2631,39 @@ def test_entrance_hls_fallback_fails_closed_on_media_error(monkeypatch):
         )
 
     assert stream_calls == []
+
+
+def test_webcodecs_entrance_reopen_waits_for_previous_cleanup(monkeypatch):
+    controller, hass = _controller(surveillance_label="Outside")
+    manager, _transport = _install_webcodecs_entrance_runtime(hass)
+    manager.phase = "stopping"
+    manager.active = False
+    manager.status = lambda: {
+        "phase": manager.phase,
+        "leases": {},
+    }
+    acquire_phases = []
+    original_acquire = manager.async_acquire
+
+    async def guarded_acquire(*, panel, reason):
+        acquire_phases.append(manager.phase)
+        return await original_acquire(panel=panel, reason=reason)
+
+    manager.async_acquire = guarded_acquire
+
+    async def run():
+        async def finish_cleanup():
+            await asyncio.sleep(0)
+            manager.phase = "inactive"
+
+        cleanup = asyncio.create_task(finish_cleanup())
+        lease = await controller.acquire_webcodecs_entrance(
+            controller.get_webcodecs_camera_target("camera.comelit_entrance")
+        )
+        await cleanup
+        await lease.release()
+
+    asyncio.run(run())
+    assert acquire_phases == ["inactive"]
+    assert manager.acquire_calls == [("entrance", "miniapp_webcodecs")]
+    assert manager.release_calls == ["miniapp_webcodecs"]

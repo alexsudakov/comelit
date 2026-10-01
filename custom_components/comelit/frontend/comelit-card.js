@@ -69,6 +69,7 @@ class ComelitCard extends HTMLElement {
     this._doorActionMessage = undefined;
     this._rendered = false;
     this._focusedCallEventId = undefined;
+    this._forceFullRender = false;
   }
 
   static getStubConfig() {
@@ -117,6 +118,7 @@ class ComelitCard extends HTMLElement {
     this._selectedCamera = undefined;
     this._intercomViewerMode = "webcodecs";
     this._intercomViewerFallbackReason = undefined;
+    this._forceFullRender = true;
     this._render();
   }
 
@@ -372,8 +374,34 @@ class ComelitCard extends HTMLElement {
     return true;
   }
 
+  _canPreserveIntercomWebCodecsViewer() {
+    const viewer = this._intercomViewerElement;
+    const target = this.shadowRoot?.querySelector("#intercom-viewer");
+    return (
+      this._rendered &&
+      this._activeTab === "intercom" &&
+      this._intercomViewerOpen &&
+      this._selectedIntercomPanel === "entrance" &&
+      this._intercomViewerMode === "webcodecs" &&
+      this._webcodecsIntercomPrimary() &&
+      viewer?.tagName?.toLowerCase() === "miniapp-webcodecs-viewer" &&
+      viewer.isConnected &&
+      target?.contains(viewer)
+    );
+  }
+
   _render() {
     if (!this.shadowRoot) {
+      return;
+    }
+
+    const forceFullRender = this._forceFullRender;
+    this._forceFullRender = false;
+    if (!forceFullRender && this._canPreserveIntercomWebCodecsViewer()) {
+      // Home Assistant state refreshes and same-panel call updates must not
+      // destroy a healthy WSS session. Dynamic text/buttons can be refreshed
+      // in place without replacing the embedded viewer node.
+      this._updateDynamicState();
       return;
     }
 

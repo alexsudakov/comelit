@@ -492,6 +492,28 @@ async function main() {
     });
     await page.waitForFunction(() => window.__webcodecs.drawCount === 3);
 
+    const preservedViewer = await page.evaluate(() => {
+      const card = document.getElementById("card");
+      const before = card.shadowRoot.querySelector(
+        "#intercom-viewer miniapp-webcodecs-viewer",
+      );
+      window.__webcodecs.productionViewer = before;
+      card._render();
+      const after = card.shadowRoot.querySelector(
+        "#intercom-viewer miniapp-webcodecs-viewer",
+      );
+      return {
+        sameNode: before === after,
+        connected: Boolean(after?.isConnected),
+        sockets: window.__webcodecs.sockets.length,
+      };
+    });
+    assert.deepEqual(preservedViewer, {
+      sameNode: true,
+      connected: true,
+      sockets: 3,
+    });
+
     await page.evaluate(() => {
       window.__webcodecs.sockets[2].emitText({
         type: "error",
