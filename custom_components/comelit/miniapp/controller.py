@@ -439,7 +439,15 @@ class ComelitMiniAppController:
         try:
             await manager.async_acquire(panel="entrance", reason=reason)
         except Exception as exc:
-            raise MiniAppOperationError("intercom_media_start_failed") from exc
+            code = (
+                "intercom_media_busy"
+                if str(exc) in {
+                    "attached_inbound_media_busy",
+                    "media_session_transition_busy",
+                }
+                else "intercom_media_start_failed"
+            )
+            raise MiniAppOperationError(code) from exc
 
         lease = MiniAppWebCodecsEntranceLease(
             manager=manager,
