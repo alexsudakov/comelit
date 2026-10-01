@@ -1270,6 +1270,97 @@ class ComelitCard extends HTMLElement {
     const generation = ++this._intercomViewerGeneration;
     target.innerHTML = '<div class="notice compact">Подключение камеры подъезда…</div>';
 
+    if (
+      this._webcodecsIntercomPrimary() &&
+      this._intercomViewerMode !== "legacy" &&
+      customElements.get("miniapp-webcodecs-viewer")
+    ) {
+      this._mountIntercomWebCodecsViewer(target, camera, generation);
+      return;
+    }
+
+    await this._mountLegacyIntercomViewer(target, camera, generation);
+  }
+
+  _mountIntercomWebCodecsViewer(target, camera, generation) {
+    const viewer = document.createElement("miniapp-webcodecs-viewer");
+    viewer.embedded = true;
+    viewer.cameras = [{
+      entityId: camera.entityId,
+      name: "Камера подъезда",
+      available: camera.available,
+      kind: "intercom_entrance",
+    }];
+    viewer.hass = this._hass;
+    viewer.autoStart = true;
+    viewer.addEventListener("comelit-webcodecs-terminal", (event) => {
+      if (
+        generation !== this._intercomViewerGeneration ||
+        !this._intercomViewerOpen ||
+        this._selectedIntercomPanel !== "entrance"
+      ) {
+        return;
+      }
+      this._intercomViewerFallbackReason =
+        String(event?.detail?.reason || "webcodecs_error");
+      this._showIntercomLegacyFallback(generation);
+    });
+
+    if (
+      generation !== this._intercomViewerGeneration ||
+      !this._intercomViewerOpen ||
+      this._selectedIntercomPanel !== "entrance"
+    ) {
+      return;
+    }
+
+    this._intercomViewerElement = viewer;
+    target.replaceChildren(viewer);
+  }
+
+  _showIntercomLegacyFallback(generation) {
+    if (
+      generation !== this._intercomViewerGeneration ||
+      !this._intercomViewerOpen ||
+      this._selectedIntercomPanel !== "entrance"
+    ) {
+      return;
+    }
+    const currentTarget = this.shadowRoot?.querySelector("#intercom-viewer");
+    if (!currentTarget) {
+      return;
+    }
+
+    this._intercomViewerElement = undefined;
+    currentTarget.innerHTML = `
+      <div class="notice compact error">
+        Быстрый WebCodecs-поток завершился:
+        ${escapeHtml(this._intercomViewerFallbackReason || "ошибка")}.
+        <div style="margin-top: 10px">
+          <button class="secondary-action" data-intercom-legacy-fallback>
+            Открыть резервный HLS
+          </button>
+        </div>
+      </div>
+    `;
+
+    currentTarget
+      .querySelector("[data-intercom-legacy-fallback]")
+      ?.addEventListener("click", () => {
+        if (
+          generation !== this._intercomViewerGeneration ||
+          !this._intercomViewerOpen ||
+          this._selectedIntercomPanel !== "entrance"
+        ) {
+          return;
+        }
+        this._intercomViewerMode = "legacy";
+        this._intercomViewerFallbackReason = undefined;
+        this._mountIntercomViewer();
+      });
+  }
+
+  async _mountLegacyIntercomViewer(target, camera, generation) {
     try {
       if (typeof window.loadCardHelpers !== "function") {
         throw new Error("loadCardHelpers unavailable");
