@@ -2,8 +2,8 @@
   "use strict";
 
   const TAG = "miniapp-webcodecs-viewer";
-  const PROTOCOL_VERSION = 1;
-  const HEADER_BYTES = 20;
+  const PROTOCOL_VERSION = 2;
+  const HEADER_BYTES = 36;
   const FLAG_KEY = 1;
   const FLAG_DELTA = 2;
   const FLAG_PTS_VALID = 4;
@@ -40,6 +40,11 @@
     return String(value);
   }
 
+  function readUint64(view, offset) {
+    return view.getUint32(offset, false) * 4294967296 +
+      view.getUint32(offset + 4, false);
+  }
+
   function parseFrame(buffer) {
     if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < HEADER_BYTES) {
       throw new Error("malformed_frame");
@@ -49,9 +54,10 @@
     const flags = view.getUint8(1);
     const reserved = view.getUint16(2, false);
     const sequence = view.getUint32(4, false);
-    const high = view.getUint32(8, false);
-    const low = view.getUint32(12, false);
-    const payloadLength = view.getUint32(16, false);
+    const pts = readUint64(view, 8);
+    const sourceElapsedUs = readUint64(view, 16);
+    const sendElapsedUs = readUint64(view, 24);
+    const payloadLength = view.getUint32(32, false);
     if (version !== PROTOCOL_VERSION || reserved !== 0) {
       throw new Error("malformed_frame");
     }
@@ -66,12 +72,13 @@
     if (payloadLength !== buffer.byteLength - HEADER_BYTES) {
       throw new Error("malformed_frame");
     }
-    const pts = high * 4294967296 + low;
     return {
       sequence,
       type: key ? "key" : "delta",
       ptsValid: Boolean(flags & FLAG_PTS_VALID),
       pts,
+      sourceElapsedUs,
+      sendElapsedUs,
       payload: buffer.slice(HEADER_BYTES),
     };
   }
@@ -81,8 +88,10 @@
       super();
       this.attachShadow({mode: "open"});
       this._cameras = [];
+      this._cameraFingerprint = "";
       this._hass = null;
       this._selected = "";
+      this._rendered = false;
       this._socket = null;
       this._decoder = null;
       this._running = false;
@@ -96,16 +105,23 @@
     }
 
     set cameras(value) {
-      this._cameras = Array.isArray(value)
+      const next = Array.isArray(value)
         ? value.filter((camera) => {
             const entityId = safeEntityId(camera.entityId || camera.entity_id);
             return entityId && !/comelit_(entrance|gate|intercom)/i.test(entityId);
           })
         : [];
+      const nextFingerprint = this._cameraListFingerprint(next);
       if (this._running) {
         this._refreshCounters();
         return;
       }
+      if (nextFingerprint === this._cameraFingerprint && this._rendered) {
+        this._syncControls();
+        return;
+      }
+      this._cameras = next;
+      this._cameraFingerprint = nextFingerprint;
       if (!this._selected || !this._cameras.some((camera) => this._cameraId(camera) === this._selected)) {
         this._selected = this._cameras.length ? this._cameraId(this._cameras[0]) : "";
       }
@@ -114,15 +130,17 @@
 
     set hass(value) {
       this._hass = value;
-      if (this._running) {
-        this._refreshCounters();
+      if (!this._rendered) {
+        this._render();
         return;
       }
-      this._render();
+      this._refreshCounters();
     }
 
     connectedCallback() {
-      this._render();
+      if (!this._rendered) {
+        this._render();
+      }
     }
 
     disconnectedCallback() {
@@ -133,15 +151,35 @@
       return safeEntityId(camera?.entityId || camera?.entity_id);
     }
 
+    _cameraName(camera) {
+      const entityId = this._cameraId(camera);
+      return String(
+        camera?.name ||
+        this._hass?.states?.[entityId]?.attributes?.friendly_name ||
+        entityId,
+      );
+    }
+
+    _cameraListFingerprint(cameras) {
+      return cameras
+        .map((camera) => this._cameraId(camera) + "\u0000" + this._cameraName(camera))
+        .join("\u0001");
+    }
+
     _newStats() {
       return {
         startedAt: 0,
         wsOpenAt: null,
-        sourceAt: null,
+        sourceOpenAt: null,
+        firstSourcePacketAt: null,
+        sourceOpenServerMs: null,
+        firstSourcePacketServerMs: null,
         firstBinaryAt: null,
         firstDecodedAt: null,
         firstReceiveAt: null,
         firstPts: null,
+        firstSourceElapsedUs: null,
+        firstSendElapsedUs: null,
         codec: "n/a",
         units: 0,
         frames: 0,
@@ -152,7 +190,9 @@
         decodeMs: [],
         receiveToDrawMs: [],
         interarrivalMs: [],
-        lagMs: [],
+        sourcePtsDriftMs: [],
+        serverQueueDriftMs: [],
+        transportDriftMs: [],
         lastReceiveAt: null,
         codedSize: "n/a",
         visibleSize: "n/a",
@@ -171,7 +211,7 @@
       }
       const options = this._cameras.map((camera) => {
         const entityId = this._cameraId(camera);
-        const name = camera.name || this._hass?.states?.[entityId]?.attributes?.friendly_name || entityId;
+        const name = this._cameraName(camera);
         return `<option value="${entityId}" ${entityId === this._selected ? "selected" : ""}>${name}</option>`;
       }).join("");
       this.shadowRoot.innerHTML = `
@@ -214,6 +254,26 @@
       });
       this.shadowRoot.querySelector("[data-start]")?.addEventListener("click", () => this._start());
       this.shadowRoot.querySelector("[data-stop]")?.addEventListener("click", () => this._stop("manual_stop", true));
+      this._rendered = true;
+      this._syncControls();
+    }
+
+    _syncControls() {
+      const select = this.shadowRoot?.querySelector("[data-camera]");
+      if (select) {
+        select.disabled = this._running;
+        if (!this._running && this._selected && select.value !== this._selected) {
+          select.value = this._selected;
+        }
+      }
+      const start = this.shadowRoot?.querySelector("[data-start]");
+      if (start) {
+        start.disabled = this._running;
+      }
+      const stop = this.shadowRoot?.querySelector("[data-stop]");
+      if (stop) {
+        stop.disabled = !this._running;
+      }
     }
 
     _setStatus(text) {
@@ -258,7 +318,13 @@
       this._pendingDecodeStarts = [];
       this._pendingBinary = [];
       this._stats.startedAt = performance.now();
-      this._render();
+      const result = this.shadowRoot?.querySelector("[data-result]");
+      if (result) {
+        result.textContent = "";
+        result.scrollTop = 0;
+      }
+      this._syncControls();
+      this._refreshCounters();
       this._setStatus("подключение");
 
       const scheme = location.protocol === "https:" ? "wss:" : "ws:";
@@ -301,6 +367,11 @@
         return;
       }
       if (message.type === "hello") {
+        if (Number(message.protocol) !== PROTOCOL_VERSION) {
+          this._stats.error = "protocol_mismatch";
+          this._stop("protocol_mismatch", true);
+          return;
+        }
         this._stats.codec = String(message.codec || "n/a");
         if (Object.prototype.hasOwnProperty.call(message, "zero_transcode")) {
           this._stats.zeroTranscode = message.zero_transcode === true;
@@ -330,8 +401,21 @@
         this._refreshCounters();
         return;
       }
-      if (message.type === "source") {
-        this._stats.sourceAt = performance.now();
+      if (message.type === "source_open") {
+        if (this._stats.sourceOpenAt === null) {
+          this._stats.sourceOpenAt = performance.now();
+          const elapsed = Number(message.server_elapsed_ms);
+          this._stats.sourceOpenServerMs = Number.isFinite(elapsed) ? elapsed : null;
+        }
+        this._setStatus("источник открыт");
+        return;
+      }
+      if (message.type === "source_packet") {
+        if (this._stats.firstSourcePacketAt === null) {
+          this._stats.firstSourcePacketAt = performance.now();
+          const elapsed = Number(message.server_elapsed_ms);
+          this._stats.firstSourcePacketServerMs = Number.isFinite(elapsed) ? elapsed : null;
+        }
         this._setStatus("получение H.264");
         return;
       }
@@ -374,11 +458,23 @@
       if (parsed.ptsValid && this._stats.firstPts === null) {
         this._stats.firstPts = parsed.pts;
       }
-      if (parsed.ptsValid && this._stats.firstPts !== null && this._stats.firstReceiveAt !== null) {
-        const arrivalElapsed = now - this._stats.firstReceiveAt;
-        const mediaElapsed = (parsed.pts - this._stats.firstPts) / 1000;
-        this._stats.lagMs.push(arrivalElapsed - mediaElapsed);
+      if (this._stats.firstSourceElapsedUs === null) {
+        this._stats.firstSourceElapsedUs = parsed.sourceElapsedUs;
       }
+      if (this._stats.firstSendElapsedUs === null) {
+        this._stats.firstSendElapsedUs = parsed.sendElapsedUs;
+      }
+      const arrivalElapsed = now - this._stats.firstReceiveAt;
+      const sourceElapsed =
+        (parsed.sourceElapsedUs - this._stats.firstSourceElapsedUs) / 1000;
+      const sendElapsed =
+        (parsed.sendElapsedUs - this._stats.firstSendElapsedUs) / 1000;
+      if (parsed.ptsValid && this._stats.firstPts !== null) {
+        const mediaElapsed = (parsed.pts - this._stats.firstPts) / 1000;
+        this._stats.sourcePtsDriftMs.push(sourceElapsed - mediaElapsed);
+      }
+      this._stats.serverQueueDriftMs.push(sendElapsed - sourceElapsed);
+      this._stats.transportDriftMs.push(arrivalElapsed - sendElapsed);
       if (this._stats.lastSequence && parsed.sequence !== this._stats.lastSequence + 1) {
         this._stats.gaps += 1;
       }
@@ -490,7 +586,7 @@
       if (emit) {
         this._emitFinal(reason);
       }
-      this._render();
+      this._syncControls();
     }
 
     _emitFinal(reason) {
@@ -514,19 +610,38 @@
         !s.error &&
         cleanStop
       );
+      const sourceStartupMs =
+        s.sourceOpenAt !== null && s.firstSourcePacketAt !== null
+          ? s.firstSourcePacketAt - s.sourceOpenAt
+          : null;
+      const sourcePacketToBinaryMs =
+        s.firstSourcePacketAt !== null && s.firstBinaryAt !== null
+          ? s.firstBinaryAt - s.firstSourcePacketAt
+          : null;
+      const binaryToDecodeMs =
+        s.firstBinaryAt !== null && s.firstDecodedAt !== null
+          ? s.firstDecodedAt - s.firstBinaryAt
+          : null;
       const block = [
         "=== COMELIT MINIAPP WEBCODECS LIVE CANARY ===",
         `RESULT=${pass ? "PASS" : "FAIL"}`,
+        `FUNCTIONAL_PASS=${pass ? "true" : "false"}`,
+        "TRANSPORT_BACKLOG_OBSERVED=unknown",
         `ENTITY_ID=${safeEntityId(this._selected) || "n/a"}`,
         `DURATION_S=${fmt(duration)}`,
         `CODEC=${s.codec}`,
         `ZERO_TRANSCODE=${s.zeroTranscode === null ? "n/a" : s.zeroTranscode ? "true" : "false"}`,
         "",
         `WS_CONNECT_MS=${s.wsOpenAt ? fmt(s.wsOpenAt - s.startedAt) : "n/a"}`,
-        `SOURCE_OPEN_MS=${s.sourceAt ? fmt(s.sourceAt - s.startedAt) : "n/a"}`,
-        `FIRST_SOURCE_PACKET_MS=${s.sourceAt ? fmt(s.sourceAt - s.startedAt) : "n/a"}`,
+        `SOURCE_OPEN_MS=${s.sourceOpenAt !== null ? fmt(s.sourceOpenAt - s.startedAt) : "n/a"}`,
+        `FIRST_SOURCE_PACKET_MS=${s.firstSourcePacketAt !== null ? fmt(s.firstSourcePacketAt - s.startedAt) : "n/a"}`,
         `FIRST_BINARY_MS=${s.firstBinaryAt ? fmt(s.firstBinaryAt - s.startedAt) : "n/a"}`,
         `FIRST_DECODED_FRAME_MS=${s.firstDecodedAt ? fmt(s.firstDecodedAt - s.startedAt) : "n/a"}`,
+        `SOURCE_OPEN_SERVER_MS=${fmt(s.sourceOpenServerMs)}`,
+        `FIRST_SOURCE_PACKET_SERVER_MS=${fmt(s.firstSourcePacketServerMs)}`,
+        `SOURCE_STARTUP_MS=${fmt(sourceStartupMs)}`,
+        `SOURCE_PACKET_TO_BINARY_MS=${fmt(sourcePacketToBinaryMs)}`,
+        `BINARY_TO_DECODE_MS=${fmt(binaryToDecodeMs)}`,
         "",
         `UNITS_RECEIVED=${s.units}`,
         `FRAMES_DECODED=${s.frames}`,
@@ -542,9 +657,15 @@
         `INTERARRIVAL_MAX_MS=${maxValue(s.interarrivalMs)}`,
         "",
         `MAX_DECODE_QUEUE=${s.maxDecodeQueue}`,
-        `ACCUMULATED_LAG_MS=${s.lagMs.length ? fmt(s.lagMs[s.lagMs.length - 1]) : "n/a"}`,
-        `ACCUMULATED_LAG_P95_MS=${percentile(s.lagMs, 0.95)}`,
-        `ACCUMULATED_LAG_MAX_MS=${maxValue(s.lagMs)}`,
+        `SOURCE_PTS_DRIFT_MS=${s.sourcePtsDriftMs.length ? fmt(s.sourcePtsDriftMs[s.sourcePtsDriftMs.length - 1]) : "n/a"}`,
+        `SOURCE_PTS_DRIFT_P95_MS=${percentile(s.sourcePtsDriftMs, 0.95)}`,
+        `SOURCE_PTS_DRIFT_MAX_MS=${maxValue(s.sourcePtsDriftMs)}`,
+        `SERVER_QUEUE_DRIFT_MS=${s.serverQueueDriftMs.length ? fmt(s.serverQueueDriftMs[s.serverQueueDriftMs.length - 1]) : "n/a"}`,
+        `SERVER_QUEUE_DRIFT_P95_MS=${percentile(s.serverQueueDriftMs, 0.95)}`,
+        `SERVER_QUEUE_DRIFT_MAX_MS=${maxValue(s.serverQueueDriftMs)}`,
+        `TRANSPORT_DRIFT_MS=${s.transportDriftMs.length ? fmt(s.transportDriftMs[s.transportDriftMs.length - 1]) : "n/a"}`,
+        `TRANSPORT_DRIFT_P95_MS=${percentile(s.transportDriftMs, 0.95)}`,
+        `TRANSPORT_DRIFT_MAX_MS=${maxValue(s.transportDriftMs)}`,
         "",
         `CODED_SIZE=${s.codedSize}`,
         `VISIBLE_SIZE=${s.visibleSize}`,

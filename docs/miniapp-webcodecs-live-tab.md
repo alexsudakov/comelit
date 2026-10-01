@@ -101,23 +101,31 @@ source_not_h264_rtsp
 
 ## Binary Framing
 
-Every binary WebSocket message is one access unit:
+Every binary WebSocket message is one access unit. Protocol v2 separates the
+camera media clock from Home Assistant receive/send monotonic clocks:
 
 ```text
 offset  size  field
-0       1     uint8   protocol_version = 1
+0       1     uint8   protocol_version = 2
 1       1     uint8   flags: bit0=KEY, bit1=DELTA, bit2=PTS_VALID
 2       2     uint16  reserved = 0
 4       4     uint32  sequence
 8       8     uint64  media_pts_us
-16      4     uint32  payload_length
-20      N     bytes   H.264 Annex-B access unit
+16      8     uint64  source_elapsed_us
+24      8     uint64  send_elapsed_us
+32      4     uint32  payload_length
+36      N     bytes   H.264 Annex-B access unit
 ```
+
+`source_elapsed_us` is measured from the first H.264 access unit received by
+the HA adapter. `send_elapsed_us` is measured from the first binary send. Both
+use the HA monotonic clock and therefore require no wall-clock synchronization
+with the phone.
 
 Constants:
 
 ```text
-WEBCODECS_HEADER_BYTES=20
+WEBCODECS_HEADER_BYTES=36
 WEBCODECS_MAX_UNIT_BYTES=1048576
 WEBCODECS_MAX_QUEUE_UNITS=48
 WEBCODECS_MAX_QUEUE_BYTES=3145728
@@ -134,8 +142,9 @@ payloads.
 Text messages from server to browser are closed:
 
 ```text
+source_open
+source_packet
 hello
-source
 error
 eos
 ```
@@ -163,6 +172,7 @@ HA log events are closed:
 ```text
 session_open
 source_resolved
+source_open
 first_source_packet
 first_binary
 unit_too_large
@@ -216,8 +226,11 @@ PROVEN_OFFLINE: a Playwright mock verifies support probing, binary frame
 parsing, `EncodedVideoChunk` creation, decoder output drawing to canvas, frame
 close, cleanup on Stop, and final canary block generation.
 
-NOT_PROVEN: real H.264 WebCodecs decode on Telegram Android WebView. That is
-the purpose of the protected production canary.
+OBSERVED: Telegram Android WebView supports the required WebCodecs APIs and
+decoded a real synthetic Annex-B H.264 frame during the manual capability
+canary. The first 1.7.24 ordinary-camera live run also decoded 599/599 H.264
+access units from `camera.dvor_1` with zero sequence gaps and visually smooth
+playback.
 
 The client reports `codedWidth`/`codedHeight`, `visibleRect`, and
 `displayWidth`/`displayHeight` separately. It does not enforce exact dimensions.
@@ -227,30 +240,71 @@ The client reports `codedWidth`/`codedHeight`, `visibleRect`, and
 The tab measures network/transport/decoder behavior, not physical
 glass-to-glass latency.
 
-`ACCUMULATED_LAG` uses only the browser `performance.now()` time base plus media
-PTS deltas:
+The 1.7.24 field named `ACCUMULATED_LAG` mixed camera/PyAV PTS progression
+with browser arrival progression and therefore was not a valid WSS/CloudPub
+backlog metric. The first live run reported roughly 15 seconds in that field
+while simultaneously showing 599/599 decoded frames, zero sequence gaps, no
+backlog stop, and visually smooth playback. That value is retained only as
+historical evidence and is replaced by protocol-v2 drift domains.
+
+Protocol v2 reports:
 
 ```text
-arrival_elapsed = client_receive_time - first_client_receive_time
-media_elapsed   = current_media_pts - first_media_pts
-lag             = arrival_elapsed - media_elapsed
+media_elapsed =
+    current_media_pts - first_media_pts
+
+source_elapsed =
+    current_source_elapsed - first_source_elapsed
+
+send_elapsed =
+    current_send_elapsed - first_send_elapsed
+
+arrival_elapsed =
+    client_receive_time - first_client_receive_time
+
+SOURCE_PTS_DRIFT =
+    source_elapsed - media_elapsed
+
+SERVER_QUEUE_DRIFT =
+    send_elapsed - source_elapsed
+
+TRANSPORT_DRIFT =
+    arrival_elapsed - send_elapsed
 ```
 
-If PTS is invalid, accumulated lag is `n/a`.
+`SOURCE_PTS_DRIFT` shows divergence between camera media PTS and the HA
+monotonic receive cadence.
+
+`SERVER_QUEUE_DRIFT` shows relative growth between receipt of an AU by HA and
+the point at which that AU begins its WebSocket send.
+
+`TRANSPORT_DRIFT` is the metric relevant to WSS/CloudPub accumulation. It
+compares client receive progression with the HA send progression and requires
+no synchronized wall clocks.
+
+No hard latency threshold is encoded in the canary. Functional PASS is reported
+separately from `TRANSPORT_BACKLOG_OBSERVED`; the latter remains `unknown`
+until the measured drift is interpreted after a production run.
 
 `DECODE_*` measures from the timestamp immediately before `VideoDecoder.decode`
 for an access unit to the corresponding `VideoDecoder` output callback. The
 client pairs decode calls and output callbacks with a FIFO because this canary
-expects decoder output in submitted access-unit order; it does not report the
-old synchronous `decode()` call overhead.
+expects decoder output in submitted access-unit order.
 
 `RECEIVE_TO_DRAW_*` measures the broader client-side post-receive contribution
 from binary message receipt to `VideoFrame` draw callback.
 
-`SOURCE_OPEN_MS` and `FIRST_SOURCE_PACKET_MS` are equivalent in the current
-protocol by construction: the server sends `hello` and `source` only when the
-first H.264 access unit is available, then immediately sends that first binary
-message. No separate source-open marker exists yet.
+Startup milestones are now distinct:
+
+- `SOURCE_OPEN_MS`: client-observed receipt of the control marker emitted
+  after `H264AccessUnitSource.open()` succeeds;
+- `FIRST_SOURCE_PACKET_MS`: client-observed receipt of the first real H.264 AU
+  marker;
+- `FIRST_BINARY_MS`: first binary AU received by the browser;
+- `FIRST_DECODED_FRAME_MS`: first `VideoFrame` output.
+
+The block also reports `SOURCE_STARTUP_MS`,
+`SOURCE_PACKET_TO_BINARY_MS`, and `BINARY_TO_DECODE_MS`.
 
 ## Canary Protocol
 
@@ -294,6 +348,48 @@ DOOR_ACTIONS=0
 GATE_ACTIONS=0
 ```
 
+
+## 1.7.24 Production Evidence And Corrective
+
+OBSERVED on 2026-10-01, first bounded live run:
+
+```text
+ENTITY_ID=camera.dvor_1
+RESULT=PASS
+ZERO_TRANSCODE=true
+UNITS_RECEIVED=599
+FRAMES_DECODED=599
+KEYFRAMES_RECEIVED=12
+SEQUENCE_GAPS=0
+WS_CONNECT_MS=156.3
+FIRST_DECODED_FRAME_MS=5784.6
+DECODE_P50_MS=5.3
+DECODE_P95_MS=16.4
+MAX_DECODE_QUEUE=14
+BACKLOG_STOP=false
+DROPPED_UNITS=0
+```
+
+User observation: the video appeared quickly after source startup and played
+smoothly without visible stutter.
+
+The intended `camera.parking_6048` target was not actually selected. The run
+used `camera.dvor_1` because the WebCodecs viewer DOM was being rebuilt during
+periodic Mini App HA-state refresh. That rebuild closed the select dropdown and
+reset result scrolling.
+
+PROVEN_STATIC root cause: `host.js` refreshes HA state periodically;
+`comelit-card` forwards `hass` and `cameras` into the WebCodecs viewer; the
+1.7.24 viewer setters performed a full `shadowRoot.innerHTML` render while
+idle. The corrective keeps the DOM stable for semantically unchanged camera
+lists, preserves selection/result scroll/last frame across background refresh,
+and updates controls/counters in place.
+
+The 1.7.24 `ACCUMULATED_LAG≈15s` observation is not interpreted as network
+delay because its definition mixed camera PTS with browser arrival time. The
+v2 timing fields above replace that ambiguity before the next production
+architecture decision.
+
 ## Deferred
 
 - Audio.
@@ -307,8 +403,6 @@ GATE_ACTIONS=0
 
 ## Not Proven Offline
 
-- Real Telegram Android WebView H.264 decode.
-- Real camera compatibility with Annex-B WebCodecs input.
-- PyAV availability in the owner production HA runtime.
-- Actual end-to-end WSS performance over the owner's phone/network.
+- Corrected protocol-v2 `TRANSPORT_DRIFT` behavior on the owner's phone/network.
+- A clean 60-second canary with the intended `camera.parking_6048` target.
 - Whether this path should replace any production playback path.

@@ -119,16 +119,20 @@ async function main() {
 
       window.__frame = () => {
         const payload = new Uint8Array([0, 0, 0, 1, 0x65, 0x88]);
-        const buffer = new ArrayBuffer(20 + payload.length);
+        const buffer = new ArrayBuffer(36 + payload.length);
         const view = new DataView(buffer);
-        view.setUint8(0, 1);
+        view.setUint8(0, 2);
         view.setUint8(1, 1 | 4);
         view.setUint16(2, 0, false);
         view.setUint32(4, 1, false);
         view.setUint32(8, 0, false);
         view.setUint32(12, 33333, false);
-        view.setUint32(16, payload.length, false);
-        new Uint8Array(buffer, 20).set(payload);
+        view.setUint32(16, 0, false);
+        view.setUint32(20, 0, false);
+        view.setUint32(24, 0, false);
+        view.setUint32(28, 0, false);
+        view.setUint32(32, payload.length, false);
+        new Uint8Array(buffer, 36).set(payload);
         return buffer;
       };
     });
@@ -140,13 +144,17 @@ async function main() {
       card.setConfig({
         default_tab: "intercom",
         webcodecs: { enabled: true },
-        surveillance: { include: ["camera.parking_6048"] },
+        surveillance: { include: ["camera.parking_6048", "camera.dvor_1"] },
       });
       card.hass = {
         states: {
           "camera.parking_6048": {
             state: "idle",
             attributes: { friendly_name: "Паркинг 6048" },
+          },
+          "camera.dvor_1": {
+            state: "idle",
+            attributes: { friendly_name: "Двор" },
           },
         },
         callWS: async () => [],
@@ -167,6 +175,42 @@ async function main() {
     });
     assert.equal(await page.evaluate(() => window.__webcodecs.sockets.length), 0);
 
+    const refreshRegression = await page.evaluate(() => {
+      const card = document.getElementById("card");
+      const viewer = card.shadowRoot.querySelector("miniapp-webcodecs-viewer");
+      const root = viewer.shadowRoot;
+      const select = root.querySelector("[data-camera]");
+      const result = root.querySelector("[data-result]");
+      const canvas = root.querySelector("[data-canvas]");
+      window.__webcodecs.uiCanvas = canvas;
+      window.__webcodecs.uiResult = result;
+      select.value = "camera.dvor_1";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      result.textContent = Array.from({ length: 80 }, (_, index) => `line-${index}`).join("\n");
+      result.scrollTop = 120;
+      const beforeScroll = result.scrollTop;
+      const baseHass = card._hass;
+      for (let index = 0; index < 10; index += 1) {
+        card.hass = {
+          ...baseHass,
+          states: { ...baseHass.states },
+        };
+      }
+      const sameSelect = root.querySelector("[data-camera]") === select;
+      const sameResult = root.querySelector("[data-result]") === result;
+      const sameCanvas = root.querySelector("[data-canvas]") === canvas;
+      const selected = root.querySelector("[data-camera]").value;
+      const afterScroll = root.querySelector("[data-result]").scrollTop;
+      select.value = "camera.parking_6048";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      return { sameSelect, sameResult, sameCanvas, selected, beforeScroll, afterScroll };
+    });
+    assert.equal(refreshRegression.sameSelect, true);
+    assert.equal(refreshRegression.sameResult, true);
+    assert.equal(refreshRegression.sameCanvas, true);
+    assert.equal(refreshRegression.selected, "camera.dvor_1");
+    assert.equal(refreshRegression.afterScroll, refreshRegression.beforeScroll);
+
     await page.evaluate(() => {
       const card = document.getElementById("card");
       card.shadowRoot.querySelector("miniapp-webcodecs-viewer")
@@ -179,16 +223,17 @@ async function main() {
 
     await page.evaluate(() => {
       const socket = window.__webcodecs.sockets[0];
+      socket.emitText({ type: "source_open", server_elapsed_ms: 120 });
+      socket.emitText({ type: "source_packet", server_elapsed_ms: 145 });
       socket.emitText({
         type: "hello",
-        protocol: 1,
+        protocol: 2,
         entity_id: "camera.parking_6048",
         codec: "avc1.640029",
         max_unit_bytes: 1048576,
         session_max_seconds: 120,
         zero_transcode: true,
       });
-      socket.emitText({ type: "source" });
       socket.emitBinary(window.__frame());
     });
     await page.waitForFunction(() => window.__webcodecs.drawCount === 1);
@@ -203,6 +248,30 @@ async function main() {
       return card.shadowRoot.querySelector("miniapp-webcodecs-viewer")
         .shadowRoot.querySelector("[data-result]").textContent.includes("RESULT=PASS");
     });
+
+    const postRunRefresh = await page.evaluate(() => {
+      const card = document.getElementById("card");
+      const root = card.shadowRoot.querySelector("miniapp-webcodecs-viewer").shadowRoot;
+      const result = root.querySelector("[data-result]");
+      result.scrollTop = 60;
+      const beforeScroll = result.scrollTop;
+      const baseHass = card._hass;
+      for (let index = 0; index < 10; index += 1) {
+        card.hass = {
+          ...baseHass,
+          states: { ...baseHass.states },
+        };
+      }
+      return {
+        sameCanvas: root.querySelector("[data-canvas]") === window.__webcodecs.uiCanvas,
+        sameResult: root.querySelector("[data-result]") === window.__webcodecs.uiResult,
+        beforeScroll,
+        afterScroll: root.querySelector("[data-result]").scrollTop,
+      };
+    });
+    assert.equal(postRunRefresh.sameCanvas, true);
+    assert.equal(postRunRefresh.sameResult, true);
+    assert.equal(postRunRefresh.afterScroll, postRunRefresh.beforeScroll);
 
     const state = await page.evaluate(() => ({
       supportChecks: window.__webcodecs.supportChecks,
@@ -225,8 +294,18 @@ async function main() {
     for (const key of [
       "=== COMELIT MINIAPP WEBCODECS LIVE CANARY ===",
       "RESULT=PASS",
+      "FUNCTIONAL_PASS=true",
+      "TRANSPORT_BACKLOG_OBSERVED=unknown",
       "ENTITY_ID=camera.parking_6048",
       "ZERO_TRANSCODE=true",
+      "SOURCE_OPEN_MS=",
+      "FIRST_SOURCE_PACKET_MS=",
+      "SOURCE_STARTUP_MS=",
+      "SOURCE_PACKET_TO_BINARY_MS=",
+      "BINARY_TO_DECODE_MS=",
+      "SOURCE_PTS_DRIFT_MS=",
+      "SERVER_QUEUE_DRIFT_MS=",
+      "TRANSPORT_DRIFT_MS=",
       "DECODE_P50_MS=",
       "FIRST_DECODED_FRAME_MS=",
       "RECEIVE_TO_DRAW_P50_MS=",

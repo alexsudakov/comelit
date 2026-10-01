@@ -724,8 +724,9 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
         first_binary_logged = False
         source_task: asyncio.Task[None] | None = None
         queued_bytes = 0
+        queued_units = 0
         queue: asyncio.Queue[object] = asyncio.Queue(
-            maxsize=webcodecs_mod.WEBCODECS_MAX_QUEUE_UNITS + 2
+            maxsize=webcodecs_mod.WEBCODECS_MAX_QUEUE_UNITS + 4
         )
 
         def log_event(event: str) -> None:
@@ -815,21 +816,33 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                 log_event("source_resolved")
 
                 async def produce_units() -> None:
-                    nonlocal queued_bytes
+                    nonlocal queued_bytes, queued_units
                     unit_source: webcodecs_mod.H264AccessUnitSource | None = None
                     send_source_eof = True
+                    first_source_packet_queued = False
                     try:
                         unit_source = await webcodecs_mod.open_h264_access_unit_source(
                             source
                         )
+                        await queue.put(
+                            ("source_open", webcodecs_mod.monotonic_ms(started))
+                        )
                         async for unit in unit_source:
+                            if not first_source_packet_queued:
+                                first_source_packet_queued = True
+                                await queue.put(
+                                    (
+                                        "source_packet",
+                                        webcodecs_mod.monotonic_ms(started),
+                                    )
+                                )
                             size = len(unit.payload)
                             if size > webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES:
                                 send_source_eof = False
                                 await queue.put(("error", "unit_too_large"))
                                 return
                             if (
-                                queue.qsize()
+                                queued_units
                                 >= webcodecs_mod.WEBCODECS_MAX_QUEUE_UNITS
                                 or queued_bytes + size
                                 > webcodecs_mod.WEBCODECS_MAX_QUEUE_BYTES
@@ -838,6 +851,7 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                                 await queue.put(("error", "backlog_exceeded"))
                                 return
                             await queue.put(unit)
+                            queued_units += 1
                             queued_bytes += size
                     except asyncio.CancelledError:
                         send_source_eof = False
@@ -861,6 +875,7 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                 )
                 codec: str | None = None
                 sequence = 0
+                send_origin_ns: int | None = None
 
                 try:
                     async with asyncio.timeout(duration):
@@ -868,6 +883,25 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                             item = await queue.get()
                             if isinstance(item, tuple):
                                 kind, code = item
+                                if kind == "source_open":
+                                    log_event("source_open")
+                                    if not await send_json(
+                                        {
+                                            "type": "source_open",
+                                            "server_elapsed_ms": int(code),
+                                        }
+                                    ):
+                                        break
+                                    continue
+                                if kind == "source_packet":
+                                    if not await send_json(
+                                        {
+                                            "type": "source_packet",
+                                            "server_elapsed_ms": int(code),
+                                        }
+                                    ):
+                                        break
+                                    continue
                                 if kind == "error":
                                     if code == "unit_too_large":
                                         log_event("unit_too_large")
@@ -884,6 +918,7 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                                 continue
 
                             assert isinstance(item, webcodecs_mod.H264AccessUnit)
+                            queued_units = max(0, queued_units - 1)
                             queued_bytes = max(0, queued_bytes - len(item.payload))
                             if not first_source_logged:
                                 first_source_logged = True
@@ -911,16 +946,22 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                                     }
                                 ):
                                     break
-                                if not await send_json({"type": "source"}):
-                                    break
-
                             sequence += 1
+                            send_now_ns = time.monotonic_ns()
+                            if send_origin_ns is None:
+                                send_origin_ns = send_now_ns
+                            send_elapsed_us = max(
+                                0,
+                                (send_now_ns - send_origin_ns) // 1000,
+                            )
                             frame = webcodecs_mod.WebCodecsFrame(
                                 sequence=sequence,
                                 media_pts_us=item.media_pts_us or 0,
                                 pts_valid=item.media_pts_us is not None,
                                 keyframe=item.keyframe,
                                 payload=item.payload,
+                                source_elapsed_us=item.source_elapsed_us,
+                                send_elapsed_us=send_elapsed_us,
                             )
                             if not await send_bytes(
                                 webcodecs_mod.encode_webcodecs_frame(frame)

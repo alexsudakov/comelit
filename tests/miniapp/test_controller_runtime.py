@@ -1531,10 +1531,12 @@ def test_webcodecs_framing_round_trip_and_malformed_rejection():
         pts_valid=True,
         keyframe=True,
         payload=b"\x00\x00\x00\x01\x65idr",
+        source_elapsed_us=12000,
+        send_elapsed_us=12500,
     )
     encoded = webcodecs_mod.encode_webcodecs_frame(frame)
     assert len(encoded) == webcodecs_mod.WEBCODECS_HEADER_BYTES + len(frame.payload)
-    assert encoded[:4] == b"\x01\x05\x00\x00"
+    assert encoded[:4] == b"\x02\x05\x00\x00"
     decoded = webcodecs_mod.decode_webcodecs_frame(encoded)
     assert decoded == frame
 
@@ -1552,11 +1554,11 @@ def test_webcodecs_framing_round_trip_and_malformed_rejection():
     assert second.sequence == decoded.sequence + 1
 
     malformed = [
-        b"\x02" + encoded[1:],
+        b"\x01" + encoded[1:],
         encoded[:2] + b"\x00\x01" + encoded[4:],
-        b"\x01\x03" + encoded[2:],
+        b"\x02\x03" + encoded[2:],
         encoded[:-1],
-        encoded[:16] + (webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES + 1).to_bytes(4, "big"),
+        encoded[:32] + (webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES + 1).to_bytes(4, "big"),
     ]
     for payload in malformed:
         with pytest.raises(webcodecs_mod.WebCodecsProtocolError):
@@ -1717,23 +1719,26 @@ def test_webcodecs_view_happy_path_secret_free_logs_and_messages(monkeypatch, ca
 
     websocket = _CaptureWebSocket.instances[0]
     texts = _json_texts(websocket)
-    assert texts[:2] == [
-        {
-            "type": "hello",
-            "protocol": 1,
-            "entity_id": "camera.driveway",
-            "codec": "avc1.640029",
-            "max_unit_bytes": webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES,
-            "session_max_seconds": webcodecs_mod.WEBCODECS_MAX_SESSION_SECONDS,
-            "zero_transcode": True,
-        },
-        {"type": "source"},
-    ]
+    assert texts[0]["type"] == "source_open"
+    assert isinstance(texts[0]["server_elapsed_ms"], int)
+    assert texts[1]["type"] == "source_packet"
+    assert isinstance(texts[1]["server_elapsed_ms"], int)
+    assert texts[2] == {
+        "type": "hello",
+        "protocol": 2,
+        "entity_id": "camera.driveway",
+        "codec": "avc1.640029",
+        "max_unit_bytes": webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES,
+        "session_max_seconds": webcodecs_mod.WEBCODECS_MAX_SESSION_SECONDS,
+        "zero_transcode": True,
+    }
     assert texts[-1] == {"type": "eos", "reason": "source_eof"}
     frame = webcodecs_mod.decode_webcodecs_frame(websocket.binaries[0])
     assert frame.sequence == 1
     assert frame.keyframe is True
     assert frame.pts_valid is True
+    assert frame.source_elapsed_us == 0
+    assert frame.send_elapsed_us == 0
     compared = [
         *websocket.texts,
         *[record.getMessage() for record in caplog.records],
@@ -1779,9 +1784,10 @@ def test_webcodecs_non_rtsp_unit_too_large_duration_and_source_failure(monkeypat
         _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
     ):
         asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
-    assert _json_texts(_CaptureWebSocket.instances[-1]) == [
-        {"type": "error", "code": "unit_too_large"}
-    ]
+    too_large_texts = _json_texts(_CaptureWebSocket.instances[-1])
+    assert too_large_texts[0]["type"] == "source_open"
+    assert too_large_texts[1]["type"] == "source_packet"
+    assert too_large_texts[-1] == {"type": "error", "code": "unit_too_large"}
 
     async def failing(_source):
         raise webcodecs_mod.WebCodecsSourceError("source_open_failed")
@@ -1907,18 +1913,18 @@ def test_webcodecs_send_connection_error_is_clean_client_close(monkeypatch):
         asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
 
     websocket = _ClosingWebSocket.instances[-1]
-    assert _json_texts(websocket)[:2] == [
-        {
-            "type": "hello",
-            "protocol": 1,
-            "entity_id": "camera.driveway",
-            "codec": "avc1.640029",
-            "max_unit_bytes": webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES,
-            "session_max_seconds": webcodecs_mod.WEBCODECS_MAX_SESSION_SECONDS,
-            "zero_transcode": True,
-        },
-        {"type": "source"},
-    ]
+    texts = _json_texts(websocket)
+    assert texts[0]["type"] == "source_open"
+    assert texts[1]["type"] == "source_packet"
+    assert texts[2] == {
+        "type": "hello",
+        "protocol": 2,
+        "entity_id": "camera.driveway",
+        "codec": "avc1.640029",
+        "max_unit_bytes": webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES,
+        "session_max_seconds": webcodecs_mod.WEBCODECS_MAX_SESSION_SECONDS,
+        "zero_transcode": True,
+    }
     assert websocket.binaries == []
 
 
