@@ -92,6 +92,10 @@
       this._hass = null;
       this._selected = "";
       this._rendered = false;
+      this._embedded = false;
+      this._autoStart = false;
+      this._autoStartQueued = false;
+      this._terminalNotified = false;
       this._socket = null;
       this._decoder = null;
       this._running = false;
@@ -130,25 +134,87 @@
         this._selected = this._cameras.length ? this._cameraId(this._cameras[0]) : "";
       }
       this._render();
+      this._maybeAutoStart();
     }
 
     set hass(value) {
       this._hass = value;
       if (!this._rendered) {
         this._render();
+      } else {
+        this._refreshCounters();
+      }
+      this._maybeAutoStart();
+    }
+
+    set embedded(value) {
+      const next = value === true;
+      if (next === this._embedded) {
         return;
       }
-      this._refreshCounters();
+      this._embedded = next;
+      this._render();
+      this._maybeAutoStart();
+    }
+
+    set autoStart(value) {
+      this._autoStart = value === true;
+      this._maybeAutoStart();
     }
 
     connectedCallback() {
       if (!this._rendered) {
         this._render();
       }
+      this._maybeAutoStart();
     }
 
     disconnectedCallback() {
       this._stop("disconnect", false);
+    }
+
+    _maybeAutoStart() {
+      if (
+        !this._embedded ||
+        !this._autoStart ||
+        this._autoStartQueued ||
+        this._running ||
+        !this.isConnected ||
+        !this._hass ||
+        !safeEntityId(this._selected)
+      ) {
+        return;
+      }
+      this._autoStartQueued = true;
+      queueMicrotask(() => {
+        this._autoStartQueued = false;
+        if (
+          this._embedded &&
+          this._autoStart &&
+          !this._running &&
+          this.isConnected &&
+          this._hass &&
+          safeEntityId(this._selected)
+        ) {
+          this._start();
+        }
+      });
+    }
+
+    _notifyEmbeddedTerminal(reason) {
+      if (!this._embedded || this._terminalNotified) {
+        return;
+      }
+      this._terminalNotified = true;
+      this.dispatchEvent(new CustomEvent("comelit-webcodecs-terminal", {
+        bubbles: true,
+        composed: true,
+        detail: {
+          reason: String(reason || "unknown"),
+          frames: this._stats.frames,
+          error: this._stats.error,
+        },
+      }));
     }
 
     _cameraId(camera) {
