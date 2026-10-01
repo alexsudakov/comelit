@@ -5,6 +5,8 @@
   const card = document.getElementById("comelitCard");
   const startupStatus = document.getElementById("startupStatus");
   const fatalError = document.getElementById("fatalError");
+  const webcodecsDebug =
+    new URLSearchParams(window.location.search).get("webcodecs_debug") === "1";
 
   let bootstrap = null;
   let hass = null;
@@ -1816,7 +1818,10 @@
     await customElements.whenDefined("comelit-card");
     card.setConfig({
       default_tab: "intercom",
-      webcodecs: { enabled: true },
+      webcodecs: {
+        enabled: webcodecsDebug,
+        intercom_primary: true,
+      },
       surveillance: {
         include: bootstrap.surveillance_entities || [],
       },
