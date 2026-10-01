@@ -11,7 +11,7 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.7.23**. This patch keeps the direct Generic Camera RTSP path introduced in 1.7.22 and additionally disables go2rtc's default ONVIF backchannel probe for Mini App MSE by appending `backchannel=0` to Generic RTSP sources. This avoids a potentially failed first DESCRIBE that can consume the go2rtc RTSP client's 5 s response timeout before normal receive-only negotiation begins. WebRTC/HLS fallbacks and Home Assistant's own WebRTC provider remain unchanged. Details are recorded in `docs/releases/1.7.23-generic-rtsp-no-backchannel.md`.
+Current stable release: **1.7.24**. This release adds an experimental Telegram Mini App-only `WebCodecs` tab for ordinary allowlisted Home Assistant cameras. The new path sends H.264 over a bounded same-origin binary WebSocket and decodes it directly with browser WebCodecs, without HLS, MSE, WebRTC, fMP4 or video transcoding in that path. Existing production camera playback paths remain unchanged; the WebCodecs tab is an explicit manual canary surface intended to measure real WSS/CloudPub transport lag before any architecture switch. Details are recorded in `docs/releases/1.7.24-webcodecs-live-tab.md`.
 
 ## Home Assistant Custom Card
 
@@ -87,6 +87,8 @@ proxy as the primary transport. Playback falls back to the existing Home
 Assistant WebRTC path and then to the session-bound HLS proxy. No Mini App
 camera preload is enabled. Camera source URLs, source credentials and raw
 go2rtc management access are never exposed to Telegram.
+
+The Mini App also contains an experimental, explicitly started `WebCodecs` tab for ordinary allowlisted H.264 cameras. It is isolated from the normal MSE/WebRTC/HLS viewer paths and exists to measure zero-transcode H.264-over-WSS latency through the deployed HTTPS ingress before deciding whether it should become a production transport.
 
 Architecture and deployment boundary: `docs/miniapp-architecture.md`.
 
