@@ -458,11 +458,23 @@
       if (parsed.ptsValid && this._stats.firstPts === null) {
         this._stats.firstPts = parsed.pts;
       }
-      if (parsed.ptsValid && this._stats.firstPts !== null && this._stats.firstReceiveAt !== null) {
-        const arrivalElapsed = now - this._stats.firstReceiveAt;
-        const mediaElapsed = (parsed.pts - this._stats.firstPts) / 1000;
-        this._stats.lagMs.push(arrivalElapsed - mediaElapsed);
+      if (this._stats.firstSourceElapsedUs === null) {
+        this._stats.firstSourceElapsedUs = parsed.sourceElapsedUs;
       }
+      if (this._stats.firstSendElapsedUs === null) {
+        this._stats.firstSendElapsedUs = parsed.sendElapsedUs;
+      }
+      const arrivalElapsed = now - this._stats.firstReceiveAt;
+      const sourceElapsed =
+        (parsed.sourceElapsedUs - this._stats.firstSourceElapsedUs) / 1000;
+      const sendElapsed =
+        (parsed.sendElapsedUs - this._stats.firstSendElapsedUs) / 1000;
+      if (parsed.ptsValid && this._stats.firstPts !== null) {
+        const mediaElapsed = (parsed.pts - this._stats.firstPts) / 1000;
+        this._stats.sourcePtsDriftMs.push(sourceElapsed - mediaElapsed);
+      }
+      this._stats.serverQueueDriftMs.push(sendElapsed - sourceElapsed);
+      this._stats.transportDriftMs.push(arrivalElapsed - sendElapsed);
       if (this._stats.lastSequence && parsed.sequence !== this._stats.lastSequence + 1) {
         this._stats.gaps += 1;
       }
