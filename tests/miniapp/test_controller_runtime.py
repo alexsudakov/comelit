@@ -687,10 +687,10 @@ def test_mse_stream_uses_public_stream_source_and_opaque_refcounted_name():
     asyncio.run(run())
 
     internal_name = controller.mse_internal_stream_name("camera.driveway")
-    assert fake_go2rtc.registers == [(internal_name, [source])]
+    assert fake_go2rtc.registers == [(internal_name, [source + "#backchannel=0"])]
 
 
-def test_mse_stream_uses_direct_source_for_generic_and_other_cameras():
+def test_mse_stream_disables_generic_rtsp_backchannel_only():
     controller, hass = _controller(surveillance_label="Outside")
     fake_go2rtc = FakeGo2RTC()
     controller.go2rtc = fake_go2rtc
@@ -703,12 +703,32 @@ def test_mse_stream_uses_direct_source_for_generic_and_other_cameras():
         return lease.internal_name
 
     internal_name = asyncio.run(acquire_and_release())
-    assert fake_go2rtc.registers == [(internal_name, [source])]
+    assert fake_go2rtc.registers == [
+        (internal_name, [source + "#backchannel=0"])
+    ]
 
     fake_go2rtc.registers.clear()
     hass.entity_registry.entities["camera.driveway"].platform = "other"
     internal_name = asyncio.run(acquire_and_release())
     assert fake_go2rtc.registers == [(internal_name, [source])]
+
+
+def test_mse_stream_preserves_existing_go2rtc_fragment_when_disabling_backchannel():
+    controller, hass = _controller(surveillance_label="Outside")
+    fake_go2rtc = FakeGo2RTC()
+    controller.go2rtc = fake_go2rtc
+    source = "rtsp://192.0.2.10/example#transport=tcp"
+    hass.cameras["camera.driveway"] = FakeCamera(set(), source)
+
+    async def run():
+        lease = await controller.acquire_mse_stream("camera.driveway")
+        await controller.release_mse_stream("camera.driveway")
+        return lease.internal_name
+
+    internal_name = asyncio.run(run())
+    assert fake_go2rtc.registers == [
+        (internal_name, [source + "&backchannel=0"])
+    ]
 
 
 def test_mse_stream_rejects_intercom_unlisted_none_and_unsupported_source():
@@ -1008,7 +1028,7 @@ def test_mse_view_happy_path_relays_text_binary_and_releases(monkeypatch):
 
     websocket = _CaptureWebSocket.instances[0]
     internal_name = controller.mse_internal_stream_name("camera.driveway")
-    assert go2rtc.registers == [(internal_name, [source])]
+    assert go2rtc.registers == [(internal_name, [source + "#backchannel=0"])]
     assert go2rtc.opened == [controller.mse_internal_stream_name("camera.driveway")]
     assert upstream.sent_json == [{"type": "mse", "value": "avc1.640029,mp4a.40.2"}]
     assert _json_texts(websocket) == [
@@ -1447,8 +1467,9 @@ def test_fixture_camera_secret_never_reaches_payloads_logs_or_serializer(monkeyp
     invalid_response, ok_response = asyncio.run(run())
 
     internal_name = controller.mse_internal_stream_name("camera.driveway")
-    assert go2rtc.registers == [(internal_name, [fixture_url])]
-    assert fixture_url == go2rtc.registers[0][1][0]
+    expected_source = fixture_url + "#backchannel=0"
+    assert go2rtc.registers == [(internal_name, [expected_source])]
+    assert expected_source == go2rtc.registers[0][1][0]
     compared = [
         invalid_response.text,
         ok_response.text,
