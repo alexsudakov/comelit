@@ -923,8 +923,13 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                             await queue.put(("eos", "source_eof"))
 
                 source_task = self.controller.hass.async_create_task(produce_units())
+                target_session_max_seconds = (
+                    webcodecs_mod.WEBCODECS_ENTRANCE_MAX_SESSION_SECONDS
+                    if target.kind == "entrance"
+                    else webcodecs_mod.WEBCODECS_MAX_SESSION_SECONDS
+                )
                 duration = min(
-                    webcodecs_mod.WEBCODECS_MAX_SESSION_SECONDS,
+                    target_session_max_seconds,
                     max(0.0, float(session.expires_at) - time.time()),
                 )
                 codec: str | None = None
@@ -998,7 +1003,7 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                                         "entity_id": entity_id,
                                         "codec": codec,
                                         "max_unit_bytes": webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES,
-                                        "session_max_seconds": webcodecs_mod.WEBCODECS_MAX_SESSION_SECONDS,
+                                        "session_max_seconds": target_session_max_seconds,
                                         "zero_transcode": True,
                                         "source_kind": source_kind,
                                         "comelit_entrance_open": target.kind == "entrance",

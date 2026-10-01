@@ -255,12 +255,17 @@ def test_webcodecs_tab_is_miniapp_flag_gated_and_canvas_only():
     viewer = _read("custom_components/comelit/frontend/miniapp/webcodecs.js")
     html = _read("custom_components/comelit/miniapp/index.html")
 
-    assert 'webcodecs: { enabled: true }' in host
+    assert 'get("webcodecs_debug") === "1"' in host
+    assert "enabled: webcodecsDebug" in host
+    assert "intercom_primary: true" in host
     assert 'config.webcodecs?.enabled === true' in card
     assert 'customElements.get("miniapp-webcodecs-viewer")' in card
     assert "<miniapp-webcodecs-viewer>" in card
     assert "grid-template-columns: repeat(${webcodecsEnabled ? 3 : 2}, 1fr)" in card
     assert "WebCodecs" in card
+    assert "_mountIntercomWebCodecsViewer" in card
+    assert "_showIntercomLegacyFallback" in card
+    assert "data-intercom-legacy-fallback" not in card
     assert "/api/comelit/frontend/miniapp/webcodecs.js" in html
 
     assert "Запустить тест" in viewer
@@ -279,3 +284,17 @@ def test_shared_card_default_config_preserves_two_top_level_tabs():
     assert 'webcodecsEnabled ? `' in card
     assert 'data-tab="webcodecs"' in card
     assert '!(nextTab === "webcodecs" && this._webcodecsEnabled())' in card
+
+
+def test_entrance_webcodecs_primary_has_bounded_startup_and_hls_cleanup_barrier():
+    card = _read("custom_components/comelit/frontend/comelit-card.js")
+    viewer = _read("custom_components/comelit/frontend/miniapp/webcodecs.js")
+    controller = _read("custom_components/comelit/miniapp/controller.py")
+
+    assert "EMBEDDED_STARTUP_TIMEOUT_MS = 15_000" in viewer
+    assert '"startup_timeout"' in viewer
+    assert 'this._intercomViewerMode = "legacy"' in card
+    assert "Переключение на резервный HLS" in card
+    assert "_await_webcodecs_entrance_cleanup" in controller
+    assert "webcodecs_cleanup_timeout" in controller
+    assert "webcodecs_cleanup_conflict" in controller

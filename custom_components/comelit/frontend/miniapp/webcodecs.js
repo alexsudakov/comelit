@@ -11,6 +11,7 @@
   const CANARY_MS = 60_000;
   const MAX_DECODE_QUEUE = 8;
   const BACKLOG_STALL_MS = 2000;
+  const EMBEDDED_STARTUP_TIMEOUT_MS = 15_000;
 
   function safeEntityId(value) {
     const entityId = String(value || "");
@@ -92,6 +93,11 @@
       this._hass = null;
       this._selected = "";
       this._rendered = false;
+      this._embedded = false;
+      this._autoStart = false;
+      this._autoStartQueued = false;
+      this._autoStartConsumed = false;
+      this._terminalNotified = false;
       this._socket = null;
       this._decoder = null;
       this._running = false;
@@ -130,25 +136,91 @@
         this._selected = this._cameras.length ? this._cameraId(this._cameras[0]) : "";
       }
       this._render();
+      this._maybeAutoStart();
     }
 
     set hass(value) {
       this._hass = value;
       if (!this._rendered) {
         this._render();
+      } else {
+        this._refreshCounters();
+      }
+      this._maybeAutoStart();
+    }
+
+    set embedded(value) {
+      const next = value === true;
+      if (next === this._embedded) {
         return;
       }
-      this._refreshCounters();
+      this._embedded = next;
+      this._autoStartConsumed = false;
+      this._render();
+      this._maybeAutoStart();
+    }
+
+    set autoStart(value) {
+      this._autoStart = value === true;
+      this._maybeAutoStart();
     }
 
     connectedCallback() {
       if (!this._rendered) {
         this._render();
       }
+      this._maybeAutoStart();
     }
 
     disconnectedCallback() {
       this._stop("disconnect", false);
+    }
+
+    _maybeAutoStart() {
+      if (
+        !this._embedded ||
+        !this._autoStart ||
+        this._autoStartQueued ||
+        this._autoStartConsumed ||
+        this._running ||
+        !this.isConnected ||
+        !this._hass ||
+        !safeEntityId(this._selected)
+      ) {
+        return;
+      }
+      this._autoStartQueued = true;
+      queueMicrotask(() => {
+        this._autoStartQueued = false;
+        if (
+          this._embedded &&
+          this._autoStart &&
+          !this._autoStartConsumed &&
+          !this._running &&
+          this.isConnected &&
+          this._hass &&
+          safeEntityId(this._selected)
+        ) {
+          this._autoStartConsumed = true;
+          this._start();
+        }
+      });
+    }
+
+    _notifyEmbeddedTerminal(reason) {
+      if (!this._embedded || this._terminalNotified) {
+        return;
+      }
+      this._terminalNotified = true;
+      this.dispatchEvent(new CustomEvent("comelit-webcodecs-terminal", {
+        bubbles: true,
+        composed: true,
+        detail: {
+          reason: String(reason || "unknown"),
+          frames: this._stats.frames,
+          error: this._stats.error,
+        },
+      }));
     }
 
     _cameraId(camera) {
@@ -229,6 +301,42 @@
         const name = this._cameraName(camera);
         return `<option value="${entityId}" ${entityId === this._selected ? "selected" : ""}>${name}</option>`;
       }).join("");
+      if (this._embedded) {
+        this.shadowRoot.innerHTML = `
+          <style>
+            :host { display: block; min-width: 0; }
+            * { box-sizing: border-box; }
+            .embedded-shell {
+              display: grid;
+              gap: 8px;
+              width: 100%;
+              min-width: 0;
+            }
+            canvas {
+              display: block;
+              width: 100%;
+              height: auto;
+              min-height: 220px;
+              background: #000;
+              border-radius: 10px;
+            }
+            .embedded-status {
+              min-height: 20px;
+              color: var(--secondary-text-color, #4b5563);
+              font-size: 0.9rem;
+            }
+          </style>
+          <div class="embedded-shell">
+            <canvas data-canvas width="1280" height="720"></canvas>
+            <div class="embedded-status">
+              Статус: <b data-status>${this._running ? "подключение" : "ожидание"}</b>
+            </div>
+          </div>
+        `;
+        this._rendered = true;
+        this._syncControls();
+        return;
+      }
       this.shadowRoot.innerHTML = `
         <style>
           :host { display: block; min-width: 0; }
@@ -324,10 +432,12 @@
         this._stats = this._newStats();
         this._stats.error = "webcodecs_unavailable";
         this._emitFinal("codec_unsupported");
+        this._notifyEmbeddedTerminal("codec_unsupported");
         return;
       }
       this._running = true;
       this._finalEmitted = false;
+      this._terminalNotified = false;
       this._stats = this._newStats();
       this._pendingReceives = [];
       this._pendingDecodeStarts = [];
@@ -347,7 +457,19 @@
       const socket = new WebSocket(url);
       socket.binaryType = "arraybuffer";
       this._socket = socket;
-      this._timer = setTimeout(() => this._stop("duration_60s", true), CANARY_MS);
+      if (this._embedded) {
+        this._timer = setTimeout(() => {
+          if (this._running && !this._stats.firstDecodedAt) {
+            this._stats.error = "startup_timeout";
+            this._stop("startup_timeout", true);
+          }
+        }, EMBEDDED_STARTUP_TIMEOUT_MS);
+      } else {
+        this._timer = setTimeout(
+          () => this._stop("duration_60s", true),
+          CANARY_MS,
+        );
+      }
 
       socket.onopen = () => {
         this._stats.wsOpenAt = performance.now();
@@ -398,21 +520,28 @@
           codec: this._stats.codec,
           optimizeForLatency: true,
         };
-        const support = await VideoDecoder.isConfigSupported(config);
-        if (!support.supported) {
+        try {
+          const support = await VideoDecoder.isConfigSupported(config);
+          if (!support.supported) {
+            this._stats.unsupported = true;
+            this._stats.error = "codec_unsupported";
+            this._stop("codec_unsupported", true);
+            return;
+          }
+          this._decoder = new VideoDecoder({
+            output: (frame) => this._drawFrame(frame),
+            error: () => {
+              this._stats.error = "decoder_error";
+              this._stop("decoder_error", true);
+            },
+          });
+          this._decoder.configure(config);
+        } catch (_) {
           this._stats.unsupported = true;
           this._stats.error = "codec_unsupported";
           this._stop("codec_unsupported", true);
           return;
         }
-        this._decoder = new VideoDecoder({
-          output: (frame) => this._drawFrame(frame),
-          error: () => {
-            this._stats.error = "decoder_error";
-            this._stop("decoder_error", true);
-          },
-        });
-        this._decoder.configure(config);
         for (const data of this._pendingBinary.splice(0)) {
           this._handleBinary(data);
         }
@@ -551,6 +680,10 @@
       const now = performance.now();
       if (!this._stats.firstDecodedAt) {
         this._stats.firstDecodedAt = now;
+        if (this._embedded && this._timer) {
+          clearTimeout(this._timer);
+          this._timer = null;
+        }
       }
       const canvas = this.shadowRoot?.querySelector("[data-canvas]");
       const context = canvas?.getContext("2d");
@@ -617,6 +750,13 @@
       this._setStatus("остановлено");
       if (emit) {
         this._emitFinal(reason);
+        const embeddedFallback =
+          this._embedded &&
+          !["manual_stop", "duration_60s", "duration_limit"].includes(reason) &&
+          (reason !== "source_eof" || this._stats.frames === 0);
+        if (embeddedFallback) {
+          this._notifyEmbeddedTerminal(reason);
+        }
       }
       this._syncControls();
     }

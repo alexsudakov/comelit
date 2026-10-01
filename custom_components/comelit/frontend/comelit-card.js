@@ -62,11 +62,14 @@ class ComelitCard extends HTMLElement {
     this._intercomViewerGeneration = 0;
     this._intercomViewerElement = undefined;
     this._intercomViewerOpen = false;
+    this._intercomViewerMode = "webcodecs";
+    this._intercomViewerFallbackReason = undefined;
     this._selectedIntercomPanel = "entrance";
     this._doorActionInFlight = new Set();
     this._doorActionMessage = undefined;
     this._rendered = false;
     this._focusedCallEventId = undefined;
+    this._forceFullRender = false;
   }
 
   static getStubConfig() {
@@ -89,12 +92,15 @@ class ComelitCard extends HTMLElement {
         ? config.default_tab
         : "intercom";
     const webcodecsEnabled = config.webcodecs?.enabled === true;
+    const webcodecsIntercomPrimary =
+      config.webcodecs?.intercom_primary === true;
 
     this._config = {
       ...config,
       webcodecs: {
         ...(config.webcodecs || {}),
         enabled: webcodecsEnabled,
+        intercom_primary: webcodecsIntercomPrimary,
       },
       surveillance: {
         ...(config.surveillance || {}),
@@ -110,6 +116,9 @@ class ComelitCard extends HTMLElement {
     this._activeTab =
       defaultTab === "webcodecs" && !webcodecsEnabled ? "intercom" : defaultTab;
     this._selectedCamera = undefined;
+    this._intercomViewerMode = "webcodecs";
+    this._intercomViewerFallbackReason = undefined;
+    this._forceFullRender = true;
     this._render();
   }
 
@@ -296,6 +305,10 @@ class ComelitCard extends HTMLElement {
     return this._config.webcodecs?.enabled === true;
   }
 
+  _webcodecsIntercomPrimary() {
+    return this._config.webcodecs?.intercom_primary === true;
+  }
+
   _intercomModel() {
     const resolve = (key) => {
       const entry = this._resolveByUniqueId(INTERCOM_UNIQUE_IDS[key]);
@@ -353,14 +366,42 @@ class ComelitCard extends HTMLElement {
     if (call.panel === "entrance" || call.panel === "gate") {
       if (this._selectedIntercomPanel !== call.panel) {
         this._intercomViewerOpen = false;
+        this._intercomViewerMode = "webcodecs";
+        this._intercomViewerFallbackReason = undefined;
       }
       this._selectedIntercomPanel = call.panel;
     }
     return true;
   }
 
+  _canPreserveIntercomWebCodecsViewer() {
+    const viewer = this._intercomViewerElement;
+    const target = this.shadowRoot?.querySelector("#intercom-viewer");
+    return (
+      this._rendered &&
+      this._activeTab === "intercom" &&
+      this._intercomViewerOpen &&
+      this._selectedIntercomPanel === "entrance" &&
+      this._intercomViewerMode === "webcodecs" &&
+      this._webcodecsIntercomPrimary() &&
+      viewer?.tagName?.toLowerCase() === "miniapp-webcodecs-viewer" &&
+      viewer.isConnected &&
+      target?.contains(viewer)
+    );
+  }
+
   _render() {
     if (!this.shadowRoot) {
+      return;
+    }
+
+    const forceFullRender = this._forceFullRender;
+    this._forceFullRender = false;
+    if (!forceFullRender && this._canPreserveIntercomWebCodecsViewer()) {
+      // Home Assistant state refreshes and same-panel call updates must not
+      // destroy a healthy WSS session. Dynamic text/buttons can be refreshed
+      // in place without replacing the embedded viewer node.
+      this._updateDynamicState();
       return;
     }
 
@@ -1062,6 +1103,8 @@ class ComelitCard extends HTMLElement {
         }
         if (panel !== this._selectedIntercomPanel) {
           this._intercomViewerOpen = false;
+          this._intercomViewerMode = "webcodecs";
+          this._intercomViewerFallbackReason = undefined;
         }
         this._selectedIntercomPanel = panel;
         this._doorActionMessage = undefined;
@@ -1078,6 +1121,10 @@ class ComelitCard extends HTMLElement {
         const camera = this._cameraPresentation(model);
         if (!camera.available || this._selectedIntercomPanel !== "entrance") {
           return;
+        }
+        if (!this._intercomViewerOpen) {
+          this._intercomViewerMode = "webcodecs";
+          this._intercomViewerFallbackReason = undefined;
         }
         this._intercomViewerOpen = !this._intercomViewerOpen;
         this._render();
@@ -1251,6 +1298,97 @@ class ComelitCard extends HTMLElement {
     const generation = ++this._intercomViewerGeneration;
     target.innerHTML = '<div class="notice compact">Подключение камеры подъезда…</div>';
 
+    if (
+      this._webcodecsIntercomPrimary() &&
+      this._intercomViewerMode !== "legacy" &&
+      customElements.get("miniapp-webcodecs-viewer")
+    ) {
+      this._mountIntercomWebCodecsViewer(target, camera, generation);
+      return;
+    }
+
+    await this._mountLegacyIntercomViewer(target, camera, generation);
+  }
+
+  _mountIntercomWebCodecsViewer(target, camera, generation) {
+    const viewer = document.createElement("miniapp-webcodecs-viewer");
+    viewer.embedded = true;
+    viewer.cameras = [{
+      entityId: camera.entityId,
+      name: "Камера подъезда",
+      available: camera.available,
+      kind: "intercom_entrance",
+    }];
+    viewer.hass = this._hass;
+    viewer.autoStart = true;
+    viewer.addEventListener("comelit-webcodecs-terminal", (event) => {
+      if (
+        generation !== this._intercomViewerGeneration ||
+        !this._intercomViewerOpen ||
+        this._selectedIntercomPanel !== "entrance"
+      ) {
+        return;
+      }
+      this._intercomViewerFallbackReason =
+        String(event?.detail?.reason || "webcodecs_error");
+      this._showIntercomLegacyFallback(generation);
+    });
+
+    if (
+      generation !== this._intercomViewerGeneration ||
+      !this._intercomViewerOpen ||
+      this._selectedIntercomPanel !== "entrance"
+    ) {
+      return;
+    }
+
+    this._intercomViewerElement = viewer;
+    target.replaceChildren(viewer);
+  }
+
+  _showIntercomLegacyFallback(generation) {
+    if (
+      generation !== this._intercomViewerGeneration ||
+      !this._intercomViewerOpen ||
+      this._selectedIntercomPanel !== "entrance"
+    ) {
+      return;
+    }
+    const currentTarget = this.shadowRoot?.querySelector("#intercom-viewer");
+    if (!currentTarget) {
+      return;
+    }
+
+    const reason = String(
+      this._intercomViewerFallbackReason || "webcodecs_error",
+    );
+    this._intercomViewerMode = "legacy";
+    this._intercomViewerElement = undefined;
+    currentTarget.innerHTML = `
+      <div class="notice compact">
+        WebCodecs недоступен (${escapeHtml(reason)}).
+        Переключение на резервный HLS…
+      </div>
+    `;
+
+    // Replacing the embedded viewer disconnects it first, which closes the WSS
+    // client. The Mini App HLS endpoint then waits for the server-side
+    // miniapp_webcodecs lease cleanup before it may create an HLS session.
+    queueMicrotask(() => {
+      if (
+        generation !== this._intercomViewerGeneration ||
+        !this._intercomViewerOpen ||
+        this._selectedIntercomPanel !== "entrance" ||
+        this._intercomViewerMode !== "legacy"
+      ) {
+        return;
+      }
+      this._intercomViewerFallbackReason = undefined;
+      this._mountIntercomViewer();
+    });
+  }
+
+  async _mountLegacyIntercomViewer(target, camera, generation) {
     try {
       if (typeof window.loadCardHelpers !== "function") {
         throw new Error("loadCardHelpers unavailable");
