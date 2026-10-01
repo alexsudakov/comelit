@@ -642,6 +642,10 @@
         !s.error &&
         cleanStop
       );
+      const intercomMediaToSourceOpenMs =
+        s.intercomMediaReadyAt !== null && s.sourceOpenAt !== null
+          ? s.sourceOpenAt - s.intercomMediaReadyAt
+          : null;
       const sourceStartupMs =
         s.sourceOpenAt !== null && s.firstSourcePacketAt !== null
           ? s.firstSourcePacketAt - s.sourceOpenAt
@@ -663,8 +667,12 @@
         `DURATION_S=${fmt(duration)}`,
         `CODEC=${s.codec}`,
         `ZERO_TRANSCODE=${s.zeroTranscode === null ? "n/a" : s.zeroTranscode ? "true" : "false"}`,
+        `SOURCE_KIND=${s.sourceKind}`,
         "",
         `WS_CONNECT_MS=${s.wsOpenAt ? fmt(s.wsOpenAt - s.startedAt) : "n/a"}`,
+        `INTERCOM_MEDIA_READY_MS=${s.intercomMediaReadyAt !== null ? fmt(s.intercomMediaReadyAt - s.startedAt) : "n/a"}`,
+        `INTERCOM_MEDIA_READY_SERVER_MS=${fmt(s.intercomMediaReadyServerMs)}`,
+        `INTERCOM_MEDIA_TO_SOURCE_OPEN_MS=${fmt(intercomMediaToSourceOpenMs)}`,
         `SOURCE_OPEN_MS=${s.sourceOpenAt !== null ? fmt(s.sourceOpenAt - s.startedAt) : "n/a"}`,
         `FIRST_SOURCE_PACKET_MS=${s.firstSourcePacketAt !== null ? fmt(s.firstSourcePacketAt - s.startedAt) : "n/a"}`,
         `FIRST_BINARY_MS=${s.firstBinaryAt ? fmt(s.firstBinaryAt - s.startedAt) : "n/a"}`,
@@ -709,8 +717,8 @@
         `BACKLOG_STOP=${s.backlogStop ? "true" : "false"}`,
         `DROPPED_UNITS=0`,
         "",
-        "COMELIT_ENTRANCE_OPEN=false",
-        "COMELIT_MEDIA_STARTED=false",
+        `COMELIT_ENTRANCE_OPEN=${s.comelitEntranceOpen ? "true" : "false"}`,
+        `COMELIT_MEDIA_STARTED=${s.comelitMediaStarted ? "true" : "false"}`,
         "DOOR_ACTIONS=0",
         "GATE_ACTIONS=0",
       ].join("\n");
