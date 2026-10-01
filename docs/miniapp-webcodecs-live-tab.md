@@ -535,18 +535,13 @@ Door and Gate actions are outside this path and remain zero.
 - Gate/intercom camera target.
 - Attached inbound Ring reuse by the WebCodecs tab.
 - Door/Gate actions.
-- Production replacement of the existing Comelit Entrance HLS path.
+## 1.7.26 live-promotion boundary
 
-## Not Proven Offline
-
-- Real Entrance H.264 acceptance by Telegram WebCodecs through the new local
-  SDP source.
-- Measured proprietary Comelit bootstrap time for this direct Mini App path.
-- Clean production teardown/listener restore after the direct WebCodecs run.
-- Whether the direct Entrance WebCodecs path should replace the existing
-  production HLS viewer rather than remain an experimental transport.
-
-
+The original offline phase intentionally did not claim real Telegram WebCodecs
+acceptance, measured proprietary bootstrap timing, or production teardown.
+Those were live-only acceptance questions. The subsequent 1.7.26 live
+acceptance closed the promotion decision before the production switch below;
+the earlier offline limitations remain provenance, not current blockers.
 
 ## Production Entrance viewer after 1.7.26
 
