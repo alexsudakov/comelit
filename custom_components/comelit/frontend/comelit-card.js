@@ -58,6 +58,8 @@ class ComelitCard extends HTMLElement {
     this._selectedCamera = undefined;
     this._viewerGeneration = 0;
     this._viewerElement = undefined;
+    this._surveillanceViewerMode = "webcodecs";
+    this._surveillanceViewerFallbackReason = undefined;
     this._webcodecsViewerElement = undefined;
     this._intercomViewerGeneration = 0;
     this._intercomViewerElement = undefined;
@@ -94,6 +96,8 @@ class ComelitCard extends HTMLElement {
     const webcodecsEnabled = config.webcodecs?.enabled === true;
     const webcodecsIntercomPrimary =
       config.webcodecs?.intercom_primary === true;
+    const webcodecsSurveillancePrimary =
+      config.webcodecs?.surveillance_primary === true;
 
     this._config = {
       ...config,
@@ -101,6 +105,7 @@ class ComelitCard extends HTMLElement {
         ...(config.webcodecs || {}),
         enabled: webcodecsEnabled,
         intercom_primary: webcodecsIntercomPrimary,
+        surveillance_primary: webcodecsSurveillancePrimary,
       },
       surveillance: {
         ...(config.surveillance || {}),
@@ -116,6 +121,8 @@ class ComelitCard extends HTMLElement {
     this._activeTab =
       defaultTab === "webcodecs" && !webcodecsEnabled ? "intercom" : defaultTab;
     this._selectedCamera = undefined;
+    this._surveillanceViewerMode = "webcodecs";
+    this._surveillanceViewerFallbackReason = undefined;
     this._intercomViewerMode = "webcodecs";
     this._intercomViewerFallbackReason = undefined;
     this._forceFullRender = true;
@@ -309,6 +316,10 @@ class ComelitCard extends HTMLElement {
     return this._config.webcodecs?.intercom_primary === true;
   }
 
+  _webcodecsSurveillancePrimary() {
+    return this._config.webcodecs?.surveillance_primary === true;
+  }
+
   _intercomModel() {
     const resolve = (key) => {
       const entry = this._resolveByUniqueId(INTERCOM_UNIQUE_IDS[key]);
@@ -390,6 +401,21 @@ class ComelitCard extends HTMLElement {
     );
   }
 
+  _canPreserveSurveillanceWebCodecsViewer() {
+    const viewer = this._viewerElement;
+    const target = this.shadowRoot?.querySelector("#viewer");
+    return (
+      this._rendered &&
+      this._activeTab === "surveillance" &&
+      Boolean(this._selectedCamera) &&
+      this._surveillanceViewerMode === "webcodecs" &&
+      this._webcodecsSurveillancePrimary() &&
+      viewer?.tagName?.toLowerCase() === "miniapp-webcodecs-viewer" &&
+      viewer.isConnected &&
+      target?.contains(viewer)
+    );
+  }
+
   _render() {
     if (!this.shadowRoot) {
       return;
@@ -397,10 +423,16 @@ class ComelitCard extends HTMLElement {
 
     const forceFullRender = this._forceFullRender;
     this._forceFullRender = false;
-    if (!forceFullRender && this._canPreserveIntercomWebCodecsViewer()) {
-      // Home Assistant state refreshes and same-panel call updates must not
-      // destroy a healthy WSS session. Dynamic text/buttons can be refreshed
-      // in place without replacing the embedded viewer node.
+    if (
+      !forceFullRender &&
+      (
+        this._canPreserveIntercomWebCodecsViewer() ||
+        this._canPreserveSurveillanceWebCodecsViewer()
+      )
+    ) {
+      // Home Assistant state refreshes and semantically unchanged card renders
+      // must not destroy a healthy WSS session. Dynamic text/buttons can be
+      // refreshed in place without replacing the embedded viewer node.
       this._updateDynamicState();
       return;
     }
@@ -1068,6 +1100,8 @@ class ComelitCard extends HTMLElement {
         }
 
         this._selectedCamera = entityId;
+        this._surveillanceViewerMode = "webcodecs";
+        this._surveillanceViewerFallbackReason = undefined;
         for (const candidate of this.shadowRoot.querySelectorAll("[data-camera]")) {
           candidate.classList.toggle(
             "selected",
@@ -1161,6 +1195,8 @@ class ComelitCard extends HTMLElement {
     }
 
     if (nextTab === "surveillance") {
+      this._surveillanceViewerMode = "webcodecs";
+      this._surveillanceViewerFallbackReason = undefined;
       // Keep the explicitly opened intercom viewer connected to the DOM.
       // This preserves its HA camera-view lease while the user inspects
       // ordinary surveillance cameras.
@@ -1442,6 +1478,103 @@ class ComelitCard extends HTMLElement {
     const generation = ++this._viewerGeneration;
     target.innerHTML = '<div class="notice">Подключение камеры…</div>';
 
+    if (
+      this._webcodecsSurveillancePrimary() &&
+      this._surveillanceViewerMode !== "legacy" &&
+      customElements.get("miniapp-webcodecs-viewer")
+    ) {
+      this._mountSurveillanceWebCodecsViewer(target, entityId, generation);
+      return;
+    }
+
+    await this._mountLegacySurveillanceViewer(target, entityId, generation);
+  }
+
+  _mountSurveillanceWebCodecsViewer(target, entityId, generation) {
+    const camera = this._surveillanceEntities()
+      .find((candidate) => candidate.entityId === entityId);
+    if (!camera || !camera.available) {
+      target.innerHTML = '<div class="notice error">Камера сейчас недоступна.</div>';
+      return;
+    }
+
+    const viewer = document.createElement("miniapp-webcodecs-viewer");
+    viewer.embedded = true;
+    viewer.cameras = [{
+      entityId: camera.entityId,
+      name: camera.name,
+      available: camera.available,
+      kind: "ordinary",
+    }];
+    viewer.hass = this._hass;
+    viewer.autoStart = true;
+    viewer.addEventListener("comelit-webcodecs-terminal", (event) => {
+      if (
+        generation !== this._viewerGeneration ||
+        this._selectedCamera !== entityId ||
+        this._activeTab !== "surveillance"
+      ) {
+        return;
+      }
+      this._surveillanceViewerFallbackReason =
+        String(event?.detail?.reason || "webcodecs_error");
+      this._showSurveillanceLegacyFallback(entityId, generation);
+    });
+
+    if (
+      generation !== this._viewerGeneration ||
+      this._selectedCamera !== entityId ||
+      this._activeTab !== "surveillance"
+    ) {
+      return;
+    }
+
+    this._viewerElement = viewer;
+    target.replaceChildren(viewer);
+  }
+
+  _showSurveillanceLegacyFallback(entityId, generation) {
+    if (
+      generation !== this._viewerGeneration ||
+      this._selectedCamera !== entityId ||
+      this._activeTab !== "surveillance"
+    ) {
+      return;
+    }
+    const currentTarget = this.shadowRoot?.querySelector("#viewer");
+    if (!currentTarget) {
+      return;
+    }
+
+    const reason = String(
+      this._surveillanceViewerFallbackReason || "webcodecs_error",
+    );
+    this._surveillanceViewerMode = "legacy";
+    this._viewerElement = undefined;
+    currentTarget.innerHTML = `
+      <div class="notice">
+        WebCodecs недоступен (${escapeHtml(reason)}).
+        Переключение на резервный MSE/WebRTC/HLS…
+      </div>
+    `;
+
+    // Replacing the embedded viewer disconnects and closes its WSS source
+    // before the existing legacy MSE -> WebRTC -> HLS chain is mounted.
+    queueMicrotask(() => {
+      if (
+        generation !== this._viewerGeneration ||
+        this._selectedCamera !== entityId ||
+        this._activeTab !== "surveillance" ||
+        this._surveillanceViewerMode !== "legacy"
+      ) {
+        return;
+      }
+      this._surveillanceViewerFallbackReason = undefined;
+      this._mountViewer(entityId);
+    });
+  }
+
+  async _mountLegacySurveillanceViewer(target, entityId, generation) {
     try {
       if (typeof window.loadCardHelpers !== "function") {
         throw new Error("loadCardHelpers unavailable");
@@ -1479,7 +1612,7 @@ class ComelitCard extends HTMLElement {
       if (currentTarget) {
         currentTarget.innerHTML = `
           <div class="notice error">
-            Не удалось создать стандартный HA camera viewer:
+            Не удалось открыть резервный viewer камеры:
             ${escapeHtml(error instanceof Error ? error.message : error)}
           </div>
         `;
