@@ -261,7 +261,7 @@
               <span>Очередь: <b data-queue>${this._stats.maxDecodeQueue}</b></span>
             </div>
             <pre data-result>${this._stats.finalBlock || ""}</pre>
-          ` : '<div class="notice">В allowlist Mini App нет обычных камер для теста WebCodecs.</div>'}
+          ` : '<div class="notice">В Mini App нет доступных камер для теста WebCodecs.</div>'}
         </div>
       `;
       this.shadowRoot.querySelector("[data-camera]")?.addEventListener("change", (event) => {
