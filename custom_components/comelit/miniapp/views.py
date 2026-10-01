@@ -812,15 +812,40 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
 
             async with lease:
                 log_event("session_open")
-                try:
-                    source = await camera.stream_source()
-                except Exception:
-                    log_event("source_open_failed")
-                    await close_with_error("source_open_failed")
-                    return websocket
-                if not webcodecs_mod.is_rtsp_source(source):
-                    await close_with_error("source_not_h264_rtsp")
-                    return websocket
+                source_kind = "ordinary_rtsp"
+                source_opener = webcodecs_mod.open_h264_access_unit_source
+                if target.kind == "entrance":
+                    try:
+                        entrance_lease = await self.controller.acquire_webcodecs_entrance(
+                            target
+                        )
+                    except MiniAppOperationError as exc:
+                        await close_with_error(str(exc))
+                        return websocket
+                    source = str(entrance_lease.local_sdp_path)
+                    source_kind = "comelit_entrance_rtp"
+                    source_opener = webcodecs_mod.open_h264_sdp_access_unit_source
+                    if not await send_json(
+                        {
+                            "type": "intercom_media_ready",
+                            "server_elapsed_ms": webcodecs_mod.monotonic_ms(started),
+                        }
+                    ):
+                        return websocket
+                else:
+                    camera = target.camera
+                    if camera is None:
+                        await close_with_error("source_open_failed")
+                        return websocket
+                    try:
+                        source = await camera.stream_source()
+                    except Exception:
+                        log_event("source_open_failed")
+                        await close_with_error("source_open_failed")
+                        return websocket
+                    if not webcodecs_mod.is_rtsp_source(source):
+                        await close_with_error("source_not_h264_rtsp")
+                        return websocket
                 log_event("source_resolved")
 
                 async def produce_units() -> None:
@@ -829,9 +854,7 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                     send_source_eof = True
                     first_source_packet_queued = False
                     try:
-                        unit_source = await webcodecs_mod.open_h264_access_unit_source(
-                            source
-                        )
+                        unit_source = await source_opener(source)
                         await queue.put(
                             ("source_open", webcodecs_mod.monotonic_ms(started))
                         )
