@@ -1475,6 +1475,14 @@ class ComelitCard extends HTMLElement {
       return;
     }
 
+    if (
+      this._selectedCamera === entityId &&
+      this._canPreserveSurveillanceWebCodecsViewer()
+    ) {
+      this._viewerElement.hass = this._hass;
+      return;
+    }
+
     const generation = ++this._viewerGeneration;
     target.innerHTML = '<div class="notice">Подключение камеры…</div>';
 
