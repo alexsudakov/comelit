@@ -2043,6 +2043,74 @@ def test_webcodecs_send_connection_error_is_clean_client_close(monkeypatch):
     assert websocket.binaries == []
 
 
+def test_h264_sdp_access_unit_source_uses_local_rtp_whitelist(monkeypatch):
+    calls = []
+
+    class _CodecContext:
+        name = "h264"
+        extradata = None
+
+    class _Stream:
+        type = "video"
+        codec_context = _CodecContext()
+
+    class _Container:
+        streams = [_Stream()]
+
+        def demux(self, _stream):
+            return iter(())
+
+        def close(self):
+            pass
+
+    def fake_open(source, **kwargs):
+        calls.append((source, kwargs))
+        return _Container()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "av",
+        types.SimpleNamespace(open=fake_open),
+    )
+
+    async def immediate_to_thread(func, /, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(webcodecs_mod.asyncio, "to_thread", immediate_to_thread)
+
+    async def run():
+        source = await webcodecs_mod.open_h264_sdp_access_unit_source(
+            "/run/comelit-media/local-rtp.sdp"
+        )
+        await source.aclose()
+
+    asyncio.run(run())
+    assert calls == [
+        (
+            "/run/comelit-media/local-rtp.sdp",
+            {
+                "mode": "r",
+                "format": "sdp",
+                "options": {"protocol_whitelist": "file,udp,rtp"},
+                "timeout": 5.0,
+            },
+        )
+    ]
+
+
+def test_webcodecs_entrance_busy_fails_before_second_media_acquire():
+    controller, hass = _controller(surveillance_label="Outside")
+    manager, _transport = _install_webcodecs_entrance_runtime(hass)
+    manager.phase = "active"
+    manager.active = True
+    target = controller.get_webcodecs_camera_target("camera.comelit_entrance")
+
+    with pytest.raises(controller_mod.MiniAppOperationError, match="intercom_media_busy"):
+        asyncio.run(controller.acquire_webcodecs_entrance(target))
+
+    assert manager.acquire_calls == []
+
+
 def test_h264_access_unit_source_closes_container_once_on_cancel(monkeypatch):
     close_count = 0
 
