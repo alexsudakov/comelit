@@ -10,11 +10,11 @@ from typing import Any
 from urllib.parse import urlsplit
 
 
-WEBCODECS_PROTOCOL_VERSION = 1
+WEBCODECS_PROTOCOL_VERSION = 2
 WEBCODECS_FLAG_KEY = 0x01
 WEBCODECS_FLAG_DELTA = 0x02
 WEBCODECS_FLAG_PTS_VALID = 0x04
-WEBCODECS_HEADER_BYTES = 20
+WEBCODECS_HEADER_BYTES = 36
 WEBCODECS_MAX_COMMAND_BYTES = 256
 WEBCODECS_MAX_UNIT_BYTES = 1024 * 1024
 WEBCODECS_MAX_QUEUE_UNITS = 48
@@ -46,6 +46,8 @@ class WebCodecsFrame:
     pts_valid: bool
     keyframe: bool
     payload: bytes
+    source_elapsed_us: int = 0
+    send_elapsed_us: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +56,7 @@ class H264AccessUnit:
     keyframe: bool
     media_pts_us: int | None
     codec: str | None = None
+    source_elapsed_us: int = 0
 
 
 @dataclass(slots=True)
@@ -133,6 +136,9 @@ def validate_webcodecs_command(data: str) -> bool:
 def encode_webcodecs_frame(frame: WebCodecsFrame) -> bytes:
     if frame.sequence < 1 or frame.sequence > 0xFFFFFFFF:
         raise WebCodecsProtocolError("invalid_sequence")
+    for value in (frame.source_elapsed_us, frame.send_elapsed_us):
+        if value < 0 or value > 0xFFFFFFFFFFFFFFFF:
+            raise WebCodecsProtocolError("invalid_elapsed")
     if len(frame.payload) > WEBCODECS_MAX_UNIT_BYTES:
         raise WebCodecsProtocolError("unit_too_large")
     flags = WEBCODECS_FLAG_KEY if frame.keyframe else WEBCODECS_FLAG_DELTA
@@ -140,12 +146,14 @@ def encode_webcodecs_frame(frame: WebCodecsFrame) -> bytes:
         flags |= WEBCODECS_FLAG_PTS_VALID
     return (
         struct.pack(
-            ">BBHIQI",
+            ">BBHIQQQI",
             WEBCODECS_PROTOCOL_VERSION,
             flags,
             0,
             frame.sequence,
             frame.media_pts_us if frame.pts_valid else 0,
+            frame.source_elapsed_us,
+            frame.send_elapsed_us,
             len(frame.payload),
         )
         + frame.payload
@@ -155,8 +163,17 @@ def encode_webcodecs_frame(frame: WebCodecsFrame) -> bytes:
 def decode_webcodecs_frame(data: bytes) -> WebCodecsFrame:
     if len(data) < WEBCODECS_HEADER_BYTES:
         raise WebCodecsProtocolError("truncated_header")
-    version, flags, reserved, sequence, pts_us, payload_length = struct.unpack(
-        ">BBHIQI",
+    (
+        version,
+        flags,
+        reserved,
+        sequence,
+        pts_us,
+        source_elapsed_us,
+        send_elapsed_us,
+        payload_length,
+    ) = struct.unpack(
+        ">BBHIQQQI",
         data[:WEBCODECS_HEADER_BYTES],
     )
     if version != WEBCODECS_PROTOCOL_VERSION:
@@ -178,6 +195,8 @@ def decode_webcodecs_frame(data: bytes) -> WebCodecsFrame:
         pts_valid=bool(flags & WEBCODECS_FLAG_PTS_VALID),
         keyframe=bool(flags & WEBCODECS_FLAG_KEY),
         payload=payload,
+        source_elapsed_us=source_elapsed_us,
+        send_elapsed_us=send_elapsed_us,
     )
 
 
@@ -336,6 +355,7 @@ class H264AccessUnitSource:
         self._pps = pps
         self._codec = codec
         self._closed = False
+        self._first_unit_ns: int | None = None
 
     @classmethod
     async def open(cls, source: str) -> "H264AccessUnitSource":
@@ -408,6 +428,10 @@ class H264AccessUnitSource:
         raw = bytes(packet)
         if not raw:
             return await self.__anext__()
+        received_ns = time.monotonic_ns()
+        if self._first_unit_ns is None:
+            self._first_unit_ns = received_ns
+        source_elapsed_us = max(0, (received_ns - self._first_unit_ns) // 1000)
         try:
             annexb = annexb_normalize(raw)
         except WebCodecsProtocolError as exc:
@@ -426,6 +450,7 @@ class H264AccessUnitSource:
             keyframe=keyframe,
             media_pts_us=packet_pts_us(packet),
             codec=self._codec,
+            source_elapsed_us=source_elapsed_us,
         )
 
     async def aclose(self) -> None:
