@@ -321,14 +321,14 @@ Assistant camera contract:
 await camera.stream_source()
 ```
 
-For Home Assistant `generic` camera entities, Comelit mirrors the compatibility
-producer set used by HA core's go2rtc provider: the resolved source is registered
-as `ffmpeg:<stream_source>` together with a second loopback producer,
-`ffmpeg:<internal_stream>#audio=opus#query=log_level=debug`, so browser-facing
-consumers can use an Opus audio variant when the camera's native audio codec is
-not directly compatible. Other ordinary camera integrations keep a single
-unchanged resolved source. The raw camera source is still validated before these
-internal server-side wrappers are applied.
+For Mini App MSE, Comelit registers the validated resolved camera source directly
+in the HA-managed go2rtc instance, including Home Assistant `generic` camera
+RTSP sources. This is intentionally narrower than HA core's WebRTC compatibility
+path: wrapping a Generic Camera source in `ffmpeg:` creates an exec-backed
+producer whose cold-start window can outlive the Mini App's bounded MSE
+negotiation. The direct source remains entirely server-side and is never exposed
+to the browser. Home Assistant's own WebRTC provider is unchanged and continues
+to use its native Generic Camera compatibility behavior on WebRTC fallback.
 
 Credentials remain owned by the original Home Assistant camera integration.
 Comelit does not add options-flow URL/login/password fields, does not duplicate

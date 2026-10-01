@@ -376,23 +376,12 @@ class ComelitMiniAppController:
 
         internal_name = self.mse_internal_stream_name(entity_id)
 
-        # Mirror Home Assistant's Generic Camera go2rtc producer set. HA core
-        # registers the direct source through ffmpeg and adds a loopback ffmpeg
-        # producer that can transcode camera audio to Opus while reusing the same
-        # go2rtc stream. This matters for cameras whose native audio codec is not
-        # directly compatible with browser MSE/WebRTC playback.
-        registry = er.async_get(self.hass)
-        entry = registry.async_get(entity_id)
-        if entry is not None and entry.platform == "generic":
-            stream_sources = [
-                "ffmpeg:" + stream_source,
-                (
-                    f"ffmpeg:{internal_name}"
-                    "#audio=opus#query=log_level=debug"
-                ),
-            ]
-        else:
-            stream_sources = [stream_source]
+        # Mini App MSE uses the resolved camera source directly inside the
+        # HA-managed go2rtc instance. In particular, do not wrap Generic Camera
+        # RTSP sources in ffmpeg here: that path becomes an exec-backed producer
+        # with a much longer cold-start window than the bounded MSE negotiation.
+        # The source remains server-side and is never serialized to the browser.
+        stream_sources = [stream_source]
         if progress is not None:
             progress("mse_source_resolved")
 
