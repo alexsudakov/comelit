@@ -286,6 +286,23 @@ def test_shared_card_default_config_preserves_two_top_level_tabs():
     assert '!(nextTab === "webcodecs" && this._webcodecsEnabled())' in card
 
 
+def test_surveillance_webcodecs_primary_reuses_validated_transport_with_legacy_fallback():
+    card = _read("custom_components/comelit/frontend/comelit-card.js")
+    host = _read("custom_components/comelit/frontend/miniapp/host.js")
+    viewer = _read("custom_components/comelit/frontend/miniapp/webcodecs.js")
+    server = _read("custom_components/comelit/miniapp/webcodecs.py")
+
+    assert "surveillance_primary: true" in host
+    assert "config.webcodecs?.surveillance_primary === true" in card
+    assert "_mountSurveillanceWebCodecsViewer" in card
+    assert "_showSurveillanceLegacyFallback" in card
+    assert "_mountLegacySurveillanceViewer" in card
+    assert "Переключение на резервный MSE/WebRTC/HLS" in card
+    assert "_canPreserveSurveillanceWebCodecsViewer" in card
+    assert 'selectedCamera?.kind === "intercom_entrance"' in viewer
+    assert "WEBCODECS_MAX_SESSION_SECONDS = 600" in server
+
+
 def test_entrance_webcodecs_primary_has_bounded_startup_and_hls_cleanup_barrier():
     card = _read("custom_components/comelit/frontend/comelit-card.js")
     viewer = _read("custom_components/comelit/frontend/miniapp/webcodecs.js")
