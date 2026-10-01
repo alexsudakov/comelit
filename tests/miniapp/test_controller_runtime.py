@@ -1913,18 +1913,18 @@ def test_webcodecs_send_connection_error_is_clean_client_close(monkeypatch):
         asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
 
     websocket = _ClosingWebSocket.instances[-1]
-    assert _json_texts(websocket)[:2] == [
-        {
-            "type": "hello",
-            "protocol": 1,
-            "entity_id": "camera.driveway",
-            "codec": "avc1.640029",
-            "max_unit_bytes": webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES,
-            "session_max_seconds": webcodecs_mod.WEBCODECS_MAX_SESSION_SECONDS,
-            "zero_transcode": True,
-        },
-        {"type": "source"},
-    ]
+    texts = _json_texts(websocket)
+    assert texts[0]["type"] == "source_open"
+    assert texts[1]["type"] == "source_packet"
+    assert texts[2] == {
+        "type": "hello",
+        "protocol": 2,
+        "entity_id": "camera.driveway",
+        "codec": "avc1.640029",
+        "max_unit_bytes": webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES,
+        "session_max_seconds": webcodecs_mod.WEBCODECS_MAX_SESSION_SECONDS,
+        "zero_transcode": True,
+    }
     assert websocket.binaries == []
 
 
