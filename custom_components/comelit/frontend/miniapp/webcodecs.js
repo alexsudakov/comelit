@@ -108,7 +108,11 @@
       const next = Array.isArray(value)
         ? value.filter((camera) => {
             const entityId = safeEntityId(camera.entityId || camera.entity_id);
-            return entityId && !/comelit_(entrance|gate|intercom)/i.test(entityId);
+            const entrance = camera?.kind === "intercom_entrance";
+            return entityId && (
+              entrance ||
+              !/comelit_(entrance|gate|intercom)/i.test(entityId)
+            );
           })
         : [];
       const nextFingerprint = this._cameraListFingerprint(next);
@@ -162,7 +166,13 @@
 
     _cameraListFingerprint(cameras) {
       return cameras
-        .map((camera) => this._cameraId(camera) + "\u0000" + this._cameraName(camera))
+        .map((camera) => (
+          this._cameraId(camera) +
+          "\u0000" +
+          this._cameraName(camera) +
+          "\u0000" +
+          String(camera?.kind || "ordinary")
+        ))
         .join("\u0001");
     }
 
@@ -170,6 +180,8 @@
       return {
         startedAt: 0,
         wsOpenAt: null,
+        intercomMediaReadyAt: null,
+        intercomMediaReadyServerMs: null,
         sourceOpenAt: null,
         firstSourcePacketAt: null,
         sourceOpenServerMs: null,
@@ -200,6 +212,9 @@
         backlogStop: false,
         stopReason: "n/a",
         zeroTranscode: null,
+        sourceKind: "n/a",
+        comelitEntranceOpen: false,
+        comelitMediaStarted: false,
         unsupported: false,
         error: null,
       };
@@ -246,7 +261,7 @@
               <span>Очередь: <b data-queue>${this._stats.maxDecodeQueue}</b></span>
             </div>
             <pre data-result>${this._stats.finalBlock || ""}</pre>
-          ` : '<div class="notice">В allowlist Mini App нет обычных камер для теста WebCodecs.</div>'}
+          ` : '<div class="notice">В Mini App нет доступных камер для теста WebCodecs.</div>'}
         </div>
       `;
       this.shadowRoot.querySelector("[data-camera]")?.addEventListener("change", (event) => {
@@ -376,6 +391,9 @@
         if (Object.prototype.hasOwnProperty.call(message, "zero_transcode")) {
           this._stats.zeroTranscode = message.zero_transcode === true;
         }
+        this._stats.sourceKind = String(message.source_kind || "n/a");
+        this._stats.comelitEntranceOpen = message.comelit_entrance_open === true;
+        this._stats.comelitMediaStarted = message.comelit_media_started === true;
         const config = {
           codec: this._stats.codec,
           optimizeForLatency: true,
@@ -399,6 +417,20 @@
           this._handleBinary(data);
         }
         this._refreshCounters();
+        return;
+      }
+      if (message.type === "intercom_media_ready") {
+        if (this._stats.intercomMediaReadyAt === null) {
+          this._stats.intercomMediaReadyAt = performance.now();
+          const elapsed = Number(message.server_elapsed_ms);
+          this._stats.intercomMediaReadyServerMs = Number.isFinite(elapsed)
+            ? elapsed
+            : null;
+          this._stats.comelitEntranceOpen = true;
+          this._stats.comelitMediaStarted = true;
+          this._stats.sourceKind = "comelit_entrance_rtp";
+        }
+        this._setStatus("Comelit media готова");
         return;
       }
       if (message.type === "source_open") {
@@ -610,6 +642,10 @@
         !s.error &&
         cleanStop
       );
+      const intercomMediaToSourceOpenMs =
+        s.intercomMediaReadyAt !== null && s.sourceOpenAt !== null
+          ? s.sourceOpenAt - s.intercomMediaReadyAt
+          : null;
       const sourceStartupMs =
         s.sourceOpenAt !== null && s.firstSourcePacketAt !== null
           ? s.firstSourcePacketAt - s.sourceOpenAt
@@ -631,8 +667,12 @@
         `DURATION_S=${fmt(duration)}`,
         `CODEC=${s.codec}`,
         `ZERO_TRANSCODE=${s.zeroTranscode === null ? "n/a" : s.zeroTranscode ? "true" : "false"}`,
+        `SOURCE_KIND=${s.sourceKind}`,
         "",
         `WS_CONNECT_MS=${s.wsOpenAt ? fmt(s.wsOpenAt - s.startedAt) : "n/a"}`,
+        `INTERCOM_MEDIA_READY_MS=${s.intercomMediaReadyAt !== null ? fmt(s.intercomMediaReadyAt - s.startedAt) : "n/a"}`,
+        `INTERCOM_MEDIA_READY_SERVER_MS=${fmt(s.intercomMediaReadyServerMs)}`,
+        `INTERCOM_MEDIA_TO_SOURCE_OPEN_MS=${fmt(intercomMediaToSourceOpenMs)}`,
         `SOURCE_OPEN_MS=${s.sourceOpenAt !== null ? fmt(s.sourceOpenAt - s.startedAt) : "n/a"}`,
         `FIRST_SOURCE_PACKET_MS=${s.firstSourcePacketAt !== null ? fmt(s.firstSourcePacketAt - s.startedAt) : "n/a"}`,
         `FIRST_BINARY_MS=${s.firstBinaryAt ? fmt(s.firstBinaryAt - s.startedAt) : "n/a"}`,
@@ -677,8 +717,8 @@
         `BACKLOG_STOP=${s.backlogStop ? "true" : "false"}`,
         `DROPPED_UNITS=0`,
         "",
-        "COMELIT_ENTRANCE_OPEN=false",
-        "COMELIT_MEDIA_STARTED=false",
+        `COMELIT_ENTRANCE_OPEN=${s.comelitEntranceOpen ? "true" : "false"}`,
+        `COMELIT_MEDIA_STARTED=${s.comelitMediaStarted ? "true" : "false"}`,
         "DOOR_ACTIONS=0",
         "GATE_ACTIONS=0",
       ].join("\n");

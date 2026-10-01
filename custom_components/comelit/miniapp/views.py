@@ -703,7 +703,7 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
             raise web.HTTPNotFound
 
         try:
-            camera = self.controller.get_webcodecs_ordinary_camera(entity_id)
+            target = self.controller.get_webcodecs_camera_target(entity_id)
         except MiniAppOperationError as exc:
             return _json_response({"error": str(exc)}, status=HTTPStatus.CONFLICT)
 
@@ -723,6 +723,8 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
         first_source_logged = False
         first_binary_logged = False
         source_task: asyncio.Task[None] | None = None
+        client_watch_task: asyncio.Task[None] | None = None
+        entrance_lease = None
         queued_bytes = 0
         queued_units = 0
         queue: asyncio.Queue[object] = asyncio.Queue(
@@ -767,7 +769,14 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
         async def close_with_error(code: str) -> None:
             nonlocal errors, reason
             errors += 1
-            if code in {"session_limit", "backlog_exceeded", "source_open_failed"}:
+            if code in {
+                "session_limit",
+                "backlog_exceeded",
+                "source_open_failed",
+                "intercom_media_busy",
+                "intercom_media_start_failed",
+                "intercom_media_unavailable",
+            }:
                 reason = code
             if not websocket.closed:
                 await send_json({"type": "error", "code": code})
@@ -804,15 +813,62 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
 
             async with lease:
                 log_event("session_open")
-                try:
-                    source = await camera.stream_source()
-                except Exception:
-                    log_event("source_open_failed")
-                    await close_with_error("source_open_failed")
-                    return websocket
-                if not webcodecs_mod.is_rtsp_source(source):
-                    await close_with_error("source_not_h264_rtsp")
-                    return websocket
+                source_kind = "ordinary_rtsp"
+                source_opener = webcodecs_mod.open_h264_access_unit_source
+                if target.kind == "entrance":
+                    try:
+                        entrance_lease = await self.controller.acquire_webcodecs_entrance(
+                            target
+                        )
+                    except MiniAppOperationError as exc:
+                        await close_with_error(str(exc))
+                        return websocket
+                    source = str(entrance_lease.local_sdp_path)
+                    source_kind = "comelit_entrance_rtp"
+                    source_opener = webcodecs_mod.open_h264_sdp_access_unit_source
+                    log_event("intercom_media_ready")
+                    if not await send_json(
+                        {
+                            "type": "intercom_media_ready",
+                            "server_elapsed_ms": webcodecs_mod.monotonic_ms(started),
+                        }
+                    ):
+                        return websocket
+
+                    async def watch_entrance_client_close() -> None:
+                        try:
+                            async for message in websocket:
+                                if message.type in {
+                                    WSMsgType.CLOSE,
+                                    WSMsgType.CLOSED,
+                                    WSMsgType.ERROR,
+                                }:
+                                    break
+                                # No post-start commands are accepted. Any
+                                # further client message terminates this
+                                # experimental media ownership fail-closed.
+                                break
+                        except _WEBSOCKET_SEND_ERRORS:
+                            pass
+                        await queue.put(("client_close", "client_close"))
+
+                    client_watch_task = self.controller.hass.async_create_task(
+                        watch_entrance_client_close()
+                    )
+                else:
+                    camera = target.camera
+                    if camera is None:
+                        await close_with_error("source_open_failed")
+                        return websocket
+                    try:
+                        source = await camera.stream_source()
+                    except Exception:
+                        log_event("source_open_failed")
+                        await close_with_error("source_open_failed")
+                        return websocket
+                    if not webcodecs_mod.is_rtsp_source(source):
+                        await close_with_error("source_not_h264_rtsp")
+                        return websocket
                 log_event("source_resolved")
 
                 async def produce_units() -> None:
@@ -821,9 +877,7 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                     send_source_eof = True
                     first_source_packet_queued = False
                     try:
-                        unit_source = await webcodecs_mod.open_h264_access_unit_source(
-                            source
-                        )
+                        unit_source = await source_opener(source)
                         await queue.put(
                             ("source_open", webcodecs_mod.monotonic_ms(started))
                         )
@@ -902,6 +956,9 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                                     ):
                                         break
                                     continue
+                                if kind == "client_close":
+                                    reason = "client_close"
+                                    break
                                 if kind == "error":
                                     if code == "unit_too_large":
                                         log_event("unit_too_large")
@@ -943,6 +1000,9 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                                         "max_unit_bytes": webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES,
                                         "session_max_seconds": webcodecs_mod.WEBCODECS_MAX_SESSION_SECONDS,
                                         "zero_transcode": True,
+                                        "source_kind": source_kind,
+                                        "comelit_entrance_open": target.kind == "entrance",
+                                        "comelit_media_started": target.kind == "entrance",
                                     }
                                 ):
                                     break
@@ -981,6 +1041,18 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                 source_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await source_task
+            if client_watch_task is not None:
+                client_watch_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await client_watch_task
+            if entrance_lease is not None:
+                try:
+                    await entrance_lease.release()
+                except Exception:
+                    errors += 1
+                    _LOGGER.exception(
+                        "Comelit Mini App WebCodecs entrance media release failed"
+                    )
             log_event("session_close")
             _LOGGER.info(
                 webcodecs_mod.webcodecs_summary_line(

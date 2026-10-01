@@ -156,12 +156,31 @@ async function main() {
             state: "idle",
             attributes: { friendly_name: "Двор" },
           },
+          "camera.comelit_entrance": {
+            state: "idle",
+            attributes: { friendly_name: "Comelit — Камера подъезда" },
+          },
         },
-        callWS: async () => [],
+        callWS: async (message) => {
+          if (message?.type === "config/entity_registry/list") {
+            return [
+              {
+                entity_id: "camera.comelit_entrance",
+                platform: "comelit",
+                unique_id: "comelit_entrance_camera",
+                labels: [],
+                name: null,
+                original_name: "Comelit — Камера подъезда",
+              },
+            ];
+          }
+          return [];
+        },
         callService: async () => {},
       };
     });
 
+    await page.waitForFunction(() => document.getElementById("card")._registryLoaded === true);
     const tabCount = await page.evaluate(() => {
       const card = document.getElementById("card");
       return card.shadowRoot.querySelectorAll("[data-tab]").length;
@@ -174,6 +193,13 @@ async function main() {
       card.shadowRoot.querySelector('[data-tab="webcodecs"]').click();
     });
     assert.equal(await page.evaluate(() => window.__webcodecs.sockets.length), 0);
+    const entranceOption = await page.evaluate(() => {
+      const card = document.getElementById("card");
+      const viewer = card.shadowRoot.querySelector("miniapp-webcodecs-viewer");
+      return [...viewer.shadowRoot.querySelectorAll("[data-camera] option")]
+        .some((option) => option.value === "camera.comelit_entrance");
+    });
+    assert.equal(entranceOption, true);
 
     const refreshRegression = await page.evaluate(() => {
       const card = document.getElementById("card");
@@ -233,6 +259,9 @@ async function main() {
         max_unit_bytes: 1048576,
         session_max_seconds: 120,
         zero_transcode: true,
+        source_kind: "ordinary_rtsp",
+        comelit_entrance_open: false,
+        comelit_media_started: false,
       });
       socket.emitBinary(window.__frame());
     });
@@ -298,6 +327,7 @@ async function main() {
       "TRANSPORT_BACKLOG_OBSERVED=unknown",
       "ENTITY_ID=camera.parking_6048",
       "ZERO_TRANSCODE=true",
+      "SOURCE_KIND=ordinary_rtsp",
       "SOURCE_OPEN_MS=",
       "FIRST_SOURCE_PACKET_MS=",
       "SOURCE_STARTUP_MS=",
@@ -316,6 +346,67 @@ async function main() {
       assert.ok(state.result.includes(key), key + "\n" + state.result);
     }
     assert.ok(logs.includes(state.result));
+
+    await page.evaluate(() => {
+      const card = document.getElementById("card");
+      const root = card.shadowRoot.querySelector("miniapp-webcodecs-viewer").shadowRoot;
+      const select = root.querySelector("[data-camera]");
+      select.value = "camera.comelit_entrance";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      root.querySelector("[data-start]").click();
+    });
+    await page.waitForFunction(() => window.__webcodecs.sockets.length === 2);
+    await page.waitForFunction(() => window.__webcodecs.sockets[1].sent.length === 1);
+    await page.evaluate(() => {
+      const socket = window.__webcodecs.sockets[1];
+      socket.emitText({ type: "intercom_media_ready", server_elapsed_ms: 4100 });
+      socket.emitText({ type: "source_open", server_elapsed_ms: 4140 });
+      socket.emitText({ type: "source_packet", server_elapsed_ms: 4160 });
+      socket.emitText({
+        type: "hello",
+        protocol: 2,
+        entity_id: "camera.comelit_entrance",
+        codec: "avc1.42C01E",
+        max_unit_bytes: 1048576,
+        session_max_seconds: 120,
+        zero_transcode: true,
+        source_kind: "comelit_entrance_rtp",
+        comelit_entrance_open: true,
+        comelit_media_started: true,
+      });
+      socket.emitBinary(window.__frame());
+    });
+    await page.waitForFunction(() => window.__webcodecs.drawCount === 2);
+    await page.evaluate(() => {
+      const card = document.getElementById("card");
+      card.shadowRoot.querySelector("miniapp-webcodecs-viewer")
+        .shadowRoot.querySelector("[data-stop]").click();
+    });
+    await page.waitForFunction(() => {
+      const card = document.getElementById("card");
+      const result = card.shadowRoot.querySelector("miniapp-webcodecs-viewer")
+        .shadowRoot.querySelector("[data-result]").textContent;
+      return result.includes("ENTITY_ID=camera.comelit_entrance") &&
+        result.includes("COMELIT_ENTRANCE_OPEN=true") &&
+        result.includes("COMELIT_MEDIA_STARTED=true");
+    });
+    const entranceResult = await page.evaluate(() => {
+      const card = document.getElementById("card");
+      return card.shadowRoot.querySelector("miniapp-webcodecs-viewer")
+        .shadowRoot.querySelector("[data-result]").textContent;
+    });
+    for (const key of [
+      "SOURCE_KIND=comelit_entrance_rtp",
+      "INTERCOM_MEDIA_READY_MS=",
+      "INTERCOM_MEDIA_READY_SERVER_MS=4100.0",
+      "INTERCOM_MEDIA_TO_SOURCE_OPEN_MS=",
+      "COMELIT_ENTRANCE_OPEN=true",
+      "COMELIT_MEDIA_STARTED=true",
+      "DOOR_ACTIONS=0",
+      "GATE_ACTIONS=0",
+    ]) {
+      assert.ok(entranceResult.includes(key), key + "\n" + entranceResult);
+    }
 
     await page.evaluate(() => {
       const card = document.getElementById("card");

@@ -308,46 +308,54 @@ The block also reports `SOURCE_STARTUP_MS`,
 
 ## Canary Protocol
 
-Documented first target:
+The ordinary-camera transport has now been live-validated. The next bounded
+production target is the Entrance intercom camera:
 
 ```text
-camera.parking_6048
+camera.comelit_entrance
 ```
-
-This target is documentation only and is not hardcoded in implementation.
 
 Procedure:
 
 1. Owner opens the Telegram Mini App.
 2. Owner opens `WebCodecs`.
-3. Owner selects `camera.parking_6048`.
+3. Owner selects `Comelit — Камера подъезда`.
 4. Owner presses `Запустить тест`.
 5. One run lasts 60 seconds or until explicit `Остановить`.
-6. No retry is part of the canary.
+6. No automatic retry is part of the canary.
+7. No Door or Gate action is part of the canary.
 
-PASS has no invented latency threshold. Minimum PASS criteria:
+PASS has no invented latency threshold. Minimum functional PASS criteria:
 
-- WSS path works end to end.
-- `VideoDecoder` produces at least one `VideoFrame`.
-- No unexplained `SEQUENCE_GAPS`.
-- Decoder queue has no irreversible growth.
-- Stop/expiry completes cleanup.
-- Stop reason is clean: `manual_stop`, `duration_60s`, `duration_limit`, or
+- the manager-owned on-demand Entrance media lifecycle starts once;
+- WSS path works end to end;
+- `VideoDecoder` produces at least one `VideoFrame`;
+- no unexplained `SEQUENCE_GAPS`;
+- decoder queue has no irreversible growth;
+- Stop/expiry closes the local source and releases the manager lease;
+- the manager then performs its existing media teardown/listener-restore
+  lifecycle;
+- stop reason is clean: `manual_stop`, `duration_60s`, `duration_limit`, or
   `source_eof`.
 
-The canary block is printed in the UI and `console.log` once:
+For the Entrance target the canary block additionally reports:
 
 ```text
-=== COMELIT MINIAPP WEBCODECS LIVE CANARY ===
-RESULT=PASS|FAIL
-ENTITY_ID=<safe entity id>
-...
-COMELIT_ENTRANCE_OPEN=false
-COMELIT_MEDIA_STARTED=false
+SOURCE_KIND=comelit_entrance_rtp
+INTERCOM_MEDIA_READY_MS=...
+INTERCOM_MEDIA_READY_SERVER_MS=...
+INTERCOM_MEDIA_TO_SOURCE_OPEN_MS=...
+COMELIT_ENTRANCE_OPEN=true
+COMELIT_MEDIA_STARTED=true
 DOOR_ACTIONS=0
 GATE_ACTIONS=0
 ```
 
+`INTERCOM_MEDIA_READY` is the boundary after
+`ComelitMediaSessionManager.async_acquire(panel="entrance")` has returned
+successfully and the existing transport reports both active media and a ready
+local SDP. It is therefore the useful boundary for separating proprietary
+Comelit bootstrap time from the local SDP/WSS/WebCodecs portion.
 
 ## 1.7.24 Production Evidence And Corrective
 
@@ -381,28 +389,160 @@ reset result scrolling.
 PROVEN_STATIC root cause: `host.js` refreshes HA state periodically;
 `comelit-card` forwards `hass` and `cameras` into the WebCodecs viewer; the
 1.7.24 viewer setters performed a full `shadowRoot.innerHTML` render while
-idle. The corrective keeps the DOM stable for semantically unchanged camera
-lists, preserves selection/result scroll/last frame across background refresh,
-and updates controls/counters in place.
+idle. The 1.7.25 corrective keeps the DOM stable for semantically unchanged
+camera lists, preserves selection/result scroll/last frame across background
+refresh, and updates controls/counters in place.
 
 The 1.7.24 `ACCUMULATED_LAG≈15s` observation is not interpreted as network
-delay because its definition mixed camera PTS with browser arrival time. The
-v2 timing fields above replace that ambiguity before the next production
-architecture decision.
+delay because its definition mixed camera PTS with browser arrival time.
+
+## 1.7.25 Parking Production Evidence
+
+OBSERVED on 2026-10-01, bounded live run on the intended ordinary camera:
+
+```text
+ENTITY_ID=camera.parking_6048
+RESULT=PASS
+FUNCTIONAL_PASS=true
+DURATION_S=55.9
+CODEC=avc1.42002A
+ZERO_TRANSCODE=true
+
+WS_CONNECT_MS=182.8
+SOURCE_OPEN_MS=4793.7
+FIRST_SOURCE_PACKET_MS=4810.6
+FIRST_BINARY_MS=4935.8
+FIRST_DECODED_FRAME_MS=5088.5
+SOURCE_STARTUP_MS=16.9
+SOURCE_PACKET_TO_BINARY_MS=125.2
+BINARY_TO_DECODE_MS=152.7
+
+UNITS_RECEIVED=1404
+FRAMES_DECODED=1404
+KEYFRAMES_RECEIVED=21
+SEQUENCE_GAPS=0
+
+DECODE_P50_MS=131.4
+DECODE_P95_MS=247.7
+DECODE_MAX_MS=408.8
+
+MAX_DECODE_QUEUE=34
+SERVER_QUEUE_DRIFT_MS=-17.6
+SERVER_QUEUE_DRIFT_P95_MS=-16.7
+SERVER_QUEUE_DRIFT_MAX_MS=4.6
+TRANSPORT_DRIFT_MS=-119.6
+TRANSPORT_DRIFT_P95_MS=296.7
+TRANSPORT_DRIFT_MAX_MS=537.1
+
+CODED_SIZE=1920x1088
+VISIBLE_SIZE=1920x1080
+DISPLAY_SIZE=1920x1080
+BACKLOG_STOP=false
+DROPPED_UNITS=0
+```
+
+User observation: `Паркинг 6048` remained selected, the image appeared quickly
+after source startup, and playback was smooth without visible stutter.
+
+Interpretation:
+
+- 1404/1404 decoded access units, zero gaps and zero drops prove the functional
+  WSS/WebCodecs delivery path for a real 1080p H.264 camera.
+- The roughly 4.6–4.8 second startup cost occurred before the first source AU;
+  it was not caused by WebCodecs or CloudPub/WSS.
+- `TRANSPORT_DRIFT` did not show irreversible positive growth over the run,
+  while the visual stream remained smooth. The existing HTTPS/WSS ingress is
+  therefore accepted as a viable low-latency transport candidate for the
+  Entrance experiment.
+- `SOURCE_PTS_DRIFT` remains a camera-clock diagnostic and is not used as a
+  network-delay verdict.
+
+## Direct Entrance WebCodecs Path
+
+PROVEN_STATIC / implementation candidate:
+
+```text
+explicit Mini App Start
+  -> existing Mini App session/auth boundary
+  -> one WebCodecs session registry lease
+  -> ComelitMediaSessionManager.async_acquire(
+       panel="entrance",
+       reason="miniapp_webcodecs"
+     )
+  -> existing listener pause / exclusive on-demand media bootstrap
+  -> existing ComelitEntranceMediaTransport
+  -> native helper PT99 H.264 RTP
+  -> existing H264RecoveryRtpShim
+  -> local SDP (/run/comelit-media/local-rtp.sdp)
+  -> PyAV SDP/RTP demux only
+  -> H.264 Annex-B access units
+  -> bounded binary WSS protocol v2
+  -> Telegram Android WebView VideoDecoder
+  -> canvas
+```
+
+The direct Entrance WebCodecs path deliberately does **not** call
+`camera.comelit_entrance.async_create_stream()` and does not construct a Home
+Assistant `Stream`. Consequently this experiment does not require HLS,
+go2rtc, MSE, WebRTC, fMP4, or video transcoding.
+
+The native helper and recovery shim are not modified. The WebCodecs source
+attaches to the already-established HA-facing local RTP/SDP boundary, so the
+existing recovery-point behavior remains authoritative.
+
+PyAV is used only as an SDP/RTP demux and H.264 packet/access-unit boundary.
+There is no `decode()`, encode, scale, filter, or video re-encode branch.
+
+The local SDP path never leaves the server. The browser receives only bounded
+control metadata and H.264 access units. Source URLs, local filesystem paths,
+credentials, tokens, SDP text, RTP identifiers and raw protocol authorization
+material are not serialized to the Mini App.
+
+### Lifecycle and safety
+
+The Entrance target is admitted only for the exact Comelit Entrance camera
+unique id. Gate/intercom alternatives remain rejected.
+
+The path fails closed if the on-demand manager is not inactive. It does not
+start a second session on top of another on-demand consumer and it does not
+reuse an attached inbound Ring transaction in this phase.
+
+One explicit Start performs at most one manager acquire. There is no automatic
+retry.
+
+Cleanup order is:
+
+```text
+WebSocket stop/close/timeout/error
+  -> cancel and close PyAV local SDP source
+  -> release miniapp_webcodecs manager lease
+  -> existing manager teardown
+  -> existing listener resume contract
+```
+
+The existing manager remains authoritative for its 600-second absolute hard
+ceiling. The Mini App canary is shorter (60 seconds), so it cannot extend that
+deadline.
+
+Door and Gate actions are outside this path and remain zero.
 
 ## Deferred
 
-- Audio.
+- Audio in the WebCodecs path.
 - Containers and muxed A/V.
 - GOP-aware dropping.
 - Arbitrary delta-frame dropping.
-- Comelit Entrance.
-- Gate/intercom camera targets.
+- Gate/intercom camera target.
+- Attached inbound Ring reuse by the WebCodecs tab.
 - Door/Gate actions.
-- Production path replacement for MSE/WebRTC/HLS.
+- Production replacement of the existing Comelit Entrance HLS path.
 
 ## Not Proven Offline
 
-- Corrected protocol-v2 `TRANSPORT_DRIFT` behavior on the owner's phone/network.
-- A clean 60-second canary with the intended `camera.parking_6048` target.
-- Whether this path should replace any production playback path.
+- Real Entrance H.264 acceptance by Telegram WebCodecs through the new local
+  SDP source.
+- Measured proprietary Comelit bootstrap time for this direct Mini App path.
+- Clean production teardown/listener restore after the direct WebCodecs run.
+- Whether the direct Entrance WebCodecs path should replace the existing
+  production HLS viewer rather than remain an experimental transport.
+

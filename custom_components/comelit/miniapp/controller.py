@@ -22,6 +22,8 @@ from ..const import (
     CONF_MINIAPP_BOT_ID,
     CONF_MINIAPP_ENABLED,
     CONF_MINIAPP_SURVEILLANCE_LABEL,
+    DATA_MEDIA_SESSIONS,
+    DATA_MEDIA_TRANSPORTS,
     DOMAIN,
     DOOR_ENTRANCE,
     DOOR_GATE,
@@ -108,6 +110,31 @@ class _MiniAppMSEStream:
 class MiniAppMSEStreamLease:
     entity_id: str
     internal_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class MiniAppWebCodecsTarget:
+    entity_id: str
+    kind: str
+    camera: Any | None = None
+
+
+@dataclass(slots=True)
+class MiniAppWebCodecsEntranceLease:
+    manager: Any
+    transport: Any
+    reason: str
+    released: bool = False
+
+    @property
+    def local_sdp_path(self) -> Path:
+        return Path(self.transport.local_sdp_path)
+
+    async def release(self) -> None:
+        if self.released:
+            return
+        self.released = True
+        await self.manager.async_release(reason=self.reason)
 
 
 def _parse_allowed_user_ids(value: object) -> frozenset[int]:
@@ -359,12 +386,23 @@ class ComelitMiniAppController:
 
         return get_camera_from_entity_id(self.hass, entity_id)
 
-    def get_webcodecs_ordinary_camera(self, entity_id: str):
+    def get_webcodecs_camera_target(self, entity_id: str) -> MiniAppWebCodecsTarget:
         if entity_id not in self._allowed_camera_entity_ids():
             raise MiniAppOperationError("camera_not_allowed")
 
         registry = er.async_get(self.hass)
         entry = registry.async_get(entity_id)
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state == STATE_UNAVAILABLE:
+            raise MiniAppOperationError("camera_unavailable")
+
+        if (
+            entry is not None
+            and entry.platform == DOMAIN
+            and entry.unique_id == ENTRANCE_CAMERA_UNIQUE_ID
+        ):
+            return MiniAppWebCodecsTarget(entity_id=entity_id, kind="entrance")
+
         if (
             entry is not None
             and entry.platform == DOMAIN
@@ -372,11 +410,59 @@ class ComelitMiniAppController:
         ):
             raise MiniAppOperationError("intercom_camera_not_allowed")
 
-        state = self.hass.states.get(entity_id)
-        if state is None or state.state == STATE_UNAVAILABLE:
-            raise MiniAppOperationError("camera_unavailable")
+        return MiniAppWebCodecsTarget(
+            entity_id=entity_id,
+            kind="ordinary",
+            camera=get_camera_from_entity_id(self.hass, entity_id),
+        )
 
-        return get_camera_from_entity_id(self.hass, entity_id)
+    async def acquire_webcodecs_entrance(
+        self,
+        target: MiniAppWebCodecsTarget,
+    ) -> MiniAppWebCodecsEntranceLease:
+        if target.kind != "entrance":
+            raise MiniAppOperationError("invalid_webcodecs_target")
+        entry = self._entry
+        entry_id = getattr(entry, "entry_id", None) if entry is not None else None
+        if not isinstance(entry_id, str) or not entry_id:
+            raise MiniAppOperationError("intercom_media_unavailable")
+
+        domain_data = self.hass.data.get(DOMAIN, {})
+        manager = domain_data.get(DATA_MEDIA_SESSIONS, {}).get(entry_id)
+        transport = domain_data.get(DATA_MEDIA_TRANSPORTS, {}).get(entry_id)
+        if manager is None or transport is None:
+            raise MiniAppOperationError("intercom_media_unavailable")
+        if getattr(manager, "phase", None) != "inactive":
+            raise MiniAppOperationError("intercom_media_busy")
+
+        reason = "miniapp_webcodecs"
+        try:
+            await manager.async_acquire(panel="entrance", reason=reason)
+        except Exception as exc:
+            code = (
+                "intercom_media_busy"
+                if str(exc) in {
+                    "attached_inbound_media_busy",
+                    "media_session_transition_busy",
+                }
+                else "intercom_media_start_failed"
+            )
+            raise MiniAppOperationError(code) from exc
+
+        lease = MiniAppWebCodecsEntranceLease(
+            manager=manager,
+            transport=transport,
+            reason=reason,
+        )
+        if not getattr(manager, "active", False):
+            await lease.release()
+            raise MiniAppOperationError("intercom_media_start_failed")
+        if not getattr(transport, "active", False) or not getattr(
+            transport, "local_sdp_ready", False
+        ):
+            await lease.release()
+            raise MiniAppOperationError("intercom_media_unavailable")
+        return lease
 
     @staticmethod
     def mse_internal_stream_name(entity_id: str) -> str:
