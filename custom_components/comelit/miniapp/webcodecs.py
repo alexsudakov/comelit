@@ -358,7 +358,14 @@ class H264AccessUnitSource:
         self._first_unit_ns: int | None = None
 
     @classmethod
-    async def open(cls, source: str) -> "H264AccessUnitSource":
+    async def _open(
+        cls,
+        source: str,
+        *,
+        input_format: str,
+        options: dict[str, str],
+        missing_h264_code: str,
+    ) -> "H264AccessUnitSource":
         try:
             import av
         except ImportError as exc:
@@ -368,8 +375,8 @@ class H264AccessUnitSource:
             return av.open(
                 source,
                 mode="r",
-                format="rtsp",
-                options={"rtsp_transport": "tcp"},
+                format=input_format,
+                options=options,
                 timeout=5.0,
             )
 
@@ -389,7 +396,7 @@ class H264AccessUnitSource:
                 None,
             )
             if video_stream is None:
-                raise WebCodecsSourceError("source_not_h264_rtsp")
+                raise WebCodecsSourceError(missing_h264_code)
 
             extradata = getattr(video_stream.codec_context, "extradata", None)
             sps, pps = avcc_extradata_to_annexb_nals(extradata)
@@ -404,6 +411,24 @@ class H264AccessUnitSource:
         except Exception:
             container.close()
             raise
+
+    @classmethod
+    async def open(cls, source: str) -> "H264AccessUnitSource":
+        return await cls._open(
+            source,
+            input_format="rtsp",
+            options={"rtsp_transport": "tcp"},
+            missing_h264_code="source_not_h264_rtsp",
+        )
+
+    @classmethod
+    async def open_sdp(cls, source: str) -> "H264AccessUnitSource":
+        return await cls._open(
+            source,
+            input_format="sdp",
+            options={"protocol_whitelist": "file,udp,rtp"},
+            missing_h264_code="source_not_h264_sdp",
+        )
 
     async def __aenter__(self) -> "H264AccessUnitSource":
         return self
@@ -462,6 +487,10 @@ class H264AccessUnitSource:
 
 async def open_h264_access_unit_source(source: str) -> H264AccessUnitSource:
     return await H264AccessUnitSource.open(source)
+
+
+async def open_h264_sdp_access_unit_source(source: str) -> H264AccessUnitSource:
+    return await H264AccessUnitSource.open_sdp(source)
 
 
 async def open_h264_access_units(source: str) -> AsyncIterator[H264AccessUnit]:
