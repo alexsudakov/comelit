@@ -11,7 +11,7 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.7.24**. This release adds an experimental Telegram Mini App-only `WebCodecs` tab for ordinary allowlisted Home Assistant cameras. The new path sends H.264 over a bounded same-origin binary WebSocket and decodes it directly with browser WebCodecs, without HLS, MSE, WebRTC, fMP4 or video transcoding in that path. Existing production camera playback paths remain unchanged; the WebCodecs tab is an explicit manual canary surface intended to measure real WSS/CloudPub transport lag before any architecture switch. Details are recorded in `docs/releases/1.7.24-webcodecs-live-tab.md`.
+Current stable release: **1.7.25**. This corrective release stabilizes the experimental Mini App `WebCodecs` tab after the first 1.7.24 live canary: background Home Assistant state refresh no longer rebuilds the viewer DOM or resets camera selection/result scroll, and protocol v2 separates camera PTS drift, HA server queue drift, and WSS/CloudPub transport drift using independent monotonic elapsed fields. Existing MSE/WebRTC/HLS playback and the Comelit Entrance media lifecycle remain unchanged. Details are recorded in `docs/releases/1.7.25-webcodecs-live-corrective.md`.
 
 ## Home Assistant Custom Card
 
