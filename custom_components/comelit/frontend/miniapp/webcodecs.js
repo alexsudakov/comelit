@@ -391,6 +391,9 @@
         if (Object.prototype.hasOwnProperty.call(message, "zero_transcode")) {
           this._stats.zeroTranscode = message.zero_transcode === true;
         }
+        this._stats.sourceKind = String(message.source_kind || "n/a");
+        this._stats.comelitEntranceOpen = message.comelit_entrance_open === true;
+        this._stats.comelitMediaStarted = message.comelit_media_started === true;
         const config = {
           codec: this._stats.codec,
           optimizeForLatency: true,
@@ -414,6 +417,20 @@
           this._handleBinary(data);
         }
         this._refreshCounters();
+        return;
+      }
+      if (message.type === "intercom_media_ready") {
+        if (this._stats.intercomMediaReadyAt === null) {
+          this._stats.intercomMediaReadyAt = performance.now();
+          const elapsed = Number(message.server_elapsed_ms);
+          this._stats.intercomMediaReadyServerMs = Number.isFinite(elapsed)
+            ? elapsed
+            : null;
+          this._stats.comelitEntranceOpen = true;
+          this._stats.comelitMediaStarted = true;
+          this._stats.sourceKind = "comelit_entrance_rtp";
+        }
+        this._setStatus("Comelit media готова");
         return;
       }
       if (message.type === "source_open") {
