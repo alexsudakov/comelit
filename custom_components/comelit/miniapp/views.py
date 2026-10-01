@@ -825,6 +825,7 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                     source = str(entrance_lease.local_sdp_path)
                     source_kind = "comelit_entrance_rtp"
                     source_opener = webcodecs_mod.open_h264_sdp_access_unit_source
+                    log_event("intercom_media_ready")
                     if not await send_json(
                         {
                             "type": "intercom_media_ready",
@@ -974,6 +975,9 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                                         "max_unit_bytes": webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES,
                                         "session_max_seconds": webcodecs_mod.WEBCODECS_MAX_SESSION_SECONDS,
                                         "zero_transcode": True,
+                                        "source_kind": source_kind,
+                                        "comelit_entrance_open": target.kind == "entrance",
+                                        "comelit_media_started": target.kind == "entrance",
                                     }
                                 ):
                                     break
@@ -1012,6 +1016,14 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                 source_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await source_task
+            if entrance_lease is not None:
+                try:
+                    await entrance_lease.release()
+                except Exception:
+                    errors += 1
+                    _LOGGER.exception(
+                        "Comelit Mini App WebCodecs entrance media release failed"
+                    )
             log_event("session_close")
             _LOGGER.info(
                 webcodecs_mod.webcodecs_summary_line(
