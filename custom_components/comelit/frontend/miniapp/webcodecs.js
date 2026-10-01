@@ -2,8 +2,8 @@
   "use strict";
 
   const TAG = "miniapp-webcodecs-viewer";
-  const PROTOCOL_VERSION = 1;
-  const HEADER_BYTES = 20;
+  const PROTOCOL_VERSION = 2;
+  const HEADER_BYTES = 36;
   const FLAG_KEY = 1;
   const FLAG_DELTA = 2;
   const FLAG_PTS_VALID = 4;
@@ -40,6 +40,11 @@
     return String(value);
   }
 
+  function readUint64(view, offset) {
+    return view.getUint32(offset, false) * 4294967296 +
+      view.getUint32(offset + 4, false);
+  }
+
   function parseFrame(buffer) {
     if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < HEADER_BYTES) {
       throw new Error("malformed_frame");
@@ -49,9 +54,10 @@
     const flags = view.getUint8(1);
     const reserved = view.getUint16(2, false);
     const sequence = view.getUint32(4, false);
-    const high = view.getUint32(8, false);
-    const low = view.getUint32(12, false);
-    const payloadLength = view.getUint32(16, false);
+    const pts = readUint64(view, 8);
+    const sourceElapsedUs = readUint64(view, 16);
+    const sendElapsedUs = readUint64(view, 24);
+    const payloadLength = view.getUint32(32, false);
     if (version !== PROTOCOL_VERSION || reserved !== 0) {
       throw new Error("malformed_frame");
     }
@@ -66,12 +72,13 @@
     if (payloadLength !== buffer.byteLength - HEADER_BYTES) {
       throw new Error("malformed_frame");
     }
-    const pts = high * 4294967296 + low;
     return {
       sequence,
       type: key ? "key" : "delta",
       ptsValid: Boolean(flags & FLAG_PTS_VALID),
       pts,
+      sourceElapsedUs,
+      sendElapsedUs,
       payload: buffer.slice(HEADER_BYTES),
     };
   }
