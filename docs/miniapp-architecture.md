@@ -470,6 +470,118 @@ HLS proxy, preserving listener/media ownership invariants.
 This WebRTC path does not imply preload: no ordinary camera stream is kept open
 merely because it is listed in the Mini App.
 
+## 12.1 Experimental WebCodecs live tab
+
+Status: PROVEN_OFFLINE for routing, framing helpers, bounded cleanup tests, and
+browser mock contract; NOT_PROVEN for real Telegram Android WebView H.264
+decode until the owner-approved production canary runs.
+
+The Mini App can enable a third tab, `WebCodecs`, by passing the explicit shared
+card flag:
+
+```text
+webcodecs.enabled === true
+```
+
+The flag is passed only by `custom_components/comelit/frontend/miniapp/host.js`.
+Default Lovelace usage does not render the tab, panel, or WebCodecs viewer.
+Opening the tab does not open a camera. The only start action is the explicit
+Russian UI button `Запустить тест`.
+
+The authenticated endpoint is:
+
+```text
+GET /api/comelit/miniapp/camera/{entity_id}/webcodecs
+```
+
+It reuses the integration-owned Mini App session cookie. Missing, invalid, or
+expired sessions are rejected before WebSocket upgrade with `403`, never raised
+`401`. Before upgrade, the view also requires a `camera.*` entity and resolves
+the camera through the ordinary surveillance guard. Closed JSON errors use
+`409` and one of:
+
+```text
+camera_not_allowed
+intercom_camera_not_allowed
+camera_unavailable
+```
+
+After upgrade the browser may send exactly one start command:
+
+```json
+{"type":"webcodecs","value":"h264"}
+```
+
+Anything else, or no command within 5 seconds, closes with
+`invalid_webcodecs_command`. The camera source is resolved only after this
+command using `await camera.stream_source()`. The resolved source remains
+server-side and is never serialized or logged.
+
+The first implementation uses lazy PyAV (`av`) as an in-process demuxer. This
+is coupled to the existing Home Assistant `stream` dependency declared in the
+Comelit manifest. The adapter demuxes H.264 packets only; it does not perform
+video decode, encode, re-encode, scaling, filtering, container muxing, or
+transcoding. If `av` is unavailable or opening fails, the WebSocket returns the
+closed error `source_dependency_missing` or `source_open_failed` without
+breaking Home Assistant startup.
+
+The server converts H.264 access units to Annex-B. Existing Annex-B start codes
+are preserved, 4-byte AVCC length prefixes are repackaged, and
+`AVCDecoderConfigurationRecord` extradata is parsed for SPS/PPS. Every keyframe
+access unit is sent with SPS/PPS prepended when they are not already present.
+The server derives `avc1.PPCCLL` from SPS bytes and sends it in the closed
+`hello` message; the codec string is not hardcoded. The same `hello` message
+includes `zero_transcode: true`, asserted server-side because this adapter only
+copies H.264 access units and has no decode, encode, re-encode, mux, scale, or
+transcode branch.
+
+Each binary WebSocket message is one explicitly framed access unit:
+
+```text
+20-byte big-endian header + H.264 Annex-B payload
+```
+
+Header fields are version, flags, reserved, sequence, media PTS in microseconds,
+and payload length. Malformed version, flags, reserved bits, truncation, length
+mismatch, or payloads larger than `WEBCODECS_MAX_UNIT_BYTES` are rejected by
+pure helpers and covered by offline tests.
+
+The path is bounded:
+
+```text
+WEBCODECS_MAX_UNIT_BYTES=1048576
+WEBCODECS_MAX_QUEUE_UNITS=48
+WEBCODECS_MAX_QUEUE_BYTES=3145728
+WEBCODECS_MAX_SESSION_SECONDS=120
+WEBCODECS_MAX_SESSIONS=4
+```
+
+At most one active WebCodecs session is allowed per camera entity, with a small
+global cap. Queue overflow sends `backlog_exceeded` and closes. The unit bound
+absorbs short event-loop stalls; the byte bound remains the memory cap. The
+first version has no frame drop policy because arbitrary delta-frame dropping
+breaks H.264 GOP dependencies. GOP-aware dropping is explicitly deferred.
+
+Cleanup is idempotent and runs from the view `finally` path for source EOF,
+source open failure, duration expiry, backlog overflow, WebSocket close, and
+task cancellation. The view owns an explicit closeable H.264 packet source and
+calls `aclose()` so the RTSP/PyAV container is released once even when the
+producer task is cancelled while suspended mid-stream. The feature does not call or modify the existing
+MSE/WebRTC/HLS/media-manager/recorder paths and does not call Door or Gate
+services.
+
+Closed, bounded log lines use:
+
+```text
+COMELIT_MINIAPP_WEBCODECS ...
+COMELIT_MINIAPP_WEBCODECS_SUMMARY ...
+```
+
+They include entity id, fixed event/reason enums, elapsed milliseconds, access
+unit counts, keyframe counts, byte counts, and error counts. They never include
+URLs, hosts, ports, usernames, passwords, cookies, tokens, Telegram `initData`,
+or camera source strings.
+
 ## 13. Mini App player diagnostics
 
 The Mini App can report bounded player milestones for an authorized camera

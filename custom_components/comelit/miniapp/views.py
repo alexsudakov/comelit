@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from http import HTTPStatus
 import json
 import logging
@@ -33,9 +34,13 @@ from .diagnostics import (
 )
 from .go2rtc import MiniAppGo2RTCError
 from .session import MiniAppSession, MiniAppSessionError
+from . import webcodecs as webcodecs_mod
 
 
 _LOGGER = logging.getLogger(__name__)
+_WEBSOCKET_SEND_ERRORS = (ConnectionError, BrokenPipeError, RuntimeError) + (
+    () if ClientError is Exception else (ClientError,)
+)
 COOKIE_NAME = "comelit_miniapp_session"
 AUTH_MAX_AGE_SECONDS = 300
 AUTH_FUTURE_SKEW_SECONDS = 30
@@ -684,6 +689,272 @@ class MiniAppCameraMSEView(_MiniAppView):
         return websocket
 
 
+class MiniAppCameraWebCodecsView(_MiniAppView):
+    url = r"/api/comelit/miniapp/camera/{entity_id}/webcodecs"
+    name = "api:comelit:miniapp:camera_webcodecs"
+
+    async def get(
+        self,
+        request: web.Request,
+        entity_id: str,
+    ) -> web.StreamResponse:
+        _token, session = self._require_session(request)
+        if not entity_id.startswith("camera."):
+            raise web.HTTPNotFound
+
+        try:
+            camera = self.controller.get_webcodecs_ordinary_camera(entity_id)
+        except MiniAppOperationError as exc:
+            return _json_response({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+
+        websocket = web.WebSocketResponse(
+            heartbeat=20,
+            max_msg_size=webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES
+            + webcodecs_mod.WEBCODECS_HEADER_BYTES,
+        )
+        await websocket.prepare(request)
+
+        started = time.monotonic()
+        units = 0
+        keyframes = 0
+        bytes_sent = 0
+        errors = 0
+        reason = "client_close"
+        first_source_logged = False
+        first_binary_logged = False
+        source_task: asyncio.Task[None] | None = None
+        queued_bytes = 0
+        queue: asyncio.Queue[object] = asyncio.Queue(
+            maxsize=webcodecs_mod.WEBCODECS_MAX_QUEUE_UNITS + 2
+        )
+
+        def log_event(event: str) -> None:
+            _LOGGER.info(
+                webcodecs_mod.webcodecs_log_line(
+                    entity_id,
+                    event,
+                    elapsed_ms=webcodecs_mod.monotonic_ms(started),
+                    units=units,
+                    bytes_sent=bytes_sent,
+                )
+            )
+
+        async def send_json(payload: dict[str, object]) -> bool:
+            nonlocal reason
+            if websocket.closed:
+                reason = "client_close"
+                return False
+            try:
+                await websocket.send_json(payload)
+            except _WEBSOCKET_SEND_ERRORS:
+                reason = "client_close"
+                return False
+            return True
+
+        async def send_bytes(payload: bytes) -> bool:
+            nonlocal reason
+            if websocket.closed:
+                reason = "client_close"
+                return False
+            try:
+                await websocket.send_bytes(payload)
+            except _WEBSOCKET_SEND_ERRORS:
+                reason = "client_close"
+                return False
+            return True
+
+        async def close_with_error(code: str) -> None:
+            nonlocal errors, reason
+            errors += 1
+            if code in {"session_limit", "backlog_exceeded", "source_open_failed"}:
+                reason = code
+            if not websocket.closed:
+                await send_json({"type": "error", "code": code})
+                with contextlib.suppress(*_WEBSOCKET_SEND_ERRORS):
+                    await websocket.close()
+
+        async def send_eos(eos_reason: str) -> None:
+            nonlocal reason
+            reason = eos_reason
+            if not websocket.closed:
+                await send_json({"type": "eos", "reason": eos_reason})
+                with contextlib.suppress(*_WEBSOCKET_SEND_ERRORS):
+                    await websocket.close()
+
+        try:
+            try:
+                first = await websocket.receive(timeout=5)
+            except TimeoutError:
+                await close_with_error("invalid_webcodecs_command")
+                return websocket
+            if (
+                first.type != WSMsgType.TEXT
+                or not webcodecs_mod.validate_webcodecs_command(first.data)
+            ):
+                await close_with_error("invalid_webcodecs_command")
+                return websocket
+
+            try:
+                lease = await webcodecs_mod.SESSION_REGISTRY.acquire(entity_id)
+            except webcodecs_mod.WebCodecsSourceError:
+                log_event("session_limit")
+                await close_with_error("session_limit")
+                return websocket
+
+            async with lease:
+                log_event("session_open")
+                try:
+                    source = await camera.stream_source()
+                except Exception:
+                    log_event("source_open_failed")
+                    await close_with_error("source_open_failed")
+                    return websocket
+                if not webcodecs_mod.is_rtsp_source(source):
+                    await close_with_error("source_not_h264_rtsp")
+                    return websocket
+                log_event("source_resolved")
+
+                async def produce_units() -> None:
+                    nonlocal queued_bytes
+                    unit_source: webcodecs_mod.H264AccessUnitSource | None = None
+                    send_source_eof = True
+                    try:
+                        unit_source = await webcodecs_mod.open_h264_access_unit_source(
+                            source
+                        )
+                        async for unit in unit_source:
+                            size = len(unit.payload)
+                            if size > webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES:
+                                send_source_eof = False
+                                await queue.put(("error", "unit_too_large"))
+                                return
+                            if (
+                                queue.qsize()
+                                >= webcodecs_mod.WEBCODECS_MAX_QUEUE_UNITS
+                                or queued_bytes + size
+                                > webcodecs_mod.WEBCODECS_MAX_QUEUE_BYTES
+                            ):
+                                send_source_eof = False
+                                await queue.put(("error", "backlog_exceeded"))
+                                return
+                            await queue.put(unit)
+                            queued_bytes += size
+                    except asyncio.CancelledError:
+                        send_source_eof = False
+                        raise
+                    except webcodecs_mod.WebCodecsSourceError as exc:
+                        send_source_eof = False
+                        await queue.put(("error", exc.code))
+                    except Exception:
+                        send_source_eof = False
+                        await queue.put(("error", "source_open_failed"))
+                    finally:
+                        if unit_source is not None:
+                            await unit_source.aclose()
+                        if send_source_eof:
+                            await queue.put(("eos", "source_eof"))
+
+                source_task = self.controller.hass.async_create_task(produce_units())
+                duration = min(
+                    webcodecs_mod.WEBCODECS_MAX_SESSION_SECONDS,
+                    max(0.0, float(session.expires_at) - time.time()),
+                )
+                codec: str | None = None
+                sequence = 0
+
+                try:
+                    async with asyncio.timeout(duration):
+                        while not websocket.closed:
+                            item = await queue.get()
+                            if isinstance(item, tuple):
+                                kind, code = item
+                                if kind == "error":
+                                    if code == "unit_too_large":
+                                        log_event("unit_too_large")
+                                    elif code == "backlog_exceeded":
+                                        log_event("backlog_exceeded")
+                                    else:
+                                        log_event("source_open_failed")
+                                    await close_with_error(str(code))
+                                    break
+                                if kind == "eos":
+                                    log_event("source_eof")
+                                    await send_eos(str(code))
+                                    break
+                                continue
+
+                            assert isinstance(item, webcodecs_mod.H264AccessUnit)
+                            queued_bytes = max(0, queued_bytes - len(item.payload))
+                            if not first_source_logged:
+                                first_source_logged = True
+                                log_event("first_source_packet")
+                            if item.codec:
+                                codec = item.codec
+                            if codec is None:
+                                sps, _pps = webcodecs_mod.split_sps_pps(item.payload)
+                                codec = webcodecs_mod.derive_avc1_codec_from_sps(
+                                    sps[0] if sps else None
+                                )
+                            if codec is None:
+                                await close_with_error("source_open_failed")
+                                break
+                            if sequence == 0:
+                                if not await send_json(
+                                    {
+                                        "type": "hello",
+                                        "protocol": webcodecs_mod.WEBCODECS_PROTOCOL_VERSION,
+                                        "entity_id": entity_id,
+                                        "codec": codec,
+                                        "max_unit_bytes": webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES,
+                                        "session_max_seconds": webcodecs_mod.WEBCODECS_MAX_SESSION_SECONDS,
+                                        "zero_transcode": True,
+                                    }
+                                ):
+                                    break
+                                if not await send_json({"type": "source"}):
+                                    break
+
+                            sequence += 1
+                            frame = webcodecs_mod.WebCodecsFrame(
+                                sequence=sequence,
+                                media_pts_us=item.media_pts_us or 0,
+                                pts_valid=item.media_pts_us is not None,
+                                keyframe=item.keyframe,
+                                payload=item.payload,
+                            )
+                            if not await send_bytes(
+                                webcodecs_mod.encode_webcodecs_frame(frame)
+                            ):
+                                break
+                            units += 1
+                            bytes_sent += len(item.payload)
+                            if item.keyframe:
+                                keyframes += 1
+                            if not first_binary_logged:
+                                first_binary_logged = True
+                                log_event("first_binary")
+                except TimeoutError:
+                    await send_eos("duration_limit")
+        finally:
+            if source_task is not None:
+                source_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await source_task
+            log_event("session_close")
+            _LOGGER.info(
+                webcodecs_mod.webcodecs_summary_line(
+                    entity_id,
+                    units=units,
+                    keyframes=keyframes,
+                    bytes_sent=bytes_sent,
+                    errors=errors,
+                    reason=reason,
+                )
+            )
+
+        return websocket
+
+
 class MiniAppCameraDiagnosticsView(_MiniAppView):
     url = r"/api/comelit/miniapp/camera/{entity_id}/diagnostics"
     name = "api:comelit:miniapp:camera_diagnostics"
@@ -811,6 +1082,7 @@ def async_register_miniapp_views(
     hass.http.register_view(MiniAppDoorView(controller))
     hass.http.register_view(MiniAppCameraStreamView(controller))
     hass.http.register_view(MiniAppCameraMSEView(controller))
+    hass.http.register_view(MiniAppCameraWebCodecsView(controller))
     hass.http.register_view(MiniAppCameraWebRTCView(controller))
     hass.http.register_view(MiniAppCameraDiagnosticsView(controller))
     hass.http.register_view(MiniAppMediaView(controller))
