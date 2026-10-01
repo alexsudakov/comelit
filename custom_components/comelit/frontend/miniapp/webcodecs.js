@@ -88,8 +88,10 @@
       super();
       this.attachShadow({mode: "open"});
       this._cameras = [];
+      this._cameraFingerprint = "";
       this._hass = null;
       this._selected = "";
+      this._rendered = false;
       this._socket = null;
       this._decoder = null;
       this._running = false;
@@ -103,16 +105,23 @@
     }
 
     set cameras(value) {
-      this._cameras = Array.isArray(value)
+      const next = Array.isArray(value)
         ? value.filter((camera) => {
             const entityId = safeEntityId(camera.entityId || camera.entity_id);
             return entityId && !/comelit_(entrance|gate|intercom)/i.test(entityId);
           })
         : [];
+      const nextFingerprint = this._cameraListFingerprint(next);
       if (this._running) {
         this._refreshCounters();
         return;
       }
+      if (nextFingerprint === this._cameraFingerprint && this._rendered) {
+        this._syncControls();
+        return;
+      }
+      this._cameras = next;
+      this._cameraFingerprint = nextFingerprint;
       if (!this._selected || !this._cameras.some((camera) => this._cameraId(camera) === this._selected)) {
         this._selected = this._cameras.length ? this._cameraId(this._cameras[0]) : "";
       }
@@ -121,15 +130,17 @@
 
     set hass(value) {
       this._hass = value;
-      if (this._running) {
-        this._refreshCounters();
+      if (!this._rendered) {
+        this._render();
         return;
       }
-      this._render();
+      this._refreshCounters();
     }
 
     connectedCallback() {
-      this._render();
+      if (!this._rendered) {
+        this._render();
+      }
     }
 
     disconnectedCallback() {
@@ -138,6 +149,21 @@
 
     _cameraId(camera) {
       return safeEntityId(camera?.entityId || camera?.entity_id);
+    }
+
+    _cameraName(camera) {
+      const entityId = this._cameraId(camera);
+      return String(
+        camera?.name ||
+        this._hass?.states?.[entityId]?.attributes?.friendly_name ||
+        entityId,
+      );
+    }
+
+    _cameraListFingerprint(cameras) {
+      return cameras
+        .map((camera) => this._cameraId(camera) + "\u0000" + this._cameraName(camera))
+        .join("\u0001");
     }
 
     _newStats() {
@@ -178,7 +204,7 @@
       }
       const options = this._cameras.map((camera) => {
         const entityId = this._cameraId(camera);
-        const name = camera.name || this._hass?.states?.[entityId]?.attributes?.friendly_name || entityId;
+        const name = this._cameraName(camera);
         return `<option value="${entityId}" ${entityId === this._selected ? "selected" : ""}>${name}</option>`;
       }).join("");
       this.shadowRoot.innerHTML = `
@@ -221,6 +247,26 @@
       });
       this.shadowRoot.querySelector("[data-start]")?.addEventListener("click", () => this._start());
       this.shadowRoot.querySelector("[data-stop]")?.addEventListener("click", () => this._stop("manual_stop", true));
+      this._rendered = true;
+      this._syncControls();
+    }
+
+    _syncControls() {
+      const select = this.shadowRoot?.querySelector("[data-camera]");
+      if (select) {
+        select.disabled = this._running;
+        if (!this._running && this._selected && select.value !== this._selected) {
+          select.value = this._selected;
+        }
+      }
+      const start = this.shadowRoot?.querySelector("[data-start]");
+      if (start) {
+        start.disabled = this._running;
+      }
+      const stop = this.shadowRoot?.querySelector("[data-stop]");
+      if (stop) {
+        stop.disabled = !this._running;
+      }
     }
 
     _setStatus(text) {
@@ -265,7 +311,13 @@
       this._pendingDecodeStarts = [];
       this._pendingBinary = [];
       this._stats.startedAt = performance.now();
-      this._render();
+      const result = this.shadowRoot?.querySelector("[data-result]");
+      if (result) {
+        result.textContent = "";
+        result.scrollTop = 0;
+      }
+      this._syncControls();
+      this._refreshCounters();
       this._setStatus("подключение");
 
       const scheme = location.protocol === "https:" ? "wss:" : "ws:";
@@ -497,7 +549,7 @@
       if (emit) {
         this._emitFinal(reason);
       }
-      this._render();
+      this._syncControls();
     }
 
     _emitFinal(reason) {
