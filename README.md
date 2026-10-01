@@ -11,7 +11,7 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.7.25**. This corrective release stabilizes the experimental Mini App `WebCodecs` tab after the first 1.7.24 live canary: background Home Assistant state refresh no longer rebuilds the viewer DOM or resets camera selection/result scroll, and protocol v2 separates camera PTS drift, HA server queue drift, and WSS/CloudPub transport drift using independent monotonic elapsed fields. Existing MSE/WebRTC/HLS playback and the Comelit Entrance media lifecycle remain unchanged. Details are recorded in `docs/releases/1.7.25-webcodecs-live-corrective.md`.
+Current stable release: **1.7.26**. This release adds an experimental direct Telegram Mini App WebCodecs path for `camera.comelit_entrance`: the existing manager-owned on-demand Comelit media lifecycle feeds the already-established recovered local H.264 RTP/SDP boundary into PyAV demux/repackaging, then bounded WSS protocol v2 and browser `VideoDecoder`, without creating an HA Stream or using HLS/go2rtc/MSE/WebRTC in that experimental path. The normal Entrance HLS viewer and all Door/Gate behavior remain unchanged. Details are recorded in `docs/releases/1.7.26-webcodecs-entrance-direct.md`.
 
 ## Home Assistant Custom Card
 
