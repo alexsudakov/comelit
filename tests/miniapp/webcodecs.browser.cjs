@@ -156,12 +156,31 @@ async function main() {
             state: "idle",
             attributes: { friendly_name: "Двор" },
           },
+          "camera.comelit_entrance": {
+            state: "idle",
+            attributes: { friendly_name: "Comelit — Камера подъезда" },
+          },
         },
-        callWS: async () => [],
+        callWS: async (message) => {
+          if (message?.type === "config/entity_registry/list") {
+            return [
+              {
+                entity_id: "camera.comelit_entrance",
+                platform: "comelit",
+                unique_id: "comelit_entrance_camera",
+                labels: [],
+                name: null,
+                original_name: "Comelit — Камера подъезда",
+              },
+            ];
+          }
+          return [];
+        },
         callService: async () => {},
       };
     });
 
+    await page.waitForFunction(() => document.getElementById("card")._registryLoaded === true);
     const tabCount = await page.evaluate(() => {
       const card = document.getElementById("card");
       return card.shadowRoot.querySelectorAll("[data-tab]").length;
@@ -174,6 +193,13 @@ async function main() {
       card.shadowRoot.querySelector('[data-tab="webcodecs"]').click();
     });
     assert.equal(await page.evaluate(() => window.__webcodecs.sockets.length), 0);
+    const entranceOption = await page.evaluate(() => {
+      const card = document.getElementById("card");
+      const viewer = card.shadowRoot.querySelector("miniapp-webcodecs-viewer");
+      return [...viewer.shadowRoot.querySelectorAll("[data-camera] option")]
+        .some((option) => option.value === "camera.comelit_entrance");
+    });
+    assert.equal(entranceOption, true);
 
     const refreshRegression = await page.evaluate(() => {
       const card = document.getElementById("card");
@@ -233,6 +259,9 @@ async function main() {
         max_unit_bytes: 1048576,
         session_max_seconds: 120,
         zero_transcode: true,
+        source_kind: "ordinary_rtsp",
+        comelit_entrance_open: false,
+        comelit_media_started: false,
       });
       socket.emitBinary(window.__frame());
     });
@@ -298,6 +327,7 @@ async function main() {
       "TRANSPORT_BACKLOG_OBSERVED=unknown",
       "ENTITY_ID=camera.parking_6048",
       "ZERO_TRANSCODE=true",
+      "SOURCE_KIND=ordinary_rtsp",
       "SOURCE_OPEN_MS=",
       "FIRST_SOURCE_PACKET_MS=",
       "SOURCE_STARTUP_MS=",
