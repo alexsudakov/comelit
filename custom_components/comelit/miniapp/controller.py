@@ -377,9 +377,21 @@ class ComelitMiniAppController:
         internal_name = self.mse_internal_stream_name(entity_id)
 
         # Mini App MSE uses the resolved camera source directly inside the
-        # HA-managed go2rtc instance. In particular, do not wrap Generic Camera
-        # RTSP sources in ffmpeg here: that path becomes an exec-backed producer
-        # with a much longer cold-start window than the bounded MSE negotiation.
+        # HA-managed go2rtc instance. For Generic Camera RTSP sources, explicitly
+        # disable go2rtc's ONVIF backchannel probe: the default probe sends an
+        # ONVIF-backchannel DESCRIBE first and may consume a full RTSP response
+        # timeout before reconnecting without backchannel. Ordinary surveillance
+        # viewing does not need a camera backchannel.
+        registry = er.async_get(self.hass)
+        entry = registry.async_get(entity_id)
+        if (
+            entry is not None
+            and entry.platform == "generic"
+            and stream_source.startswith(("rtsp://", "rtsps://"))
+        ):
+            separator = "&" if "#" in stream_source else "#"
+            stream_source = f"{stream_source}{separator}backchannel=0"
+
         # The source remains server-side and is never serialized to the browser.
         stream_sources = [stream_source]
         if progress is not None:
