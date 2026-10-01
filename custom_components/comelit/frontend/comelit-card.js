@@ -271,6 +271,27 @@ class ComelitCard extends HTMLElement {
     return result;
   }
 
+  _webcodecsEntities() {
+    const result = [...this._surveillanceEntities()];
+    const model = this._intercomModel();
+    const entry = model.entranceCamera.entry;
+    if (entry?.entity_id) {
+      const state = model.entranceCamera.state;
+      result.unshift({
+        entityId: entry.entity_id,
+        name:
+          state?.attributes?.friendly_name ||
+          entry.name ||
+          entry.original_name ||
+          "Камера подъезда",
+        state: state?.state || "unavailable",
+        available: Boolean(state) && state.state !== "unavailable",
+        kind: "intercom_entrance",
+      });
+    }
+    return result;
+  }
+
   _webcodecsEnabled() {
     return this._config.webcodecs?.enabled === true;
   }
@@ -680,7 +701,7 @@ class ComelitCard extends HTMLElement {
     }
 
     if (this._activeTab === "webcodecs" && webcodecsEnabled) {
-      this._mountWebCodecsViewer(cameras);
+      this._mountWebCodecsViewer(this._webcodecsEntities());
     }
 
     this._updateDynamicState();
@@ -699,7 +720,7 @@ class ComelitCard extends HTMLElement {
     }
     if (this._webcodecsViewerElement) {
       this._webcodecsViewerElement.hass = this._hass;
-      this._webcodecsViewerElement.cameras = this._surveillanceEntities();
+      this._webcodecsViewerElement.cameras = this._webcodecsEntities();
     }
 
     for (const button of this.shadowRoot.querySelectorAll("[data-camera]")) {
@@ -1120,7 +1141,7 @@ class ComelitCard extends HTMLElement {
     }
 
     if (nextTab === "webcodecs") {
-      this._mountWebCodecsViewer(this._surveillanceEntities());
+      this._mountWebCodecsViewer(this._webcodecsEntities());
     }
 
     this._updateDynamicState();
