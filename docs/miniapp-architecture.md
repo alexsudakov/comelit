@@ -322,13 +322,15 @@ await camera.stream_source()
 ```
 
 For Mini App MSE, Comelit registers the validated resolved camera source directly
-in the HA-managed go2rtc instance, including Home Assistant `generic` camera
-RTSP sources. This is intentionally narrower than HA core's WebRTC compatibility
-path: wrapping a Generic Camera source in `ffmpeg:` creates an exec-backed
-producer whose cold-start window can outlive the Mini App's bounded MSE
-negotiation. The direct source remains entirely server-side and is never exposed
-to the browser. Home Assistant's own WebRTC provider is unchanged and continues
-to use its native Generic Camera compatibility behavior on WebRTC fallback.
+in the HA-managed go2rtc instance. For Home Assistant `generic` RTSP cameras,
+the internal source adds `backchannel=0` so go2rtc skips its default ONVIF
+backchannel DESCRIBE attempt. Ordinary surveillance viewing does not require a
+camera backchannel, and avoiding that first probe prevents a failed/unsupported
+backchannel request from consuming a full RTSP response timeout before go2rtc
+reconnects for normal receive-only viewing. The direct source remains entirely
+server-side and is never exposed to the browser. Home Assistant's own WebRTC
+provider is unchanged and continues to use its native Generic Camera
+compatibility behavior on WebRTC fallback.
 
 Credentials remain owned by the original Home Assistant camera integration.
 Comelit does not add options-flow URL/login/password fields, does not duplicate
