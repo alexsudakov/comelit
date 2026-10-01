@@ -610,9 +610,23 @@
         !s.error &&
         cleanStop
       );
+      const sourceStartupMs =
+        s.sourceOpenAt !== null && s.firstSourcePacketAt !== null
+          ? s.firstSourcePacketAt - s.sourceOpenAt
+          : null;
+      const sourcePacketToBinaryMs =
+        s.firstSourcePacketAt !== null && s.firstBinaryAt !== null
+          ? s.firstBinaryAt - s.firstSourcePacketAt
+          : null;
+      const binaryToDecodeMs =
+        s.firstBinaryAt !== null && s.firstDecodedAt !== null
+          ? s.firstDecodedAt - s.firstBinaryAt
+          : null;
       const block = [
         "=== COMELIT MINIAPP WEBCODECS LIVE CANARY ===",
         `RESULT=${pass ? "PASS" : "FAIL"}`,
+        `FUNCTIONAL_PASS=${pass ? "true" : "false"}`,
+        "TRANSPORT_BACKLOG_OBSERVED=unknown",
         `ENTITY_ID=${safeEntityId(this._selected) || "n/a"}`,
         `DURATION_S=${fmt(duration)}`,
         `CODEC=${s.codec}`,
