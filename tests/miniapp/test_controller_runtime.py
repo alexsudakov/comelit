@@ -1696,6 +1696,117 @@ async def _single_webcodecs_source(_source):
     return _AsyncUnitSource([unit async for unit in _single_webcodecs_unit(_source)])
 
 
+class _FakeWebCodecsMediaTransport:
+    def __init__(self):
+        self.active = False
+        self.local_sdp_ready = False
+        self.local_sdp_path = Path("/run/comelit-media/local-rtp.sdp")
+
+
+class _FakeWebCodecsMediaManager:
+    def __init__(self, transport):
+        self.transport = transport
+        self.phase = "inactive"
+        self.active = False
+        self.acquire_calls = []
+        self.release_calls = []
+
+    async def async_acquire(self, *, panel, reason):
+        self.acquire_calls.append((panel, reason))
+        self.phase = "active"
+        self.active = True
+        self.transport.active = True
+        self.transport.local_sdp_ready = True
+        return {"active": True}
+
+    async def async_release(self, *, reason):
+        self.release_calls.append(reason)
+        self.phase = "inactive"
+        self.active = False
+        self.transport.active = False
+        self.transport.local_sdp_ready = False
+        return {"active": False}
+
+
+def _install_webcodecs_entrance_runtime(hass):
+    transport = _FakeWebCodecsMediaTransport()
+    manager = _FakeWebCodecsMediaManager(transport)
+    domain_data = hass.data.setdefault(controller_mod.DOMAIN, {})
+    domain_data.setdefault(controller_mod.DATA_MEDIA_SESSIONS, {})["entry-1"] = manager
+    domain_data.setdefault(controller_mod.DATA_MEDIA_TRANSPORTS, {})["entry-1"] = transport
+    return manager, transport
+
+
+def test_webcodecs_entrance_invalid_command_never_acquires_media(monkeypatch):
+    controller, hass = _controller(surveillance_label="Outside")
+    manager, _transport = _install_webcodecs_entrance_runtime(hass)
+    token, _session = controller.sessions.create(424242, 12345678)
+    view = views_mod.MiniAppCameraWebCodecsView(controller)
+
+    with _MSEWebSocketPatch(
+        monkeypatch,
+        _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"vp8"}'),
+    ):
+        asyncio.run(
+            view.get(_mse_request(controller, token), "camera.comelit_entrance")
+        )
+
+    assert manager.acquire_calls == []
+    assert _json_texts(_CaptureWebSocket.instances[-1]) == [
+        {"type": "error", "code": "invalid_webcodecs_command"}
+    ]
+
+
+def test_webcodecs_entrance_live_path_uses_manager_local_sdp_and_releases(monkeypatch):
+    controller, hass = _controller(surveillance_label="Outside")
+    manager, transport = _install_webcodecs_entrance_runtime(hass)
+    token, _session = controller.sessions.create(424242, 12345678)
+    opened_sources = []
+
+    async def open_sdp(source):
+        opened_sources.append(source)
+        return _AsyncUnitSource(
+            [unit async for unit in _single_webcodecs_unit(source)]
+        )
+
+    monkeypatch.setattr(
+        views_mod.webcodecs_mod,
+        "open_h264_sdp_access_unit_source",
+        open_sdp,
+    )
+    view = views_mod.MiniAppCameraWebCodecsView(controller)
+
+    with _MSEWebSocketPatch(
+        monkeypatch,
+        _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+    ):
+        asyncio.run(
+            view.get(_mse_request(controller, token), "camera.comelit_entrance")
+        )
+
+    websocket = _CaptureWebSocket.instances[-1]
+    texts = _json_texts(websocket)
+    assert texts[0]["type"] == "intercom_media_ready"
+    assert isinstance(texts[0]["server_elapsed_ms"], int)
+    assert texts[1]["type"] == "source_open"
+    assert texts[2]["type"] == "source_packet"
+    hello = texts[3]
+    assert hello["type"] == "hello"
+    assert hello["protocol"] == 2
+    assert hello["entity_id"] == "camera.comelit_entrance"
+    assert hello["source_kind"] == "comelit_entrance_rtp"
+    assert hello["zero_transcode"] is True
+    assert hello["comelit_entrance_open"] is True
+    assert hello["comelit_media_started"] is True
+    assert texts[-1] == {"type": "eos", "reason": "source_eof"}
+    assert opened_sources == [str(transport.local_sdp_path)]
+    assert manager.acquire_calls == [("entrance", "miniapp_webcodecs")]
+    assert manager.release_calls == ["miniapp_webcodecs"]
+    assert manager.phase == "inactive"
+    assert manager.active is False
+    assert transport.active is False
+
+
 def test_webcodecs_view_happy_path_secret_free_logs_and_messages(monkeypatch, caplog):
     fixture_url = "rtsp://" + "alpha" + ":" + "bravo" + "@example.invalid/live"
     controller, hass = _controller(surveillance_label="Outside")
