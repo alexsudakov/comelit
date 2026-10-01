@@ -62,6 +62,8 @@ class ComelitCard extends HTMLElement {
     this._intercomViewerGeneration = 0;
     this._intercomViewerElement = undefined;
     this._intercomViewerOpen = false;
+    this._intercomViewerMode = "webcodecs";
+    this._intercomViewerFallbackReason = undefined;
     this._selectedIntercomPanel = "entrance";
     this._doorActionInFlight = new Set();
     this._doorActionMessage = undefined;
@@ -89,12 +91,15 @@ class ComelitCard extends HTMLElement {
         ? config.default_tab
         : "intercom";
     const webcodecsEnabled = config.webcodecs?.enabled === true;
+    const webcodecsIntercomPrimary =
+      config.webcodecs?.intercom_primary === true;
 
     this._config = {
       ...config,
       webcodecs: {
         ...(config.webcodecs || {}),
         enabled: webcodecsEnabled,
+        intercom_primary: webcodecsIntercomPrimary,
       },
       surveillance: {
         ...(config.surveillance || {}),
@@ -110,6 +115,8 @@ class ComelitCard extends HTMLElement {
     this._activeTab =
       defaultTab === "webcodecs" && !webcodecsEnabled ? "intercom" : defaultTab;
     this._selectedCamera = undefined;
+    this._intercomViewerMode = "webcodecs";
+    this._intercomViewerFallbackReason = undefined;
     this._render();
   }
 
@@ -294,6 +301,10 @@ class ComelitCard extends HTMLElement {
 
   _webcodecsEnabled() {
     return this._config.webcodecs?.enabled === true;
+  }
+
+  _webcodecsIntercomPrimary() {
+    return this._config.webcodecs?.intercom_primary === true;
   }
 
   _intercomModel() {
