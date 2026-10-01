@@ -367,6 +367,11 @@
         return;
       }
       if (message.type === "hello") {
+        if (Number(message.protocol) !== PROTOCOL_VERSION) {
+          this._stats.error = "protocol_mismatch";
+          this._stop("protocol_mismatch", true);
+          return;
+        }
         this._stats.codec = String(message.codec || "n/a");
         if (Object.prototype.hasOwnProperty.call(message, "zero_transcode")) {
           this._stats.zeroTranscode = message.zero_transcode === true;
