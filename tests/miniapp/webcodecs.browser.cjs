@@ -555,8 +555,10 @@ async function main() {
     // Production ordinary surveillance path: the normal two-tab surface uses
     // the already live-validated WebCodecs transport first. Terminal failures
     // fall back to the existing picture-entity MSE -> WebRTC -> HLS chain.
-    await page.evaluate(() => {
+    const surveillanceSocketBase = await page.evaluate(() => {
       window.__webcodecs.legacyMounts = 0;
+      window.__webcodecs.surveillanceSocketBase =
+        window.__webcodecs.sockets.length;
       const card = document.getElementById("card");
       card.setConfig({
         default_tab: "surveillance",
@@ -567,10 +569,47 @@ async function main() {
         },
         surveillance: { include: ["camera.parking_6048", "camera.dvor_1"] },
       });
+      return window.__webcodecs.surveillanceSocketBase;
+    });
+    assert.equal(surveillanceSocketBase, 3);
+
+    const surveillanceMount = await page.evaluate(() => {
+      const card = document.getElementById("card");
+      const viewer = card.shadowRoot.querySelector(
+        "#viewer miniapp-webcodecs-viewer",
+      );
+      return {
+        primary: card._webcodecsSurveillancePrimary(),
+        selected: card._selectedCamera,
+        viewer: Boolean(viewer),
+        connected: Boolean(viewer?.isConnected),
+        embedded: viewer?._embedded === true,
+        autoStart: viewer?._autoStart === true,
+        autoStartConsumed: viewer?._autoStartConsumed === true,
+      };
+    });
+    assert.deepEqual(surveillanceMount, {
+      primary: true,
+      selected: "camera.dvor_1",
+      viewer: true,
+      connected: true,
+      embedded: true,
+      autoStart: true,
+      autoStartConsumed: true,
     });
 
-    await page.waitForFunction(() => window.__webcodecs.sockets.length === 4);
-    await page.waitForFunction(() => window.__webcodecs.sockets[3].sent.length === 1);
+    await page.waitForFunction(
+      (base) => window.__webcodecs.sockets.length > base,
+      surveillanceSocketBase,
+    );
+    assert.equal(
+      await page.evaluate(() => window.__webcodecs.sockets.length),
+      surveillanceSocketBase + 1,
+    );
+    await page.waitForFunction(
+      (index) => window.__webcodecs.sockets[index].sent.length === 1,
+      surveillanceSocketBase,
+    );
     const surveillanceSurface = await page.evaluate(() => {
       const card = document.getElementById("card");
       const viewer = card.shadowRoot.querySelector("#viewer miniapp-webcodecs-viewer");
@@ -592,7 +631,7 @@ async function main() {
     });
 
     await page.evaluate(() => {
-      const socket = window.__webcodecs.sockets[3];
+      const socket = window.__webcodecs.sockets[surveillanceSocketBase];
       socket.emitText({ type: "source_open", server_elapsed_ms: 4700 });
       socket.emitText({ type: "source_packet", server_elapsed_ms: 4720 });
       socket.emitText({
@@ -629,11 +668,11 @@ async function main() {
     assert.deepEqual(preservedSurveillanceViewer, {
       sameNode: true,
       connected: true,
-      sockets: 4,
+      sockets: surveillanceSocketBase + 1,
     });
 
     await page.evaluate(() => {
-      window.__webcodecs.sockets[3].emitText({
+      window.__webcodecs.sockets[surveillanceSocketBase].emitText({
         type: "error",
         code: "source_open_failed",
       });
@@ -654,13 +693,20 @@ async function main() {
       card.shadowRoot.querySelector('[data-tab="intercom"]').click();
       card.shadowRoot.querySelector('[data-tab="surveillance"]').click();
     });
-    await page.waitForFunction(() => window.__webcodecs.sockets.length === 5);
-    await page.evaluate(() => {
-      window.__webcodecs.sockets[4].emitText({
+    await page.waitForFunction(
+      (base) => window.__webcodecs.sockets.length > base + 1,
+      surveillanceSocketBase,
+    );
+    assert.equal(
+      await page.evaluate(() => window.__webcodecs.sockets.length),
+      surveillanceSocketBase + 2,
+    );
+    await page.evaluate((index) => {
+      window.__webcodecs.sockets[index].emitText({
         type: "eos",
         reason: "duration_limit",
       });
-    });
+    }, surveillanceSocketBase + 1);
     await page.waitForFunction(() => window.__webcodecs.legacyMounts === 2);
 
     console.log("webcodecs mock canary: PASS");
