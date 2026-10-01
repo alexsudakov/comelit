@@ -11,7 +11,7 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.7.22**. This patch changes only the Mini App MSE source path for ordinary Home Assistant Generic Camera entities: the validated `camera.stream_source()` RTSP source is registered directly in the HA-managed go2rtc instance instead of being wrapped in an exec-backed `ffmpeg:` producer with an additional Opus loopback producer. This avoids the go2rtc ffmpeg/exec cold-start path whose internal startup timeout can exceed the Mini App's bounded 8 s MSE negotiation window. Home Assistant's own WebRTC fallback remains unchanged. Details are recorded in `docs/releases/1.7.22-direct-generic-rtsp.md`.
+Current stable release: **1.7.23**. This patch keeps the direct Generic Camera RTSP path introduced in 1.7.22 and additionally disables go2rtc's default ONVIF backchannel probe for Mini App MSE by appending `backchannel=0` to Generic RTSP sources. This avoids a potentially failed first DESCRIBE that can consume the go2rtc RTSP client's 5 s response timeout before normal receive-only negotiation begins. WebRTC/HLS fallbacks and Home Assistant's own WebRTC provider remain unchanged. Details are recorded in `docs/releases/1.7.23-generic-rtsp-no-backchannel.md`.
 
 ## Home Assistant Custom Card
 
