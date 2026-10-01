@@ -1779,6 +1779,7 @@ def test_webcodecs_entrance_live_path_uses_manager_local_sdp_and_releases(monkey
     with _MSEWebSocketPatch(
         monkeypatch,
         _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+        messages=("wait_forever",),
     ):
         asyncio.run(
             view.get(_mse_request(controller, token), "camera.comelit_entrance")
@@ -1805,6 +1806,41 @@ def test_webcodecs_entrance_live_path_uses_manager_local_sdp_and_releases(monkey
     assert manager.phase == "inactive"
     assert manager.active is False
     assert transport.active is False
+
+
+def test_webcodecs_entrance_client_close_releases_manager_immediately(monkeypatch):
+    controller, hass = _controller(surveillance_label="Outside")
+    manager, _transport = _install_webcodecs_entrance_runtime(hass)
+    token, _session = controller.sessions.create(424242, 12345678)
+
+    async def slow_sdp(_source):
+        class _SlowSource(_AsyncUnitSource):
+            async def __anext__(self):
+                await asyncio.sleep(10)
+                raise StopAsyncIteration
+
+        return _SlowSource([])
+
+    monkeypatch.setattr(
+        views_mod.webcodecs_mod,
+        "open_h264_sdp_access_unit_source",
+        slow_sdp,
+    )
+    view = views_mod.MiniAppCameraWebCodecsView(controller)
+
+    with _MSEWebSocketPatch(
+        monkeypatch,
+        _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+        messages=(_FakeWSMessage(views_mod.WSMsgType.CLOSE),),
+    ):
+        asyncio.run(
+            view.get(_mse_request(controller, token), "camera.comelit_entrance")
+        )
+
+    assert manager.acquire_calls == [("entrance", "miniapp_webcodecs")]
+    assert manager.release_calls == ["miniapp_webcodecs"]
+    assert manager.phase == "inactive"
+    assert manager.active is False
 
 
 def test_webcodecs_view_happy_path_secret_free_logs_and_messages(monkeypatch, caplog):
