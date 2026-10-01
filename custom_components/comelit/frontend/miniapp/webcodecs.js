@@ -401,8 +401,21 @@
         this._refreshCounters();
         return;
       }
-      if (message.type === "source") {
-        this._stats.sourceAt = performance.now();
+      if (message.type === "source_open") {
+        if (this._stats.sourceOpenAt === null) {
+          this._stats.sourceOpenAt = performance.now();
+          const elapsed = Number(message.server_elapsed_ms);
+          this._stats.sourceOpenServerMs = Number.isFinite(elapsed) ? elapsed : null;
+        }
+        this._setStatus("источник открыт");
+        return;
+      }
+      if (message.type === "source_packet") {
+        if (this._stats.firstSourcePacketAt === null) {
+          this._stats.firstSourcePacketAt = performance.now();
+          const elapsed = Number(message.server_elapsed_ms);
+          this._stats.firstSourcePacketServerMs = Number.isFinite(elapsed) ? elapsed : null;
+        }
         this._setStatus("получение H.264");
         return;
       }
