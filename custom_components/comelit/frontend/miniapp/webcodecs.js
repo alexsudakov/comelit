@@ -95,6 +95,7 @@
       this._embedded = false;
       this._autoStart = false;
       this._autoStartQueued = false;
+      this._autoStartConsumed = false;
       this._terminalNotified = false;
       this._socket = null;
       this._decoder = null;
@@ -153,6 +154,7 @@
         return;
       }
       this._embedded = next;
+      this._autoStartConsumed = false;
       this._render();
       this._maybeAutoStart();
     }
@@ -178,6 +180,7 @@
         !this._embedded ||
         !this._autoStart ||
         this._autoStartQueued ||
+        this._autoStartConsumed ||
         this._running ||
         !this.isConnected ||
         !this._hass ||
@@ -191,11 +194,13 @@
         if (
           this._embedded &&
           this._autoStart &&
+          !this._autoStartConsumed &&
           !this._running &&
           this.isConnected &&
           this._hass &&
           safeEntityId(this._selected)
         ) {
+          this._autoStartConsumed = true;
           this._start();
         }
       });
