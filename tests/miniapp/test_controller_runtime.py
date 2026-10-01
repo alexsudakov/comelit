@@ -1619,12 +1619,9 @@ def test_webcodecs_endpoint_rejects_camera_guard_errors_as_closed_json():
     assert response.status == 409
     assert json.loads(response.text) == {"error": "camera_not_allowed"}
 
-    hass.cameras["camera.comelit_entrance"] = FakeCamera(set(), "rtsp://example/live")
-    response = asyncio.run(
-        view.get(_mse_request(controller, token), "camera.comelit_entrance")
-    )
-    assert response.status == 409
-    assert json.loads(response.text) == {"error": "intercom_camera_not_allowed"}
+    entrance = controller.get_webcodecs_camera_target("camera.comelit_entrance")
+    assert entrance.kind == "entrance"
+    assert entrance.camera is None
 
     hass.entity_registry.entities["camera.comelit_gate"] = FakeRegistryEntry(
         "camera.comelit_gate",
