@@ -108,7 +108,11 @@
       const next = Array.isArray(value)
         ? value.filter((camera) => {
             const entityId = safeEntityId(camera.entityId || camera.entity_id);
-            return entityId && !/comelit_(entrance|gate|intercom)/i.test(entityId);
+            const entrance = camera?.kind === "intercom_entrance";
+            return entityId && (
+              entrance ||
+              !/comelit_(entrance|gate|intercom)/i.test(entityId)
+            );
           })
         : [];
       const nextFingerprint = this._cameraListFingerprint(next);
@@ -162,7 +166,13 @@
 
     _cameraListFingerprint(cameras) {
       return cameras
-        .map((camera) => this._cameraId(camera) + "\u0000" + this._cameraName(camera))
+        .map((camera) => (
+          this._cameraId(camera) +
+          "\u0000" +
+          this._cameraName(camera) +
+          "\u0000" +
+          String(camera?.kind || "ordinary")
+        ))
         .join("\u0001");
     }
 
@@ -170,6 +180,8 @@
       return {
         startedAt: 0,
         wsOpenAt: null,
+        intercomMediaReadyAt: null,
+        intercomMediaReadyServerMs: null,
         sourceOpenAt: null,
         firstSourcePacketAt: null,
         sourceOpenServerMs: null,
@@ -200,6 +212,9 @@
         backlogStop: false,
         stopReason: "n/a",
         zeroTranscode: null,
+        sourceKind: "n/a",
+        comelitEntranceOpen: false,
+        comelitMediaStarted: false,
         unsupported: false,
         error: null,
       };
