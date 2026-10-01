@@ -484,6 +484,7 @@ def webcodecs_log_line(
     allowed = {
         "session_open",
         "source_resolved",
+        "source_open",
         "first_source_packet",
         "first_binary",
         "unit_too_large",
