@@ -1840,6 +1840,9 @@ def test_webcodecs_view_happy_path_secret_free_logs_and_messages(monkeypatch, ca
         "max_unit_bytes": webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES,
         "session_max_seconds": webcodecs_mod.WEBCODECS_MAX_SESSION_SECONDS,
         "zero_transcode": True,
+        "source_kind": "ordinary_rtsp",
+        "comelit_entrance_open": False,
+        "comelit_media_started": False,
     }
     assert texts[-1] == {"type": "eos", "reason": "source_eof"}
     frame = webcodecs_mod.decode_webcodecs_frame(websocket.binaries[0])
@@ -2033,6 +2036,9 @@ def test_webcodecs_send_connection_error_is_clean_client_close(monkeypatch):
         "max_unit_bytes": webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES,
         "session_max_seconds": webcodecs_mod.WEBCODECS_MAX_SESSION_SECONDS,
         "zero_transcode": True,
+        "source_kind": "ordinary_rtsp",
+        "comelit_entrance_open": False,
+        "comelit_media_started": False,
     }
     assert websocket.binaries == []
 
