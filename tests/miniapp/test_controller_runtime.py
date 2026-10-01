@@ -1531,10 +1531,12 @@ def test_webcodecs_framing_round_trip_and_malformed_rejection():
         pts_valid=True,
         keyframe=True,
         payload=b"\x00\x00\x00\x01\x65idr",
+        source_elapsed_us=12000,
+        send_elapsed_us=12500,
     )
     encoded = webcodecs_mod.encode_webcodecs_frame(frame)
     assert len(encoded) == webcodecs_mod.WEBCODECS_HEADER_BYTES + len(frame.payload)
-    assert encoded[:4] == b"\x01\x05\x00\x00"
+    assert encoded[:4] == b"\x02\x05\x00\x00"
     decoded = webcodecs_mod.decode_webcodecs_frame(encoded)
     assert decoded == frame
 
@@ -1552,11 +1554,11 @@ def test_webcodecs_framing_round_trip_and_malformed_rejection():
     assert second.sequence == decoded.sequence + 1
 
     malformed = [
-        b"\x02" + encoded[1:],
+        b"\x01" + encoded[1:],
         encoded[:2] + b"\x00\x01" + encoded[4:],
-        b"\x01\x03" + encoded[2:],
+        b"\x02\x03" + encoded[2:],
         encoded[:-1],
-        encoded[:16] + (webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES + 1).to_bytes(4, "big"),
+        encoded[:32] + (webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES + 1).to_bytes(4, "big"),
     ]
     for payload in malformed:
         with pytest.raises(webcodecs_mod.WebCodecsProtocolError):
