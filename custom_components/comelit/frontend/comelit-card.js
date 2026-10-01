@@ -1331,33 +1331,33 @@ class ComelitCard extends HTMLElement {
       return;
     }
 
+    const reason = String(
+      this._intercomViewerFallbackReason || "webcodecs_error",
+    );
+    this._intercomViewerMode = "legacy";
     this._intercomViewerElement = undefined;
     currentTarget.innerHTML = `
-      <div class="notice compact error">
-        Быстрый WebCodecs-поток завершился:
-        ${escapeHtml(this._intercomViewerFallbackReason || "ошибка")}.
-        <div style="margin-top: 10px">
-          <button class="secondary-action" data-intercom-legacy-fallback>
-            Открыть резервный HLS
-          </button>
-        </div>
+      <div class="notice compact">
+        WebCodecs недоступен (${escapeHtml(reason)}).
+        Переключение на резервный HLS…
       </div>
     `;
 
-    currentTarget
-      .querySelector("[data-intercom-legacy-fallback]")
-      ?.addEventListener("click", () => {
-        if (
-          generation !== this._intercomViewerGeneration ||
-          !this._intercomViewerOpen ||
-          this._selectedIntercomPanel !== "entrance"
-        ) {
-          return;
-        }
-        this._intercomViewerMode = "legacy";
-        this._intercomViewerFallbackReason = undefined;
-        this._mountIntercomViewer();
-      });
+    // Replacing the embedded viewer disconnects it first, which closes the WSS
+    // client. The Mini App HLS endpoint then waits for the server-side
+    // miniapp_webcodecs lease cleanup before it may create an HLS session.
+    queueMicrotask(() => {
+      if (
+        generation !== this._intercomViewerGeneration ||
+        !this._intercomViewerOpen ||
+        this._selectedIntercomPanel !== "entrance" ||
+        this._intercomViewerMode !== "legacy"
+      ) {
+        return;
+      }
+      this._intercomViewerFallbackReason = undefined;
+      this._mountIntercomViewer();
+    });
   }
 
   async _mountLegacyIntercomViewer(target, camera, generation) {

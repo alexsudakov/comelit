@@ -11,6 +11,7 @@
   const CANARY_MS = 60_000;
   const MAX_DECODE_QUEUE = 8;
   const BACKLOG_STALL_MS = 2000;
+  const EMBEDDED_STARTUP_TIMEOUT_MS = 15_000;
 
   function safeEntityId(value) {
     const entityId = String(value || "");
@@ -456,7 +457,14 @@
       const socket = new WebSocket(url);
       socket.binaryType = "arraybuffer";
       this._socket = socket;
-      if (!this._embedded) {
+      if (this._embedded) {
+        this._timer = setTimeout(() => {
+          if (this._running && !this._stats.firstDecodedAt) {
+            this._stats.error = "startup_timeout";
+            this._stop("startup_timeout", true);
+          }
+        }, EMBEDDED_STARTUP_TIMEOUT_MS);
+      } else {
         this._timer = setTimeout(
           () => this._stop("duration_60s", true),
           CANARY_MS,
@@ -512,21 +520,28 @@
           codec: this._stats.codec,
           optimizeForLatency: true,
         };
-        const support = await VideoDecoder.isConfigSupported(config);
-        if (!support.supported) {
+        try {
+          const support = await VideoDecoder.isConfigSupported(config);
+          if (!support.supported) {
+            this._stats.unsupported = true;
+            this._stats.error = "codec_unsupported";
+            this._stop("codec_unsupported", true);
+            return;
+          }
+          this._decoder = new VideoDecoder({
+            output: (frame) => this._drawFrame(frame),
+            error: () => {
+              this._stats.error = "decoder_error";
+              this._stop("decoder_error", true);
+            },
+          });
+          this._decoder.configure(config);
+        } catch (_) {
           this._stats.unsupported = true;
           this._stats.error = "codec_unsupported";
           this._stop("codec_unsupported", true);
           return;
         }
-        this._decoder = new VideoDecoder({
-          output: (frame) => this._drawFrame(frame),
-          error: () => {
-            this._stats.error = "decoder_error";
-            this._stop("decoder_error", true);
-          },
-        });
-        this._decoder.configure(config);
         for (const data of this._pendingBinary.splice(0)) {
           this._handleBinary(data);
         }
@@ -665,6 +680,10 @@
       const now = performance.now();
       if (!this._stats.firstDecodedAt) {
         this._stats.firstDecodedAt = now;
+        if (this._embedded && this._timer) {
+          clearTimeout(this._timer);
+          this._timer = null;
+        }
       }
       const canvas = this.shadowRoot?.querySelector("[data-canvas]");
       const context = canvas?.getContext("2d");
@@ -731,10 +750,11 @@
       this._setStatus("остановлено");
       if (emit) {
         this._emitFinal(reason);
-        if (
+        const embeddedFallback =
           this._embedded &&
-          !["manual_stop", "duration_60s", "duration_limit", "source_eof"].includes(reason)
-        ) {
+          !["manual_stop", "duration_60s", "duration_limit"].includes(reason) &&
+          (reason !== "source_eof" || this._stats.frames === 0);
+        if (embeddedFallback) {
           this._notifyEmbeddedTerminal(reason);
         }
       }

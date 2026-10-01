@@ -74,6 +74,7 @@ _HLS_PROXY_TAIL = re.compile(
 )
 _DIRECT_SOURCE = re.compile(r"^(?:rtsp|rtsps|http|https)://[^\r\n\t ]+$")
 _MAX_MSE_STREAMS = 32
+_WEBCODECS_HLS_FALLBACK_CLEANUP_SECONDS = 5.0
 
 
 class MiniAppOperationError(HomeAssistantError):
@@ -541,6 +542,79 @@ class ComelitMiniAppController:
         if unregister_name is not None:
             await self.go2rtc.unregister_stream(unregister_name)
 
+    async def _await_webcodecs_entrance_cleanup(
+        self,
+        entity_id: str,
+    ) -> None:
+        """Wait only for an in-flight Entrance WebCodecs teardown.
+
+        This is a local ownership barrier, not a media retry. It prevents the
+        HLS fallback from creating a second Comelit session while the
+        miniapp_webcodecs lease is still stopping.
+        """
+        registry = er.async_get(self.hass)
+        registry_entry = registry.async_get(entity_id)
+        if (
+            registry_entry is None
+            or registry_entry.platform != DOMAIN
+            or registry_entry.unique_id != ENTRANCE_CAMERA_UNIQUE_ID
+        ):
+            return
+
+        config_entry = self._entry
+        entry_id = (
+            getattr(config_entry, "entry_id", None)
+            if config_entry is not None
+            else None
+        )
+        if not isinstance(entry_id, str) or not entry_id:
+            return
+
+        manager = (
+            self.hass.data.get(DOMAIN, {})
+            .get(DATA_MEDIA_SESSIONS, {})
+            .get(entry_id)
+        )
+        status_getter = getattr(manager, "status", None)
+        if manager is None or not callable(status_getter):
+            return
+
+        def snapshot() -> tuple[str, bool]:
+            status = status_getter()
+            if not isinstance(status, dict):
+                return str(getattr(manager, "phase", "unknown")), False
+            phase = str(status.get("phase") or getattr(manager, "phase", "unknown"))
+            leases = status.get("leases")
+            webcodecs_owned = (
+                isinstance(leases, dict)
+                and bool(leases.get("miniapp_webcodecs"))
+            )
+            return phase, webcodecs_owned
+
+        phase, webcodecs_owned = snapshot()
+        if phase == "error":
+            raise MiniAppOperationError("webcodecs_cleanup_failed")
+        if phase == "inactive":
+            return
+        if not webcodecs_owned and phase != "stopping":
+            return
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _WEBCODECS_HLS_FALLBACK_CLEANUP_SECONDS
+        while True:
+            phase, webcodecs_owned = snapshot()
+            if phase == "inactive":
+                return
+            if phase == "error":
+                raise MiniAppOperationError("webcodecs_cleanup_failed")
+            if phase == "active" and not webcodecs_owned:
+                raise MiniAppOperationError("webcodecs_cleanup_conflict")
+
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise MiniAppOperationError("webcodecs_cleanup_timeout")
+            await asyncio.sleep(min(0.05, remaining))
+
     async def async_create_camera_media(
         self,
         session_token: str,
@@ -553,6 +627,8 @@ class ComelitMiniAppController:
         state = self.hass.states.get(entity_id)
         if state is None or state.state == STATE_UNAVAILABLE:
             raise MiniAppOperationError("camera is unavailable")
+
+        await self._await_webcodecs_entrance_cleanup(entity_id)
 
         # Use Home Assistant's normal camera stream API. For
         # camera.comelit_entrance this enters ComelitEntranceCamera's existing

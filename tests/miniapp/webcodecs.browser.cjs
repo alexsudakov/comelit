@@ -428,6 +428,108 @@ async function main() {
       hasPanel: false,
     });
 
+    // Production Entrance path: WebCodecs is primary without exposing the
+    // diagnostic tab. A terminal WebCodecs failure falls back to the legacy
+    // HLS-backed picture viewer automatically, with no extra user click.
+    await page.evaluate(() => {
+      window.__webcodecs.legacyMounts = 0;
+      window.loadCardHelpers = async () => ({
+        createCardElement: async (config) => {
+          window.__webcodecs.legacyMounts += 1;
+          const node = document.createElement("div");
+          node.dataset.legacyViewer = config.entity;
+          return node;
+        },
+      });
+
+      const card = document.getElementById("card");
+      card.setConfig({
+        default_tab: "intercom",
+        webcodecs: { enabled: false, intercom_primary: true },
+        surveillance: { include: ["camera.parking_6048"] },
+      });
+      card.shadowRoot.querySelector("[data-intercom-camera-toggle]").click();
+    });
+
+    await page.waitForFunction(() => window.__webcodecs.sockets.length === 3);
+    await page.waitForFunction(() => window.__webcodecs.sockets[2].sent.length === 1);
+    const productionSurface = await page.evaluate(() => {
+      const card = document.getElementById("card");
+      const viewer = card.shadowRoot.querySelector("#intercom-viewer miniapp-webcodecs-viewer");
+      return {
+        tabs: [...card.shadowRoot.querySelectorAll("[data-tab]")]
+          .map((button) => button.textContent.trim()),
+        embedded: Boolean(viewer),
+        hasStart: Boolean(viewer?.shadowRoot.querySelector("[data-start]")),
+        hasResult: Boolean(viewer?.shadowRoot.querySelector("[data-result]")),
+      };
+    });
+    assert.deepEqual(productionSurface, {
+      tabs: ["Домофон", "Видеонаблюдение"],
+      embedded: true,
+      hasStart: false,
+      hasResult: false,
+    });
+
+    await page.evaluate(() => {
+      const socket = window.__webcodecs.sockets[2];
+      socket.emitText({ type: "intercom_media_ready", server_elapsed_ms: 3900 });
+      socket.emitText({ type: "source_open", server_elapsed_ms: 3950 });
+      socket.emitText({ type: "source_packet", server_elapsed_ms: 3970 });
+      socket.emitText({
+        type: "hello",
+        protocol: 2,
+        entity_id: "camera.comelit_entrance",
+        codec: "avc1.42C01E",
+        max_unit_bytes: 1048576,
+        session_max_seconds: 600,
+        zero_transcode: true,
+        source_kind: "comelit_entrance_rtp",
+        comelit_entrance_open: true,
+        comelit_media_started: true,
+      });
+      socket.emitBinary(window.__frame());
+    });
+    await page.waitForFunction(() => window.__webcodecs.drawCount === 3);
+
+    await page.evaluate(() => {
+      window.__webcodecs.sockets[2].emitText({
+        type: "error",
+        code: "source_open_failed",
+      });
+    });
+    await page.waitForFunction(() => window.__webcodecs.legacyMounts === 1);
+    const automaticFallback = await page.evaluate(() => {
+      const card = document.getElementById("card");
+      return {
+        legacy: card.shadowRoot
+          .querySelector("#intercom-viewer [data-legacy-viewer]")
+          ?.dataset.legacyViewer,
+        manualFallbackButton: Boolean(
+          card.shadowRoot.querySelector("[data-intercom-legacy-fallback]"),
+        ),
+      };
+    });
+    assert.deepEqual(automaticFallback, {
+      legacy: "camera.comelit_entrance",
+      manualFallbackButton: false,
+    });
+
+    // Explicit reopen resets the primary mode. If WebCodecs is unavailable in
+    // the WebView, fallback is automatic before opening any WebCodecs socket.
+    await page.evaluate(() => {
+      const card = document.getElementById("card");
+      card.shadowRoot.querySelector("[data-intercom-camera-toggle]").click();
+      window.__webcodecs.savedVideoDecoder = window.VideoDecoder;
+      delete window.VideoDecoder;
+      card.shadowRoot.querySelector("[data-intercom-camera-toggle]").click();
+    });
+    await page.waitForFunction(() => window.__webcodecs.legacyMounts === 2);
+    assert.equal(await page.evaluate(() => window.__webcodecs.sockets.length), 3);
+    await page.evaluate(() => {
+      window.VideoDecoder = window.__webcodecs.savedVideoDecoder;
+    });
+
     console.log("webcodecs mock canary: PASS");
   } finally {
     await browser.close();

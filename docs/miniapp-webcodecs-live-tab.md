@@ -546,3 +546,50 @@ Door and Gate actions are outside this path and remain zero.
 - Whether the direct Entrance WebCodecs path should replace the existing
   production HLS viewer rather than remain an experimental transport.
 
+
+
+## Production Entrance viewer after 1.7.26
+
+The 1.7.26 Entrance canary promoted the already-implemented direct
+WebCodecs/WSS transport to the primary Telegram Mini App viewer in the next
+production patch.
+
+The normal Entrance viewer now uses:
+
+```text
+explicit "Показать камеру"
+  -> embedded WebCodecs viewer
+  -> existing /webcodecs endpoint
+  -> existing ComelitMediaSessionManager
+  -> existing native Entrance media + H264 recovery
+  -> WSS protocol v2
+  -> VideoDecoder + canvas
+```
+
+The legacy HA/HLS viewer remains a fallback only. A bounded startup/decoder/WSS
+failure closes the WebCodecs client first; the HLS endpoint then waits for the
+`miniapp_webcodecs` ownership to reach a safe inactive state before requesting
+HA HLS. This barrier is local cleanup synchronization, not an automatic
+Comelit packet/session retry. If cleanup enters the manager error state or does
+not finish within the bound, HLS fails closed rather than creating overlapping
+Comelit media ownership.
+
+The embedded production player has a 15-second first-frame startup deadline.
+The 600-second Entrance media hard ceiling remains authoritative and is not
+converted into an automatic HLS restart.
+
+The diagnostic WebCodecs tab and canary UI are retained for future controlled
+testing but are hidden by default. They are exposed only with the explicit Mini
+App URL query flag:
+
+```text
+webcodecs_debug=1
+```
+
+Without that flag the normal surface remains exactly:
+
+```text
+[ Домофон ] [ Видеонаблюдение ]
+```
+
+Door and Gate semantics are unchanged.
