@@ -11,7 +11,7 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.7.21**. This diagnostic patch keeps playback behavior unchanged, logs every upstream go2rtc WebSocket text response after MSE negotiation (including sanitized `type=error` values), and adds a third go2rtc stream-state snapshot at about 7 s before the existing 8 s negotiation timeout. This closes a diagnostic blind spot where go2rtc handler errors could previously be discarded while the Mini App waited for timeout. Details are recorded in `docs/releases/1.7.21-go2rtc-upstream-errors.md`.
+Current stable release: **1.7.22**. This patch changes only the Mini App MSE source path for ordinary Home Assistant Generic Camera entities: the validated `camera.stream_source()` RTSP source is registered directly in the HA-managed go2rtc instance instead of being wrapped in an exec-backed `ffmpeg:` producer with an additional Opus loopback producer. This avoids the go2rtc ffmpeg/exec cold-start path whose internal startup timeout can exceed the Mini App's bounded 8 s MSE negotiation window. Home Assistant's own WebRTC fallback remains unchanged. Details are recorded in `docs/releases/1.7.22-direct-generic-rtsp.md`.
 
 ## Home Assistant Custom Card
 
