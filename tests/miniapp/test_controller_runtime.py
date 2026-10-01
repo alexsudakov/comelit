@@ -1378,9 +1378,10 @@ def test_mse_lease_name_has_no_secrets_or_entity_and_is_stable():
     assert "driveway" not in first_name
     assert "test-user" not in first_name
     assert "test-password" not in first_name
+    expected_source = source + "#backchannel=0"
     assert fake_go2rtc.registers == [
-        (first_name, [source]),
-        (second_name, [source]),
+        (first_name, [expected_source]),
+        (second_name, [expected_source]),
     ]
 
 
