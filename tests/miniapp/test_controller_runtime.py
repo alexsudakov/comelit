@@ -30,8 +30,9 @@ class _HomeAssistantError(Exception):
 
 
 class _ConfigEntry:
-    def __init__(self, options=None):
+    def __init__(self, options=None, entry_id="entry-1"):
         self.options = options or {}
+        self.entry_id = entry_id
 
 
 class _HomeAssistant:
