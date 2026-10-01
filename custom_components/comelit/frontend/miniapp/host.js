@@ -1821,6 +1821,7 @@
       webcodecs: {
         enabled: webcodecsDebug,
         intercom_primary: true,
+        surveillance_primary: true,
       },
       surveillance: {
         include: bootstrap.surveillance_entities || [],
