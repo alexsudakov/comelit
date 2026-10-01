@@ -723,6 +723,7 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
         first_source_logged = False
         first_binary_logged = False
         source_task: asyncio.Task[None] | None = None
+        client_watch_task: asyncio.Task[None] | None = None
         entrance_lease = None
         queued_bytes = 0
         queued_units = 0
@@ -833,6 +834,27 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                         }
                     ):
                         return websocket
+
+                    async def watch_entrance_client_close() -> None:
+                        try:
+                            async for message in websocket:
+                                if message.type in {
+                                    WSMsgType.CLOSE,
+                                    WSMsgType.CLOSED,
+                                    WSMsgType.ERROR,
+                                }:
+                                    break
+                                # No post-start commands are accepted. Any
+                                # further client message terminates this
+                                # experimental media ownership fail-closed.
+                                break
+                        except _WEBSOCKET_SEND_ERRORS:
+                            pass
+                        await queue.put(("client_close", "client_close"))
+
+                    client_watch_task = self.controller.hass.async_create_task(
+                        watch_entrance_client_close()
+                    )
                 else:
                     camera = target.camera
                     if camera is None:
@@ -934,6 +956,9 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                                     ):
                                         break
                                     continue
+                                if kind == "client_close":
+                                    reason = "client_close"
+                                    break
                                 if kind == "error":
                                     if code == "unit_too_large":
                                         log_event("unit_too_large")
@@ -1016,6 +1041,10 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                 source_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await source_task
+            if client_watch_task is not None:
+                client_watch_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await client_watch_task
             if entrance_lease is not None:
                 try:
                     await entrance_lease.release()
