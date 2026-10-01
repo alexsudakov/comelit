@@ -295,6 +295,42 @@
         const name = this._cameraName(camera);
         return `<option value="${entityId}" ${entityId === this._selected ? "selected" : ""}>${name}</option>`;
       }).join("");
+      if (this._embedded) {
+        this.shadowRoot.innerHTML = `
+          <style>
+            :host { display: block; min-width: 0; }
+            * { box-sizing: border-box; }
+            .embedded-shell {
+              display: grid;
+              gap: 8px;
+              width: 100%;
+              min-width: 0;
+            }
+            canvas {
+              display: block;
+              width: 100%;
+              height: auto;
+              min-height: 220px;
+              background: #000;
+              border-radius: 10px;
+            }
+            .embedded-status {
+              min-height: 20px;
+              color: var(--secondary-text-color, #4b5563);
+              font-size: 0.9rem;
+            }
+          </style>
+          <div class="embedded-shell">
+            <canvas data-canvas width="1280" height="720"></canvas>
+            <div class="embedded-status">
+              Статус: <b data-status>${this._running ? "подключение" : "ожидание"}</b>
+            </div>
+          </div>
+        `;
+        this._rendered = true;
+        this._syncControls();
+        return;
+      }
       this.shadowRoot.innerHTML = `
         <style>
           :host { display: block; min-width: 0; }
