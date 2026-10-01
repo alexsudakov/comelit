@@ -1719,23 +1719,26 @@ def test_webcodecs_view_happy_path_secret_free_logs_and_messages(monkeypatch, ca
 
     websocket = _CaptureWebSocket.instances[0]
     texts = _json_texts(websocket)
-    assert texts[:2] == [
-        {
-            "type": "hello",
-            "protocol": 1,
-            "entity_id": "camera.driveway",
-            "codec": "avc1.640029",
-            "max_unit_bytes": webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES,
-            "session_max_seconds": webcodecs_mod.WEBCODECS_MAX_SESSION_SECONDS,
-            "zero_transcode": True,
-        },
-        {"type": "source"},
-    ]
+    assert texts[0]["type"] == "source_open"
+    assert isinstance(texts[0]["server_elapsed_ms"], int)
+    assert texts[1]["type"] == "source_packet"
+    assert isinstance(texts[1]["server_elapsed_ms"], int)
+    assert texts[2] == {
+        "type": "hello",
+        "protocol": 2,
+        "entity_id": "camera.driveway",
+        "codec": "avc1.640029",
+        "max_unit_bytes": webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES,
+        "session_max_seconds": webcodecs_mod.WEBCODECS_MAX_SESSION_SECONDS,
+        "zero_transcode": True,
+    }
     assert texts[-1] == {"type": "eos", "reason": "source_eof"}
     frame = webcodecs_mod.decode_webcodecs_frame(websocket.binaries[0])
     assert frame.sequence == 1
     assert frame.keyframe is True
     assert frame.pts_valid is True
+    assert frame.source_elapsed_us == 0
+    assert frame.send_elapsed_us == 0
     compared = [
         *websocket.texts,
         *[record.getMessage() for record in caplog.records],
