@@ -845,6 +845,42 @@ async function main() {
       },
     );
 
+    // An ordinary camera that is already unavailable must retain the legacy
+    // picture-entity behavior so a later HA state recovery can be reflected
+    // without requiring the user to switch cameras or reopen the card.
+    const socketsBeforeUnavailable = await page.evaluate(
+      () => window.__webcodecs.sockets.length,
+    );
+    await page.evaluate(() => {
+      const card = document.getElementById("card");
+      const baseHass = card._hass;
+      card.hass = {
+        ...baseHass,
+        states: {
+          ...baseHass.states,
+          "camera.parking_6048": {
+            ...baseHass.states["camera.parking_6048"],
+            state: "unavailable",
+          },
+        },
+      };
+      card.shadowRoot.querySelector('[data-tab="surveillance"]').click();
+    });
+    await page.waitForFunction(() => window.__webcodecs.legacyMounts === 4);
+    assert.equal(
+      await page.evaluate(() => window.__webcodecs.sockets.length),
+      socketsBeforeUnavailable,
+      "unavailable ordinary camera must not open WebCodecs WSS",
+    );
+    assert.equal(
+      await page.evaluate(() => {
+        const card = document.getElementById("card");
+        return card.shadowRoot.querySelector("#viewer [data-legacy-viewer]")
+          ?.dataset.legacyViewer;
+      }),
+      "camera.parking_6048",
+    );
+
     console.log("webcodecs mock canary: PASS");
   } finally {
     await browser.close();
