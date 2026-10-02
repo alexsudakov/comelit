@@ -303,6 +303,22 @@ def test_surveillance_webcodecs_primary_reuses_validated_transport_with_legacy_f
     assert "WEBCODECS_MAX_SESSION_SECONDS = 600" in server
 
 
+def test_entrance_tab_switch_uses_bounded_warm_park_without_hidden_decoder():
+    card = _read("custom_components/comelit/frontend/comelit-card.js")
+    viewer = _read("custom_components/comelit/frontend/miniapp/webcodecs.js")
+    controller = _read("custom_components/comelit/miniapp/controller.py")
+    views = _read("custom_components/comelit/miniapp/views.py")
+
+    assert "_parkAndDisconnectIntercomViewer" in card
+    assert "await viewer.parkEntrance()" in card
+    assert 'target.replaceChildren()' in card
+    assert '"/api/comelit/miniapp/entrance/park"' in viewer
+    assert "_WEBCODECS_ENTRANCE_PARK_SECONDS = 60.0" in controller
+    assert 'reason=_WEBCODECS_ENTRANCE_PARK_REASON' in controller
+    assert 'reason=_WEBCODECS_ENTRANCE_VIEWER_REASON' in controller
+    assert "MiniAppEntranceParkView" in views
+
+
 def test_entrance_webcodecs_primary_has_bounded_startup_and_hls_cleanup_barrier():
     card = _read("custom_components/comelit/frontend/comelit-card.js")
     viewer = _read("custom_components/comelit/frontend/miniapp/webcodecs.js")
