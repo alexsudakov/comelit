@@ -602,9 +602,15 @@ async function main() {
       (base) => window.__webcodecs.sockets.length > base,
       surveillanceSocketBase,
     );
+    const surveillanceSocketUrls = await page.evaluate(
+      (base) => window.__webcodecs.sockets.slice(base).map((socket) => socket.url),
+      surveillanceSocketBase,
+    );
     assert.equal(
-      await page.evaluate(() => window.__webcodecs.sockets.length),
-      surveillanceSocketBase + 1,
+      surveillanceSocketUrls.length,
+      1,
+      "ordinary surveillance must create exactly one WebCodecs socket: " +
+        JSON.stringify(surveillanceSocketUrls),
     );
     await page.waitForFunction(
       (index) => window.__webcodecs.sockets[index].sent.length === 1,
