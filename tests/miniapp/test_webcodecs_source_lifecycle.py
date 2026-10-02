@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import importlib.util
 import os
 from pathlib import Path
+import queue
 import sys
 import threading
 import time
@@ -38,6 +40,11 @@ class _Packet:
         return b"\x00\x00\x00\x01\x67\x64\x00\x29\x00\x00\x00\x01\x65\x88"
 
 
+class _BaseExceptionPacket(_Packet):
+    def __bytes__(self):
+        raise SystemExit("packet copy died")
+
+
 class _CodecContext:
     name = "h264"
     extradata = None
@@ -45,6 +52,11 @@ class _CodecContext:
 
 class _Stream:
     type = "video"
+    codec_context = _CodecContext()
+
+
+class _AudioStream:
+    type = "audio"
     codec_context = _CodecContext()
 
 
@@ -101,14 +113,22 @@ class _FakeContainer:
         block_reads: set[int] | None = None,
         fail_read: int | None = None,
         read_delay: float = 0,
+        streams: list[object] | None = None,
+        block_close: bool = False,
+        fail_close: bool = False,
     ) -> None:
         self.packets = packets
         self.block_reads = block_reads
         self.fail_read = fail_read
         self.read_delay = read_delay
+        self.streams = streams if streams is not None else [_Stream()]
+        self.block_close = block_close
+        self.fail_close = fail_close
         self.read_started = threading.Event()
         self.release_read = threading.Event()
         self.read_ended = threading.Event()
+        self.close_started = threading.Event()
+        self.release_close = threading.Event()
         self.close_called = threading.Event()
         self.read_in_progress = False
         self.close_count = 0
@@ -130,9 +150,14 @@ class _FakeContainer:
         self.close_thread_id = threading.get_ident()
         self.concurrent_close = self.read_in_progress
         assert not self.read_in_progress
+        self.close_started.set()
+        if self.block_close:
+            self.release_close.wait()
         self.close_count += 1
         self.events.append("close")
         self.close_called.set()
+        if self.fail_close:
+            raise RuntimeError("close failed")
 
 
 def _install_av(monkeypatch, container: _FakeContainer, open_block: threading.Event | None = None):
@@ -155,6 +180,21 @@ async def _wait_event(event: threading.Event, timeout: float = 1.0) -> bool:
             return True
         await asyncio.sleep(0)
     return event.is_set()
+
+
+async def _collect_loop_garbage() -> None:
+    for _ in range(4):
+        await asyncio.sleep(0)
+        gc.collect()
+    await asyncio.sleep(0)
+
+
+def _future_exception_warnings(contexts: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [
+        context
+        for context in contexts
+        if context.get("message") == "Future exception was never retrieved"
+    ]
 
 
 def test_cancelled_consumer_cleanup_waits_for_read_before_close(monkeypatch):
@@ -358,8 +398,17 @@ def test_owner_thread_death_after_open_resolves_close_without_full_bound(
     monkeypatch, caplog
 ):
     class _ExplodingCommands:
+        def __init__(self):
+            self._queued: queue.Queue[object] = queue.Queue()
+
         def get(self):
             raise SystemExit("command loop died")
+
+        def get_nowait(self):
+            return self._queued.get_nowait()
+
+        def put(self, command):
+            self._queued.put(command)
 
     container = _FakeContainer()
     _install_av(monkeypatch, container)
@@ -384,6 +433,50 @@ def test_owner_thread_death_after_open_resolves_close_without_full_bound(
     _run(run())
 
 
+def test_teardown_drain_error_does_not_escape_owner_thread(monkeypatch):
+    class _DrainExplodingCommands:
+        def get(self):
+            raise SystemExit("command loop died")
+
+        def get_nowait(self):
+            raise RuntimeError("drain failed")
+
+        def put(self, _command):
+            pass
+
+    container = _FakeContainer()
+    _install_av(monkeypatch, container)
+    monkeypatch.setattr(webcodecs_mod, "WEBCODECS_SOURCE_CLOSE_JOIN_TIMEOUT", 0.5)
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        contexts: list[dict[str, object]] = []
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: contexts.append(context))
+        try:
+            source = await webcodecs_mod.open_h264_access_unit_source(
+                "rtsp://example/live"
+            )
+            owner = source._owner
+            original_commands = owner._commands
+            owner._commands = _DrainExplodingCommands()
+            original_commands.put(("ignored", object()))
+            assert await _wait_event(container.close_called)
+            assert owner.join(1)
+            assert container.close_count == 1
+            assert owner._terminated
+            started = time.monotonic()
+            await asyncio.wait_for(source.aclose(), timeout=1)
+            elapsed = time.monotonic() - started
+            assert elapsed < 0.1
+            assert container.close_count == 1
+            assert contexts == []
+        finally:
+            loop.set_exception_handler(previous_handler)
+
+    _run(run())
+
+
 def test_read_failure_keeps_close_serialized(monkeypatch):
     container = _FakeContainer(fail_read=0)
     _install_av(monkeypatch, container)
@@ -400,6 +493,156 @@ def test_read_failure_keeps_close_serialized(monkeypatch):
     _run(run())
 
 
+def test_owner_base_exception_during_next_resolves_waiters(monkeypatch):
+    container = _FakeContainer(packets=[_BaseExceptionPacket()])
+    _install_av(monkeypatch, container)
+    monkeypatch.setattr(webcodecs_mod, "WEBCODECS_SOURCE_CLOSE_JOIN_TIMEOUT", 0.05)
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        contexts: list[dict[str, object]] = []
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: contexts.append(context))
+        source = await webcodecs_mod.open_h264_access_unit_source("rtsp://example/live")
+        owner = source._owner
+        thread = owner._thread
+        try:
+            with pytest.raises(webcodecs_mod.WebCodecsSourceError) as exc_info:
+                await asyncio.wait_for(source.__anext__(), timeout=1)
+            assert exc_info.value.code == "source_open_failed"
+            assert isinstance(exc_info.value.__cause__, SystemExit)
+            assert await _wait_event(container.close_called)
+            assert container.close_count == 1
+            assert not thread.is_alive()
+
+            with pytest.raises(webcodecs_mod.WebCodecsSourceError):
+                await asyncio.wait_for(source.__anext__(), timeout=1)
+            await asyncio.wait_for(source.aclose(), timeout=1)
+            assert container.close_count == 1
+            del source, owner
+            await _collect_loop_garbage()
+            assert contexts == []
+            assert _future_exception_warnings(contexts) == []
+        finally:
+            loop.set_exception_handler(previous_handler)
+
+    _run(run())
+
+
+def test_late_read_error_after_cancel_is_retrieved(monkeypatch):
+    container = _FakeContainer(block_reads={0}, fail_read=0)
+    _install_av(monkeypatch, container)
+    monkeypatch.setattr(webcodecs_mod, "WEBCODECS_SOURCE_CLOSE_JOIN_TIMEOUT", 0.05)
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        contexts: list[dict[str, object]] = []
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: contexts.append(context))
+        source = await webcodecs_mod.open_h264_access_unit_source("rtsp://example/live")
+        owner = source._owner
+        thread = owner._thread
+        task = asyncio.create_task(source.__anext__())
+        try:
+            assert await _wait_event(container.read_started)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            container.release_read.set()
+            await source.aclose()
+            assert await _wait_event(container.close_called)
+            assert container.close_count == 1
+            assert not thread.is_alive()
+            del source, owner, task
+            await _collect_loop_garbage()
+            assert contexts == []
+            assert _future_exception_warnings(contexts) == []
+        finally:
+            loop.set_exception_handler(previous_handler)
+
+    _run(run())
+
+
+def test_late_open_error_after_cancel_is_retrieved(monkeypatch):
+    container = _FakeContainer(streams=[_AudioStream()])
+    open_block = threading.Event()
+    _install_av(monkeypatch, container, open_block=open_block)
+    monkeypatch.setattr(webcodecs_mod, "WEBCODECS_SOURCE_CLOSE_JOIN_TIMEOUT", 0.05)
+    owners: list[object] = []
+    original_init = webcodecs_mod._H264PyAVOwner.__init__
+
+    def init_spy(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        owners.append(self)
+
+    monkeypatch.setattr(webcodecs_mod._H264PyAVOwner, "__init__", init_spy)
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        contexts: list[dict[str, object]] = []
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: contexts.append(context))
+        task = asyncio.create_task(
+            webcodecs_mod.open_h264_access_unit_source("rtsp://example/live")
+        )
+        try:
+            await asyncio.sleep(0)
+            assert owners
+            owner = owners[0]
+            thread = owner._thread
+            task.cancel()
+            open_block.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert await _wait_event(container.close_called)
+            assert container.close_count == 1
+            assert not thread.is_alive()
+            owners.clear()
+            del owner, task
+            await _collect_loop_garbage()
+            assert contexts == []
+            assert _future_exception_warnings(contexts) == []
+        finally:
+            loop.set_exception_handler(previous_handler)
+
+    _run(run())
+
+
+def test_late_close_error_after_cancel_is_retrieved(monkeypatch):
+    container = _FakeContainer(block_close=True, fail_close=True)
+    _install_av(monkeypatch, container)
+    monkeypatch.setattr(webcodecs_mod, "WEBCODECS_SOURCE_CLOSE_JOIN_TIMEOUT", 0.05)
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        contexts: list[dict[str, object]] = []
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: contexts.append(context))
+        source = await webcodecs_mod.open_h264_access_unit_source("rtsp://example/live")
+        owner = source._owner
+        thread = owner._thread
+        task = asyncio.create_task(source.aclose())
+        try:
+            assert await _wait_event(container.close_started)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            container.release_close.set()
+            assert await _wait_event(container.close_called)
+            assert container.close_count == 1
+            assert not container.concurrent_close
+            thread.join(1)
+            assert not thread.is_alive()
+            del source, owner, task
+            await _collect_loop_garbage()
+            assert contexts == []
+            assert _future_exception_warnings(contexts) == []
+        finally:
+            loop.set_exception_handler(previous_handler)
+
+    _run(run())
+
+
 def test_repeated_close_is_idempotent(monkeypatch):
     container = _FakeContainer(packets=[])
     _install_av(monkeypatch, container)
@@ -409,6 +652,31 @@ def test_repeated_close_is_idempotent(monkeypatch):
         await source.aclose()
         await source.aclose()
         await source.aclose()
+        assert container.close_count == 1
+        assert not source._owner._thread.is_alive()
+
+    _run(run())
+
+
+def test_repeated_close_after_cancel_waits_for_native_close(monkeypatch):
+    container = _FakeContainer(block_close=True)
+    _install_av(monkeypatch, container)
+    monkeypatch.setattr(webcodecs_mod, "WEBCODECS_SOURCE_CLOSE_JOIN_TIMEOUT", 0.5)
+
+    async def run():
+        source = await webcodecs_mod.open_h264_access_unit_source("rtsp://example/live")
+        first_close = asyncio.create_task(source.aclose())
+        assert await _wait_event(container.close_started)
+        first_close.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first_close
+
+        second_close = asyncio.create_task(source.aclose())
+        await asyncio.sleep(0)
+        assert not second_close.done()
+        assert container.close_count == 0
+        container.release_close.set()
+        await asyncio.wait_for(second_close, timeout=1)
         assert container.close_count == 1
         assert not source._owner._thread.is_alive()
 

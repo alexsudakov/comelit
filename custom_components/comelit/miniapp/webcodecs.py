@@ -362,7 +362,11 @@ class _LoopFutureBridge:
         self._resolve(lambda: self.future.set_result(result))
 
     def set_exception(self, exc: BaseException) -> None:
-        self._resolve(lambda: self.future.set_exception(exc))
+        def apply_exception() -> None:
+            self.future.add_done_callback(_retrieve_late_exception)
+            self.future.set_exception(exc)
+
+        self._resolve(apply_exception)
 
     def _resolve(self, apply: Any) -> None:
         def resolve() -> None:
@@ -375,8 +379,20 @@ class _LoopFutureBridge:
             return
 
 
+def _retrieve_late_exception(future: asyncio.Future[Any]) -> None:
+    """Mark late exceptions as retrieved without changing await delivery."""
+    if not future.cancelled():
+        future.exception()
+
+
 async def _await_owner_future(future: asyncio.Future[Any]) -> Any:
     return await asyncio.shield(future)
+
+
+def _source_open_failed(exc: BaseException) -> WebCodecsSourceError:
+    error = WebCodecsSourceError("source_open_failed")
+    error.__cause__ = exc
+    return error
 
 
 class _H264PyAVOwner:
@@ -401,6 +417,8 @@ class _H264PyAVOwner:
         self._close_future: _LoopFutureBridge | None = None
         self._state_lock = threading.Lock()
         self._terminated = False
+        self._closing = False
+        self._terminal_exception: BaseException | None = None
         self._thread = threading.Thread(
             target=self._run,
             name="comelit-webcodecs-pyav",
@@ -414,11 +432,19 @@ class _H264PyAVOwner:
 
     def next_packet(self) -> asyncio.Future[_H264PacketSnapshot | None]:
         future = _LoopFutureBridge(self._loop)
+        with self._state_lock:
+            if self._terminated or self._closing or not self._thread.is_alive():
+                if self._terminal_exception is None:
+                    future.set_result(None)
+                else:
+                    future.set_exception(_source_open_failed(self._terminal_exception))
+                return future.future
         self._commands.put(("next", future))
         return future.future
 
     def close(self) -> asyncio.Future[None]:
         with self._state_lock:
+            self._closing = True
             if self._close_future is None:
                 self._close_future = _LoopFutureBridge(self._loop)
                 if self._terminated or not self._thread.is_alive():
@@ -435,6 +461,8 @@ class _H264PyAVOwner:
         container: Any | None = None
         iterator: Any | None = None
         closed = False
+        current_future: _LoopFutureBridge | None = None
+        terminal_exception: BaseException | None = None
 
         def close_container() -> None:
             nonlocal closed
@@ -487,18 +515,22 @@ class _H264PyAVOwner:
             while True:
                 command = self._commands.get()
                 kind, future = command
+                current_future = future
                 if kind == "close":
                     try:
                         close_container()
                     except Exception as exc:
                         future.set_exception(exc)
+                    current_future = None
                     return
                 if kind != "next":
+                    current_future = None
                     continue
                 try:
                     packet = next(iterator, None)
                     if packet is None:
                         future.set_result(None)
+                        current_future = None
                         continue
                     future.set_result(
                         _H264PacketSnapshot(
@@ -507,21 +539,65 @@ class _H264PyAVOwner:
                             media_pts_us=packet_pts_us(packet),
                         ),
                     )
+                    current_future = None
                 except Exception as exc:
                     future.set_exception(exc)
+                    current_future = None
         except BaseException as exc:
+            terminal_exception = exc
             self._ready.set_exception(exc)
         finally:
             if not closed and container is not None:
                 try:
                     close_container()
-                except Exception:
+                except BaseException as exc:
+                    if terminal_exception is None:
+                        terminal_exception = exc
                     _LOGGER.exception("Comelit Mini App WebCodecs PyAV close failed")
+            pending_error = (
+                _source_open_failed(terminal_exception)
+                if terminal_exception is not None
+                else WebCodecsSourceError("source_open_failed")
+            )
+            try:
+                if current_future is not None:
+                    current_future.set_exception(pending_error)
+            except BaseException:
+                _LOGGER.exception(
+                    "Comelit Mini App WebCodecs PyAV pending command resolution failed"
+                )
+            while True:
+                try:
+                    pending_kind, pending_future = self._commands.get_nowait()
+                except queue.Empty:
+                    break
+                except BaseException:
+                    _LOGGER.exception(
+                        "Comelit Mini App WebCodecs PyAV command drain failed"
+                    )
+                    break
+                try:
+                    if pending_kind == "close":
+                        pending_future.set_result(None)
+                    else:
+                        pending_future.set_exception(
+                            WebCodecsSourceError("source_open_failed")
+                        )
+                except BaseException:
+                    _LOGGER.exception(
+                        "Comelit Mini App WebCodecs PyAV drained command resolution failed"
+                    )
             with self._state_lock:
                 self._terminated = True
+                self._terminal_exception = terminal_exception
                 close_future = self._close_future
             if close_future is not None:
-                close_future.set_result(None)
+                try:
+                    close_future.set_result(None)
+                except BaseException:
+                    _LOGGER.exception(
+                        "Comelit Mini App WebCodecs PyAV close future resolution failed"
+                    )
 
 
 class H264AccessUnitSource:
@@ -667,10 +743,9 @@ class H264AccessUnitSource:
             owner.join(timeout)
 
     async def aclose(self) -> None:
-        if self._close_started:
-            return
-        self._close_started = True
-        self._closed = True
+        if not self._close_started:
+            self._close_started = True
+            self._closed = True
         await self._close_owner(self._owner)
 
 

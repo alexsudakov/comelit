@@ -632,7 +632,9 @@ If a read remains blocked past the bound, control returns to the event loop and
 the queued close is still performed later by the same daemon owner thread after
 the bounded PyAV read timeout unblocks. The daemon owner thread is an explicit
 limitation accepted here because PyAV open/read calls use the 5.0 second timeout
-bound and teardown does not rely on process shutdown for normal cleanup. The primary WebCodecs source does not call the legacy MSE/WebRTC/HLS transport
+bound and teardown does not rely on process shutdown for normal cleanup.
+
+The primary WebCodecs source does not call the legacy MSE/WebRTC/HLS transport
 while it is healthy. Those paths remain isolated fallbacks. The WebCodecs
 transport does not call Door or Gate services.
 
