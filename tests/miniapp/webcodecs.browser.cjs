@@ -710,7 +710,7 @@ async function main() {
       });
       socket.emitBinary(window.__frame());
     }, surveillanceSocketBase);
-    await page.waitForFunction(() => window.__webcodecs.drawCount === 4);
+    await page.waitForFunction(() => window.__webcodecs.drawCount === 5);
     assert.equal(
       await page.evaluate(() => window.__webcodecs.legacyMounts),
       0,
