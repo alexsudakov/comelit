@@ -660,6 +660,11 @@ async function main() {
       socket.emitBinary(window.__frame());
     }, surveillanceSocketBase);
     await page.waitForFunction(() => window.__webcodecs.drawCount === 4);
+    assert.equal(
+      await page.evaluate(() => window.__webcodecs.legacyMounts),
+      0,
+      "successful ordinary WebCodecs playback must not mount legacy",
+    );
 
     const preservedSurveillanceViewer = await page.evaluate(() => {
       const card = document.getElementById("card");
@@ -719,6 +724,126 @@ async function main() {
       });
     }, surveillanceSocketBase + 1);
     await page.waitForFunction(() => window.__webcodecs.legacyMounts === 2);
+
+    // Ordinary WebCodecs capability absence is terminal for the primary path
+    // and must fall back without constructing a WSS session.
+    const socketsBeforeUnsupported = await page.evaluate(
+      () => window.__webcodecs.sockets.length,
+    );
+    await page.evaluate(() => {
+      window.__webcodecs.savedVideoDecoder = window.VideoDecoder;
+      delete window.VideoDecoder;
+      const card = document.getElementById("card");
+      card.shadowRoot.querySelector('[data-tab="intercom"]').click();
+      card.shadowRoot.querySelector('[data-tab="surveillance"]').click();
+    });
+    await page.waitForFunction(() => window.__webcodecs.legacyMounts === 3);
+    assert.equal(
+      await page.evaluate(() => window.__webcodecs.sockets.length),
+      socketsBeforeUnsupported,
+      "unsupported WebCodecs must fall back before opening WSS",
+    );
+    assert.equal(
+      await page.evaluate(() => {
+        const card = document.getElementById("card");
+        return card.shadowRoot.querySelector("#viewer [data-legacy-viewer]")
+          ?.dataset.legacyViewer;
+      }),
+      "camera.dvor_1",
+    );
+
+    // Start a fresh primary viewer, switch cameras, then inject a late event
+    // from the disconnected old socket. Generation guards must ignore it.
+    await page.evaluate(() => {
+      window.VideoDecoder = window.__webcodecs.savedVideoDecoder;
+      const card = document.getElementById("card");
+      card.shadowRoot.querySelector('[data-tab="intercom"]').click();
+      card.shadowRoot.querySelector('[data-tab="surveillance"]').click();
+    });
+    await page.waitForFunction(
+      (base) => window.__webcodecs.sockets.length === base + 1,
+      socketsBeforeUnsupported,
+    );
+    const staleDvorSocketIndex = socketsBeforeUnsupported;
+    await page.waitForFunction(
+      (index) => window.__webcodecs.sockets[index].sent.length === 1,
+      staleDvorSocketIndex,
+    );
+
+    await page.evaluate(() => {
+      const card = document.getElementById("card");
+      card.shadowRoot.querySelector(
+        '[data-camera="camera.parking_6048"]',
+      ).click();
+    });
+    await page.waitForFunction(
+      (base) => window.__webcodecs.sockets.length === base + 2,
+      socketsBeforeUnsupported,
+    );
+    const parkingSocketIndex = socketsBeforeUnsupported + 1;
+    const switchedState = await page.evaluate((oldIndex) => {
+      const card = document.getElementById("card");
+      return {
+        selected: card._selectedCamera,
+        oldSocketClosed:
+          window.__webcodecs.sockets[oldIndex].readyState === WebSocket.CLOSED,
+        webcodecsMounted: Boolean(
+          card.shadowRoot.querySelector("#viewer miniapp-webcodecs-viewer"),
+        ),
+      };
+    }, staleDvorSocketIndex);
+    assert.deepEqual(switchedState, {
+      selected: "camera.parking_6048",
+      oldSocketClosed: true,
+      webcodecsMounted: true,
+    });
+
+    await page.evaluate((oldIndex) => {
+      window.__webcodecs.sockets[oldIndex].emitText({
+        type: "error",
+        code: "source_open_failed",
+      });
+    }, staleDvorSocketIndex);
+    await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    assert.equal(
+      await page.evaluate(() => window.__webcodecs.legacyMounts),
+      3,
+      "stale callback after camera switch must not start legacy fallback",
+    );
+
+    // Leaving Surveillance disconnects the active ordinary viewer. A late
+    // callback from that closed socket must likewise be ignored.
+    await page.evaluate(() => {
+      document.getElementById("card").shadowRoot
+        .querySelector('[data-tab="intercom"]').click();
+    });
+    assert.equal(
+      await page.evaluate((index) =>
+        window.__webcodecs.sockets[index].readyState === WebSocket.CLOSED
+      , parkingSocketIndex),
+      true,
+      "leaving Surveillance must close the active WebCodecs socket",
+    );
+    await page.evaluate((index) => {
+      window.__webcodecs.sockets[index].emitText({
+        type: "error",
+        code: "source_open_failed",
+      });
+    }, parkingSocketIndex);
+    await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    assert.deepEqual(
+      await page.evaluate(() => {
+        const card = document.getElementById("card");
+        return {
+          legacyMounts: window.__webcodecs.legacyMounts,
+          viewerReleased: card._viewerElement === undefined,
+        };
+      }),
+      {
+        legacyMounts: 3,
+        viewerReleased: true,
+      },
+    );
 
     console.log("webcodecs mock canary: PASS");
   } finally {
