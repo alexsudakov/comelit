@@ -479,6 +479,50 @@ The Comelit entrance camera continues to use its separately validated
 manager-owned WebCodecs lifecycle. Its 600-second media-manager ceiling remains
 authoritative and does not trigger an automatic HLS restart.
 
+### Entrance warm tab park
+
+When an explicitly opened Entrance WebCodecs viewer switches from
+`Домофон` to `Видеонаблюдение`, the Mini App does not keep the hidden
+browser viewer alive. Before disconnecting that viewer it acquires one bounded
+manager lease:
+
+```text
+miniapp_webcodecs_park
+```
+
+The browser-side Entrance resources are then released before ordinary
+surveillance starts:
+
+```text
+Entrance canvas / VideoDecoder
+-> PyAV reader
+-> Entrance WebSocket
+-> disconnected
+```
+
+The park lease keeps the already-established Comelit on-demand media transport
+alive for **60 seconds**. Returning to `Домофон` within that bound acquires a
+new `miniapp_webcodecs` viewer lease first and only then releases
+`miniapp_webcodecs_park`. The manager therefore never reaches zero leases
+during the hand-off and does not repeat the cold P2P/PseudoTCP/CTPP bootstrap.
+
+If the user does not return within 60 seconds, the park lease expires. With no
+other media lease, the existing `ComelitMediaSessionManager` performs its
+normal full teardown and restores the persistent listener. The existing
+600-second absolute manager deadline remains authoritative and can terminate a
+park earlier.
+
+This is deliberately **not** a newly invented proprietary RTPC pause/resume
+operation. During the bounded park, the WebView receives and decodes no
+Entrance video, but the existing Comelit upstream media transport in Home
+Assistant remains active. A future protocol-level
+`stop RTP -> keep CTPP -> reopen RTP` optimization requires separate live
+evidence before production use.
+
+Explicit camera close, Mini App close, terminal Entrance WebCodecs failure, and
+Entrance HLS fallback do not request the warm park and retain their normal
+teardown/fallback semantics.
+
 ## 12.1 WebCodecs transport and diagnostic tab
 
 Status: live-validated for ordinary H.264 surveillance cameras and for the
