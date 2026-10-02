@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import hashlib
+import logging
 from pathlib import Path
 import re
 from typing import Any, Callable
@@ -75,6 +76,11 @@ _HLS_PROXY_TAIL = re.compile(
 _DIRECT_SOURCE = re.compile(r"^(?:rtsp|rtsps|http|https)://[^\r\n\t ]+$")
 _MAX_MSE_STREAMS = 32
 _WEBCODECS_HLS_FALLBACK_CLEANUP_SECONDS = 5.0
+_WEBCODECS_ENTRANCE_PARK_SECONDS = 60.0
+_WEBCODECS_ENTRANCE_VIEWER_REASON = "miniapp_webcodecs"
+_WEBCODECS_ENTRANCE_PARK_REASON = "miniapp_webcodecs_park"
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class MiniAppOperationError(HomeAssistantError):
@@ -178,6 +184,10 @@ class ComelitMiniAppController:
         self._mse_lock = asyncio.Lock()
         self._mse_streams: dict[str, _MiniAppMSEStream] = {}
         self._entry: ConfigEntry | None = None
+        self._webcodecs_entrance_lock = asyncio.Lock()
+        self._webcodecs_entrance_park_task: asyncio.Task[None] | None = None
+        self._webcodecs_entrance_park_manager: Any | None = None
+        self._webcodecs_entrance_park_held = False
 
     def set_entry(self, entry: ConfigEntry) -> None:
         self._entry = entry
@@ -417,12 +427,7 @@ class ComelitMiniAppController:
             camera=get_camera_from_entity_id(self.hass, entity_id),
         )
 
-    async def acquire_webcodecs_entrance(
-        self,
-        target: MiniAppWebCodecsTarget,
-    ) -> MiniAppWebCodecsEntranceLease:
-        if target.kind != "entrance":
-            raise MiniAppOperationError("invalid_webcodecs_target")
+    def _webcodecs_entrance_runtime(self) -> tuple[Any, Any]:
         entry = self._entry
         entry_id = getattr(entry, "entry_id", None) if entry is not None else None
         if not isinstance(entry_id, str) or not entry_id:
@@ -433,42 +438,192 @@ class ComelitMiniAppController:
         transport = domain_data.get(DATA_MEDIA_TRANSPORTS, {}).get(entry_id)
         if manager is None or transport is None:
             raise MiniAppOperationError("intercom_media_unavailable")
+        return manager, transport
 
+    async def _cancel_webcodecs_entrance_park_timer_locked(self) -> None:
+        task = self._webcodecs_entrance_park_task
+        self._webcodecs_entrance_park_task = None
+        if task is None or task is asyncio.current_task():
+            return
+        task.cancel()
         try:
-            await self._await_webcodecs_manager_cleanup(manager)
-        except MiniAppOperationError as exc:
-            raise MiniAppOperationError("intercom_media_busy") from exc
-        if getattr(manager, "phase", None) != "inactive":
-            raise MiniAppOperationError("intercom_media_busy")
+            await task
+        except asyncio.CancelledError:
+            pass
 
-        reason = "miniapp_webcodecs"
+    async def _expire_webcodecs_entrance_park(self, manager: Any) -> None:
         try:
-            await manager.async_acquire(panel="entrance", reason=reason)
-        except Exception as exc:
-            code = (
-                "intercom_media_busy"
-                if str(exc) in {
-                    "attached_inbound_media_busy",
-                    "media_session_transition_busy",
-                }
-                else "intercom_media_start_failed"
+            await asyncio.sleep(_WEBCODECS_ENTRANCE_PARK_SECONDS)
+        except asyncio.CancelledError:
+            raise
+
+        async with self._webcodecs_entrance_lock:
+            if (
+                not self._webcodecs_entrance_park_held
+                or self._webcodecs_entrance_park_manager is not manager
+            ):
+                return
+            self._webcodecs_entrance_park_task = None
+            self._webcodecs_entrance_park_manager = None
+            self._webcodecs_entrance_park_held = False
+            try:
+                await manager.async_release(reason=_WEBCODECS_ENTRANCE_PARK_REASON)
+            except Exception:
+                _LOGGER.exception(
+                    "Comelit Mini App Entrance warm park release failed"
+                )
+
+    async def async_park_webcodecs_entrance(self) -> dict[str, object]:
+        """Keep the active Entrance media session warm for a bounded tab switch.
+
+        The browser WSS/PyAV/VideoDecoder consumer is still disconnected.  Only
+        an additional manager lease is retained for 60 seconds so a return to
+        the Entrance tab can reuse the already-established Comelit media
+        transport without another cold P2P/CTPP bootstrap.
+        """
+        async with self._webcodecs_entrance_lock:
+            manager, transport = self._webcodecs_entrance_runtime()
+            if (
+                getattr(manager, "phase", None) != "active"
+                or not getattr(manager, "active", False)
+                or not getattr(transport, "active", False)
+                or not getattr(transport, "local_sdp_ready", False)
+            ):
+                raise MiniAppOperationError("intercom_media_unavailable")
+
+            if (
+                self._webcodecs_entrance_park_held
+                and self._webcodecs_entrance_park_manager is manager
+            ):
+                await self._cancel_webcodecs_entrance_park_timer_locked()
+            else:
+                if self._webcodecs_entrance_park_held:
+                    stale_manager = self._webcodecs_entrance_park_manager
+                    await self._cancel_webcodecs_entrance_park_timer_locked()
+                    self._webcodecs_entrance_park_manager = None
+                    self._webcodecs_entrance_park_held = False
+                    if stale_manager is not None:
+                        try:
+                            await stale_manager.async_release(
+                                reason=_WEBCODECS_ENTRANCE_PARK_REASON
+                            )
+                        except Exception:
+                            _LOGGER.exception(
+                                "Comelit Mini App stale Entrance park release failed"
+                            )
+                try:
+                    await manager.async_acquire(
+                        panel="entrance",
+                        reason=_WEBCODECS_ENTRANCE_PARK_REASON,
+                    )
+                except Exception as exc:
+                    raise MiniAppOperationError("intercom_media_busy") from exc
+                self._webcodecs_entrance_park_manager = manager
+                self._webcodecs_entrance_park_held = True
+
+            self._webcodecs_entrance_park_task = self.hass.async_create_task(
+                self._expire_webcodecs_entrance_park(manager)
             )
-            raise MiniAppOperationError(code) from exc
+            return {
+                "parked": True,
+                "timeout_seconds": int(_WEBCODECS_ENTRANCE_PARK_SECONDS),
+            }
 
-        lease = MiniAppWebCodecsEntranceLease(
-            manager=manager,
-            transport=transport,
-            reason=reason,
-        )
-        if not getattr(manager, "active", False):
-            await lease.release()
-            raise MiniAppOperationError("intercom_media_start_failed")
-        if not getattr(transport, "active", False) or not getattr(
-            transport, "local_sdp_ready", False
-        ):
-            await lease.release()
-            raise MiniAppOperationError("intercom_media_unavailable")
-        return lease
+    async def acquire_webcodecs_entrance(
+        self,
+        target: MiniAppWebCodecsTarget,
+    ) -> MiniAppWebCodecsEntranceLease:
+        if target.kind != "entrance":
+            raise MiniAppOperationError("invalid_webcodecs_target")
+
+        async with self._webcodecs_entrance_lock:
+            manager, transport = self._webcodecs_entrance_runtime()
+
+            # Fast return from Surveillance: acquire the new viewer lease before
+            # dropping the warm park lease, so the manager never reaches zero
+            # leases and therefore never tears down the established transport.
+            if (
+                self._webcodecs_entrance_park_held
+                and self._webcodecs_entrance_park_manager is manager
+                and getattr(manager, "phase", None) == "active"
+                and getattr(manager, "active", False)
+                and getattr(transport, "active", False)
+                and getattr(transport, "local_sdp_ready", False)
+            ):
+                try:
+                    await manager.async_acquire(
+                        panel="entrance",
+                        reason=_WEBCODECS_ENTRANCE_VIEWER_REASON,
+                    )
+                except Exception as exc:
+                    raise MiniAppOperationError("intercom_media_busy") from exc
+
+                await self._cancel_webcodecs_entrance_park_timer_locked()
+                self._webcodecs_entrance_park_manager = None
+                self._webcodecs_entrance_park_held = False
+                try:
+                    await manager.async_release(
+                        reason=_WEBCODECS_ENTRANCE_PARK_REASON
+                    )
+                except Exception as exc:
+                    # Avoid leaking a fresh viewer lease if the ownership
+                    # hand-off cannot be completed coherently.
+                    await manager.async_release(
+                        reason=_WEBCODECS_ENTRANCE_VIEWER_REASON
+                    )
+                    raise MiniAppOperationError("intercom_media_busy") from exc
+
+                return MiniAppWebCodecsEntranceLease(
+                    manager=manager,
+                    transport=transport,
+                    reason=_WEBCODECS_ENTRANCE_VIEWER_REASON,
+                )
+
+            if self._webcodecs_entrance_park_held:
+                # The manager watchdog/hard timeout may have invalidated a warm
+                # lease while the browser was away. Clear only local park state;
+                # the manager is the source of truth for its own lease table.
+                await self._cancel_webcodecs_entrance_park_timer_locked()
+                self._webcodecs_entrance_park_manager = None
+                self._webcodecs_entrance_park_held = False
+
+            try:
+                await self._await_webcodecs_manager_cleanup(manager)
+            except MiniAppOperationError as exc:
+                raise MiniAppOperationError("intercom_media_busy") from exc
+            if getattr(manager, "phase", None) != "inactive":
+                raise MiniAppOperationError("intercom_media_busy")
+
+            try:
+                await manager.async_acquire(
+                    panel="entrance",
+                    reason=_WEBCODECS_ENTRANCE_VIEWER_REASON,
+                )
+            except Exception as exc:
+                code = (
+                    "intercom_media_busy"
+                    if str(exc) in {
+                        "attached_inbound_media_busy",
+                        "media_session_transition_busy",
+                    }
+                    else "intercom_media_start_failed"
+                )
+                raise MiniAppOperationError(code) from exc
+
+            lease = MiniAppWebCodecsEntranceLease(
+                manager=manager,
+                transport=transport,
+                reason=_WEBCODECS_ENTRANCE_VIEWER_REASON,
+            )
+            if not getattr(manager, "active", False):
+                await lease.release()
+                raise MiniAppOperationError("intercom_media_start_failed")
+            if not getattr(transport, "active", False) or not getattr(
+                transport, "local_sdp_ready", False
+            ):
+                await lease.release()
+                raise MiniAppOperationError("intercom_media_unavailable")
+            return lease
 
     @staticmethod
     def mse_internal_stream_name(entity_id: str) -> str:
