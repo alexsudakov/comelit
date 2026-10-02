@@ -182,6 +182,13 @@ async def _wait_event(event: threading.Event, timeout: float = 1.0) -> bool:
     return event.is_set()
 
 
+async def _wait_thread_exit(thread: threading.Thread, timeout: float = 1.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while thread.is_alive() and time.monotonic() < deadline:
+        await asyncio.sleep(0)
+    return not thread.is_alive()
+
+
 async def _collect_loop_garbage() -> None:
     for _ in range(4):
         await asyncio.sleep(0)
@@ -219,7 +226,7 @@ def test_cancelled_consumer_cleanup_waits_for_read_before_close(monkeypatch):
         assert container.close_count == 1
         assert container.close_thread_id == container.read_thread_id
         assert container.events == ["read_start", "read_end", "close"]
-        assert not source._owner._thread.is_alive()
+        assert await _wait_thread_exit(source._owner._thread)
 
     _run(run())
     assert not container.concurrent_close
@@ -238,7 +245,7 @@ def test_fast_reads_are_not_delayed_by_polling_bridge(monkeypatch):
         await asyncio.wait_for(source.aclose(), timeout=1)
         assert elapsed < 0.15
         assert container.close_count == 1
-        assert not source._owner._thread.is_alive()
+        assert await _wait_thread_exit(source._owner._thread)
 
     _run(run())
 
@@ -287,7 +294,7 @@ def test_delayed_read_uses_single_bridge_await_without_tiny_timeout(monkeypatch)
         ]
         await real_asyncio.wait_for(source.aclose(), timeout=1)
         assert container.close_count == 1
-        assert not source._owner._thread.is_alive()
+        assert await _wait_thread_exit(source._owner._thread)
 
     _run(run())
 
@@ -314,7 +321,7 @@ def test_packet_read_creates_no_file_descriptors_or_private_future_bridge(monkey
 
         assert fds_after == fds_before
         assert container.close_count == 1
-        assert not source._owner._thread.is_alive()
+        assert await _wait_thread_exit(source._owner._thread)
 
     _run(run())
 
@@ -330,7 +337,7 @@ def test_normal_eos_closes_owner_thread_once(monkeypatch):
         await source.aclose()
         assert container.close_count == 1
         assert container.close_thread_id == container.read_thread_id
-        assert not source._owner._thread.is_alive()
+        assert await _wait_thread_exit(source._owner._thread)
 
     _run(run())
 
@@ -366,7 +373,7 @@ def test_cancel_close_before_first_packet_closes_without_read(monkeypatch):
         assert container.close_count == 1
         assert container.events == ["close"]
         assert not container.read_started.is_set()
-        assert not source._owner._thread.is_alive()
+        assert await _wait_thread_exit(source._owner._thread)
 
     _run(run())
 
@@ -420,7 +427,7 @@ def test_owner_thread_death_after_open_resolves_close_without_full_bound(
         source._owner._commands = _ExplodingCommands()
         original_commands.put(("ignored", object()))
         assert await _wait_event(container.close_called)
-        assert not source._owner._thread.is_alive()
+        assert await _wait_thread_exit(source._owner._thread)
         assert container.close_count == 1
         assert not container.concurrent_close
         started = time.monotonic()
@@ -513,7 +520,7 @@ def test_owner_base_exception_during_next_resolves_waiters(monkeypatch):
             assert isinstance(exc_info.value.__cause__, SystemExit)
             assert await _wait_event(container.close_called)
             assert container.close_count == 1
-            assert not thread.is_alive()
+            assert await _wait_thread_exit(thread)
 
             with pytest.raises(webcodecs_mod.WebCodecsSourceError):
                 await asyncio.wait_for(source.__anext__(), timeout=1)
@@ -552,7 +559,7 @@ def test_late_read_error_after_cancel_is_retrieved(monkeypatch):
             await source.aclose()
             assert await _wait_event(container.close_called)
             assert container.close_count == 1
-            assert not thread.is_alive()
+            assert await _wait_thread_exit(thread)
             del source, owner, task
             await _collect_loop_garbage()
             assert contexts == []
@@ -596,7 +603,7 @@ def test_late_open_error_after_cancel_is_retrieved(monkeypatch):
                 await task
             assert await _wait_event(container.close_called)
             assert container.close_count == 1
-            assert not thread.is_alive()
+            assert await _wait_thread_exit(thread)
             owners.clear()
             del owner, task
             await _collect_loop_garbage()
@@ -631,8 +638,7 @@ def test_late_close_error_after_cancel_is_retrieved(monkeypatch):
             assert await _wait_event(container.close_called)
             assert container.close_count == 1
             assert not container.concurrent_close
-            thread.join(1)
-            assert not thread.is_alive()
+            assert await _wait_thread_exit(thread)
             del source, owner, task
             await _collect_loop_garbage()
             assert contexts == []
@@ -653,7 +659,7 @@ def test_repeated_close_is_idempotent(monkeypatch):
         await source.aclose()
         await source.aclose()
         assert container.close_count == 1
-        assert not source._owner._thread.is_alive()
+        assert await _wait_thread_exit(source._owner._thread)
 
     _run(run())
 
@@ -678,7 +684,7 @@ def test_repeated_close_after_cancel_waits_for_native_close(monkeypatch):
         container.release_close.set()
         await asyncio.wait_for(second_close, timeout=1)
         assert container.close_count == 1
-        assert not source._owner._thread.is_alive()
+        assert await _wait_thread_exit(source._owner._thread)
 
     _run(run())
 
@@ -707,7 +713,7 @@ def test_repeated_start_cancel_close_cycles_leave_no_owner_thread(monkeypatch):
             container.release_read.set()
             await asyncio.wait_for(close_task, timeout=1)
             assert container.close_count == 1
-            assert not source._owner._thread.is_alive()
+            assert await _wait_thread_exit(source._owner._thread)
 
     _run(tracked_run())
 
@@ -724,7 +730,7 @@ def test_worker_lifecycle_finishes_after_eos_cleanup(monkeypatch):
         await source.aclose()
         assert container.close_count == 1
         assert container.close_called.is_set()
-        assert not source._owner._thread.is_alive()
+        assert await _wait_thread_exit(source._owner._thread)
 
     _run(run())
 
@@ -773,8 +779,7 @@ def test_negative_control_legacy_to_thread_close_race_trips_fake_container(monke
         assert container.concurrent_close
         assert container.close_count == 0
         container.release_read.set()
-        read_thread.join(1)
-        assert not read_thread.is_alive()
+        assert await _wait_thread_exit(read_thread)
         assert read_result
         assert container.events == ["read_start", "read_end"]
 
