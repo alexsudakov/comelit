@@ -439,7 +439,7 @@ class _H264PyAVOwner:
                 else:
                     future.set_exception(_source_open_failed(self._terminal_exception))
                 return future.future
-        self._commands.put(("next", future))
+            self._commands.put(("next", future))
         return future.future
 
     def close(self) -> asyncio.Future[None]:
@@ -566,6 +566,10 @@ class _H264PyAVOwner:
                 _LOGGER.exception(
                     "Comelit Mini App WebCodecs PyAV pending command resolution failed"
                 )
+            with self._state_lock:
+                self._terminated = True
+                self._terminal_exception = terminal_exception
+                close_future = self._close_future
             while True:
                 try:
                     pending_kind, pending_future = self._commands.get_nowait()
@@ -587,10 +591,6 @@ class _H264PyAVOwner:
                     _LOGGER.exception(
                         "Comelit Mini App WebCodecs PyAV drained command resolution failed"
                     )
-            with self._state_lock:
-                self._terminated = True
-                self._terminal_exception = terminal_exception
-                close_future = self._close_future
             if close_future is not None:
                 try:
                     close_future.set_result(None)

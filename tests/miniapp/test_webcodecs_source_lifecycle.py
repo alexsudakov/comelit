@@ -536,6 +536,68 @@ def test_owner_base_exception_during_next_resolves_waiters(monkeypatch):
     _run(run())
 
 
+def test_next_packet_during_owner_terminal_drain_resolves_waiter(monkeypatch):
+    class _DrainBlockingCommands:
+        def __init__(self):
+            self.drain_started = threading.Event()
+            self.release_drain = threading.Event()
+            self.put_commands: list[object] = []
+            self._first_drain = True
+
+        def get(self):
+            raise SystemExit("command loop died")
+
+        def get_nowait(self):
+            if self._first_drain:
+                self._first_drain = False
+                self.drain_started.set()
+                self.release_drain.wait()
+            raise queue.Empty
+
+        def put(self, command):
+            self.put_commands.append(command)
+
+    container = _FakeContainer()
+    _install_av(monkeypatch, container)
+    monkeypatch.setattr(webcodecs_mod, "WEBCODECS_SOURCE_CLOSE_JOIN_TIMEOUT", 0.05)
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        contexts: list[dict[str, object]] = []
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: contexts.append(context))
+        source = await webcodecs_mod.open_h264_access_unit_source("rtsp://example/live")
+        owner = source._owner
+        thread = owner._thread
+        commands = _DrainBlockingCommands()
+        try:
+            original_commands = owner._commands
+            owner._commands = commands
+            original_commands.put(("ignored", object()))
+            assert await _wait_event(commands.drain_started)
+
+            next_future = owner.next_packet()
+            with pytest.raises(webcodecs_mod.WebCodecsSourceError):
+                await asyncio.wait_for(next_future, timeout=0.2)
+            assert commands.put_commands == []
+
+            commands.release_drain.set()
+            assert await _wait_event(container.close_called)
+            assert container.close_count == 1
+            assert await _wait_thread_exit(thread)
+            await asyncio.wait_for(source.aclose(), timeout=1)
+            assert container.close_count == 1
+            del source, owner
+            await _collect_loop_garbage()
+            assert contexts == []
+            assert _future_exception_warnings(contexts) == []
+        finally:
+            commands.release_drain.set()
+            loop.set_exception_handler(previous_handler)
+
+    _run(run())
+
+
 def test_late_read_error_after_cancel_is_retrieved(monkeypatch):
     container = _FakeContainer(block_reads={0}, fail_read=0)
     _install_av(monkeypatch, container)
