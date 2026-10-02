@@ -331,3 +331,23 @@ def test_entrance_webcodecs_primary_has_bounded_startup_and_hls_cleanup_barrier(
     assert "_await_webcodecs_entrance_cleanup" in controller
     assert "webcodecs_cleanup_timeout" in controller
     assert "webcodecs_cleanup_conflict" in controller
+
+
+def test_webcodecs_client_close_watcher_is_shared_by_entrance_and_ordinary():
+    views = _read("custom_components/comelit/miniapp/views.py")
+    server = _read("custom_components/comelit/miniapp/webcodecs.py")
+
+    assert "watch_entrance_client_close" not in views
+    assert views.count("async def watch_webcodecs_client_close()") == 1
+    assert views.count("watch_webcodecs_client_close()") == 2
+    assert views.count('await queue.put(("client_close", "client_close"))') == 1
+    assert 'log_event("client_close")' in views
+    assert '"client_close",' in server
+
+    watcher_pos = views.index("async def watch_webcodecs_client_close()")
+    entrance_pos = views.index('if target.kind == "entrance":')
+    ordinary_pos = views.index("camera = target.camera", entrance_pos)
+    source_task_pos = views.index(
+        "source_task = self.controller.hass.async_create_task(produce_units())"
+    )
+    assert entrance_pos < ordinary_pos < watcher_pos < source_task_pos
