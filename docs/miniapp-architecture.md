@@ -557,12 +557,60 @@ stop/cancel, release of the `ring_media` lease and stream consumer, then the
 camera-view cleanup callback
 `camera.async_release_attached_camera_view_if_idle(reason)`. That callback
 releases `camera_view` only for the same `attached_inbound` owner/provider and
-defers if another named provider consumer is present; the final `camera_view`
+defers only if another integration-owned named provider consumer is present in
+`HAStreamMediaProvider.consumers`. That deferral does not see ordinary Home
+Assistant HLS viewers from the frontend or dashboards; the final `camera_view`
 lease release drives the existing attached-media R58/SIGUSR2 stop path.
 
 Home Assistant HLS idle cleanup (`OUTPUT_IDLE_TIMEOUT`, HA Core ref 2026.9.2)
 does not fit the Mini App's 15-second viewer-loss bound by itself, so Mini App
 close/expiry initiates `camera_view` release explicitly.
+
+### Known limitation: ordinary HA HLS viewers are not visible
+
+The Mini App attached-viewer lease is visible to the integration, but ordinary
+Home Assistant frontend/dashboard HLS viewers are not. HA Core tracks one HLS
+output per `Stream` and per format in
+`homeassistant/components/stream/__init__.py` with
+`_outputs: dict[str, StreamOutput]`; `outputs()` returns those format outputs,
+and `add_provider()` reuses `self._outputs[fmt]` for an existing output.
+
+HLS idle is shared per track/provider and refreshed by any HLS client through
+`homeassistant/components/stream/hls.py` `track.idle_timer.awake()`.
+`homeassistant/components/stream/core.py` owns the `IdleTimer`, and
+`homeassistant/components/stream/const.py` sets `OUTPUT_IDLE_TIMEOUT = 30`.
+This timer is not ownership evidence and cannot be used as a per-viewer signal.
+
+The `/api/hls/<token>/...` URL identifies the `Stream` by its `access_token`,
+not an individual client. `homeassistant/components/stream/__init__.py`
+constructs `endpoint_url()` from that token, and
+`homeassistant/components/stream/core.py` resolves the stream by token.
+
+The shared camera path is the same one used by Mini App HLS. In
+`homeassistant/components/camera/__init__.py`, Home Assistant documents that
+there is at most one stream, meaning one decode worker, per camera.
+`async_request_stream(hass, entity_id, fmt)` calls `stream.add_provider(fmt)`
+and then `stream.endpoint_url(fmt)`, so the Mini App and an ordinary HA viewer
+receive the same HA camera stream.
+
+HA 2026.9.2 exposes per-session identity for WebRTC through
+`camera/__init__.py` `async_handle_web_rtc_offer(..., session_id)` and
+`close_webrtc_session(session_id)`. HLS and the attached path do not provide an
+equivalent client identity.
+
+Therefore `OTHER_HA_VIEWER_SURVIVES_MINIAPP_CLOSE=NOT_PROVEN`. Mini App close
+or lease expiry can release `camera_view` and stop the attached transport while
+an ordinary HA HLS viewer is still watching the same camera. This is not proof
+that the ordinary viewer must break, because HA may fail closed or request
+again after attached media closes, but there is no guarantee and the
+integration must not simulate a per-viewer signal.
+
+Open question: the Mini App attached viewer needs its own HA-visible owned
+resource, such as a separate lease/provider/stream object with explicit
+acquire/release, or HA Core needs to expose a per-client HLS lease to
+integrations. Validation requires two independent owners: Mini App close
+releases only Mini App ownership, the ordinary HA HLS client remains active,
+and only the last departure or HA HLS idle causes exactly one transport stop.
 
 ## 12.1 WebCodecs transport and diagnostic tab
 

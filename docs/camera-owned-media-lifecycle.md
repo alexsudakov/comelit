@@ -114,14 +114,65 @@ Stream recording task to stop/cancel in bounded fashion. A non-empty partial
 file is reported as `truncated`; otherwise the recording result is `failed`.
 Only then does `ring_media` release its attached-media lease and HA Stream
 consumer. The camera-view cleanup callback then releases `camera_view` only for
-the same `attached_inbound` owner/provider; if another named provider consumer
-is still present, cleanup is deferred with `camera_view_release_deferred`. The
-compare-and-release path under `_camera_view_lock` drops the final
-`camera_view` lease, allowing the existing R58/SIGUSR2 cleanup path to close
-the inbound media transport. A 600-second defense-in-depth ceiling remains in
-case neither remote close nor viewer termination is observed.
+the same `attached_inbound` owner/provider. Cleanup is deferred with
+`camera_view_release_deferred` only when another integration-owned named
+provider consumer is still present in `HAStreamMediaProvider.consumers`; that
+guard does not observe ordinary Home Assistant HLS viewers from the frontend or
+dashboards. The compare-and-release path under `_camera_view_lock` drops the
+final `camera_view` lease, allowing the existing R58/SIGUSR2 cleanup path to
+close the inbound media transport. A 600-second defense-in-depth ceiling remains
+in case neither remote close nor viewer termination is observed.
 
-Direct cleanup cannot close a shared HA Stream while a named consumer remains.
+Direct cleanup cannot close a shared HA Stream while a named integration-owned
+provider consumer remains.
+
+## Known limitation: ordinary HA HLS viewers are not visible
+
+Home Assistant Core does not expose a per-viewer registry for HLS clients on
+the camera stream path used here. In HA 2026.9.2,
+`homeassistant/components/stream/__init__.py` tracks one HLS output per
+`Stream` and per format with `_outputs: dict[str, StreamOutput]`; `outputs()`
+returns those format outputs, and `add_provider()` reuses `self._outputs[fmt]`
+when the output already exists.
+
+HLS idle is shared per track/provider, not per browser client:
+`homeassistant/components/stream/hls.py` refreshes the track with
+`track.idle_timer.awake()`, `homeassistant/components/stream/core.py` owns the
+`IdleTimer`, and `homeassistant/components/stream/const.py` sets
+`OUTPUT_IDLE_TIMEOUT = 30`. That idle timer is not ownership evidence and must
+not be used as a per-viewer signal.
+
+The `/api/hls/<token>/...` path identifies the `Stream` by its
+`access_token`, not a client. `homeassistant/components/stream/__init__.py`
+builds `endpoint_url()` from the stream `access_token`, and
+`homeassistant/components/stream/core.py` looks up the stream by that token.
+
+The camera contract shares that same stream. In
+`homeassistant/components/camera/__init__.py`, Home Assistant documents that
+there is at most one stream, meaning one decode worker, per camera.
+`async_request_stream(hass, entity_id, fmt)` calls `stream.add_provider(fmt)`
+and returns `stream.endpoint_url(fmt)`. Therefore the Mini App and an ordinary
+HA frontend/dashboard HLS viewer receive the same HA camera stream.
+
+HA 2026.9.2 has per-session identity for WebRTC through
+`camera/__init__.py` `async_handle_web_rtc_offer(..., session_id)` and
+`close_webrtc_session(session_id)`. The HLS and attached-camera path has no
+equivalent client identity.
+
+The direct consequence is
+`OTHER_HA_VIEWER_SURVIVES_MINIAPP_CLOSE=NOT_PROVEN`. Mini App close or lease
+expiry can release `camera_view` and stop the attached transport while an
+ordinary HA HLS viewer is still watching the same camera. This does not prove
+that the viewer will necessarily break, because after attached media closes HA
+may fail closed or request again, but there is no guarantee and the integration
+must not simulate a per-viewer signal.
+
+Open question: the Mini App attached viewer needs either its own HA-visible
+owned resource, such as a separate lease/provider/stream object with explicit
+acquire/release, or a per-client HLS lease that HA Core exposes to integrations.
+Validation requires two independent owners: Mini App close releases only Mini
+App ownership, the ordinary HA HLS client remains active, and only the last
+departure or HA HLS idle produces exactly one transport stop.
 
 ## Switch migration
 
