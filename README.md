@@ -11,11 +11,11 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.7.28**. This release promotes the already live-validated direct WebCodecs/WSS transport to the normal Telegram Mini App «Видеонаблюдение» viewer for ordinary allowlisted H.264 cameras. The existing `camera.stream_source() -> PyAV H.264 demux/repackaging -> WSS protocol v2 -> VideoDecoder -> canvas` path is reused as primary; the established MSE -> WebRTC -> HLS viewer remains the automatic fallback. Healthy viewers survive routine Home Assistant refreshes, while camera changes and leaving «Видеонаблюдение» close the old WSS/source cleanly. Entrance keeps its separate WebCodecs -> HLS lifecycle, and Door/Gate behavior is unchanged. Details are recorded in `docs/releases/1.7.28-surveillance-webcodecs-primary.md`.
+Current stable release: **1.7.29**. This release fixes the Entrance → «Видеонаблюдение» lifecycle introduced by the WebCodecs primary viewers: the hidden Entrance WebSocket/PyAV/VideoDecoder is now disconnected before an ordinary camera starts, while one bounded `miniapp_webcodecs_park` manager lease keeps the already-established Comelit media transport warm for up to 60 seconds. Returning to «Домофон» inside that minute reuses the existing transport without another cold P2P/PseudoTCP/CTPP bootstrap; otherwise normal teardown restores the persistent listener. Door/Gate behavior and the 600-second absolute media ceiling are unchanged. Details are recorded in `docs/releases/1.7.29-entrance-warm-park.md`.
 
 ## Home Assistant Custom Card
 
-Version 1.5.19 keeps an explicitly opened entrance intercom live view active across switches between «Домофон» and «Видеонаблюдение», while retaining the Phase C controls.
+Since 1.7.29, switching from an explicitly opened Entrance view to «Видеонаблюдение» disconnects the hidden browser video consumer instead of keeping a second WebCodecs decoder alive. A bounded 60-second server-side warm lease preserves fast return to the Entrance camera.
 
 After updating the integration and restarting Home Assistant, register this resource once in the Lovelace resource settings:
 
@@ -52,7 +52,7 @@ The intercom tab now supports an explicit entrance live view and semantic Entran
 
 Opening the entrance camera is always an explicit user action. The card delegates playback to Home Assistant's standard camera viewer and does not expose raw stream credentials.
 
-An explicitly opened entrance viewer remains connected while the user switches to the surveillance tab. Returning to «Домофон» therefore resumes the same viewer without intentionally releasing the intercom camera-view lease. The intercom viewer stops only after an explicit «Скрыть камеру», a panel change that makes it irrelevant, card teardown/reload, or backend/session termination including the absolute media limit.
+When the Mini App switches from an explicitly opened Entrance camera to «Видеонаблюдение», the Entrance browser viewer is disconnected first, releasing its WSS/PyAV/VideoDecoder resources. A separate bounded manager lease keeps the already-established Comelit media transport warm for up to 60 seconds. Returning to «Домофон» within that window attaches a fresh browser viewer to the same active transport without repeating the cold P2P/PseudoTCP/CTPP bootstrap. If the user does not return, the warm lease expires and normal media teardown restores the persistent listener. The 600-second absolute media limit remains authoritative.
 
 Ordinary surveillance viewers remain non-persistent: leaving «Видеонаблюдение» releases that hidden viewer so a standard RTSP/HLS camera is not kept alive unnecessarily.
 
