@@ -129,7 +129,7 @@ WEBCODECS_HEADER_BYTES=36
 WEBCODECS_MAX_UNIT_BYTES=1048576
 WEBCODECS_MAX_QUEUE_UNITS=48
 WEBCODECS_MAX_QUEUE_BYTES=3145728
-WEBCODECS_MAX_SESSION_SECONDS=120
+WEBCODECS_MAX_SESSION_SECONDS=600
 WEBCODECS_MAX_SESSIONS=4
 ```
 
@@ -456,6 +456,48 @@ Interpretation:
   Entrance experiment.
 - `SOURCE_PTS_DRIFT` remains a camera-clock diagnostic and is not used as a
   network-delay verdict.
+
+## Production ordinary-surveillance promotion
+
+The ordinary-camera WebCodecs transport is live-validated and is now reused by
+the normal Mini App «Видеонаблюдение» viewer as its primary transport.
+
+Production path:
+
+```text
+explicit surveillance tab / camera selection
+  -> embedded WebCodecs viewer
+  -> existing /webcodecs endpoint
+  -> existing camera.stream_source()
+  -> PyAV H.264 demux/repackaging only
+  -> bounded WSS protocol v2
+  -> VideoDecoder + canvas
+```
+
+A startup, codec, decoder, WSS, source-open, source-EOF, backlog, or server
+duration failure tears down the WebCodecs viewer before mounting the already
+existing legacy viewer. The legacy viewer retains its established fallback
+order:
+
+```text
+MSE -> WebRTC -> HLS
+```
+
+Leaving «Видеонаблюдение» still disconnects the ordinary viewer, so no RTSP
+source is kept open in the background. Re-entering the tab or selecting another
+camera is a new explicit user navigation and may start one new primary
+WebCodecs session.
+
+The server-side ordinary WebCodecs ceiling is 600 seconds. The diagnostic tab
+still ends its canary locally after 60 seconds. For embedded ordinary viewing,
+server `duration_limit` falls back to the legacy chain. Entrance keeps its
+separate contract: its 600-second manager ceiling does not trigger automatic
+HLS restart.
+
+The normal two-tab surface enables this behavior with
+`webcodecs.surveillance_primary=true`; the debug tab remains separately gated
+by `webcodecs_debug=1`. Default Lovelace usage outside the Mini App does not
+opt into this primary transport.
 
 ## Direct Entrance WebCodecs Path
 

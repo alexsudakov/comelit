@@ -750,10 +750,19 @@
       this._setStatus("остановлено");
       if (emit) {
         this._emitFinal(reason);
+        const selectedCamera = this._cameras.find(
+          (camera) => this._cameraId(camera) === this._selected,
+        );
+        const entranceEmbedded = selectedCamera?.kind === "intercom_entrance";
         const embeddedFallback =
           this._embedded &&
-          !["manual_stop", "duration_60s", "duration_limit"].includes(reason) &&
-          (reason !== "source_eof" || this._stats.frames === 0);
+          !["manual_stop", "duration_60s"].includes(reason) &&
+          !(entranceEmbedded && reason === "duration_limit") &&
+          (
+            reason !== "source_eof" ||
+            !entranceEmbedded ||
+            this._stats.frames === 0
+          );
         if (embeddedFallback) {
           this._notifyEmbeddedTerminal(reason);
         }

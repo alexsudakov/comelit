@@ -550,7 +550,336 @@ async function main() {
     assert.equal(await page.evaluate(() => window.__webcodecs.sockets.length), 3);
     await page.evaluate(() => {
       window.VideoDecoder = window.__webcodecs.savedVideoDecoder;
+      const card = document.getElementById("card");
+      // Isolate the ordinary-camera scenario. The card intentionally keeps an
+      // explicitly opened Entrance viewer alive while changing tabs, so close
+      // the Entrance viewer before asserting ordinary-camera socket ownership.
+      card.shadowRoot.querySelector("[data-intercom-camera-toggle]").click();
     });
+
+    // Production ordinary surveillance path: the normal two-tab surface uses
+    // the already live-validated WebCodecs transport first. Terminal failures
+    // fall back to the existing picture-entity MSE -> WebRTC -> HLS chain.
+    const surveillanceSocketBase = await page.evaluate(() => {
+      window.__webcodecs.legacyMounts = 0;
+      window.__webcodecs.surveillanceSocketBase =
+        window.__webcodecs.sockets.length;
+      const card = document.getElementById("card");
+      card.setConfig({
+        default_tab: "surveillance",
+        webcodecs: {
+          enabled: false,
+          intercom_primary: true,
+          surveillance_primary: true,
+        },
+        surveillance: { include: ["camera.parking_6048", "camera.dvor_1"] },
+      });
+      return window.__webcodecs.surveillanceSocketBase;
+    });
+    assert.equal(surveillanceSocketBase, 3);
+
+    const surveillanceMount = await page.evaluate(() => {
+      const card = document.getElementById("card");
+      const viewer = card.shadowRoot.querySelector(
+        "#viewer miniapp-webcodecs-viewer",
+      );
+      return {
+        primary: card._webcodecsSurveillancePrimary(),
+        selected: card._selectedCamera,
+        viewer: Boolean(viewer),
+        connected: Boolean(viewer?.isConnected),
+        embedded: viewer?._embedded === true,
+        autoStart: viewer?._autoStart === true,
+        autoStartConsumed: viewer?._autoStartConsumed === true,
+      };
+    });
+    assert.deepEqual(surveillanceMount, {
+      primary: true,
+      selected: "camera.dvor_1",
+      viewer: true,
+      connected: true,
+      embedded: true,
+      autoStart: true,
+      autoStartConsumed: true,
+    });
+
+    await page.waitForFunction(
+      (base) => window.__webcodecs.sockets.length > base,
+      surveillanceSocketBase,
+    );
+    const surveillanceSocketUrls = await page.evaluate(
+      (base) => window.__webcodecs.sockets.slice(base).map((socket) => socket.url),
+      surveillanceSocketBase,
+    );
+    assert.equal(
+      surveillanceSocketUrls.length,
+      1,
+      "ordinary surveillance must create exactly one WebCodecs socket: " +
+        JSON.stringify(surveillanceSocketUrls),
+    );
+    await page.waitForFunction(
+      (index) => window.__webcodecs.sockets[index].sent.length === 1,
+      surveillanceSocketBase,
+    );
+    const surveillanceSurface = await page.evaluate(() => {
+      const card = document.getElementById("card");
+      const viewer = card.shadowRoot.querySelector("#viewer miniapp-webcodecs-viewer");
+      return {
+        tabs: [...card.shadowRoot.querySelectorAll("[data-tab]")]
+          .map((button) => button.textContent.trim()),
+        selected: card._selectedCamera,
+        embedded: Boolean(viewer),
+        hasStart: Boolean(viewer?.shadowRoot.querySelector("[data-start]")),
+        hasResult: Boolean(viewer?.shadowRoot.querySelector("[data-result]")),
+      };
+    });
+    assert.deepEqual(surveillanceSurface, {
+      tabs: ["Домофон", "Видеонаблюдение"],
+      selected: "camera.dvor_1",
+      embedded: true,
+      hasStart: false,
+      hasResult: false,
+    });
+
+    await page.evaluate((index) => {
+      const socket = window.__webcodecs.sockets[index];
+      socket.emitText({ type: "source_open", server_elapsed_ms: 4700 });
+      socket.emitText({ type: "source_packet", server_elapsed_ms: 4720 });
+      socket.emitText({
+        type: "hello",
+        protocol: 2,
+        entity_id: "camera.dvor_1",
+        codec: "avc1.42C02A",
+        max_unit_bytes: 1048576,
+        session_max_seconds: 600,
+        zero_transcode: true,
+        source_kind: "ordinary_rtsp",
+        comelit_entrance_open: false,
+        comelit_media_started: false,
+      });
+      socket.emitBinary(window.__frame());
+    }, surveillanceSocketBase);
+    await page.waitForFunction(() => window.__webcodecs.drawCount === 4);
+    assert.equal(
+      await page.evaluate(() => window.__webcodecs.legacyMounts),
+      0,
+      "successful ordinary WebCodecs playback must not mount legacy",
+    );
+
+    const preservedSurveillanceViewer = await page.evaluate(() => {
+      const card = document.getElementById("card");
+      const before = card.shadowRoot.querySelector(
+        "#viewer miniapp-webcodecs-viewer",
+      );
+      card._render();
+      const after = card.shadowRoot.querySelector(
+        "#viewer miniapp-webcodecs-viewer",
+      );
+      return {
+        sameNode: before === after,
+        connected: Boolean(after?.isConnected),
+        sockets: window.__webcodecs.sockets.length,
+      };
+    });
+    assert.deepEqual(preservedSurveillanceViewer, {
+      sameNode: true,
+      connected: true,
+      sockets: surveillanceSocketBase + 1,
+    });
+
+    await page.evaluate((index) => {
+      window.__webcodecs.sockets[index].emitText({
+        type: "error",
+        code: "source_open_failed",
+      });
+    }, surveillanceSocketBase);
+    await page.waitForFunction(() => window.__webcodecs.legacyMounts === 1);
+    const surveillanceFallback = await page.evaluate(() => {
+      const card = document.getElementById("card");
+      return card.shadowRoot.querySelector("#viewer [data-legacy-viewer]")
+        ?.dataset.legacyViewer;
+    });
+    assert.equal(surveillanceFallback, "camera.dvor_1");
+
+    // Re-entering Surveillance is an explicit user navigation and retries the
+    // primary transport once. Ordinary duration_limit then falls back, while
+    // Entrance keeps its no-auto-restart ceiling semantics.
+    await page.evaluate(() => {
+      const card = document.getElementById("card");
+      card.shadowRoot.querySelector('[data-tab="intercom"]').click();
+      card.shadowRoot.querySelector('[data-tab="surveillance"]').click();
+    });
+    await page.waitForFunction(
+      (base) => window.__webcodecs.sockets.length > base + 1,
+      surveillanceSocketBase,
+    );
+    assert.equal(
+      await page.evaluate(() => window.__webcodecs.sockets.length),
+      surveillanceSocketBase + 2,
+    );
+    await page.evaluate((index) => {
+      window.__webcodecs.sockets[index].emitText({
+        type: "eos",
+        reason: "duration_limit",
+      });
+    }, surveillanceSocketBase + 1);
+    await page.waitForFunction(() => window.__webcodecs.legacyMounts === 2);
+
+    // Ordinary WebCodecs capability absence is terminal for the primary path
+    // and must fall back without constructing a WSS session.
+    const socketsBeforeUnsupported = await page.evaluate(
+      () => window.__webcodecs.sockets.length,
+    );
+    await page.evaluate(() => {
+      window.__webcodecs.savedVideoDecoder = window.VideoDecoder;
+      delete window.VideoDecoder;
+      const card = document.getElementById("card");
+      card.shadowRoot.querySelector('[data-tab="intercom"]').click();
+      card.shadowRoot.querySelector('[data-tab="surveillance"]').click();
+    });
+    await page.waitForFunction(() => window.__webcodecs.legacyMounts === 3);
+    assert.equal(
+      await page.evaluate(() => window.__webcodecs.sockets.length),
+      socketsBeforeUnsupported,
+      "unsupported WebCodecs must fall back before opening WSS",
+    );
+    assert.equal(
+      await page.evaluate(() => {
+        const card = document.getElementById("card");
+        return card.shadowRoot.querySelector("#viewer [data-legacy-viewer]")
+          ?.dataset.legacyViewer;
+      }),
+      "camera.dvor_1",
+    );
+
+    // Start a fresh primary viewer, switch cameras, then inject a late event
+    // from the disconnected old socket. Generation guards must ignore it.
+    await page.evaluate(() => {
+      window.VideoDecoder = window.__webcodecs.savedVideoDecoder;
+      const card = document.getElementById("card");
+      card.shadowRoot.querySelector('[data-tab="intercom"]').click();
+      card.shadowRoot.querySelector('[data-tab="surveillance"]').click();
+    });
+    await page.waitForFunction(
+      (base) => window.__webcodecs.sockets.length === base + 1,
+      socketsBeforeUnsupported,
+    );
+    const staleDvorSocketIndex = socketsBeforeUnsupported;
+    await page.waitForFunction(
+      (index) => window.__webcodecs.sockets[index].sent.length === 1,
+      staleDvorSocketIndex,
+    );
+
+    await page.evaluate(() => {
+      const card = document.getElementById("card");
+      card.shadowRoot.querySelector(
+        '[data-camera="camera.parking_6048"]',
+      ).click();
+    });
+    await page.waitForFunction(
+      (base) => window.__webcodecs.sockets.length === base + 2,
+      socketsBeforeUnsupported,
+    );
+    const parkingSocketIndex = socketsBeforeUnsupported + 1;
+    const switchedState = await page.evaluate((oldIndex) => {
+      const card = document.getElementById("card");
+      return {
+        selected: card._selectedCamera,
+        oldSocketClosed:
+          window.__webcodecs.sockets[oldIndex].readyState === WebSocket.CLOSED,
+        webcodecsMounted: Boolean(
+          card.shadowRoot.querySelector("#viewer miniapp-webcodecs-viewer"),
+        ),
+      };
+    }, staleDvorSocketIndex);
+    assert.deepEqual(switchedState, {
+      selected: "camera.parking_6048",
+      oldSocketClosed: true,
+      webcodecsMounted: true,
+    });
+
+    await page.evaluate((oldIndex) => {
+      window.__webcodecs.sockets[oldIndex].emitText({
+        type: "error",
+        code: "source_open_failed",
+      });
+    }, staleDvorSocketIndex);
+    await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    assert.equal(
+      await page.evaluate(() => window.__webcodecs.legacyMounts),
+      3,
+      "stale callback after camera switch must not start legacy fallback",
+    );
+
+    // Leaving Surveillance disconnects the active ordinary viewer. A late
+    // callback from that closed socket must likewise be ignored.
+    await page.evaluate(() => {
+      document.getElementById("card").shadowRoot
+        .querySelector('[data-tab="intercom"]').click();
+    });
+    assert.equal(
+      await page.evaluate((index) =>
+        window.__webcodecs.sockets[index].readyState === WebSocket.CLOSED
+      , parkingSocketIndex),
+      true,
+      "leaving Surveillance must close the active WebCodecs socket",
+    );
+    await page.evaluate((index) => {
+      window.__webcodecs.sockets[index].emitText({
+        type: "error",
+        code: "source_open_failed",
+      });
+    }, parkingSocketIndex);
+    await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    assert.deepEqual(
+      await page.evaluate(() => {
+        const card = document.getElementById("card");
+        return {
+          legacyMounts: window.__webcodecs.legacyMounts,
+          viewerReleased: card._viewerElement === undefined,
+        };
+      }),
+      {
+        legacyMounts: 3,
+        viewerReleased: true,
+      },
+    );
+
+    // An ordinary camera that is already unavailable must retain the legacy
+    // picture-entity behavior so a later HA state recovery can be reflected
+    // without requiring the user to switch cameras or reopen the card.
+    const socketsBeforeUnavailable = await page.evaluate(
+      () => window.__webcodecs.sockets.length,
+    );
+    await page.evaluate(() => {
+      const card = document.getElementById("card");
+      const baseHass = card._hass;
+      card.hass = {
+        ...baseHass,
+        states: {
+          ...baseHass.states,
+          "camera.parking_6048": {
+            ...baseHass.states["camera.parking_6048"],
+            state: "unavailable",
+          },
+        },
+      };
+      card.shadowRoot.querySelector('[data-tab="surveillance"]').click();
+    });
+    await page.waitForFunction(() => window.__webcodecs.legacyMounts === 4);
+    assert.equal(
+      await page.evaluate(() => window.__webcodecs.sockets.length),
+      socketsBeforeUnavailable,
+      "unavailable ordinary camera must not open WebCodecs WSS",
+    );
+    assert.equal(
+      await page.evaluate(() => {
+        const card = document.getElementById("card");
+        return card.shadowRoot.querySelector("#viewer [data-legacy-viewer]")
+          ?.dataset.legacyViewer;
+      }),
+      "camera.parking_6048",
+    );
 
     console.log("webcodecs mock canary: PASS");
   } finally {

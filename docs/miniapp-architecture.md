@@ -424,69 +424,80 @@ Repository implementation does not by itself:
 Those remain explicit deployment and acceptance steps.
 
 
-## Surveillance live view: MSE and WebRTC via Home Assistant go2rtc
+## Surveillance live view: WebCodecs primary with legacy HA fallbacks
 
-Ordinary Home Assistant surveillance cameras use a different live-view path from
-the Comelit entrance camera.
+Ordinary Home Assistant surveillance cameras remain a separate lifecycle domain
+from the Comelit entrance camera, but the normal Telegram Mini App viewer now
+reuses the already live-validated direct WebCodecs transport as its primary
+playback path.
 
-For ordinary cameras, the Mini App first attempts MSE/fMP4 through the
-restricted same-origin proxy backed by HA-managed go2rtc. If MSE is unsupported
-or fails one of its bounded startup milestones, the Mini App falls back to Home
-Assistant's registered WebRTC provider. On HAOS/default-config installations
-this is normally the Home Assistant-managed go2rtc provider. If WebRTC is
-unavailable or produces no decoded frame, the existing session-bound HLS proxy
-remains the final fallback.
-
-Conceptual path:
+Primary path:
 
 ```text
 Telegram Mini App
-  -> session-bound Comelit MSE WebSocket endpoint
+  -> authenticated /api/comelit/miniapp/camera/{entity_id}/webcodecs
   -> camera.stream_source()
-  -> Home Assistant-managed go2rtc
-  -> camera RTSP source
+  -> PyAV H.264 demux/repackaging only
+  -> bounded Annex-B WSS protocol v2
+  -> VideoDecoder
+  -> canvas
 ```
 
-The browser receives only the closed MSE protocol through the authenticated
-Mini App route. It does not receive go2rtc credentials or direct go2rtc
-management API access.
+The resolved camera source remains server-side. The browser never receives the
+RTSP URL, source credentials, Home Assistant stream capability, or go2rtc
+management access. This path does not decode, encode, scale, filter, remux to
+fMP4, or otherwise transcode video on Home Assistant.
 
-When the MSE viewer is removed or the Mini App WebSocket closes, the upstream
-go2rtc WebSocket is closed and the server releases the refcounted stream. When
-the WebRTC fallback viewer is removed, the Home Assistant camera WebRTC session
-is explicitly closed.
+The production viewer is embedded and auto-starts only after the user enters
+«Видеонаблюдение» or explicitly selects an ordinary camera. Leaving the tab
+disconnects the viewer and releases the RTSP/PyAV source. There is no camera
+preload.
 
-The Mini App treats WebRTC signaling, remote-track announcement, and the first
-decoded/rendered video frame as separate milestones. A remote track alone is
-not reported as successful playback. While a first frame is pending, the UI can
-surface elapsed time plus inbound RTP bytes and decoded-frame count from browser
-WebRTC statistics. This distinguishes an ICE/RTP delivery problem from a
-decode/render or slow-source/keyframe problem during production canaries.
+The server-side ordinary WebCodecs session is bounded to 600 seconds. The
+diagnostic canary remains client-bounded to 60 seconds. For embedded ordinary
+viewing, a server duration limit or another terminal source/decoder/WSS failure
+disconnects the primary viewer and mounts the existing legacy viewer.
 
-The Comelit entrance camera is deliberately excluded from this new path. It
-continues to use the separately validated on-demand Comelit media manager and
-HLS proxy, preserving listener/media ownership invariants.
+Legacy fallback order remains:
 
-This WebRTC path does not imply preload: no ordinary camera stream is kept open
-merely because it is listed in the Mini App.
+```text
+MSE -> WebRTC -> HLS
+```
 
-## 12.1 Experimental WebCodecs live tab
+The MSE path still resolves `camera.stream_source()` server-side, registers an
+opaque stream with Home Assistant-managed go2rtc, and proxies only the bounded
+MSE protocol. If MSE fails, the legacy viewer may use Home Assistant's
+registered WebRTC provider and finally the existing session-bound HLS proxy.
+These paths are retained as fallbacks rather than removed.
 
-Status: PROVEN_OFFLINE for routing, framing helpers, bounded cleanup tests, and
-browser mock contract; NOT_PROVEN for real Telegram Android WebView H.264
-decode until the owner-approved production canary runs.
+Periodic Home Assistant state refreshes and semantically unchanged card renders
+must preserve the connected embedded WebCodecs node. Selecting another camera,
+leaving the surveillance tab, explicit card reconfiguration, or terminal
+fallback may replace it.
 
-The Mini App can enable a third tab, `WebCodecs`, by passing the explicit shared
-card flag:
+The Comelit entrance camera continues to use its separately validated
+manager-owned WebCodecs lifecycle. Its 600-second media-manager ceiling remains
+authoritative and does not trigger an automatic HLS restart.
+
+## 12.1 WebCodecs transport and diagnostic tab
+
+Status: live-validated for ordinary H.264 surveillance cameras and for the
+Comelit Entrance path. Routing, framing, bounded cleanup, and browser behavior
+also remain covered by offline tests.
+
+The Mini App can additionally expose a third diagnostic tab, `WebCodecs`, by
+passing the explicit shared card flag:
 
 ```text
 webcodecs.enabled === true
 ```
 
 The flag is passed only by `custom_components/comelit/frontend/miniapp/host.js`.
-Default Lovelace usage does not render the tab, panel, or WebCodecs viewer.
-Opening the tab does not open a camera. The only start action is the explicit
-Russian UI button `Запустить тест`.
+Default Lovelace usage does not render the diagnostic tab or panel. The normal
+Mini App two-tab surface separately opts ordinary surveillance into embedded
+WebCodecs primary playback with `webcodecs.surveillance_primary=true`.
+Opening the diagnostic tab does not open a camera. Its only start action is the
+explicit Russian UI button `Запустить тест`.
 
 The authenticated endpoint is:
 
@@ -538,11 +549,11 @@ transcode branch.
 Each binary WebSocket message is one explicitly framed access unit:
 
 ```text
-20-byte big-endian header + H.264 Annex-B payload
+36-byte big-endian header + H.264 Annex-B payload
 ```
 
 Header fields are version, flags, reserved, sequence, media PTS in microseconds,
-and payload length. Malformed version, flags, reserved bits, truncation, length
+source elapsed microseconds, send elapsed microseconds, and payload length. Malformed version, flags, reserved bits, truncation, length
 mismatch, or payloads larger than `WEBCODECS_MAX_UNIT_BYTES` are rejected by
 pure helpers and covered by offline tests.
 
@@ -552,7 +563,7 @@ The path is bounded:
 WEBCODECS_MAX_UNIT_BYTES=1048576
 WEBCODECS_MAX_QUEUE_UNITS=48
 WEBCODECS_MAX_QUEUE_BYTES=3145728
-WEBCODECS_MAX_SESSION_SECONDS=120
+WEBCODECS_MAX_SESSION_SECONDS=600
 WEBCODECS_MAX_SESSIONS=4
 ```
 
@@ -566,9 +577,9 @@ Cleanup is idempotent and runs from the view `finally` path for source EOF,
 source open failure, duration expiry, backlog overflow, WebSocket close, and
 task cancellation. The view owns an explicit closeable H.264 packet source and
 calls `aclose()` so the RTSP/PyAV container is released once even when the
-producer task is cancelled while suspended mid-stream. The feature does not call or modify the existing
-MSE/WebRTC/HLS/media-manager/recorder paths and does not call Door or Gate
-services.
+producer task is cancelled while suspended mid-stream. The primary WebCodecs source does not call the legacy MSE/WebRTC/HLS transport
+while it is healthy. Those paths remain isolated fallbacks. The WebCodecs
+transport does not call Door or Gate services.
 
 Closed, bounded log lines use:
 

@@ -78,17 +78,21 @@ semantic `entrance` / `gate` endpoints, each request requires a one-time
 action nonce, and one accepted request maps to exactly one existing Comelit
 `button.press` with no automatic retry.
 
-Camera viewing uses two deliberately separate paths. The Comelit entrance
-camera keeps Home Assistant HLS and its existing validated camera-owned media
-lifecycle. Ordinary surveillance cameras resolve their existing Home Assistant
-`Camera.stream_source()` server-side, register an opaque stream with the
-HA-managed go2rtc instance, and use a restricted same-origin MSE/fMP4 WebSocket
-proxy as the primary transport. Playback falls back to the existing Home
-Assistant WebRTC path and then to the session-bound HLS proxy. No Mini App
-camera preload is enabled. Camera source URLs, source credentials and raw
-go2rtc management access are never exposed to Telegram.
+Camera viewing uses direct WebCodecs/WSS as the primary Mini App transport
+for both the Comelit entrance camera and ordinary allowlisted H.264 surveillance
+cameras. Ordinary cameras resolve their existing Home Assistant
+`Camera.stream_source()` server-side, demux/repackage H.264 without transcoding,
+and send bounded Annex-B access units through the authenticated same-origin
+WebSocket to `VideoDecoder`. On a bounded WebCodecs startup/runtime failure,
+ordinary surveillance falls back to the existing MSE -> WebRTC -> HLS chain;
+the Entrance keeps its separately validated WebCodecs -> HLS lifecycle. No
+Mini App camera preload is enabled. Camera source URLs, credentials, raw go2rtc
+management access, and Home Assistant HLS capability tokens are never exposed
+to Telegram.
 
-The Mini App also contains an experimental, explicitly started `WebCodecs` tab for ordinary allowlisted H.264 cameras. It is isolated from the normal MSE/WebRTC/HLS viewer paths and exists to measure zero-transcode H.264-over-WSS latency through the deployed HTTPS ingress before deciding whether it should become a production transport.
+The diagnostic `WebCodecs` tab remains available only with
+`webcodecs_debug=1`. It reuses the same transport for controlled canaries but
+is no longer the only place where ordinary-camera WebCodecs is used.
 
 Architecture and deployment boundary: `docs/miniapp-architecture.md`.
 
