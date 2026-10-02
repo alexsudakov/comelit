@@ -852,26 +852,6 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                     ):
                         return websocket
 
-                    async def watch_entrance_client_close() -> None:
-                        try:
-                            async for message in websocket:
-                                if message.type in {
-                                    WSMsgType.CLOSE,
-                                    WSMsgType.CLOSED,
-                                    WSMsgType.ERROR,
-                                }:
-                                    break
-                                # No post-start commands are accepted. Any
-                                # further client message terminates this
-                                # experimental media ownership fail-closed.
-                                break
-                        except _WEBSOCKET_SEND_ERRORS:
-                            pass
-                        await queue.put(("client_close", "client_close"))
-
-                    client_watch_task = self.controller.hass.async_create_task(
-                        watch_entrance_client_close()
-                    )
                 else:
                     camera = target.camera
                     if camera is None:
@@ -886,6 +866,33 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                     if not webcodecs_mod.is_rtsp_source(source):
                         await close_with_error("source_not_h264_rtsp")
                         return websocket
+
+                async def watch_webcodecs_client_close() -> None:
+                    try:
+                        async for message in websocket:
+                            if message.type in {
+                                WSMsgType.CLOSE,
+                                WSMsgType.CLOSED,
+                                WSMsgType.ERROR,
+                            }:
+                                break
+                            # No post-start commands are accepted for either
+                            # Entrance or ordinary WebCodecs sessions. Treat
+                            # any further client message as a fail-closed
+                            # termination request.
+                            break
+                    except _WEBSOCKET_SEND_ERRORS:
+                        pass
+                    log_event("client_close")
+                    await queue.put(("client_close", "client_close"))
+
+                # Exactly one receive-side owner is created after the initial
+                # WebCodecs command. This keeps ordinary RTSP sessions from
+                # waiting for a later send failure before noticing that the
+                # embedded viewer has left the DOM.
+                client_watch_task = self.controller.hass.async_create_task(
+                    watch_webcodecs_client_close()
+                )
                 log_event("source_resolved")
 
                 async def produce_units() -> None:

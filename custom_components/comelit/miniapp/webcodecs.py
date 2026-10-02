@@ -781,6 +781,7 @@ def webcodecs_log_line(
         "source_open",
         "first_source_packet",
         "first_binary",
+        "client_close",
         "unit_too_large",
         "backlog_exceeded",
         "session_limit",

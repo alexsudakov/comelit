@@ -1940,6 +1940,7 @@ def test_webcodecs_view_happy_path_secret_free_logs_and_messages(monkeypatch, ca
         with _MSEWebSocketPatch(
             monkeypatch,
             _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+            messages=("wait_forever",),
         ):
             asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
 
@@ -1984,6 +1985,7 @@ def test_webcodecs_non_rtsp_unit_too_large_duration_and_source_failure(monkeypat
     with _MSEWebSocketPatch(
         monkeypatch,
         _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+        messages=("wait_forever",),
     ):
         asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
     assert _json_texts(_CaptureWebSocket.instances[-1]) == [
@@ -2011,6 +2013,7 @@ def test_webcodecs_non_rtsp_unit_too_large_duration_and_source_failure(monkeypat
     with _MSEWebSocketPatch(
         monkeypatch,
         _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+        messages=("wait_forever",),
     ):
         asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
     too_large_texts = _json_texts(_CaptureWebSocket.instances[-1])
@@ -2029,6 +2032,7 @@ def test_webcodecs_non_rtsp_unit_too_large_duration_and_source_failure(monkeypat
     with _MSEWebSocketPatch(
         monkeypatch,
         _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+        messages=("wait_forever",),
     ):
         asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
     assert _json_texts(_CaptureWebSocket.instances[-1]) == [
@@ -2055,6 +2059,7 @@ def test_webcodecs_non_rtsp_unit_too_large_duration_and_source_failure(monkeypat
     with _MSEWebSocketPatch(
         monkeypatch,
         _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+        messages=("wait_forever",),
     ):
         asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
     assert _json_texts(_CaptureWebSocket.instances[-1])[-1] == {
@@ -2077,6 +2082,7 @@ def test_webcodecs_session_limit_and_backlog_cleanup(monkeypatch):
             with _MSEWebSocketPatch(
                 monkeypatch,
                 _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+                messages=("wait_forever",),
             ):
                 await view.get(_mse_request(controller, token), "camera.driveway")
         finally:
@@ -2110,6 +2116,7 @@ def test_webcodecs_session_limit_and_backlog_cleanup(monkeypatch):
     with _MSEWebSocketPatch(
         monkeypatch,
         _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+        messages=("wait_forever",),
     ):
         _CaptureWebSocket.send_delay = 0.02
         asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
@@ -2137,6 +2144,7 @@ def test_webcodecs_send_connection_error_is_clean_client_close(monkeypatch):
     with _MSEWebSocketPatch(
         monkeypatch,
         _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+        messages=("wait_forever",),
     ):
         monkeypatch.setattr(views_mod.web, "WebSocketResponse", _ClosingWebSocket)
         asyncio.run(view.get(_mse_request(controller, token), "camera.driveway"))
