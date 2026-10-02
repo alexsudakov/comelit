@@ -11,7 +11,7 @@ The integration is intended to be installed and updated through HACS as a custom
 Repository: `alexsudakov/comelit`  
 Category: Integration
 
-Current stable release: **1.7.29**. This release fixes the Entrance → «Видеонаблюдение» lifecycle introduced by the WebCodecs primary viewers: the hidden Entrance WebSocket/PyAV/VideoDecoder is now disconnected before an ordinary camera starts, while one bounded `miniapp_webcodecs_park` manager lease keeps the already-established Comelit media transport warm for up to 60 seconds. Returning to «Домофон» inside that minute reuses the existing transport without another cold P2P/PseudoTCP/CTPP bootstrap; otherwise normal teardown restores the persistent listener. Door/Gate behavior and the 600-second absolute media ceiling are unchanged. Details are recorded in `docs/releases/1.7.29-entrance-warm-park.md`.
+Current stable release: **1.7.31**. This release fixes delayed server-side teardown of ordinary surveillance WebCodecs sessions after the embedded viewer leaves «Видеонаблюдение». Entrance and ordinary WebCodecs sessions now share one receive-side client-close watcher, while the existing 60-second Entrance warm-park semantics, serialized PyAV teardown from 1.7.30, Door/Gate behavior, fallback policy, and 600-second absolute media ceiling remain unchanged. Details are recorded in `docs/releases/1.7.31-ordinary-webcodecs-client-close.md`.
 
 ## Home Assistant Custom Card
 
