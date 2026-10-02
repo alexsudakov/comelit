@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+import logging
+import queue
 import struct
+import threading
 import time
 from types import TracebackType
 from typing import Any
@@ -22,6 +25,9 @@ WEBCODECS_MAX_QUEUE_BYTES = 3 * 1024 * 1024
 WEBCODECS_MAX_SESSION_SECONDS = 600
 WEBCODECS_ENTRANCE_MAX_SESSION_SECONDS = 600
 WEBCODECS_MAX_SESSIONS = 4
+WEBCODECS_SOURCE_CLOSE_JOIN_TIMEOUT = 6.0
+
+_LOGGER = logging.getLogger(__name__)
 
 _START4 = b"\x00\x00\x00\x01"
 _START3 = b"\x00\x00\x01"
@@ -58,6 +64,13 @@ class H264AccessUnit:
     media_pts_us: int | None
     codec: str | None = None
     source_elapsed_us: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _H264PacketSnapshot:
+    raw: bytes
+    keyframe: bool
+    media_pts_us: int | None
 
 
 @dataclass(slots=True)
@@ -338,24 +351,196 @@ def packet_pts_us(packet: Any) -> int | None:
         return None
 
 
+class _LoopFutureBridge:
+    """Resolve one event-loop Future from the PyAV owner thread."""
+
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
+        self.future = loop.create_future()
+
+    def set_result(self, result: Any) -> None:
+        self._resolve(lambda: self.future.set_result(result))
+
+    def set_exception(self, exc: BaseException) -> None:
+        self._resolve(lambda: self.future.set_exception(exc))
+
+    def _resolve(self, apply: Any) -> None:
+        def resolve() -> None:
+            if not self.future.done():
+                apply()
+
+        try:
+            self._loop.call_soon_threadsafe(resolve)
+        except RuntimeError:
+            return
+
+
+async def _await_owner_future(future: asyncio.Future[Any]) -> Any:
+    return await asyncio.shield(future)
+
+
+class _H264PyAVOwner:
+    """Single-thread owner for one PyAV InputContainer lifecycle."""
+
+    def __init__(
+        self,
+        source: str,
+        *,
+        input_format: str,
+        options: dict[str, str],
+        missing_h264_code: str,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        self._source = source
+        self._input_format = input_format
+        self._options = options
+        self._missing_h264_code = missing_h264_code
+        self._loop = loop
+        self._commands: queue.Queue[tuple[str, _LoopFutureBridge]] = queue.Queue()
+        self._ready = _LoopFutureBridge(loop)
+        self._close_future: _LoopFutureBridge | None = None
+        self._state_lock = threading.Lock()
+        self._terminated = False
+        self._thread = threading.Thread(
+            target=self._run,
+            name="comelit-webcodecs-pyav",
+            daemon=True,
+        )
+        self._thread.start()
+
+    @property
+    def ready(self) -> asyncio.Future[tuple[list[bytes], list[bytes], str | None]]:
+        return self._ready.future
+
+    def next_packet(self) -> asyncio.Future[_H264PacketSnapshot | None]:
+        future = _LoopFutureBridge(self._loop)
+        self._commands.put(("next", future))
+        return future.future
+
+    def close(self) -> asyncio.Future[None]:
+        with self._state_lock:
+            if self._close_future is None:
+                self._close_future = _LoopFutureBridge(self._loop)
+                if self._terminated or not self._thread.is_alive():
+                    self._close_future.set_result(None)
+                    return self._close_future.future
+                self._commands.put(("close", self._close_future))
+            return self._close_future.future
+
+    def join(self, timeout: float) -> bool:
+        self._thread.join(timeout)
+        return not self._thread.is_alive()
+
+    def _run(self) -> None:
+        container: Any | None = None
+        iterator: Any | None = None
+        closed = False
+
+        def close_container() -> None:
+            nonlocal closed
+            if closed:
+                return
+            closed = True
+            if container is not None:
+                container.close()
+
+        try:
+            try:
+                import av
+            except ImportError as exc:
+                raise WebCodecsSourceError("source_dependency_missing") from exc
+
+            try:
+                container = av.open(
+                    self._source,
+                    mode="r",
+                    format=self._input_format,
+                    options=self._options,
+                    timeout=5.0,
+                )
+            except Exception as exc:
+                raise WebCodecsSourceError("source_open_failed") from exc
+
+            try:
+                video_stream = next(
+                    (
+                        stream
+                        for stream in container.streams
+                        if getattr(stream, "type", None) == "video"
+                        and getattr(stream.codec_context, "name", "").lower()
+                        == "h264"
+                    ),
+                    None,
+                )
+                if video_stream is None:
+                    raise WebCodecsSourceError(self._missing_h264_code)
+
+                extradata = getattr(video_stream.codec_context, "extradata", None)
+                sps, pps = avcc_extradata_to_annexb_nals(extradata)
+                codec = derive_avc1_codec_from_sps(sps[0] if sps else None)
+                iterator = container.demux(video_stream)
+                self._ready.set_result((sps, pps, codec))
+            except Exception:
+                close_container()
+                raise
+
+            while True:
+                command = self._commands.get()
+                kind, future = command
+                if kind == "close":
+                    try:
+                        close_container()
+                    except Exception as exc:
+                        future.set_exception(exc)
+                    return
+                if kind != "next":
+                    continue
+                try:
+                    packet = next(iterator, None)
+                    if packet is None:
+                        future.set_result(None)
+                        continue
+                    future.set_result(
+                        _H264PacketSnapshot(
+                            raw=bytes(packet),
+                            keyframe=bool(getattr(packet, "is_keyframe", False)),
+                            media_pts_us=packet_pts_us(packet),
+                        ),
+                    )
+                except Exception as exc:
+                    future.set_exception(exc)
+        except BaseException as exc:
+            self._ready.set_exception(exc)
+        finally:
+            if not closed and container is not None:
+                try:
+                    close_container()
+                except Exception:
+                    _LOGGER.exception("Comelit Mini App WebCodecs PyAV close failed")
+            with self._state_lock:
+                self._terminated = True
+                close_future = self._close_future
+            if close_future is not None:
+                close_future.set_result(None)
+
+
 class H264AccessUnitSource:
     """Closeable copy-only H.264 packet source."""
 
     def __init__(
         self,
-        container: Any,
-        iterator: Any,
+        owner: _H264PyAVOwner,
         *,
         sps: list[bytes],
         pps: list[bytes],
         codec: str | None,
     ) -> None:
-        self._container = container
-        self._iterator = iterator
+        self._owner = owner
         self._sps = sps
         self._pps = pps
         self._codec = codec
         self._closed = False
+        self._close_started = False
         self._first_unit_ns: int | None = None
 
     @classmethod
@@ -367,51 +552,30 @@ class H264AccessUnitSource:
         options: dict[str, str],
         missing_h264_code: str,
     ) -> "H264AccessUnitSource":
+        owner = _H264PyAVOwner(
+            source,
+            input_format=input_format,
+            options=options,
+            missing_h264_code=missing_h264_code,
+            loop=asyncio.get_running_loop(),
+        )
         try:
-            import av
-        except ImportError as exc:
-            raise WebCodecsSourceError("source_dependency_missing") from exc
-
-        def _open_container():
-            return av.open(
-                source,
-                mode="r",
-                format=input_format,
-                options=options,
-                timeout=5.0,
-            )
-
-        try:
-            container = await asyncio.to_thread(_open_container)
-        except Exception as exc:
-            raise WebCodecsSourceError("source_open_failed") from exc
-
-        try:
-            video_stream = next(
-                (
-                    stream
-                    for stream in container.streams
-                    if getattr(stream, "type", None) == "video"
-                    and getattr(stream.codec_context, "name", "").lower() == "h264"
-                ),
-                None,
-            )
-            if video_stream is None:
-                raise WebCodecsSourceError(missing_h264_code)
-
-            extradata = getattr(video_stream.codec_context, "extradata", None)
-            sps, pps = avcc_extradata_to_annexb_nals(extradata)
-            codec = derive_avc1_codec_from_sps(sps[0] if sps else None)
+            sps, pps, codec = await _await_owner_future(owner.ready)
             return cls(
-                container,
-                container.demux(video_stream),
+                owner,
                 sps=sps,
                 pps=pps,
                 codec=codec,
             )
-        except Exception:
-            container.close()
+        except asyncio.CancelledError:
+            await cls._close_owner(owner)
             raise
+        except WebCodecsSourceError:
+            owner.join(WEBCODECS_SOURCE_CLOSE_JOIN_TIMEOUT)
+            raise
+        except Exception as exc:
+            owner.join(WEBCODECS_SOURCE_CLOSE_JOIN_TIMEOUT)
+            raise WebCodecsSourceError("source_open_failed") from exc
 
     @classmethod
     async def open(cls, source: str) -> "H264AccessUnitSource":
@@ -448,10 +612,10 @@ class H264AccessUnitSource:
     async def __anext__(self) -> H264AccessUnit:
         if self._closed:
             raise StopAsyncIteration
-        packet = await asyncio.to_thread(lambda: next(self._iterator, None))
+        packet = await _await_owner_future(self._owner.next_packet())
         if packet is None:
             raise StopAsyncIteration
-        raw = bytes(packet)
+        raw = packet.raw
         if not raw:
             return await self.__anext__()
         received_ns = time.monotonic_ns()
@@ -468,22 +632,46 @@ class H264AccessUnitSource:
             self._codec = derive_avc1_codec_from_sps(self._sps[0])
         if current_pps:
             self._pps = current_pps
-        keyframe = bool(getattr(packet, "is_keyframe", False)) or has_idr(annexb)
+        keyframe = packet.keyframe or has_idr(annexb)
         if keyframe:
             annexb = prepend_parameter_sets(annexb, self._sps, self._pps)
         return H264AccessUnit(
             payload=annexb,
             keyframe=keyframe,
-            media_pts_us=packet_pts_us(packet),
+            media_pts_us=packet.media_pts_us,
             codec=self._codec,
             source_elapsed_us=source_elapsed_us,
         )
 
-    async def aclose(self) -> None:
-        if self._closed:
+    @staticmethod
+    async def _close_owner(owner: _H264PyAVOwner) -> None:
+        close_future = owner.close()
+        completed = False
+        try:
+            await asyncio.wait_for(
+                _await_owner_future(close_future),
+                timeout=WEBCODECS_SOURCE_CLOSE_JOIN_TIMEOUT,
+            )
+            completed = True
+        except TimeoutError:
+            if owner.join(0):
+                return
+            _LOGGER.warning(
+                "Comelit Mini App WebCodecs PyAV owner did not stop within %.1fs; "
+                "close remains queued on owner thread",
+                WEBCODECS_SOURCE_CLOSE_JOIN_TIMEOUT,
+            )
             return
+        finally:
+            timeout = WEBCODECS_SOURCE_CLOSE_JOIN_TIMEOUT if completed else 0
+            owner.join(timeout)
+
+    async def aclose(self) -> None:
+        if self._close_started:
+            return
+        self._close_started = True
         self._closed = True
-        self._container.close()
+        await self._close_owner(self._owner)
 
 
 async def open_h264_access_unit_source(source: str) -> H264AccessUnitSource:
