@@ -176,6 +176,32 @@
       this._stop("disconnect", false);
     }
 
+    async parkEntrance() {
+      const camera = this._cameras.find(
+        (candidate) => this._cameraId(candidate) === this._selected,
+      );
+      if (
+        !this._embedded ||
+        camera?.kind !== "intercom_entrance" ||
+        !this._running ||
+        !this.isConnected
+      ) {
+        return false;
+      }
+
+      try {
+        const response = await fetch("/api/comelit/miniapp/entrance/park", {
+          method: "POST",
+          headers: {"X-Comelit-MiniApp-Request": "1"},
+          credentials: "same-origin",
+          cache: "no-store",
+        });
+        return response.ok;
+      } catch (_) {
+        return false;
+      }
+    }
+
     _maybeAutoStart() {
       if (
         !this._embedded ||
