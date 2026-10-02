@@ -619,9 +619,22 @@ breaks H.264 GOP dependencies. GOP-aware dropping is explicitly deferred.
 
 Cleanup is idempotent and runs from the view `finally` path for source EOF,
 source open failure, duration expiry, backlog overflow, WebSocket close, and
-task cancellation. The view owns an explicit closeable H.264 packet source and
-calls `aclose()` so the RTSP/PyAV container is released once even when the
-producer task is cancelled while suspended mid-stream. The primary WebCodecs source does not call the legacy MSE/WebRTC/HLS transport
+task cancellation. Each H.264 packet source owns one PyAV worker thread; `av.open`,
+`container.demux()` iteration, packet-to-plain-value copying, and
+`container.close()` for that input container all run on that owner thread in FIFO
+order. Cancelling the async producer therefore cannot make the event-loop thread
+close an `InputContainer` while PyAV/FFmpeg is still inside a blocking read. The
+view still calls `aclose()`, but `aclose()` only queues the owner-thread close and
+waits a bounded interval for the worker to finish; owner completion is delivered
+to the event loop with `loop.call_soon_threadsafe()` without allocating per-source
+wake file descriptors.
+If a read remains blocked past the bound, control returns to the event loop and
+the queued close is still performed later by the same daemon owner thread after
+the bounded PyAV read timeout unblocks. The daemon owner thread is an explicit
+limitation accepted here because PyAV open/read calls use the 5.0 second timeout
+bound and teardown does not rely on process shutdown for normal cleanup.
+
+The primary WebCodecs source does not call the legacy MSE/WebRTC/HLS transport
 while it is healthy. Those paths remain isolated fallbacks. The WebCodecs
 transport does not call Door or Gate services.
 
