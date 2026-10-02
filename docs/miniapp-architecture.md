@@ -523,6 +523,39 @@ Explicit camera close, Mini App close, terminal Entrance WebCodecs failure, and
 Entrance HLS fallback do not request the warm park and retain their normal
 teardown/fallback semantics.
 
+### Entrance attached Ring viewer lease
+
+During real inbound Ring media, the Mini App Entrance viewer is the HLS/HA
+Stream path, not the on-demand Entrance WebCodecs path. The WebCodecs request is
+allowed to fail closed with `intercom_media_busy` while the already-attached
+inbound transport feeds Home Assistant Stream and HLS.
+
+That HLS viewer is represented by a session-bound server lease:
+
+```text
+POST /api/comelit/miniapp/attached-viewer
+  action=open | heartbeat | close
+  viewer_id=<browser-generated opaque id>
+```
+
+The endpoint uses the existing Mini App session cookie and marker header. It
+does not accept an entity id, source URL, SDP, event id, or any transport stop
+primitive from the browser. `close` is idempotent. Multiple viewer ids in the
+same Mini App session refcount independently; attached Ring teardown is
+requested only when the last relevant Entrance viewer is gone.
+
+The browser sends heartbeat about every 5 seconds. The server expires a lease
+after about 15 seconds without heartbeat, so WebView loss is bounded even if
+`pagehide` or disconnect cleanup is not delivered. `visibilitychange=hidden` is
+not terminal because short system overlays must not close media.
+
+When the last lease is released or expires, the controller asks
+`RingMediaCoordinator.async_request_stop(viewer_closed|viewer_lease_expired)`.
+The HTTP view never calls attached-media `async_force_stop` or native transport
+cleanup directly. The coordinator owns the ordered cleanup: bounded recording
+stop/cancel, release of the `ring_media` lease, and then the existing
+attached-media R58/SIGUSR2 stop path through the final lease release.
+
 ## 12.1 WebCodecs transport and diagnostic tab
 
 Status: live-validated for ordinary H.264 surveillance cameras and for the

@@ -56,6 +56,8 @@
     "live_latency_s",
     "fatal",
   ];
+  const ATTACHED_VIEWER_HEARTBEAT_MS = 5000;
+  const ATTACHED_VIEWER_ENDPOINT = "/api/comelit/miniapp/attached-viewer";
 
   // The shared comelit-card mounts this viewer inside its Shadow DOM.
   // Page-level styles.css cannot style descendants across that boundary.
@@ -168,6 +170,10 @@
       this._failed = false;
       this._requestGeneration = 0;
       this._diagnostics = null;
+      this._attachedViewerId = null;
+      this._attachedViewerOpen = false;
+      this._attachedViewerHeartbeatTimer = null;
+      this._attachedViewerPagehideHandler = null;
     }
 
     setConfig(config) {
@@ -191,6 +197,7 @@
         this._reportDiagnostics("mse_fallback", {reason: "navigate"});
       }
       this._requestGeneration += 1;
+      this._closeAttachedViewerLease(true);
       this._destroyPlayback();
       this._video = null;
       this._labelElement = null;
@@ -290,6 +297,7 @@
 
     _destroyPlayback() {
       this._playbackMode = null;
+      this._closeAttachedViewerLease(false);
       this._destroyMSE();
       this._destroyWebRTC();
 
@@ -303,6 +311,74 @@
         this._video.removeAttribute("src");
         this._video.load();
       }
+    }
+
+    _ensureAttachedViewerId() {
+      if (this._attachedViewerId) {
+        return this._attachedViewerId;
+      }
+      const random = new Uint32Array(4);
+      if (window.crypto?.getRandomValues) {
+        window.crypto.getRandomValues(random);
+        this._attachedViewerId = Array.from(random, (value) =>
+          value.toString(36),
+        ).join("");
+      } else {
+        this._attachedViewerId =
+          String(Date.now()) + Math.random().toString(36).slice(2);
+      }
+      return this._attachedViewerId;
+    }
+
+    _sendAttachedViewerEvent(action, keepalive = false) {
+      const viewerId = this._ensureAttachedViewerId();
+      const body = JSON.stringify({
+        action,
+        viewer_id: viewerId,
+      });
+      fetch(ATTACHED_VIEWER_ENDPOINT, {
+        method: "POST",
+        credentials: "same-origin",
+        keepalive,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Comelit-MiniApp-Request": "1",
+        },
+        body,
+      }).catch(() => {});
+    }
+
+    _startAttachedViewerLease() {
+      if (this._attachedViewerOpen) {
+        return;
+      }
+      this._attachedViewerOpen = true;
+      this._sendAttachedViewerEvent("open");
+      this._attachedViewerHeartbeatTimer = setInterval(() => {
+        if (this._attachedViewerOpen && this.isConnected) {
+          this._sendAttachedViewerEvent("heartbeat");
+        }
+      }, ATTACHED_VIEWER_HEARTBEAT_MS);
+      this._attachedViewerPagehideHandler = () => {
+        this._closeAttachedViewerLease(true);
+      };
+      window.addEventListener("pagehide", this._attachedViewerPagehideHandler);
+    }
+
+    _closeAttachedViewerLease(keepalive = false) {
+      if (!this._attachedViewerOpen) {
+        return;
+      }
+      this._attachedViewerOpen = false;
+      if (this._attachedViewerHeartbeatTimer) {
+        clearInterval(this._attachedViewerHeartbeatTimer);
+        this._attachedViewerHeartbeatTimer = null;
+      }
+      if (this._attachedViewerPagehideHandler) {
+        window.removeEventListener("pagehide", this._attachedViewerPagehideHandler);
+        this._attachedViewerPagehideHandler = null;
+      }
+      this._sendAttachedViewerEvent("close", keepalive);
     }
 
     _showPlaybackError(message) {
@@ -1648,6 +1724,7 @@
       this._startDiagnostics(entityId, generation);
 
       if (isIntercomCameraEntity(entityId)) {
+        this._startAttachedViewerLease();
         this._openHls(entityId, generation);
       } else {
         this._openMSE(entityId, generation);

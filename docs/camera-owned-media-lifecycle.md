@@ -1,6 +1,6 @@
 # Camera-owned media lifecycle
 
-Status: camera-owned on-demand lifecycle live-validated in HAOS; inbound Ring lifetime now follows authoritative remote close.
+Status: camera-owned on-demand lifecycle live-validated in HAOS; inbound Ring lifetime now follows authoritative remote close, Mini App viewer lease end, or the existing hard limit.
 
 ## Goal
 
@@ -91,17 +91,31 @@ Typical inbound Ring plus user viewing:
 
 ```text
 CALL_INIT -> ring_media acquires attached media + shared HA Stream
-20-second recording completes -> recording artifact/event completes
-ring_media remains held while the real inbound call remains open
-camera_view may join the already-warm shared HA Stream at any point
-remote/native media close -> ring_media releases
+Mini App Entrance viewer opens HLS through the session-bound proxy
+viewer sends /api/comelit/miniapp/attached-viewer open + heartbeat
+20-second recording completes, or is bounded-cancelled on viewer termination
+ring_media remains held while a terminal condition has not occurred
+remote/native media close OR last Mini App Entrance viewer close/expiry
+-> ring_media releases
 camera_view releases on the same owner becoming inactive
 consumers = {} -> HA Stream closes
 ```
 
 The 20-second recording target is **not** the lifetime of the inbound call. For a real
-Ring, backend-observed remote/native media close is authoritative. A 600-second
-defense-in-depth ceiling remains in case the remote close is never observed.
+Ring, backend-observed remote/native media close remains authoritative, but the
+Mini App Entrance viewer is also represented by a bounded server-side lease:
+open and heartbeat are refreshed about every 5 seconds, and the server expires
+the lease after about 15 seconds without a heartbeat. Explicit Hide/destroy,
+Mini App close, and `pagehide` only accelerate release; server-side expiry is
+authoritative if the WebView disappears.
+
+If the viewer terminates during recording, the coordinator first asks the HA
+Stream recording task to stop/cancel in bounded fashion. A non-empty partial
+file is reported as `truncated`; otherwise the recording result is `failed`.
+Only then does `ring_media` release its attached-media lease, allowing the
+existing R58/SIGUSR2 cleanup path to close the inbound media transport. A
+600-second defense-in-depth ceiling remains in case neither remote close nor
+viewer termination is observed.
 
 Direct cleanup cannot close a shared HA Stream while a named consumer remains.
 

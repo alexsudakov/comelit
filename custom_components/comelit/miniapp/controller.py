@@ -6,6 +6,7 @@ import hashlib
 import logging
 from pathlib import Path
 import re
+import time
 from typing import Any, Callable
 
 from homeassistant.components.camera import async_request_stream, get_camera_from_entity_id
@@ -25,6 +26,7 @@ from ..const import (
     CONF_MINIAPP_SURVEILLANCE_LABEL,
     DATA_MEDIA_SESSIONS,
     DATA_MEDIA_TRANSPORTS,
+    DATA_RING_MEDIA,
     DOMAIN,
     DOOR_ENTRANCE,
     DOOR_GATE,
@@ -79,6 +81,9 @@ _WEBCODECS_HLS_FALLBACK_CLEANUP_SECONDS = 5.0
 _WEBCODECS_ENTRANCE_PARK_SECONDS = 60.0
 _WEBCODECS_ENTRANCE_VIEWER_REASON = "miniapp_webcodecs"
 _WEBCODECS_ENTRANCE_PARK_REASON = "miniapp_webcodecs_park"
+ATTACHED_VIEWER_HEARTBEAT_INTERVAL_SECONDS = 5
+ATTACHED_VIEWER_LEASE_EXPIRY_SECONDS = 15
+_ATTACHED_VIEWER_ACTIONS = frozenset({"open", "heartbeat", "close"})
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -144,6 +149,15 @@ class MiniAppWebCodecsEntranceLease:
         await self.manager.async_release(reason=self.reason)
 
 
+@dataclass(slots=True)
+class _AttachedViewerLease:
+    token: str
+    viewer_id: str
+    expires_at: float
+    task: asyncio.Task[None]
+    heartbeat_logged: bool = False
+
+
 def _parse_allowed_user_ids(value: object) -> frozenset[int]:
     if isinstance(value, (list, tuple, set, frozenset)):
         raw_items = value
@@ -188,6 +202,8 @@ class ComelitMiniAppController:
         self._webcodecs_entrance_park_task: asyncio.Task[None] | None = None
         self._webcodecs_entrance_park_manager: Any | None = None
         self._webcodecs_entrance_park_held = False
+        self._attached_viewer_lock = asyncio.Lock()
+        self._attached_viewers: dict[tuple[str, str], _AttachedViewerLease] = {}
 
     def set_entry(self, entry: ConfigEntry) -> None:
         self._entry = entry
@@ -195,6 +211,9 @@ class ComelitMiniAppController:
     def clear_entry(self, entry: ConfigEntry) -> None:
         if self._entry is entry:
             self._entry = None
+            self.hass.async_create_task(
+                self.async_close_attached_viewers_for_shutdown()
+            )
 
     @property
     def settings(self) -> MiniAppSettings:
@@ -309,6 +328,189 @@ class ComelitMiniAppController:
     def state_payload(self) -> dict[str, Any]:
         entries = self._allowed_registry_entries()
         return {"states": self._state_payload_for_entries(entries)}
+
+    def _attached_ring_media_coordinator(self) -> Any | None:
+        entry = self._entry
+        entry_id = getattr(entry, "entry_id", None) if entry is not None else None
+        if not isinstance(entry_id, str) or not entry_id:
+            return None
+        return (
+            self.hass.data.get(DOMAIN, {})
+            .get(DATA_RING_MEDIA, {})
+            .get(entry_id)
+        )
+
+    async def _request_attached_ring_stop(
+        self,
+        reason: str,
+        *,
+        viewer_count: int,
+    ) -> bool:
+        coordinator = self._attached_ring_media_coordinator()
+        request_stop = getattr(coordinator, "async_request_stop", None)
+        if not callable(request_stop):
+            return False
+        started = asyncio.get_running_loop().time()
+        _LOGGER.info(
+            "Comelit attached_viewer_last_released reason=%s viewer_count=%s elapsed_ms=0",
+            reason,
+            viewer_count,
+        )
+        requested = await request_stop(reason)
+        elapsed_ms = max(0, round((asyncio.get_running_loop().time() - started) * 1000))
+        _LOGGER.info(
+            "Comelit ring_media_stop_requested reason=%s viewer_count=%s elapsed_ms=%s requested=%s",
+            reason,
+            viewer_count,
+            elapsed_ms,
+            bool(requested),
+        )
+        return bool(requested)
+
+    async def _expire_attached_viewer(
+        self,
+        token: str,
+        viewer_id: str,
+        expires_at: float,
+    ) -> None:
+        delay = max(0.0, expires_at - asyncio.get_running_loop().time())
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            raise
+
+        request_stop = False
+        async with self._attached_viewer_lock:
+            key = (token, viewer_id)
+            lease = self._attached_viewers.get(key)
+            if lease is None or lease.expires_at != expires_at:
+                return
+            self._attached_viewers.pop(key, None)
+            request_stop = not self._attached_viewers
+            viewer_count = len(self._attached_viewers)
+
+        _LOGGER.info(
+            "Comelit attached_viewer_expired viewer_count=%s",
+            viewer_count,
+        )
+        if request_stop:
+            await self._request_attached_ring_stop(
+                "viewer_lease_expired",
+                viewer_count=viewer_count,
+            )
+
+    def _create_attached_viewer_expiry_task(
+        self,
+        session_token: str,
+        viewer_id: str,
+        expires_at: float,
+    ) -> asyncio.Task[None]:
+        task = self.hass.async_create_task(
+            self._expire_attached_viewer(session_token, viewer_id, expires_at)
+        )
+        set_name = getattr(task, "set_name", None)
+        if callable(set_name):
+            set_name("Comelit attached viewer lease expiry")
+
+        def consume_result(done: asyncio.Task[None]) -> None:
+            try:
+                done.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                _LOGGER.exception("Comelit attached viewer expiry task failed")
+
+        task.add_done_callback(consume_result)
+        return task
+
+    async def async_attached_viewer_event(
+        self,
+        session_token: str,
+        session: MiniAppSession,
+        *,
+        action: str,
+        viewer_id: str,
+    ) -> dict[str, object]:
+        """Maintain a bounded Mini App Entrance viewer lease for attached media."""
+        if action not in _ATTACHED_VIEWER_ACTIONS:
+            raise MiniAppOperationError("invalid_attached_viewer_action")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", viewer_id):
+            raise MiniAppOperationError("invalid_attached_viewer_id")
+        epoch_now = time.time()
+        if float(session.expires_at) <= epoch_now:
+            raise MiniAppOperationError("Mini App session is expired")
+
+        key = (session_token, viewer_id)
+        loop = asyncio.get_running_loop()
+        loop_now = loop.time()
+        session_remaining = max(0.0, float(session.expires_at) - epoch_now)
+        expires_at = min(
+            loop_now + session_remaining,
+            loop_now + ATTACHED_VIEWER_LEASE_EXPIRY_SECONDS,
+        )
+        request_stop = False
+        viewer_count = 0
+
+        async with self._attached_viewer_lock:
+            existing = self._attached_viewers.pop(key, None)
+            heartbeat_logged = bool(existing.heartbeat_logged) if existing else False
+            if existing is not None:
+                existing.task.cancel()
+
+            if action in {"open", "heartbeat"}:
+                heartbeat_logged = heartbeat_logged or action == "heartbeat"
+                task = self._create_attached_viewer_expiry_task(
+                    session_token,
+                    viewer_id,
+                    expires_at,
+                )
+                self._attached_viewers[key] = _AttachedViewerLease(
+                    token=session_token,
+                    viewer_id=viewer_id,
+                    expires_at=expires_at,
+                    task=task,
+                    heartbeat_logged=heartbeat_logged,
+                )
+                viewer_count = len(self._attached_viewers)
+            else:
+                viewer_count = len(self._attached_viewers)
+                request_stop = existing is not None and viewer_count == 0
+
+        if action == "open":
+            _LOGGER.info("Comelit attached_viewer_open viewer_count=%s", viewer_count)
+        elif action == "close":
+            _LOGGER.info("Comelit attached_viewer_close viewer_count=%s", viewer_count)
+        elif not existing or not existing.heartbeat_logged:
+            _LOGGER.info(
+                "Comelit attached_viewer_heartbeat viewer_count=%s",
+                viewer_count,
+            )
+
+        if request_stop:
+            await self._request_attached_ring_stop(
+                "viewer_closed",
+                viewer_count=viewer_count,
+            )
+
+        return {
+            "ok": True,
+            "viewer_count": viewer_count,
+            "heartbeat_interval_seconds": ATTACHED_VIEWER_HEARTBEAT_INTERVAL_SECONDS,
+            "lease_expiry_seconds": ATTACHED_VIEWER_LEASE_EXPIRY_SECONDS,
+        }
+
+    async def async_close_attached_viewers_for_shutdown(self) -> None:
+        async with self._attached_viewer_lock:
+            leases = list(self._attached_viewers.values())
+            self._attached_viewers.clear()
+        for lease in leases:
+            lease.task.cancel()
+        if leases:
+            await asyncio.gather(
+                *(lease.task for lease in leases),
+                return_exceptions=True,
+            )
+            await self._request_attached_ring_stop("shutdown", viewer_count=0)
 
     def _resolve_door_entity_id(self, door: str) -> str:
         unique_id = DOOR_UNIQUE_IDS.get(door)
