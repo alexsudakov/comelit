@@ -1502,7 +1502,7 @@ class ComelitCard extends HTMLElement {
     const camera = this._surveillanceEntities()
       .find((candidate) => candidate.entityId === entityId);
     if (!camera || !camera.available) {
-      target.innerHTML = '<div class="notice error">Камера сейчас недоступна.</div>';
+      this._mountLegacySurveillanceViewer(target, entityId, generation);
       return;
     }
 
