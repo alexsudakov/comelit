@@ -110,6 +110,7 @@ TaskFactory = Callable[
     [Coroutine[Any, Any, None], str],
     asyncio.Task[None],
 ]
+CameraViewReleaseCallback = Callable[[str], Awaitable[bool]]
 
 
 @dataclass(frozen=True)
@@ -362,6 +363,14 @@ class RingMediaCoordinator:
         self._last_recording_result: dict[str, object] | None = None
         self._ring_end_reason: str | None = None
         self._attach_failure_recorder: Callable[[str | None], None] | None = None
+        self._camera_view_release_callback: CameraViewReleaseCallback | None = None
+
+    def set_camera_view_release_callback(
+        self,
+        callback: CameraViewReleaseCallback | None,
+    ) -> None:
+        """Register the camera-owned attached-view lease cleanup callback."""
+        self._camera_view_release_callback = callback
 
     def set_attach_failure_recorder(
         self,
@@ -723,6 +732,24 @@ class RingMediaCoordinator:
                         _LOGGER.exception(
                             "Comelit ring media stream-consumer release failed"
                         )
+                if self._ring_end_reason in {
+                    RING_END_VIEWER_CLOSED,
+                    RING_END_VIEWER_LEASE_EXPIRED,
+                }:
+                    release_camera_view = self._camera_view_release_callback
+                    if release_camera_view is not None:
+                        try:
+                            released = await release_camera_view(self._ring_end_reason)
+                        except Exception:
+                            _LOGGER.exception(
+                                "Comelit attached camera-view release failed"
+                            )
+                        else:
+                            _LOGGER.info(
+                                "Comelit camera_view_release_observed reason=%s released=%s",
+                                self._ring_end_reason,
+                                bool(released),
+                            )
             else:
                 close = getattr(self._snapshot_provider, "async_close", None)
                 if close is not None:

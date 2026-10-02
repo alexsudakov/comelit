@@ -553,8 +553,16 @@ When the last lease is released or expires, the controller asks
 `RingMediaCoordinator.async_request_stop(viewer_closed|viewer_lease_expired)`.
 The HTTP view never calls attached-media `async_force_stop` or native transport
 cleanup directly. The coordinator owns the ordered cleanup: bounded recording
-stop/cancel, release of the `ring_media` lease, and then the existing
-attached-media R58/SIGUSR2 stop path through the final lease release.
+stop/cancel, release of the `ring_media` lease and stream consumer, then the
+camera-view cleanup callback
+`camera.async_release_attached_camera_view_if_idle(reason)`. That callback
+releases `camera_view` only for the same `attached_inbound` owner/provider and
+defers if another named provider consumer is present; the final `camera_view`
+lease release drives the existing attached-media R58/SIGUSR2 stop path.
+
+Home Assistant HLS idle cleanup (`OUTPUT_IDLE_TIMEOUT`, HA Core ref 2026.9.2)
+does not fit the Mini App's 15-second viewer-loss bound by itself, so Mini App
+close/expiry initiates `camera_view` release explicitly.
 
 ## 12.1 WebCodecs transport and diagnostic tab
 

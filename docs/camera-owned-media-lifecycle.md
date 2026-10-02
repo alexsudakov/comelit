@@ -112,10 +112,14 @@ authoritative if the WebView disappears.
 If the viewer terminates during recording, the coordinator first asks the HA
 Stream recording task to stop/cancel in bounded fashion. A non-empty partial
 file is reported as `truncated`; otherwise the recording result is `failed`.
-Only then does `ring_media` release its attached-media lease, allowing the
-existing R58/SIGUSR2 cleanup path to close the inbound media transport. A
-600-second defense-in-depth ceiling remains in case neither remote close nor
-viewer termination is observed.
+Only then does `ring_media` release its attached-media lease and HA Stream
+consumer. The camera-view cleanup callback then releases `camera_view` only for
+the same `attached_inbound` owner/provider; if another named provider consumer
+is still present, cleanup is deferred with `camera_view_release_deferred`. The
+compare-and-release path under `_camera_view_lock` drops the final
+`camera_view` lease, allowing the existing R58/SIGUSR2 cleanup path to close
+the inbound media transport. A 600-second defense-in-depth ceiling remains in
+case neither remote close nor viewer termination is observed.
 
 Direct cleanup cannot close a shared HA Stream while a named consumer remains.
 
