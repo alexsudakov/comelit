@@ -550,6 +550,11 @@ async function main() {
     assert.equal(await page.evaluate(() => window.__webcodecs.sockets.length), 3);
     await page.evaluate(() => {
       window.VideoDecoder = window.__webcodecs.savedVideoDecoder;
+      const card = document.getElementById("card");
+      // Isolate the ordinary-camera scenario. The card intentionally keeps an
+      // explicitly opened Entrance viewer alive while changing tabs, so close
+      // the Entrance viewer before asserting ordinary-camera socket ownership.
+      card.shadowRoot.querySelector("[data-intercom-camera-toggle]").click();
     });
 
     // Production ordinary surveillance path: the normal two-tab surface uses
