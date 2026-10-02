@@ -1710,22 +1710,40 @@ class _FakeWebCodecsMediaManager:
         self.active = False
         self.acquire_calls = []
         self.release_calls = []
+        self.leases = {}
+        self.start_count = 0
+
+    def status(self):
+        return {
+            "phase": self.phase,
+            "active": self.active,
+            "leases": dict(self.leases),
+        }
 
     async def async_acquire(self, *, panel, reason):
         self.acquire_calls.append((panel, reason))
+        if self.phase != "active":
+            self.start_count += 1
+        self.leases[reason] = self.leases.get(reason, 0) + 1
         self.phase = "active"
         self.active = True
         self.transport.active = True
         self.transport.local_sdp_ready = True
-        return {"active": True}
+        return self.status()
 
     async def async_release(self, *, reason):
         self.release_calls.append(reason)
-        self.phase = "inactive"
-        self.active = False
-        self.transport.active = False
-        self.transport.local_sdp_ready = False
-        return {"active": False}
+        count = self.leases.get(reason, 0)
+        if count <= 1:
+            self.leases.pop(reason, None)
+        else:
+            self.leases[reason] = count - 1
+        if not self.leases:
+            self.phase = "inactive"
+            self.active = False
+            self.transport.active = False
+            self.transport.local_sdp_ready = False
+        return self.status()
 
 
 def _install_webcodecs_entrance_runtime(hass):
@@ -1806,6 +1824,69 @@ def test_webcodecs_entrance_live_path_uses_manager_local_sdp_and_releases(monkey
     assert manager.phase == "inactive"
     assert manager.active is False
     assert transport.active is False
+
+
+def test_webcodecs_entrance_park_holds_transport_and_reuses_without_restart():
+    controller, hass = _controller(surveillance_label="Outside")
+    manager, transport = _install_webcodecs_entrance_runtime(hass)
+
+    async def run():
+        first = await controller.acquire_webcodecs_entrance(
+            controller.get_webcodecs_camera_target("camera.comelit_entrance")
+        )
+        assert manager.start_count == 1
+        assert manager.leases == {"miniapp_webcodecs": 1}
+
+        parked = await controller.async_park_webcodecs_entrance()
+        assert parked == {"parked": True, "timeout_seconds": 60}
+        assert manager.leases == {
+            "miniapp_webcodecs": 1,
+            "miniapp_webcodecs_park": 1,
+        }
+
+        await first.release()
+        assert manager.phase == "active"
+        assert manager.active is True
+        assert transport.active is True
+        assert manager.leases == {"miniapp_webcodecs_park": 1}
+
+        second = await controller.acquire_webcodecs_entrance(
+            controller.get_webcodecs_camera_target("camera.comelit_entrance")
+        )
+        assert manager.start_count == 1
+        assert manager.phase == "active"
+        assert manager.leases == {"miniapp_webcodecs": 1}
+        assert "miniapp_webcodecs_park" in manager.release_calls
+
+        await second.release()
+        assert manager.phase == "inactive"
+        assert manager.active is False
+        assert transport.active is False
+
+    asyncio.run(run())
+
+
+def test_webcodecs_entrance_park_expires_after_60_seconds(monkeypatch):
+    controller, hass = _controller(surveillance_label="Outside")
+    manager, transport = _install_webcodecs_entrance_runtime(hass)
+    monkeypatch.setattr(controller_mod, "_WEBCODECS_ENTRANCE_PARK_SECONDS", 0.0)
+
+    async def run():
+        lease = await controller.acquire_webcodecs_entrance(
+            controller.get_webcodecs_camera_target("camera.comelit_entrance")
+        )
+        parked = await controller.async_park_webcodecs_entrance()
+        assert parked == {"parked": True, "timeout_seconds": 0}
+        await lease.release()
+        assert manager.phase == "active"
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert manager.phase == "inactive"
+        assert manager.active is False
+        assert transport.active is False
+        assert "miniapp_webcodecs_park" in manager.release_calls
+
+    asyncio.run(run())
 
 
 def test_webcodecs_entrance_client_close_releases_manager_immediately(monkeypatch):
