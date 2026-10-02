@@ -33,6 +33,19 @@ async function main() {
         supportChecks: [],
         drawCount: 0,
         closedFrames: 0,
+        parkCalls: [],
+      };
+
+      window.fetch = async (url, options = {}) => {
+        if (url === "/api/comelit/miniapp/entrance/park") {
+          window.__webcodecs.parkCalls.push({
+            url,
+            method: options.method,
+            marker: options.headers?.["X-Comelit-MiniApp-Request"],
+          });
+          return { ok: true, status: 200 };
+        }
+        throw new Error("unexpected fetch: " + url);
       };
 
       CanvasRenderingContext2D.prototype.drawImage = function () {
@@ -445,8 +458,12 @@ async function main() {
       const card = document.getElementById("card");
       card.setConfig({
         default_tab: "intercom",
-        webcodecs: { enabled: false, intercom_primary: true },
-        surveillance: { include: ["camera.parking_6048"] },
+        webcodecs: {
+          enabled: false,
+          intercom_primary: true,
+          surveillance_primary: true,
+        },
+        surveillance: { include: ["camera.parking_6048", "camera.dvor_1"] },
       });
       card.shadowRoot.querySelector("[data-intercom-camera-toggle]").click();
     });
@@ -548,14 +565,38 @@ async function main() {
     });
     await page.waitForFunction(() => window.__webcodecs.legacyMounts === 2);
     assert.equal(await page.evaluate(() => window.__webcodecs.sockets.length), 3);
+    // Restore WebCodecs, reopen Entrance successfully, then switch directly
+    // to Surveillance. The tab transition must acquire the 60-second warm
+    // server lease before disconnecting the Entrance WSS/decoder, and only
+    // then start the ordinary camera WebCodecs viewer.
     await page.evaluate(() => {
       window.VideoDecoder = window.__webcodecs.savedVideoDecoder;
       const card = document.getElementById("card");
-      // Isolate the ordinary-camera scenario. The card intentionally keeps an
-      // explicitly opened Entrance viewer alive while changing tabs, so close
-      // the Entrance viewer before asserting ordinary-camera socket ownership.
+      card.shadowRoot.querySelector("[data-intercom-camera-toggle]").click();
       card.shadowRoot.querySelector("[data-intercom-camera-toggle]").click();
     });
+    await page.waitForFunction(() => window.__webcodecs.sockets.length === 4);
+    await page.waitForFunction(() => window.__webcodecs.sockets[3].sent.length === 1);
+    await page.evaluate(() => {
+      const socket = window.__webcodecs.sockets[3];
+      socket.emitText({ type: "intercom_media_ready", server_elapsed_ms: 180 });
+      socket.emitText({ type: "source_open", server_elapsed_ms: 200 });
+      socket.emitText({ type: "source_packet", server_elapsed_ms: 220 });
+      socket.emitText({
+        type: "hello",
+        protocol: 2,
+        entity_id: "camera.comelit_entrance",
+        codec: "avc1.42C01E",
+        max_unit_bytes: 1048576,
+        session_max_seconds: 600,
+        zero_transcode: true,
+        source_kind: "comelit_entrance_rtp",
+        comelit_entrance_open: true,
+        comelit_media_started: true,
+      });
+      socket.emitBinary(window.__frame());
+    });
+    await page.waitForFunction(() => window.__webcodecs.drawCount === 4);
 
     // Production ordinary surveillance path: the normal two-tab surface uses
     // the already live-validated WebCodecs transport first. Terminal failures
@@ -565,18 +606,23 @@ async function main() {
       window.__webcodecs.surveillanceSocketBase =
         window.__webcodecs.sockets.length;
       const card = document.getElementById("card");
-      card.setConfig({
-        default_tab: "surveillance",
-        webcodecs: {
-          enabled: false,
-          intercom_primary: true,
-          surveillance_primary: true,
-        },
-        surveillance: { include: ["camera.parking_6048", "camera.dvor_1"] },
-      });
+      card.shadowRoot.querySelector('[data-tab="surveillance"]').click();
       return window.__webcodecs.surveillanceSocketBase;
     });
-    assert.equal(surveillanceSocketBase, 3);
+    assert.equal(surveillanceSocketBase, 4);
+    await page.waitForFunction(() => window.__webcodecs.parkCalls.length === 1);
+    await page.waitForFunction(
+      (index) => window.__webcodecs.sockets[index].readyState === WebSocket.CLOSED,
+      3,
+    );
+    assert.deepEqual(
+      await page.evaluate(() => window.__webcodecs.parkCalls[0]),
+      {
+        url: "/api/comelit/miniapp/entrance/park",
+        method: "POST",
+        marker: "1",
+      },
+    );
 
     const surveillanceMount = await page.evaluate(() => {
       const card = document.getElementById("card");
@@ -601,6 +647,11 @@ async function main() {
       embedded: true,
       autoStart: true,
       autoStartConsumed: true,
+    });
+    await page.evaluate(() => {
+      // Keep subsequent ordinary-camera fallback/stale-event cases focused on
+      // ordinary lifecycle; warm Entrance reuse is independently asserted.
+      document.getElementById("card")._intercomViewerOpen = false;
     });
 
     await page.waitForFunction(
