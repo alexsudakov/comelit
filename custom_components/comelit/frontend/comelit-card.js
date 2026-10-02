@@ -1172,7 +1172,41 @@ class ComelitCard extends HTMLElement {
     }
   }
 
-  _setActiveTab(nextTab) {
+  async _parkAndDisconnectIntercomViewer() {
+    if (
+      !this._intercomViewerOpen ||
+      this._selectedIntercomPanel !== "entrance" ||
+      !this._intercomViewerElement
+    ) {
+      return;
+    }
+
+    const viewer = this._intercomViewerElement;
+    if (
+      this._intercomViewerMode === "webcodecs" &&
+      viewer.tagName?.toLowerCase() === "miniapp-webcodecs-viewer" &&
+      typeof viewer.parkEntrance === "function"
+    ) {
+      // Acquire the bounded server-side warm lease before removing the viewer
+      // from the DOM. If parking fails we still disconnect: the existing WSS
+      // lease then tears the Comelit media session down normally, so return to
+      // Entrance is merely cold rather than leaving two browser video streams.
+      try {
+        await viewer.parkEntrance();
+      } catch (_) {
+        // Best-effort UX optimization only; normal teardown remains safe.
+      }
+    }
+
+    this._intercomViewerGeneration += 1;
+    this._intercomViewerElement = undefined;
+    const target = this.shadowRoot.querySelector("#intercom-viewer");
+    if (target) {
+      target.replaceChildren();
+    }
+  }
+
+  async _setActiveTab(nextTab) {
     if (
       (
         nextTab !== "intercom" &&
@@ -1182,6 +1216,10 @@ class ComelitCard extends HTMLElement {
       nextTab === this._activeTab
     ) {
       return;
+    }
+
+    if (this._activeTab === "intercom" && nextTab !== "intercom") {
+      await this._parkAndDisconnectIntercomViewer();
     }
 
     this._activeTab = nextTab;
@@ -1197,9 +1235,6 @@ class ComelitCard extends HTMLElement {
     if (nextTab === "surveillance") {
       this._surveillanceViewerMode = "webcodecs";
       this._surveillanceViewerFallbackReason = undefined;
-      // Keep the explicitly opened intercom viewer connected to the DOM.
-      // This preserves its HA camera-view lease while the user inspects
-      // ordinary surveillance cameras.
       if (this._selectedCamera && !this._viewerElement) {
         this._mountViewer(this._selectedCamera);
       }
@@ -1215,6 +1250,7 @@ class ComelitCard extends HTMLElement {
       }
 
       if (
+        nextTab === "intercom" &&
         this._intercomViewerOpen &&
         this._selectedIntercomPanel === "entrance" &&
         !this._intercomViewerElement
