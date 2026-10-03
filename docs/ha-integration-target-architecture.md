@@ -1,6 +1,6 @@
 # Comelit Home Assistant Integration — Target Architecture and MVP Requirements
 
-> Historical baseline note (2026-09-25): this file records the original target/design decisions and early research plan. The direct-HA architectural direction remains valid, but the old camera research matrix, 60-second recording goal, 30-second Ring timeout, migration backend and narrow MVP sections are not current production behavior. Current runtime/media rules are in `docs/intercom-media-session-architecture.md`, current camera ownership in `docs/camera-owned-media-lifecycle.md`, current Ring/Telegram orchestration in `docs/ring-telegram-ha-automation-current.md`, and the current UI in `docs/custom-card-architecture.md` plus `README.md`.
+> Historical baseline note (2026-09-25): this file records the original target/design decisions and early research plan. The direct-HA architectural direction remains valid, but the old camera research matrix, 60-second recording goal, 30-second Ring timeout, migration backend and narrow MVP sections are not current production behavior. Current runtime/media rules are in `docs/intercom-media-session-architecture.md`, current camera ownership in `docs/camera-owned-media-lifecycle.md`, current Ring/Telegram orchestration in `docs/ring-telegram-ha-automation-current.md`, and the current UI in `docs/custom-card-architecture.md` plus `README.md`. Gate mapping/actuation is now implemented; on 2026-10-03 the user reported a physical Gate opening after an explicit Gate action on prerelease `1.7.32b1`. That observation is not a controlled acceptance trace and does not change the rule that protocol ACK/service completion is not proof of physical effect. Current Gate evidence is recorded in `docs/gate-live-validation.md`.
 
 Status: historical approved design baseline; current production supplements take precedence
 Date: 2026-09-01
@@ -321,7 +321,7 @@ The next MVP implementation target is intentionally narrower than the complete v
 8. no live intercom conversation required yet;
 9. no Telegram dependency required yet.
 
-Before implementing this MVP, the project must determine the exact Comelit mapping/actuation path for the `gate` Door with the same closed-set and one-shot safety discipline already applied to the entrance Door.
+Historical note: at the time of this baseline, Gate mapping/actuation still had to be determined with the same closed-set and one-shot safety discipline already applied to the entrance Door. That work is now implemented. On 2026-10-03 the user explicitly invoked Gate on prerelease `1.7.32b1` and reported that the physical gate opened. This is user-observed physical evidence rather than a controlled acceptance trace; the protocol/physical-result distinction and no-retry safety contract remain unchanged. See `docs/gate-live-validation.md` for current status.
 
 ## 14. Immediate next research task: incoming ring detection
 
