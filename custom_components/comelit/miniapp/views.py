@@ -296,6 +296,40 @@ class MiniAppEntranceParkView(_MiniAppView):
         return _json_response(result)
 
 
+class MiniAppAttachedViewerView(_MiniAppView):
+    url = "/api/comelit/miniapp/attached-viewer"
+    name = "api:comelit:miniapp:attached_viewer"
+
+    async def post(self, request: web.Request) -> web.Response:
+        self._require_miniapp_marker(request)
+        token, session = self._require_session(request)
+        body = await request.content.read(1024)
+        try:
+            payload = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            raise web.HTTPBadRequest from None
+        if not isinstance(payload, dict):
+            raise web.HTTPBadRequest
+        action = payload.get("action")
+        viewer_id = payload.get("viewer_id")
+        if not isinstance(action, str) or not isinstance(viewer_id, str):
+            raise web.HTTPBadRequest
+
+        try:
+            result = await self.controller.async_attached_viewer_event(
+                token,
+                session,
+                action=action,
+                viewer_id=viewer_id,
+            )
+        except MiniAppOperationError as exc:
+            return _json_response(
+                {"error": str(exc)},
+                status=HTTPStatus.CONFLICT,
+            )
+        return _json_response(result)
+
+
 class MiniAppCameraStreamView(_MiniAppView):
     url = r"/api/comelit/miniapp/camera/{entity_id}/stream"
     name = "api:comelit:miniapp:camera_stream"
@@ -1223,6 +1257,7 @@ def async_register_miniapp_views(
     hass.http.register_view(MiniAppStateView(controller))
     hass.http.register_view(MiniAppDoorView(controller))
     hass.http.register_view(MiniAppEntranceParkView(controller))
+    hass.http.register_view(MiniAppAttachedViewerView(controller))
     hass.http.register_view(MiniAppCameraStreamView(controller))
     hass.http.register_view(MiniAppCameraMSEView(controller))
     hass.http.register_view(MiniAppCameraWebCodecsView(controller))

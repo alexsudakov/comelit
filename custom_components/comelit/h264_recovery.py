@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 import struct
 from typing import Any
@@ -484,16 +484,20 @@ class RecoveryRtpShimProtocol(asyncio.DatagramProtocol):
     def __init__(
         self,
         rewriter: H264RecoveryRewriter,
-        output_transport: asyncio.DatagramTransport,
+        output_transports: Sequence[asyncio.DatagramTransport],
     ) -> None:
         self._rewriter = rewriter
-        self._output_transport = output_transport
+        self._output_transports = tuple(output_transports)
         self.last_error: str | None = None
 
     def datagram_received(self, data: bytes, addr: Any) -> None:
         try:
             for packet in self._rewriter.rewrite_rtp_packet(data):
-                self._output_transport.sendto(packet)
+                for transport in self._output_transports:
+                    try:
+                        transport.sendto(packet)
+                    except Exception:
+                        self.last_error = "fanout_send_exception"
         except Exception:
             self.last_error = "rewrite_exception"
             self._rewriter.last_error = "rewrite_exception"
@@ -510,6 +514,7 @@ class H264RecoveryRtpShim:
         *,
         input_port: int,
         output_port: int,
+        output_ports: Sequence[int] | None = None,
         host: str = "127.0.0.1",
         endpoint_factory: Callable[..., Awaitable[tuple[asyncio.DatagramTransport, Any]]]
         | None = None,
@@ -517,16 +522,22 @@ class H264RecoveryRtpShim:
     ) -> None:
         self._host = host
         self._input_port = input_port
+        ports = tuple(output_ports) if output_ports is not None else (output_port,)
+        if not ports:
+            raise ValueError("output_ports must not be empty")
+        if output_port not in ports:
+            ports = (output_port, *ports)
+        self._output_ports = tuple(dict.fromkeys(ports))
         self._output_port = output_port
         self._endpoint_factory = endpoint_factory
         self._rewriter = H264RecoveryRewriter(on_decodable_frame=on_decodable_frame)
         self._input_transport: asyncio.DatagramTransport | None = None
-        self._output_transport: asyncio.DatagramTransport | None = None
+        self._output_transports: tuple[asyncio.DatagramTransport, ...] = ()
         self._protocol: RecoveryRtpShimProtocol | None = None
 
     @property
     def running(self) -> bool:
-        return self._input_transport is not None and self._output_transport is not None
+        return self._input_transport is not None and bool(self._output_transports)
 
     @property
     def input_port(self) -> int:
@@ -535,6 +546,10 @@ class H264RecoveryRtpShim:
     @property
     def output_port(self) -> int:
         return self._output_port
+
+    @property
+    def output_ports(self) -> tuple[int, ...]:
+        return self._output_ports
 
     def diagnostics(self) -> RecoveryShimDiagnostics:
         diagnostics = self._rewriter.diagnostics(running=self.running)
@@ -560,20 +575,23 @@ class H264RecoveryRtpShim:
         loop = asyncio.get_running_loop()
         endpoint_factory = self._endpoint_factory or loop.create_datagram_endpoint
         input_transport: asyncio.DatagramTransport | None = None
-        output_transport: asyncio.DatagramTransport | None = None
+        output_transports: list[asyncio.DatagramTransport] = []
         protocol: RecoveryRtpShimProtocol | None = None
-        check_transport, _ = await endpoint_factory(
-            asyncio.DatagramProtocol,
-            local_addr=(self._host, self._output_port),
-        )
-        check_transport.close()
-        await asyncio.sleep(0)
-        try:
-            output_transport, _ = await endpoint_factory(
+        for port in self._output_ports:
+            check_transport, _ = await endpoint_factory(
                 asyncio.DatagramProtocol,
-                remote_addr=(self._host, self._output_port),
+                local_addr=(self._host, port),
             )
-            protocol = RecoveryRtpShimProtocol(self._rewriter, output_transport)
+            check_transport.close()
+            await asyncio.sleep(0)
+        try:
+            for port in self._output_ports:
+                output_transport, _ = await endpoint_factory(
+                    asyncio.DatagramProtocol,
+                    remote_addr=(self._host, port),
+                )
+                output_transports.append(output_transport)
+            protocol = RecoveryRtpShimProtocol(self._rewriter, output_transports)
             input_transport, _ = await endpoint_factory(
                 lambda: protocol,
                 local_addr=(self._host, self._input_port),
@@ -581,24 +599,24 @@ class H264RecoveryRtpShim:
         except BaseException:
             if input_transport is not None:
                 input_transport.close()
-            if output_transport is not None:
+            for output_transport in output_transports:
                 output_transport.close()
             self._input_transport = None
-            self._output_transport = None
+            self._output_transports = ()
             self._protocol = None
             raise
         self._protocol = protocol
         self._input_transport = input_transport
-        self._output_transport = output_transport
+        self._output_transports = tuple(output_transports)
 
     async def async_stop(self) -> None:
         input_transport = self._input_transport
-        output_transport = self._output_transport
+        output_transports = self._output_transports
         self._input_transport = None
-        self._output_transport = None
+        self._output_transports = ()
         self._protocol = None
         if input_transport is not None:
             input_transport.close()
-        if output_transport is not None:
+        for output_transport in output_transports:
             output_transport.close()
         await asyncio.sleep(0)

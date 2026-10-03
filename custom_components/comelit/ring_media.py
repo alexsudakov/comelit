@@ -60,6 +60,22 @@ _SAFE_STREAM_CONSUMER = re.compile(r"^[a-z0-9_]{1,64}$")
 _RING_MEDIA_REASON = "ring_media"
 _JPEG_SOI = b"\xff\xd8"
 _JPEG_EOI = b"\xff\xd9"
+RING_END_REMOTE_CLOSED = "remote_closed"
+RING_END_VIEWER_CLOSED = "viewer_closed"
+RING_END_VIEWER_LEASE_EXPIRED = "viewer_lease_expired"
+RING_END_HARD_LIMIT = "hard_limit"
+RING_END_SHUTDOWN = "shutdown"
+RING_END_MEDIA_ERROR = "media_error"
+_REQUEST_STOP_REASONS = frozenset(
+    {
+        RING_END_REMOTE_CLOSED,
+        RING_END_VIEWER_CLOSED,
+        RING_END_VIEWER_LEASE_EXPIRED,
+        RING_END_HARD_LIMIT,
+        RING_END_SHUTDOWN,
+        RING_END_MEDIA_ERROR,
+    }
+)
 
 
 class MediaSession(Protocol):
@@ -94,8 +110,6 @@ TaskFactory = Callable[
     [Coroutine[Any, Any, None], str],
     asyncio.Task[None],
 ]
-
-
 @dataclass(frozen=True)
 class RingMediaPaths:
     root: Path
@@ -155,11 +169,17 @@ class HAStreamMediaProvider:
         transport: Any,
         *,
         camera_entity: str = ENTRANCE_CAMERA_ENTITY_ID,
+        local_sdp_path_attr: str = "local_sdp_path",
+        local_sdp_ready_attr: str = "local_sdp_ready",
+        stream_label: str | None = None,
     ) -> None:
         self._hass = hass
         self._manager = manager
         self._transport = transport
         self._camera_entity = camera_entity
+        self._local_sdp_path_attr = local_sdp_path_attr
+        self._local_sdp_ready_attr = local_sdp_ready_attr
+        self._stream_label = stream_label or camera_entity
         self._stream: Any | None = None
         self._create_stream_lock: asyncio.Lock | None = None
         self._consumer_lock = asyncio.Lock()
@@ -195,9 +215,11 @@ class HAStreamMediaProvider:
     async def _async_stream_source(self) -> str | None:
         if not self._manager.active:
             return None
-        path = self._transport.local_sdp_path
+        path = getattr(self._transport, self._local_sdp_path_attr, None)
+        if path is None:
+            return None
         ready = await self._hass.async_add_executor_job(
-            lambda: self._transport.local_sdp_ready
+            lambda: bool(getattr(self._transport, self._local_sdp_ready_attr, False))
         )
         if not ready:
             return None
@@ -231,7 +253,7 @@ class HAStreamMediaProvider:
                     self._hass,
                     self._camera_entity,
                 ),
-                stream_label=self._camera_entity,
+                stream_label=self._stream_label,
             )
             self._hass.data[STREAM_DOMAIN][ATTR_STREAMS].append(stream)
             self._stream = stream
@@ -335,6 +357,8 @@ class RingMediaCoordinator:
         self._active_event_id: str | None = None
         self._task: asyncio.Task[None] | None = None
         self._stop_event: asyncio.Event | None = None
+        self._stop_reason: str | None = None
+        self._stop_requested_monotonic: float | None = None
         self._snapshot_event_count = 0
         self._snapshot_sequence_last = 0
         self._snapshot_first_monotonic: float | None = None
@@ -422,6 +446,8 @@ class RingMediaCoordinator:
         self._last_recording_result = None
         self._ring_end_reason = None
         self._stop_event = asyncio.Event()
+        self._stop_reason = None
+        self._stop_requested_monotonic = None
         self._task = self._task_factory(
             self._async_run_lifecycle(
                 event_id=event_id,
@@ -433,10 +459,25 @@ class RingMediaCoordinator:
         )
         return True
 
-    async def async_shutdown(self) -> None:
+    async def async_request_stop(self, reason: str) -> bool:
+        """Request the active Ring media lifecycle to converge on teardown once."""
+        if reason not in _REQUEST_STOP_REASONS:
+            raise ValueError("invalid_ring_media_stop_reason")
         stop_event = self._stop_event
-        if stop_event is not None:
-            stop_event.set()
+        if stop_event is None or not self.running:
+            return False
+        if self._stop_reason is None:
+            self._stop_reason = reason
+            self._stop_requested_monotonic = self._monotonic()
+            _LOGGER.info(
+                "Comelit ring_media_stop_requested reason=%s viewer_count=- elapsed_ms=0 requested=True",
+                reason,
+            )
+        stop_event.set()
+        return True
+
+    async def async_shutdown(self) -> None:
+        await self.async_request_stop(RING_END_SHUTDOWN)
         task = self._task
         if task is not None and not task.done():
             task.cancel()
@@ -456,6 +497,8 @@ class RingMediaCoordinator:
     ) -> str:
         """Wait for authoritative remote close, bounded by the safety ceiling."""
         waiter = self._remote_close_waiter
+        if stop_event.is_set():
+            return self._stop_reason or RING_END_SHUTDOWN
         if waiter is None:
             return "recording_complete"
 
@@ -481,10 +524,13 @@ class RingMediaCoordinator:
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if stop_task in done and stop_task.result():
-                return "shutdown"
+                return self._stop_reason or RING_END_SHUTDOWN
             if remote_task in done:
                 try:
-                    return "remote_closed" if remote_task.result() else "remote_close_unconfirmed"
+                    if remote_task.result():
+                        self._stop_reason = self._stop_reason or RING_END_REMOTE_CLOSED
+                        return "remote_closed"
+                    return "remote_close_unconfirmed"
                 except Exception:
                     _LOGGER.exception("Comelit remote ring close waiter failed")
                     return "remote_close_unconfirmed"
@@ -515,6 +561,7 @@ class RingMediaCoordinator:
         recording_started: float | None = None
         recording_actual = 0.0
         recording_failure_reason: str | None = None
+        stop_completed_elapsed_ms = 0
         try:
             await self._manager.async_acquire(panel=door, reason=_RING_MEDIA_REASON)
             acquired = True
@@ -529,21 +576,59 @@ class RingMediaCoordinator:
                 self._async_snapshot_loop(event_id, door, paths, stop_event)
             )
             recording_started = self._monotonic()
-            recording_state = await self._async_recording(
-                paths,
-                stop_event=stop_event,
+            recording_task = asyncio.create_task(
+                self._async_recording(
+                    paths,
+                    stop_event=stop_event,
+                ),
+                name="Comelit ring media recording",
             )
+            stop_task = asyncio.create_task(
+                stop_event.wait(),
+                name="wait Comelit ring media recording stop",
+            )
+            done, _ = await asyncio.wait(
+                {recording_task, stop_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if recording_task in done:
+                try:
+                    recording_state = recording_task.result()
+                except asyncio.CancelledError:
+                    recording_state = await self._async_recording_cancel_state(paths)
+                    recording_failure_reason = (
+                        None
+                        if recording_state == RECORDING_STATE_TRUNCATED
+                        else "recording_cancelled"
+                    )
+            else:
+                recording_task.cancel()
+                try:
+                    await recording_task
+                except asyncio.CancelledError:
+                    pass
+                recording_state = await self._async_recording_cancel_state(paths)
+                recording_failure_reason = (
+                    None
+                    if recording_state == RECORDING_STATE_TRUNCATED
+                    else "recording_cancelled"
+                )
+            if not stop_task.done():
+                stop_task.cancel()
+                try:
+                    await stop_task
+                except asyncio.CancelledError:
+                    pass
             recording_actual = max(0.0, self._monotonic() - recording_started)
             if (
                 recording_state == RECORDING_STATE_COMPLETED
                 and recording_actual < self._recording_target_seconds
             ):
                 recording_state = RECORDING_STATE_TRUNCATED
-            recording_failure_reason = self._recording_failure_reason()
+            recording_failure_reason = (
+                recording_failure_reason or self._recording_failure_reason()
+            )
 
-            # Recording completion is independent from the lifetime of the
-            # inbound call. Emit the retained-file result immediately, then
-            # keep the attached media/HA Stream warm until Comelit closes it.
             self._fire_recording_complete(
                 event_id,
                 door,
@@ -562,7 +647,7 @@ class RingMediaCoordinator:
             else:
                 self._ring_end_reason = "media_start_failed"
 
-            if self._ring_end_reason == "hard_limit":
+            if self._ring_end_reason == RING_END_HARD_LIMIT:
                 force_stop = getattr(self._manager, "async_force_stop", None)
                 if callable(force_stop):
                     try:
@@ -581,7 +666,7 @@ class RingMediaCoordinator:
         except (ComelitMediaSessionError, RuntimeError, ValueError) as exc:
             recording_state = RECORDING_STATE_FAILED
             recording_failure_reason = "media_start_failed"
-            self._ring_end_reason = "media_error"
+            self._ring_end_reason = RING_END_MEDIA_ERROR
             recorder = getattr(self, "_attach_failure_recorder", None)
             if recorder is not None:
                 # Sanitized by the recorder's own whitelist; the raw
@@ -589,14 +674,14 @@ class RingMediaCoordinator:
                 recorder(str(exc))
         except asyncio.CancelledError:
             stop_event.set()
-            self._ring_end_reason = "shutdown"
+            self._ring_end_reason = RING_END_SHUTDOWN
             recording_state = RECORDING_STATE_TRUNCATED
             if recording_started is not None:
                 recording_actual = max(0.0, self._monotonic() - recording_started)
             raise
         except Exception:
             _LOGGER.exception("Comelit ring media lifecycle failed")
-            self._ring_end_reason = "media_error"
+            self._ring_end_reason = RING_END_MEDIA_ERROR
             recording_state = RECORDING_STATE_FAILED
             recording_failure_reason = (
                 self._recording_failure_reason() or "recorder_exception"
@@ -628,6 +713,11 @@ class RingMediaCoordinator:
                     await self._manager.async_release(reason=_RING_MEDIA_REASON)
                 except Exception:
                     _LOGGER.exception("Comelit ring media release failed")
+            if self._stop_requested_monotonic is not None:
+                stop_completed_elapsed_ms = max(
+                    0,
+                    round((self._monotonic() - self._stop_requested_monotonic) * 1000),
+                )
             if stream_consumer_acquired:
                 release_consumer = getattr(
                     self._snapshot_provider, "async_release_consumer", None
@@ -649,6 +739,14 @@ class RingMediaCoordinator:
             if self._active_event_id == event_id:
                 self._active_event_id = None
                 self._stop_event = None
+                self._stop_reason = None
+                self._stop_requested_monotonic = None
+            if self._ring_end_reason is not None:
+                _LOGGER.info(
+                    "Comelit ring_media_stop_completed reason=%s viewer_count=- elapsed_ms=%s",
+                    self._ring_end_reason,
+                    stop_completed_elapsed_ms,
+                )
 
     async def _async_snapshot_loop(
         self,
@@ -710,6 +808,17 @@ class RingMediaCoordinator:
             RECORDING_STATE_FAILED,
         }:
             return state
+        return RECORDING_STATE_FAILED
+
+    async def _async_recording_cancel_state(self, paths: RingMediaPaths) -> str:
+        def has_file() -> bool:
+            return paths.recording_path.is_file() and paths.recording_path.stat().st_size > 0
+
+        try:
+            if await self._hass.async_add_executor_job(has_file):
+                return RECORDING_STATE_TRUNCATED
+        except Exception:
+            return RECORDING_STATE_FAILED
         return RECORDING_STATE_FAILED
 
     def _recording_failure_reason(self) -> str | None:
