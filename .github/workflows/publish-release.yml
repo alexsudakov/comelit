@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - candidate/1.7.32b1
     paths:
       - custom_components/comelit/manifest.json
       - .github/workflows/publish-release.yml
@@ -62,4 +63,5 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "$VERSION" \
+            --prerelease \
             --generate-notes
