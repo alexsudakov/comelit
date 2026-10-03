@@ -154,13 +154,40 @@ hass.states
 entity_registry
 label_registry
 hass.services
-camera async_request_stream
+camera async_request_stream for ordinary surveillance cameras
+internal attached Mini App HA Stream for real inbound Entrance media
 ```
 
 There is no HA Long-Lived Access Token.
 
 The browser receives only the filtered states and registry metadata required by
 the Comelit card.
+
+For the intercom Entrance during a real inbound Ring, the Mini App does not use
+`async_request_stream(hass, "camera.comelit_entrance", HLS_PROVIDER)`. Home
+Assistant HLS has no per-browser ownership identity: an HLS URL identifies the
+HA `Stream`, not an individual viewer. The Mini App therefore owns a separate
+internal attached media resource:
+
+```text
+one native attached inbound RTP transport
+  -> one H264 recovery/rewrite state
+  -> local RTP fan-out
+       -> camera/ring SDP: attached-local-rtp.sdp, video 17999 + audio 17808
+       -> Mini App SDP: attached-miniapp-rtp.sdp, video 18099 only
+  -> separate HA Stream objects
+       -> camera.comelit_entrance / ring snapshot-recording provider
+       -> Mini App session-bound HLS proxy provider
+```
+
+The upstream Comelit call/media transaction remains single. Mini App viewers
+refcount only the internal Mini App stream and the
+`miniapp_attached_view` attached-session lease. Closing or expiring the last Mini
+App viewer releases only Mini App ownership and requests ring-media convergence;
+an ordinary HA frontend viewer keeps its independent `camera_view` lease until
+the camera Stream lifecycle releases it. The browser still receives only an
+opaque `/api/comelit/miniapp/media/{media_id}/...` URL, never the local SDP path
+or raw HA HLS source.
 
 ## 7. Surveillance cameras
 
@@ -553,24 +580,22 @@ When the last lease is released or expires, the controller asks
 `RingMediaCoordinator.async_request_stop(viewer_closed|viewer_lease_expired)`.
 The HTTP view never calls attached-media `async_force_stop` or native transport
 cleanup directly. The coordinator owns the ordered cleanup: bounded recording
-stop/cancel, release of the `ring_media` lease and stream consumer, then the
-camera-view cleanup callback
-`camera.async_release_attached_camera_view_if_idle(reason)`. That callback
-releases `camera_view` only for the same `attached_inbound` owner/provider and
-defers only if another integration-owned named provider consumer is present in
-`HAStreamMediaProvider.consumers`. That deferral does not see ordinary Home
-Assistant HLS viewers from the frontend or dashboards; the final `camera_view`
-lease release drives the existing attached-media R58/SIGUSR2 stop path.
+stop/cancel, release of the `ring_media` lease and stream consumer, and release
+of the Mini App's own `miniapp_attached_view` lease and internal HA Stream. It
+does not release `camera_view`; the normal camera Stream lifecycle remains the
+only owner of that lease. The final attached-session lease release drives the
+existing attached-media R58/SIGUSR2 stop path.
 
 Home Assistant HLS idle cleanup (`OUTPUT_IDLE_TIMEOUT`, HA Core ref 2026.9.2)
 does not fit the Mini App's 15-second viewer-loss bound by itself, so Mini App
-close/expiry initiates `camera_view` release explicitly.
+close/expiry releases the explicit Mini App resource instead of trying to infer
+ordinary HA viewers.
 
-### Known limitation: ordinary HA HLS viewers are not visible
+### HA HLS viewer identity and Mini App isolation
 
-The Mini App attached-viewer lease is visible to the integration, but ordinary
-Home Assistant frontend/dashboard HLS viewers are not. HA Core tracks one HLS
-output per `Stream` and per format in
+The Mini App attached-viewer lease is visible to the integration. Ordinary Home
+Assistant frontend/dashboard HLS viewers are not. HA Core tracks one HLS output
+per `Stream` and per format in
 `homeassistant/components/stream/__init__.py` with
 `_outputs: dict[str, StreamOutput]`; `outputs()` returns those format outputs,
 and `add_provider()` reuses `self._outputs[fmt]` for an existing output.
@@ -586,31 +611,25 @@ not an individual client. `homeassistant/components/stream/__init__.py`
 constructs `endpoint_url()` from that token, and
 `homeassistant/components/stream/core.py` resolves the stream by token.
 
-The shared camera path is the same one used by Mini App HLS. In
+The ordinary camera path is intentionally separate from Mini App attached HLS.
+In
 `homeassistant/components/camera/__init__.py`, Home Assistant documents that
 there is at most one stream, meaning one decode worker, per camera.
 `async_request_stream(hass, entity_id, fmt)` calls `stream.add_provider(fmt)`
-and then `stream.endpoint_url(fmt)`, so the Mini App and an ordinary HA viewer
-receive the same HA camera stream.
+and then `stream.endpoint_url(fmt)`. The Mini App therefore does not use that
+API for real inbound attached Entrance media; it creates an internal HA Stream
+from `attached-miniapp-rtp.sdp` instead.
 
 HA 2026.9.2 exposes per-session identity for WebRTC through
 `camera/__init__.py` `async_handle_web_rtc_offer(..., session_id)` and
 `close_webrtc_session(session_id)`. HLS and the attached path do not provide an
 equivalent client identity.
 
-Therefore `OTHER_HA_VIEWER_SURVIVES_MINIAPP_CLOSE=NOT_PROVEN`. Mini App close
-or lease expiry can release `camera_view` and stop the attached transport while
-an ordinary HA HLS viewer is still watching the same camera. This is not proof
-that the ordinary viewer must break, because HA may fail closed or request
-again after attached media closes, but there is no guarantee and the
-integration must not simulate a per-viewer signal.
-
-Open question: the Mini App attached viewer needs its own HA-visible owned
-resource, such as a separate lease/provider/stream object with explicit
-acquire/release, or HA Core needs to expose a per-client HLS lease to
-integrations. Validation requires two independent owners: Mini App close
-releases only Mini App ownership, the ordinary HA HLS client remains active,
-and only the last departure or HA HLS idle causes exactly one transport stop.
+Because Mini App has its own downstream video port and HA Stream, Mini App close
+releases only Mini App ownership. If an ordinary HA viewer owns `camera_view`,
+the upstream attached transport remains active until that camera lease is later
+released. The integration still must not simulate a per-viewer HA HLS signal;
+it relies on explicit local ownership instead.
 
 ## 12.1 WebCodecs transport and diagnostic tab
 

@@ -5,6 +5,7 @@ import importlib.util
 import json
 import logging
 from pathlib import Path
+import struct
 import sys
 import time
 import types
@@ -232,6 +233,7 @@ _install_module(
     H264RecoveryRtpShim=object,
     MEDIA_VIDEO_RTP_PORT=17899,
     MEDIA_VIDEO_HA_RTP_PORT=17999,
+    MEDIA_VIDEO_MINIAPP_RTP_PORT=18099,
     MEDIA_AUDIO_RTP_PORT=17808,
 )
 
@@ -290,6 +292,16 @@ def _attached_media_mod():
     return _load(
         PKG_ROOT / "attached_media.py",
         "custom_components.comelit.attached_media",
+    )
+
+
+def _h264_recovery_mod():
+    module = sys.modules.get("custom_components.comelit.h264_recovery")
+    if module is not None:
+        return module
+    return _load(
+        PKG_ROOT / "h264_recovery.py",
+        "custom_components.comelit.h264_recovery",
     )
 
 
@@ -592,23 +604,35 @@ def test_door_press_rejects_unknown_semantic_target_without_service_call():
     assert hass.services.calls == []
 
 
-def test_camera_uses_one_ha_hls_request_and_returns_only_proxy_capability():
+def test_entrance_camera_uses_miniapp_attached_stream_and_returns_only_proxy_capability():
     controller, hass = _controller()
+    coordinator = _install_attached_ring_coordinator(hass)
     _stream_requests.clear()
     token, session = controller.sessions.create(424242, 12345678)
 
-    proxy_url = asyncio.run(
-        controller.async_create_camera_media(
+    async def run():
+        await controller.async_attached_viewer_event(
+            token,
+            session,
+            action="open",
+            viewer_id="viewer_hls1",
+        )
+        return await controller.async_create_camera_media(
             token,
             session,
             "camera.comelit_entrance",
         )
-    )
 
-    assert _stream_requests == [(hass, "camera.comelit_entrance", "hls")]
+    proxy_url = asyncio.run(run())
+
+    assert _stream_requests == []
     assert proxy_url.startswith("/api/comelit/miniapp/media/")
     assert proxy_url.endswith("/master_playlist.m3u8")
     assert "/api/hls/" not in proxy_url
+    assert coordinator.attached_session.status()["leases"] == {
+        "miniapp_attached_view": 1
+    }
+    assert coordinator.attached_provider.consumers == {"miniapp_attached_view": 1}
 
     media_id = proxy_url.split("/")[5]
     assert (
@@ -617,7 +641,7 @@ def test_camera_uses_one_ha_hls_request_and_returns_only_proxy_capability():
             token,
             "playlist.m3u8",
         )
-        == "/api/hls/deadbeef/playlist.m3u8"
+        == "/api/hls/facefeed/playlist.m3u8"
     )
     assert (
         controller.resolve_media_upstream_path(
@@ -625,8 +649,10 @@ def test_camera_uses_one_ha_hls_request_and_returns_only_proxy_capability():
             token,
             "segment/12.3.m4s",
         )
-        == "/api/hls/deadbeef/segment/12.3.m4s"
+        == "/api/hls/facefeed/segment/12.3.m4s"
     )
+
+    asyncio.run(controller.async_close_attached_viewers_for_shutdown())
 
 
 def test_camera_rejects_unlisted_entity_without_starting_stream():
@@ -2277,6 +2303,70 @@ def test_h264_sdp_access_unit_source_uses_local_rtp_whitelist(monkeypatch):
     ]
 
 
+def _rtp_packet(sequence: int, timestamp: int, payload: bytes, *, payload_type=99):
+    header = bytearray(12)
+    header[0] = 0x80
+    header[1] = payload_type & 0x7F
+    struct.pack_into("!H", header, 2, sequence)
+    struct.pack_into("!I", header, 4, timestamp)
+    struct.pack_into("!I", header, 8, 0x12345678)
+    return bytes(header) + payload
+
+
+def _rtp_sequence(packet: bytes) -> int:
+    return struct.unpack_from("!H", packet, 2)[0]
+
+
+class _FakeDatagramTransport:
+    def __init__(self, *, fail: bool = False):
+        self.fail = fail
+        self.packets: list[bytes] = []
+
+    def sendto(self, packet):
+        if self.fail:
+            raise OSError("closed")
+        self.packets.append(packet)
+
+
+def test_h264_recovery_rtp_fanout_rewrites_once_and_sends_identical_packets():
+    h264_mod = _h264_recovery_mod()
+    ha_sink = _FakeDatagramTransport()
+    miniapp_sink = _FakeDatagramTransport()
+    rewriter = h264_mod.H264RecoveryRewriter()
+    protocol = h264_mod.RecoveryRtpShimProtocol(
+        rewriter,
+        (ha_sink, miniapp_sink),
+    )
+
+    protocol.datagram_received(_rtp_packet(10, 90000, b"\x67\x64"), ("127.0.0.1", 1))
+    protocol.datagram_received(_rtp_packet(11, 90000, b"\x68\xee"), ("127.0.0.1", 1))
+    protocol.datagram_received(_rtp_packet(12, 90000, b"\x41\xb8"), ("127.0.0.1", 1))
+
+    assert rewriter.input_packets == 3
+    assert rewriter.injected_count == 1
+    assert rewriter.output_packets == 4
+    assert ha_sink.packets == miniapp_sink.packets
+    assert [_rtp_sequence(packet) for packet in ha_sink.packets] == [10, 11, 12, 13]
+    assert len(ha_sink.packets) == 4
+
+
+def test_h264_recovery_rtp_fanout_miniapp_sink_failure_keeps_ha_sink_alive():
+    h264_mod = _h264_recovery_mod()
+    ha_sink = _FakeDatagramTransport()
+    failed_miniapp_sink = _FakeDatagramTransport(fail=True)
+    protocol = h264_mod.RecoveryRtpShimProtocol(
+        h264_mod.H264RecoveryRewriter(),
+        (failed_miniapp_sink, ha_sink),
+    )
+    packet = _rtp_packet(20, 180000, b"not-h264", payload_type=98)
+
+    protocol.datagram_received(packet, ("127.0.0.1", 1))
+
+    assert ha_sink.packets == [packet]
+    assert failed_miniapp_sink.packets == []
+    assert protocol.last_error == "fanout_send_exception"
+
+
 def test_webcodecs_entrance_busy_fails_before_second_media_acquire():
     controller, hass = _controller(surveillance_label="Outside")
     manager, _transport = _install_webcodecs_entrance_runtime(hass)
@@ -2720,8 +2810,9 @@ def test_diagnostics_rate_limiter_store_stays_bounded_under_overflow():
     assert view._rate_limiter.bucket_count <= diagnostics_mod.MAX_RATE_LIMIT_SESSIONS
 
 
-def test_entrance_hls_fallback_waits_for_webcodecs_cleanup(monkeypatch):
+def test_entrance_hls_uses_attached_resource_without_ha_camera_request(monkeypatch):
     controller, hass = _controller(surveillance_label="Outside")
+    coordinator = _install_attached_ring_coordinator(hass)
     manager, _transport = _install_webcodecs_entrance_runtime(hass)
     token, session = controller.sessions.create(424242, 12345678)
     manager.phase = "stopping"
@@ -2739,27 +2830,29 @@ def test_entrance_hls_fallback_waits_for_webcodecs_cleanup(monkeypatch):
     monkeypatch.setattr(controller_mod, "async_request_stream", fake_request_stream)
 
     async def run():
-        async def finish_cleanup():
-            await asyncio.sleep(0)
-            manager.phase = "inactive"
-
-        cleanup = asyncio.create_task(finish_cleanup())
+        await controller.async_attached_viewer_event(
+            token,
+            session,
+            action="open",
+            viewer_id="viewer_hls2",
+        )
         result = await controller.async_create_camera_media(
             token,
             session,
             "camera.comelit_entrance",
         )
-        await cleanup
         return result
 
     result = asyncio.run(run())
-    assert stream_phases == [
-        ("inactive", "camera.comelit_entrance", controller_mod.HLS_PROVIDER)
-    ]
+    assert stream_phases == []
     assert result.startswith("/api/comelit/miniapp/media/")
+    assert coordinator.attached_session.status()["leases"] == {
+        "miniapp_attached_view": 1
+    }
+    asyncio.run(controller.async_close_attached_viewers_for_shutdown())
 
 
-def test_entrance_hls_fallback_fails_closed_on_media_error(monkeypatch):
+def test_entrance_hls_fails_closed_without_attached_resource(monkeypatch):
     controller, hass = _controller(surveillance_label="Outside")
     manager, _transport = _install_webcodecs_entrance_runtime(hass)
     token, session = controller.sessions.create(424242, 12345678)
@@ -2779,7 +2872,7 @@ def test_entrance_hls_fallback_fails_closed_on_media_error(monkeypatch):
 
     with pytest.raises(
         controller_mod.MiniAppOperationError,
-        match="webcodecs_cleanup_failed",
+        match="attached_media_stream_unavailable",
     ):
         asyncio.run(
             controller.async_create_camera_media(
@@ -2842,6 +2935,18 @@ def _install_attached_ring_coordinator(hass, *, requested: bool = True):
     coordinator = _FakeAttachedRingCoordinator(requested=requested)
     domain_data = hass.data.setdefault(controller_mod.DOMAIN, {})
     domain_data.setdefault(controller_mod.DATA_RING_MEDIA, {})["entry-1"] = coordinator
+    attached_session = _attached_media_mod().ComelitAttachedRingMediaSession(
+        _FakeAttachedTransport()
+    )
+    attached_provider = _FakeAttachedStreamProvider()
+    domain_data.setdefault(controller_mod.DATA_ATTACHED_MEDIA_SESSIONS, {})[
+        "entry-1"
+    ] = attached_session
+    domain_data.setdefault(controller_mod.DATA_MINIAPP_ATTACHED_MEDIA_PROVIDERS, {})[
+        "entry-1"
+    ] = attached_provider
+    coordinator.attached_session = attached_session
+    coordinator.attached_provider = attached_provider
     return coordinator
 
 
@@ -3127,7 +3232,8 @@ def test_attached_viewer_shutdown_clears_leases_tasks_and_is_idempotent(monkeypa
 
 
 def test_attached_viewer_endpoint_reports_lease_constants():
-    controller, _hass = _controller(surveillance_label="Outside")
+    controller, hass = _controller(surveillance_label="Outside")
+    _install_attached_ring_coordinator(hass)
     token, _session = controller.sessions.create(424242, 12345678)
     view = views_mod.MiniAppAttachedViewerView(controller)
 
@@ -3371,6 +3477,13 @@ class _FakeAttachedStreamProvider:
         self.consumers = {}
         self.release_calls = []
         self.close_calls = 0
+        self.stream = types.SimpleNamespace(
+            set_update_callback=lambda _callback: None,
+            outputs=lambda: {},
+            stop=lambda: None,
+            add_provider=lambda _provider: None,
+            endpoint_url=lambda _provider: "/api/hls/facefeed/master_playlist.m3u8",
+        )
 
     async def async_acquire_consumer(self, reason):
         self.consumers[reason] = self.consumers.get(reason, 0) + 1
@@ -3386,11 +3499,7 @@ class _FakeAttachedStreamProvider:
             await self.async_close()
 
     async def async_get_stream(self):
-        return types.SimpleNamespace(
-            set_update_callback=lambda _callback: None,
-            outputs=lambda: {},
-            stop=lambda: None,
-        )
+        return self.stream
 
     async def async_capture_jpeg(self):
         return None
@@ -3558,15 +3667,18 @@ def _attached_camera_lifecycle(tmp_path, hass):
         hard_limit_seconds=600,
         task_factory=lambda coro, name: asyncio.create_task(coro, name=name),
     )
-    coordinator.set_camera_view_release_callback(
-        camera.async_release_attached_camera_view_if_idle
-    )
     domain_data = hass.data.setdefault(controller_mod.DOMAIN, {})
     domain_data.setdefault(controller_mod.DATA_RING_MEDIA, {})["entry-1"] = coordinator
+    domain_data.setdefault(controller_mod.DATA_ATTACHED_MEDIA_SESSIONS, {})[
+        "entry-1"
+    ] = attached_session
+    domain_data.setdefault(controller_mod.DATA_MINIAPP_ATTACHED_MEDIA_PROVIDERS, {})[
+        "entry-1"
+    ] = _FakeAttachedStreamProvider()
     return coordinator, recorder, camera, attached_session, attached_transport, attached_provider
 
 
-def test_camera_setup_entry_wires_ring_media_release_callback_to_created_camera(
+def test_camera_setup_entry_does_not_wire_ring_media_release_callback(
     tmp_path,
 ):
     controller, hass = _controller(surveillance_label="Outside")
@@ -3611,9 +3723,6 @@ def test_camera_setup_entry_wires_ring_media_release_callback_to_created_camera(
     domain_data.setdefault(camera_mod.DATA_ATTACHED_MEDIA_PROVIDERS, {})[
         entry.entry_id
     ] = attached_provider
-    domain_data.setdefault(camera_mod.DATA_RING_MEDIA, {})[entry.entry_id] = (
-        coordinator
-    )
     added = []
 
     async def run():
@@ -3633,6 +3742,9 @@ def test_camera_setup_entry_wires_ring_media_release_callback_to_created_camera(
         }
         assert await coordinator.async_request_stop("viewer_closed")
         await asyncio.wait_for(_wait_for(lambda: not coordinator.running), timeout=1)
+        assert attached_session.status()["leases"] == {"camera_view": 1}
+        assert attached_session.status()["active"] is True
+        await camera._async_release_camera_view_media()
 
     asyncio.run(run())
     assert attached_session.status()["leases"] == {}
@@ -3680,7 +3792,7 @@ async def _start_attached_ring_with_camera_view(
     assert status["active"] is True
 
 
-def test_attached_ring_close_releases_camera_view_and_stops_once(tmp_path):
+def test_attached_ring_close_preserves_camera_view_then_stops_once(tmp_path):
     controller, hass = _controller(surveillance_label="Outside")
     coordinator, recorder, camera, session, transport, provider = (
         _attached_camera_lifecycle(tmp_path, hass)
@@ -3700,124 +3812,83 @@ def test_attached_ring_close_releases_camera_view_and_stops_once(tmp_path):
         await asyncio.wait_for(_wait_for(lambda: not coordinator.running), timeout=1)
 
     asyncio.run(run())
+    assert session.status()["leases"] == {"camera_view": 1}
+    assert session.status()["active"] is True
+    assert transport.stop_calls == 0
+    assert provider.release_calls == ["ring_media"]
+
+    asyncio.run(camera._async_release_camera_view_media())
     assert session.status()["leases"] == {}
     assert session.status()["active"] is False
     assert transport.stop_calls == 1
     assert provider.release_calls == ["ring_media", "camera_view"]
 
 
-def test_attached_camera_view_release_preserves_new_lease_after_toctou_attach(
-    tmp_path,
-    monkeypatch,
-):
+def test_attached_miniapp_close_preserves_concurrent_camera_view_acquire(tmp_path):
     controller, hass = _controller(surveillance_label="Outside")
     coordinator, recorder, camera, session, transport, provider = (
         _attached_camera_lifecycle(tmp_path, hass)
     )
-    on_demand_manager = camera._manager
-    on_demand_transport = camera._transport
-    on_demand_provider = camera._media_provider
-    original_end_camera_view = camera._async_end_camera_view
-
-    async def acquire_new_lease_before_original_release(reason, **kwargs):
-        assert await camera._async_release_camera_view_media(
-            expected_owner=session,
-            expected_provider=provider,
-            expected_owner_kind="attached_inbound",
-        )
-        assert session.status()["leases"] == {}
-        await on_demand_manager.async_acquire(panel="entrance", reason="camera_view")
-        await on_demand_provider.async_acquire_consumer("camera_view")
-        async with camera._camera_view_lock:
-            camera._camera_view_owner = on_demand_manager
-            camera._camera_view_transport = on_demand_transport
-            camera._camera_view_provider = on_demand_provider
-            camera._camera_view_owner_kind = "on_demand"
-        assert on_demand_manager.status()["leases"] == {"camera_view": 1}
-        assert on_demand_transport.active is True
-        return await original_end_camera_view(reason, **kwargs)
-
-    monkeypatch.setattr(
-        camera,
-        "_async_end_camera_view",
-        acquire_new_lease_before_original_release,
-    )
+    token, miniapp_session = controller.sessions.create(424242, 12345678)
 
     async def run():
-        await _start_attached_ring_with_camera_view(
-            coordinator, recorder, camera, session
+        assert await coordinator.async_start_for_ring(
+            {"door": "entrance", "event_id": "evt_attached_race"}
         )
-        assert await coordinator.async_request_stop("viewer_closed")
-        await asyncio.wait_for(_wait_for(lambda: not coordinator.running), timeout=1)
-
-    asyncio.run(run())
-    assert session.status()["leases"] == {}
-    assert transport.stop_calls == 1
-    assert on_demand_manager.status()["leases"] == {"camera_view": 1}
-    assert on_demand_transport.active is True
-    assert on_demand_manager.release_calls == []
-
-
-def test_attached_camera_view_release_without_toctou_releases_original_lease(
-    tmp_path,
-):
-    controller, hass = _controller(surveillance_label="Outside")
-    coordinator, recorder, camera, session, transport, provider = (
-        _attached_camera_lifecycle(tmp_path, hass)
-    )
-
-    async def run():
-        await _start_attached_ring_with_camera_view(
-            coordinator, recorder, camera, session
+        await asyncio.wait_for(recorder.started.wait(), timeout=1)
+        await controller.async_attached_viewer_event(
+            token,
+            miniapp_session,
+            action="open",
+            viewer_id="viewer_race1",
         )
-        assert await coordinator.async_request_stop("viewer_closed")
-        await asyncio.wait_for(_wait_for(lambda: not coordinator.running), timeout=1)
-
-    asyncio.run(run())
-    assert session.status()["leases"] == {}
-    assert session.status()["active"] is False
-    assert transport.stop_calls == 1
-    assert provider.release_calls == ["ring_media", "camera_view"]
-
-
-def test_camera_view_expected_identity_mismatch_preserves_stream_and_lease(
-    tmp_path,
-):
-    controller, hass = _controller(surveillance_label="Outside")
-    _coordinator, _recorder, camera, session, _transport, provider = (
-        _attached_camera_lifecycle(tmp_path, hass)
-    )
-    wrong_owner = camera._manager
-    wrong_provider = camera._media_provider
-    stream = object()
-
-    async def run():
-        await session.async_acquire(panel="entrance", reason="ring_media")
-        try:
-            await camera._async_acquire_camera_view_media()
-            camera.stream = stream
-            released = await camera._async_end_camera_view(
-                "attached_viewer_released",
-                expected_owner=wrong_owner,
-                expected_provider=wrong_provider,
-                expected_owner_kind="on_demand",
+        close_task = asyncio.create_task(
+            controller.async_attached_viewer_event(
+                token,
+                miniapp_session,
+                action="close",
+                viewer_id="viewer_race1",
             )
-            assert released is False
-            assert camera.stream is stream
-            assert session.status()["leases"] == {
-                "ring_media": 1,
-                "camera_view": 1,
-            }
-            assert provider.release_calls == []
-        finally:
-            await camera._async_release_camera_view_media()
-            await session.async_release(reason="ring_media")
+        )
+        await camera._async_acquire_camera_view_media()
+        await close_task
+        await asyncio.wait_for(_wait_for(lambda: not coordinator.running), timeout=1)
+        assert session.status()["leases"] == {"camera_view": 1}
+        assert transport.stop_calls == 0
+        await camera._async_release_camera_view_media()
 
     asyncio.run(run())
-    assert camera.stream is stream
+    assert session.status()["leases"] == {}
+    assert transport.stop_calls == 1
+    assert provider.release_calls == ["ring_media", "camera_view"]
 
 
-def test_attached_ring_lease_expiry_releases_camera_view_and_stops_once(
+def test_ring_media_viewer_stop_preserves_original_camera_view_lease(
+    tmp_path,
+):
+    controller, hass = _controller(surveillance_label="Outside")
+    coordinator, recorder, camera, session, transport, provider = (
+        _attached_camera_lifecycle(tmp_path, hass)
+    )
+
+    async def run():
+        await _start_attached_ring_with_camera_view(
+            coordinator, recorder, camera, session
+        )
+        assert await coordinator.async_request_stop("viewer_closed")
+        await asyncio.wait_for(_wait_for(lambda: not coordinator.running), timeout=1)
+
+    asyncio.run(run())
+    assert session.status()["leases"] == {"camera_view": 1}
+    assert session.status()["active"] is True
+    assert transport.stop_calls == 0
+    assert provider.release_calls == ["ring_media"]
+    asyncio.run(camera._async_release_camera_view_media())
+    assert transport.stop_calls == 1
+    assert provider.release_calls == ["ring_media", "camera_view"]
+
+
+def test_attached_ring_lease_expiry_preserves_camera_view_and_stops_once(
     tmp_path,
     monkeypatch,
 ):
@@ -3851,6 +3922,11 @@ def test_attached_ring_lease_expiry_releases_camera_view_and_stops_once(
         await asyncio.wait_for(_wait_for(lambda: not coordinator.running), timeout=1)
 
     asyncio.run(run())
+    assert session.status()["leases"] == {"camera_view": 1}
+    assert session.status()["active"] is True
+    assert transport.stop_calls == 0
+    assert provider.release_calls == ["ring_media"]
+    asyncio.run(camera._async_release_camera_view_media())
     assert session.status()["leases"] == {}
     assert session.status()["active"] is False
     assert transport.stop_calls == 1
@@ -3907,6 +3983,8 @@ def test_attached_ring_reopen_after_teardown_fails_closed_with_exact_reason(tmp_
             token, miniapp_session, action="close", viewer_id="viewer_reopen"
         )
         await asyncio.wait_for(_wait_for(lambda: not coordinator.running), timeout=1)
+        assert session.status()["leases"] == {"camera_view": 1}
+        await camera._async_release_camera_view_media()
         assert session.status()["leases"] == {}
         assert session.status()["active"] is False
 

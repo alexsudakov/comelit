@@ -35,6 +35,7 @@ from .const import (
     DATA_MEDIA_PROVIDERS,
     DATA_MEDIA_SESSIONS,
     DATA_MEDIA_TRANSPORTS,
+    DATA_MINIAPP_ATTACHED_MEDIA_PROVIDERS,
     DATA_MINIAPP,
     DATA_RING_MEDIA,
     DATA_RUNTIMES,
@@ -249,6 +250,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             DATA_ATTACHED_MEDIA_PROVIDERS, {}
         )
         attached_providers[entry.entry_id] = ring_media_provider
+        miniapp_attached_provider = HAStreamMediaProvider(
+            hass,
+            attached_session,
+            attached_transport,
+            local_sdp_path_attr="miniapp_local_sdp_path",
+            local_sdp_ready_attr="miniapp_local_sdp_ready",
+            stream_label="comelit_miniapp_attached",
+        )
+        miniapp_attached_providers = domain_data.setdefault(
+            DATA_MINIAPP_ATTACHED_MEDIA_PROVIDERS, {}
+        )
+        miniapp_attached_providers[entry.entry_id] = miniapp_attached_provider
         ring_media = RingMediaCoordinator(
             hass,
             attached_session,
@@ -307,6 +320,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     media_providers = domain_data.get(DATA_MEDIA_PROVIDERS, {})
     attached_sessions = domain_data.get(DATA_ATTACHED_MEDIA_SESSIONS, {})
     attached_providers = domain_data.get(DATA_ATTACHED_MEDIA_PROVIDERS, {})
+    miniapp_attached_providers = domain_data.get(
+        DATA_MINIAPP_ATTACHED_MEDIA_PROVIDERS, {}
+    )
     attached_transports = domain_data.get(DATA_ATTACHED_MEDIA_TRANSPORTS, {})
     ring_media_lifecycles = domain_data.get(DATA_RING_MEDIA, {})
     synthetic_lifecycles = domain_data.get(DATA_SYNTHETIC_RING_MEDIA, {})
@@ -321,6 +337,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     media_providers.pop(entry.entry_id, None)
     attached_session = attached_sessions.pop(entry.entry_id, None)
     attached_providers.pop(entry.entry_id, None)
+    miniapp_attached_providers.pop(entry.entry_id, None)
     attached_transports.pop(entry.entry_id, None)
     ring_media = ring_media_lifecycles.pop(entry.entry_id, None)
     synthetic_ring_media = synthetic_lifecycles.pop(entry.entry_id, None)

@@ -336,7 +336,7 @@
         action,
         viewer_id: viewerId,
       });
-      fetch(ATTACHED_VIEWER_ENDPOINT, {
+      return fetch(ATTACHED_VIEWER_ENDPOINT, {
         method: "POST",
         credentials: "same-origin",
         keepalive,
@@ -348,12 +348,12 @@
       }).catch(() => {});
     }
 
-    _startAttachedViewerLease() {
+    async _startAttachedViewerLease() {
       if (this._attachedViewerOpen) {
         return;
       }
       this._attachedViewerOpen = true;
-      this._sendAttachedViewerEvent("open");
+      await this._sendAttachedViewerEvent("open");
       this._attachedViewerHeartbeatTimer = setInterval(() => {
         if (this._attachedViewerOpen && this.isConnected) {
           this._sendAttachedViewerEvent("heartbeat");
@@ -1724,8 +1724,11 @@
       this._startDiagnostics(entityId, generation);
 
       if (isIntercomCameraEntity(entityId)) {
-        this._startAttachedViewerLease();
-        this._openHls(entityId, generation);
+        this._startAttachedViewerLease().then(() => {
+          if (generation === this._requestGeneration) {
+            this._openHls(entityId, generation);
+          }
+        });
       } else {
         this._openMSE(entityId, generation);
       }

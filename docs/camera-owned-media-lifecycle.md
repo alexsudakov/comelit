@@ -36,12 +36,14 @@ CALL_INIT
   -> camera live-stream request
   -> camera_view joins ComelitAttachedRingMediaSession
   -> same upstream call transaction
-  -> same HAStreamMediaProvider / same HA Stream
+  -> camera/ring HAStreamMediaProvider
+  -> camera/ring HA Stream
 ```
 
-The shared HA Stream consumer registry prevents a second local PyAV/RTP consumer from
-binding the same loopback RTP ports. Ring snapshot/recording and camera live view can
-therefore coexist on one Stream object.
+Ring snapshot/recording and ordinary `camera.comelit_entrance` live view share
+the camera/ring HAStreamMediaProvider and its local SDP. The Mini App attached
+viewer no longer shares this HA Stream; it has a separate internal downstream
+SDP/HA Stream while still sharing the same upstream Comelit attached transport.
 
 A two-second bounded local wait covers the race where the persistent listener has
 already marked inbound media busy but the Ring coordinator has not yet claimed the
@@ -93,12 +95,14 @@ Typical inbound Ring plus user viewing:
 CALL_INIT -> ring_media acquires attached media + shared HA Stream
 Mini App Entrance viewer opens HLS through the session-bound proxy
 viewer sends /api/comelit/miniapp/attached-viewer open + heartbeat
+-> miniapp_attached_view acquires attached media + internal Mini App HA Stream
 20-second recording completes, or is bounded-cancelled on viewer termination
 ring_media remains held while a terminal condition has not occurred
 remote/native media close OR last Mini App Entrance viewer close/expiry
 -> ring_media releases
-camera_view releases on the same owner becoming inactive
-consumers = {} -> HA Stream closes
+-> miniapp_attached_view releases its internal Mini App HA Stream
+camera_view remains if an ordinary HA frontend viewer is active
+last camera_view release -> attached transport stops once
 ```
 
 The 20-second recording target is **not** the lifetime of the inbound call. For a real
@@ -112,21 +116,15 @@ authoritative if the WebView disappears.
 If the viewer terminates during recording, the coordinator first asks the HA
 Stream recording task to stop/cancel in bounded fashion. A non-empty partial
 file is reported as `truncated`; otherwise the recording result is `failed`.
-Only then does `ring_media` release its attached-media lease and HA Stream
-consumer. The camera-view cleanup callback then releases `camera_view` only for
-the same `attached_inbound` owner/provider. Cleanup is deferred with
-`camera_view_release_deferred` only when another integration-owned named
-provider consumer is still present in `HAStreamMediaProvider.consumers`; that
-guard does not observe ordinary Home Assistant HLS viewers from the frontend or
-dashboards. The compare-and-release path under `_camera_view_lock` drops the
-final `camera_view` lease, allowing the existing R58/SIGUSR2 cleanup path to
-close the inbound media transport. A 600-second defense-in-depth ceiling remains
-in case neither remote close nor viewer termination is observed.
+Only then does `ring_media` release its attached-media lease and camera/ring HA
+Stream consumer. Mini App close/expiry does not release `camera_view`. The
+ordinary camera monitor remains the sole owner of camera-view release, so a
+dashboard/frontend viewer can continue on the camera/ring stream after the Mini
+App exits. The existing R58/SIGUSR2 stop path runs only after the last attached
+session owner is gone. A 600-second defense-in-depth ceiling remains in case
+neither remote close nor viewer termination is observed.
 
-Direct cleanup cannot close a shared HA Stream while a named integration-owned
-provider consumer remains.
-
-## Known limitation: ordinary HA HLS viewers are not visible
+## HLS viewer identity and explicit Mini App ownership
 
 Home Assistant Core does not expose a per-viewer registry for HLS clients on
 the camera stream path used here. In HA 2026.9.2,
@@ -159,20 +157,30 @@ HA 2026.9.2 has per-session identity for WebRTC through
 `close_webrtc_session(session_id)`. The HLS and attached-camera path has no
 equivalent client identity.
 
-The direct consequence is
-`OTHER_HA_VIEWER_SURVIVES_MINIAPP_CLOSE=NOT_PROVEN`. Mini App close or lease
-expiry can release `camera_view` and stop the attached transport while an
-ordinary HA HLS viewer is still watching the same camera. This does not prove
-that the viewer will necessarily break, because after attached media closes HA
-may fail closed or request again, but there is no guarantee and the integration
-must not simulate a per-viewer signal.
+The integration therefore does not infer ordinary HA viewers from
+`provider.consumers`, HLS idle, or `/api/hls/<token>/...` traffic. Instead, Mini
+App attached viewing is represented by an explicit owned resource:
 
-Open question: the Mini App attached viewer needs either its own HA-visible
-owned resource, such as a separate lease/provider/stream object with explicit
-acquire/release, or a per-client HLS lease that HA Core exposes to integrations.
-Validation requires two independent owners: Mini App close releases only Mini
-App ownership, the ordinary HA HLS client remains active, and only the last
-departure or HA HLS idle produces exactly one transport stop.
+```text
+native attached inbound RTP video 17899
+  -> one H264RecoveryRtpShim / one rewrite state
+  -> fan-out to camera/ring video 17999
+  -> fan-out to Mini App video 18099
+```
+
+The camera/ring SDP remains `attached-local-rtp.sdp` with video 17999 and audio
+17808. The Mini App SDP is `attached-miniapp-rtp.sdp` with video 18099 only; the
+Mini App browser player is muted and no second Comelit audio transport is
+created. These ports are distinct, so two HA Stream objects never read the same
+local UDP sink.
+
+Mini App OPEN acquires `miniapp_attached_view`, creates/reuses the internal Mini
+App HA Stream, and increments a viewer refcount. Closing one of multiple Mini
+App viewers decrements only that refcount. Closing or expiring the last Mini App
+viewer closes the internal Mini App stream, releases `miniapp_attached_view`,
+and requests `ring_media` stop. If `camera_view` is still present, the upstream
+attached transport remains active; only the later camera-view release reaches
+zero attached-session leases and performs exactly one transport stop.
 
 ## Switch migration
 

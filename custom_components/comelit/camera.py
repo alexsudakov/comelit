@@ -31,7 +31,6 @@ from .const import (
     DATA_MEDIA_PROVIDERS,
     DATA_MEDIA_SESSIONS,
     DATA_MEDIA_TRANSPORTS,
-    DATA_RING_MEDIA,
     DOMAIN,
     ENTRANCE_CAMERA_ENTITY_ID,
     ENTRANCE_CAMERA_UNIQUE_ID,
@@ -259,16 +258,6 @@ async def async_setup_entry(
             attached_transport=attached_transport,
             attached_provider=attached_provider,
         )
-        ring_media = domain_data.get(DATA_RING_MEDIA, {}).get(entry.entry_id)
-        set_camera_view_release_callback = getattr(
-            ring_media,
-            "set_camera_view_release_callback",
-            None,
-        )
-        if callable(set_camera_view_release_callback):
-            set_camera_view_release_callback(
-                camera.async_release_attached_camera_view_if_idle
-            )
         async_add_entities([camera])
 
 
@@ -798,31 +787,13 @@ class ComelitEntranceCamera(Camera):
                 owner_kind="on_demand",
             )
 
-    async def _async_release_camera_view_media(
-        self,
-        *,
-        expected_owner: (
-            ComelitMediaSessionManager | ComelitAttachedRingMediaSession | None
-        ) = None,
-        expected_provider: HAStreamMediaProvider | None = None,
-        expected_owner_kind: str | None = None,
-    ) -> bool:
+    async def _async_release_camera_view_media(self) -> bool:
         timeline = self._latency_timeline
         if timeline is not None and not timeline.emitted:
             self._emit_latency_log(timeline)
         async with self._camera_view_lock:
             owner = self._camera_view_owner
             provider = self._camera_view_provider
-            owner_kind = self._camera_view_owner_kind
-            if (
-                expected_owner is not None
-                and (
-                    owner is not expected_owner
-                    or provider is not expected_provider
-                    or owner_kind != expected_owner_kind
-                )
-            ):
-                return False
             self._camera_view_owner = None
             self._camera_view_transport = None
             self._camera_view_provider = None
@@ -842,45 +813,6 @@ class ComelitEntranceCamera(Camera):
             except Exception:
                 _LOGGER.exception("Failed to release Comelit camera-view media lease")
             return True
-
-    async def async_release_attached_camera_view_if_idle(self, reason: str) -> bool:
-        """Release the Mini App attached HLS camera-view lease when it is alone."""
-        async with self._camera_view_lock:
-            owner = self._camera_view_owner
-            provider = self._camera_view_provider
-            if (
-                self._camera_view_owner_kind != "attached_inbound"
-                or owner is None
-                or provider is None
-                or owner is not self._attached_session
-                or provider is not self._attached_provider
-            ):
-                return False
-
-            consumers = getattr(provider, "consumers", {})
-            if callable(consumers):
-                consumers = consumers()
-            consumers = dict(consumers)
-            other_consumers = {
-                name: count
-                for name, count in consumers.items()
-                if name != _CAMERA_VIEW_LEASE_REASON and count
-            }
-            if other_consumers:
-                _LOGGER.info(
-                    "Comelit camera_view_release_deferred reason=%s consumer_count=%s",
-                    reason,
-                    len(other_consumers),
-                )
-                return False
-
-        _LOGGER.info("Comelit camera_view_release_requested reason=%s", reason)
-        return await self._async_end_camera_view(
-            "attached_viewer_released",
-            expected_owner=owner,
-            expected_provider=provider,
-            expected_owner_kind="attached_inbound",
-        )
 
     async def stream_source(self) -> str | None:
         """Return the local SDP for the camera-owned live-view lease."""
@@ -1098,31 +1030,10 @@ class ComelitEntranceCamera(Camera):
             if self._camera_view_monitor_task is asyncio.current_task():
                 self._camera_view_monitor_task = None
 
-    async def _async_end_camera_view(
-        self,
-        reason: str,
-        *,
-        expected_owner: (
-            ComelitMediaSessionManager | ComelitAttachedRingMediaSession | None
-        ) = None,
-        expected_provider: HAStreamMediaProvider | None = None,
-        expected_owner_kind: str | None = None,
-    ) -> bool:
+    async def _async_end_camera_view(self, reason: str) -> bool:
         _LOGGER.debug("Ending Comelit camera live view: %s", reason)
-        if expected_owner is not None:
-            async with self._camera_view_lock:
-                if (
-                    self._camera_view_owner is not expected_owner
-                    or self._camera_view_provider is not expected_provider
-                    or self._camera_view_owner_kind != expected_owner_kind
-                ):
-                    return False
         await self._async_reset_stream()
-        return await self._async_release_camera_view_media(
-            expected_owner=expected_owner,
-            expected_provider=expected_provider,
-            expected_owner_kind=expected_owner_kind,
-        )
+        return await self._async_release_camera_view_media()
 
     async def _async_reset_stream(self) -> None:
         """Detach the camera entity without stopping a Ring-shared HA Stream.

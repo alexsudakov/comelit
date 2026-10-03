@@ -26,6 +26,8 @@ from ..const import (
     CONF_MINIAPP_SURVEILLANCE_LABEL,
     DATA_MEDIA_SESSIONS,
     DATA_MEDIA_TRANSPORTS,
+    DATA_ATTACHED_MEDIA_SESSIONS,
+    DATA_MINIAPP_ATTACHED_MEDIA_PROVIDERS,
     DATA_RING_MEDIA,
     DOMAIN,
     DOOR_ENTRANCE,
@@ -81,6 +83,7 @@ _WEBCODECS_HLS_FALLBACK_CLEANUP_SECONDS = 5.0
 _WEBCODECS_ENTRANCE_PARK_SECONDS = 60.0
 _WEBCODECS_ENTRANCE_VIEWER_REASON = "miniapp_webcodecs"
 _WEBCODECS_ENTRANCE_PARK_REASON = "miniapp_webcodecs_park"
+_MINIAPP_ATTACHED_VIEW_REASON = "miniapp_attached_view"
 ATTACHED_VIEWER_HEARTBEAT_INTERVAL_SECONDS = 5
 ATTACHED_VIEWER_LEASE_EXPIRY_SECONDS = 15
 _ATTACHED_VIEWER_ACTIONS = frozenset({"open", "heartbeat", "close"})
@@ -158,6 +161,14 @@ class _AttachedViewerLease:
     heartbeat_logged: bool = False
 
 
+@dataclass(slots=True)
+class _MiniAppAttachedResource:
+    session: Any
+    provider: Any
+    refcount: int = 0
+    stream: Any | None = None
+
+
 def _parse_allowed_user_ids(value: object) -> frozenset[int]:
     if isinstance(value, (list, tuple, set, frozenset)):
         raw_items = value
@@ -204,6 +215,7 @@ class ComelitMiniAppController:
         self._webcodecs_entrance_park_held = False
         self._attached_viewer_lock = asyncio.Lock()
         self._attached_viewers: dict[tuple[str, str], _AttachedViewerLease] = {}
+        self._miniapp_attached_resource: _MiniAppAttachedResource | None = None
 
     def set_entry(self, entry: ConfigEntry) -> None:
         self._entry = entry
@@ -340,6 +352,113 @@ class ComelitMiniAppController:
             .get(entry_id)
         )
 
+    def _miniapp_attached_runtime(self) -> tuple[Any, Any]:
+        entry = self._entry
+        entry_id = getattr(entry, "entry_id", None) if entry is not None else None
+        if not isinstance(entry_id, str) or not entry_id:
+            raise MiniAppOperationError("attached_media_unavailable")
+        domain_data = self.hass.data.get(DOMAIN, {})
+        session = domain_data.get(DATA_ATTACHED_MEDIA_SESSIONS, {}).get(entry_id)
+        provider = domain_data.get(DATA_MINIAPP_ATTACHED_MEDIA_PROVIDERS, {}).get(
+            entry_id
+        )
+        if session is None or provider is None:
+            raise MiniAppOperationError("attached_media_unavailable")
+        return session, provider
+
+    async def _ensure_miniapp_attached_resource_locked(self) -> None:
+        resource = self._miniapp_attached_resource
+        if resource is not None:
+            resource.refcount += 1
+            _LOGGER.info(
+                "miniapp_attached_stream_reused miniapp_attached_viewers=%s "
+                "miniapp_attached_stream_active=true",
+                resource.refcount,
+            )
+            return
+
+        session, provider = self._miniapp_attached_runtime()
+        lease_acquired = False
+        consumer_acquired = False
+        try:
+            await session.async_acquire(
+                panel="entrance",
+                reason=_MINIAPP_ATTACHED_VIEW_REASON,
+            )
+            lease_acquired = True
+            await provider.async_acquire_consumer(_MINIAPP_ATTACHED_VIEW_REASON)
+            consumer_acquired = True
+            stream = await provider.async_get_stream()
+            if stream is None:
+                raise MiniAppOperationError("attached_media_stream_unavailable")
+            add_provider = getattr(stream, "add_provider", None)
+            if callable(add_provider):
+                result = add_provider(HLS_PROVIDER)
+                if asyncio.iscoroutine(result):
+                    await result
+        except Exception:
+            if consumer_acquired:
+                try:
+                    release_consumer = getattr(
+                        provider,
+                        "async_release_consumer",
+                        None,
+                    )
+                    if not callable(release_consumer):
+                        raise MiniAppOperationError(
+                            "attached_media_stream_unavailable"
+                        )
+                    await release_consumer(_MINIAPP_ATTACHED_VIEW_REASON)
+                except Exception:
+                    _LOGGER.exception("Mini App attached stream consumer cleanup failed")
+            if lease_acquired:
+                await session.async_release(reason=_MINIAPP_ATTACHED_VIEW_REASON)
+            raise
+
+        self._miniapp_attached_resource = _MiniAppAttachedResource(
+            session=session,
+            provider=provider,
+            refcount=1,
+            stream=stream,
+        )
+        _LOGGER.info(
+            "miniapp_attached_stream_created miniapp_attached_viewers=1 "
+            "miniapp_attached_stream_active=true"
+        )
+
+    async def _release_miniapp_attached_resource_locked(self) -> None:
+        resource = self._miniapp_attached_resource
+        if resource is None:
+            return
+        resource.refcount = max(0, resource.refcount - 1)
+        if resource.refcount > 0:
+            return
+
+        self._miniapp_attached_resource = None
+        try:
+            await resource.provider.async_release_consumer(
+                _MINIAPP_ATTACHED_VIEW_REASON
+            )
+        finally:
+            await resource.session.async_release(reason=_MINIAPP_ATTACHED_VIEW_REASON)
+        _LOGGER.info(
+            "miniapp_attached_stream_closed miniapp_attached_viewers=0 "
+            "miniapp_attached_stream_active=false"
+        )
+
+    def _miniapp_attached_hls_master_path_locked(self) -> str | None:
+        resource = self._miniapp_attached_resource
+        stream = resource.stream if resource is not None else None
+        if stream is None:
+            return None
+        endpoint_url = getattr(stream, "endpoint_url", None)
+        if not callable(endpoint_url):
+            return None
+        upstream_master = endpoint_url(HLS_PROVIDER)
+        if not isinstance(upstream_master, str):
+            return None
+        return upstream_master
+
     async def _request_attached_ring_stop(
         self,
         reason: str,
@@ -388,6 +507,7 @@ class ComelitMiniAppController:
             self._attached_viewers.pop(key, None)
             request_stop = not self._attached_viewers
             viewer_count = len(self._attached_viewers)
+            await self._release_miniapp_attached_resource_locked()
 
         _LOGGER.info(
             "Comelit attached_viewer_expired viewer_count=%s",
@@ -464,6 +584,12 @@ class ComelitMiniAppController:
                     viewer_id,
                     expires_at,
                 )
+                if existing is None:
+                    try:
+                        await self._ensure_miniapp_attached_resource_locked()
+                    except Exception:
+                        task.cancel()
+                        raise
                 self._attached_viewers[key] = _AttachedViewerLease(
                     token=session_token,
                     viewer_id=viewer_id,
@@ -475,6 +601,8 @@ class ComelitMiniAppController:
             else:
                 viewer_count = len(self._attached_viewers)
                 request_stop = existing is not None and viewer_count == 0
+                if existing is not None:
+                    await self._release_miniapp_attached_resource_locked()
 
         if action == "open":
             _LOGGER.info("Comelit attached_viewer_open viewer_count=%s", viewer_count)
@@ -503,6 +631,8 @@ class ComelitMiniAppController:
         async with self._attached_viewer_lock:
             leases = list(self._attached_viewers.values())
             self._attached_viewers.clear()
+            for _lease in leases:
+                await self._release_miniapp_attached_resource_locked()
         for lease in leases:
             lease.task.cancel()
         if leases:
@@ -980,6 +1110,15 @@ class ComelitMiniAppController:
         )
         await self._await_webcodecs_manager_cleanup(manager)
 
+    def _is_entrance_camera_entity(self, entity_id: str) -> bool:
+        registry = er.async_get(self.hass)
+        registry_entry = registry.async_get(entity_id)
+        return (
+            registry_entry is not None
+            and registry_entry.platform == DOMAIN
+            and registry_entry.unique_id == ENTRANCE_CAMERA_UNIQUE_ID
+        )
+
     async def async_create_camera_media(
         self,
         session_token: str,
@@ -993,17 +1132,21 @@ class ComelitMiniAppController:
         if state is None or state.state == STATE_UNAVAILABLE:
             raise MiniAppOperationError("camera is unavailable")
 
-        await self._await_webcodecs_entrance_cleanup(entity_id)
+        if self._is_entrance_camera_entity(entity_id):
+            async with self._attached_viewer_lock:
+                upstream_master = self._miniapp_attached_hls_master_path_locked()
+            if upstream_master is None:
+                raise MiniAppOperationError("attached_media_stream_unavailable")
+        else:
+            await self._await_webcodecs_entrance_cleanup(entity_id)
 
-        # Use Home Assistant's normal camera stream API. For
-        # camera.comelit_entrance this enters ComelitEntranceCamera's existing
-        # camera-owned lifecycle. The HA HLS capability itself remains inside
-        # Home Assistant; the WebView receives only a session-bound proxy path.
-        upstream_master = await async_request_stream(
-            self.hass,
-            entity_id,
-            HLS_PROVIDER,
-        )
+            # Use Home Assistant's normal camera stream API for ordinary
+            # cameras. The WebView receives only a session-bound proxy path.
+            upstream_master = await async_request_stream(
+                self.hass,
+                entity_id,
+                HLS_PROVIDER,
+            )
         if _HLS_MASTER_PATH.fullmatch(upstream_master) is None:
             raise MiniAppOperationError("unexpected Home Assistant HLS path")
 

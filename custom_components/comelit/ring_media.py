@@ -110,9 +110,6 @@ TaskFactory = Callable[
     [Coroutine[Any, Any, None], str],
     asyncio.Task[None],
 ]
-CameraViewReleaseCallback = Callable[[str], Awaitable[bool]]
-
-
 @dataclass(frozen=True)
 class RingMediaPaths:
     root: Path
@@ -172,11 +169,17 @@ class HAStreamMediaProvider:
         transport: Any,
         *,
         camera_entity: str = ENTRANCE_CAMERA_ENTITY_ID,
+        local_sdp_path_attr: str = "local_sdp_path",
+        local_sdp_ready_attr: str = "local_sdp_ready",
+        stream_label: str | None = None,
     ) -> None:
         self._hass = hass
         self._manager = manager
         self._transport = transport
         self._camera_entity = camera_entity
+        self._local_sdp_path_attr = local_sdp_path_attr
+        self._local_sdp_ready_attr = local_sdp_ready_attr
+        self._stream_label = stream_label or camera_entity
         self._stream: Any | None = None
         self._create_stream_lock: asyncio.Lock | None = None
         self._consumer_lock = asyncio.Lock()
@@ -212,9 +215,11 @@ class HAStreamMediaProvider:
     async def _async_stream_source(self) -> str | None:
         if not self._manager.active:
             return None
-        path = self._transport.local_sdp_path
+        path = getattr(self._transport, self._local_sdp_path_attr, None)
+        if path is None:
+            return None
         ready = await self._hass.async_add_executor_job(
-            lambda: self._transport.local_sdp_ready
+            lambda: bool(getattr(self._transport, self._local_sdp_ready_attr, False))
         )
         if not ready:
             return None
@@ -248,7 +253,7 @@ class HAStreamMediaProvider:
                     self._hass,
                     self._camera_entity,
                 ),
-                stream_label=self._camera_entity,
+                stream_label=self._stream_label,
             )
             self._hass.data[STREAM_DOMAIN][ATTR_STREAMS].append(stream)
             self._stream = stream
@@ -363,14 +368,6 @@ class RingMediaCoordinator:
         self._last_recording_result: dict[str, object] | None = None
         self._ring_end_reason: str | None = None
         self._attach_failure_recorder: Callable[[str | None], None] | None = None
-        self._camera_view_release_callback: CameraViewReleaseCallback | None = None
-
-    def set_camera_view_release_callback(
-        self,
-        callback: CameraViewReleaseCallback | None,
-    ) -> None:
-        """Register the camera-owned attached-view lease cleanup callback."""
-        self._camera_view_release_callback = callback
 
     def set_attach_failure_recorder(
         self,
@@ -732,24 +729,6 @@ class RingMediaCoordinator:
                         _LOGGER.exception(
                             "Comelit ring media stream-consumer release failed"
                         )
-                if self._ring_end_reason in {
-                    RING_END_VIEWER_CLOSED,
-                    RING_END_VIEWER_LEASE_EXPIRED,
-                }:
-                    release_camera_view = self._camera_view_release_callback
-                    if release_camera_view is not None:
-                        try:
-                            released = await release_camera_view(self._ring_end_reason)
-                        except Exception:
-                            _LOGGER.exception(
-                                "Comelit attached camera-view release failed"
-                            )
-                        else:
-                            _LOGGER.info(
-                                "Comelit camera_view_release_observed reason=%s released=%s",
-                                self._ring_end_reason,
-                                bool(released),
-                            )
             else:
                 close = getattr(self._snapshot_provider, "async_close", None)
                 if close is not None:
