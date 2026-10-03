@@ -633,6 +633,12 @@ def test_entrance_camera_uses_miniapp_attached_stream_and_returns_only_proxy_cap
         "miniapp_attached_view": 1
     }
     assert coordinator.attached_provider.consumers == {"miniapp_attached_view": 1}
+    assert coordinator.attached_session._transport.activate_miniapp_output_calls == 1
+    assert coordinator.attached_provider.events == [
+        "add_provider",
+        "start",
+        "activate_miniapp_output",
+    ]
 
     media_id = proxy_url.split("/")[5]
     assert (
@@ -653,6 +659,10 @@ def test_entrance_camera_uses_miniapp_attached_stream_and_returns_only_proxy_cap
     )
 
     asyncio.run(controller.async_close_attached_viewers_for_shutdown())
+    assert (
+        coordinator.attached_session._transport.deactivate_miniapp_output_calls
+        == 1
+    )
 
 
 def test_camera_rejects_unlisted_entity_without_starting_stream():
@@ -2935,10 +2945,14 @@ def _install_attached_ring_coordinator(hass, *, requested: bool = True):
     coordinator = _FakeAttachedRingCoordinator(requested=requested)
     domain_data = hass.data.setdefault(controller_mod.DOMAIN, {})
     domain_data.setdefault(controller_mod.DATA_RING_MEDIA, {})["entry-1"] = coordinator
-    attached_session = _attached_media_mod().ComelitAttachedRingMediaSession(
-        _FakeAttachedTransport()
-    )
+    attached_transport = _FakeAttachedTransport()
     attached_provider = _FakeAttachedStreamProvider()
+    events: list[str] = []
+    attached_transport.events = events
+    attached_provider.events = events
+    attached_session = _attached_media_mod().ComelitAttachedRingMediaSession(
+        attached_transport
+    )
     domain_data.setdefault(controller_mod.DATA_ATTACHED_MEDIA_SESSIONS, {})[
         "entry-1"
     ] = attached_session
@@ -2947,6 +2961,7 @@ def _install_attached_ring_coordinator(hass, *, requested: bool = True):
     ] = attached_provider
     coordinator.attached_session = attached_session
     coordinator.attached_provider = attached_provider
+    coordinator.attached_transport = attached_transport
     return coordinator
 
 
@@ -3032,6 +3047,49 @@ def test_attached_viewer_heartbeats_keep_lease_alive_until_close(monkeypatch):
 
     asyncio.run(run())
     assert coordinator.requests == ["viewer_closed"]
+
+
+def test_attached_viewer_last_close_stopped_transport_deactivate_is_best_effort(
+    caplog,
+):
+    controller, hass = _controller(surveillance_label="Outside")
+    coordinator = _install_attached_ring_coordinator(hass)
+    token, session = controller.sessions.create(424242, 12345678)
+    original_release = coordinator.attached_session.async_release
+
+    async def stopped_release(*, reason):
+        result = await original_release(reason=reason)
+        coordinator.attached_session._transport.active = False
+        return result
+
+    coordinator.attached_session.async_release = stopped_release
+
+    async def run():
+        await controller.async_attached_viewer_event(
+            token, session, action="open", viewer_id="viewer_stopped1"
+        )
+        with caplog.at_level(
+            logging.WARNING,
+            logger="custom_components.comelit.miniapp.controller",
+        ):
+            await controller.async_attached_viewer_event(
+                token, session, action="close", viewer_id="viewer_stopped1"
+            )
+
+    asyncio.run(run())
+
+    assert coordinator.requests == ["viewer_closed"]
+    assert (
+        coordinator.attached_session._transport.deactivate_miniapp_output_calls
+        == 1
+    )
+    assert not [
+        record
+        for record in caplog.records
+        if record.levelno >= logging.ERROR
+        and "Mini App attached" in record.getMessage()
+        and "deactivate" in record.getMessage()
+    ]
 
 
 def test_attached_viewer_two_viewers_release_last_only():
@@ -3444,6 +3502,165 @@ class _FakeSnapshotProvider:
         return None
 
 
+class _FakeAttachedRuntime:
+    running = True
+    listener_ready = True
+    attached_media_open = True
+
+    async def async_wait_attached_media_open(self, timeout):
+        return True
+
+    async def async_wait_attached_media_closed(self, timeout):
+        return False
+
+    async def async_stop_attached_media(self, timeout):
+        return True
+
+
+class _FakeAttachedShim:
+    def __init__(self):
+        self.activations: list[int] = []
+        self.deactivations: list[int] = []
+        self.deactivate_error: Exception | None = None
+
+    async def async_activate_output_port(self, port):
+        self.activations.append(port)
+
+    async def async_deactivate_output_port(self, port):
+        if self.deactivate_error is not None:
+            raise self.deactivate_error
+        self.deactivations.append(port)
+
+
+def test_async_wait_for_udp_listener_returns_true_after_ordered_probe():
+    attached_media_mod = _attached_media_mod()
+    calls: list[int] = []
+    values = iter([False, False, True])
+    now = 0.0
+
+    def clock():
+        return now
+
+    async def sleep(delay):
+        nonlocal now
+        now += delay
+
+    def probe(port):
+        calls.append(port)
+        return next(values)
+
+    result = asyncio.run(
+        attached_media_mod.async_wait_for_udp_listener(
+            18099,
+            probe=probe,
+            timeout_seconds=1.0,
+            interval_seconds=0.02,
+            monotonic_clock=clock,
+            sleep=sleep,
+        )
+    )
+
+    assert result is True
+    assert calls == [18099, 18099, 18099]
+
+
+def test_async_wait_for_udp_listener_returns_false_when_bounded():
+    attached_media_mod = _attached_media_mod()
+    calls: list[int] = []
+    now = 0.0
+
+    def clock():
+        return now
+
+    async def sleep(delay):
+        nonlocal now
+        now += delay
+
+    def probe(port):
+        calls.append(port)
+        return False
+
+    result = asyncio.run(
+        attached_media_mod.async_wait_for_udp_listener(
+            18099,
+            probe=probe,
+            timeout_seconds=0.04,
+            interval_seconds=0.02,
+            monotonic_clock=clock,
+            sleep=sleep,
+        )
+    )
+
+    assert result is False
+    assert calls == [18099, 18099, 18099]
+
+
+def test_transport_activates_after_udp_listener_probe_succeeds(monkeypatch):
+    attached_media_mod = _attached_media_mod()
+    values = iter([False, False, True])
+    seen: list[bool] = []
+    shim = _FakeAttachedShim()
+    transport = attached_media_mod.ComelitAttachedRingMediaTransport(
+        _FakeAttachedRuntime(),
+        udp_listener_probe=lambda _port: seen.append(True) or next(values),
+    )
+    transport._active = True
+    transport._video_recovery_shim = shim
+    monkeypatch.setattr(
+        attached_media_mod, "_MINIAPP_UDP_LISTENER_WAIT_INTERVAL_SECONDS", 0.0
+    )
+
+    asyncio.run(transport.async_activate_miniapp_output())
+
+    assert len(seen) == 3
+    assert shim.activations == [attached_media_mod.MEDIA_VIDEO_MINIAPP_RTP_PORT]
+
+
+def test_transport_activation_times_out_open(monkeypatch):
+    attached_media_mod = _attached_media_mod()
+    shim = _FakeAttachedShim()
+    transport = attached_media_mod.ComelitAttachedRingMediaTransport(
+        _FakeAttachedRuntime(),
+        udp_listener_probe=lambda _port: False,
+    )
+    transport._active = True
+    transport._video_recovery_shim = shim
+    monkeypatch.setattr(
+        attached_media_mod, "_MINIAPP_UDP_LISTENER_WAIT_TIMEOUT_SECONDS", 0.001
+    )
+    monkeypatch.setattr(
+        attached_media_mod, "_MINIAPP_UDP_LISTENER_WAIT_INTERVAL_SECONDS", 0.0
+    )
+
+    asyncio.run(transport.async_activate_miniapp_output())
+
+    assert shim.activations == [attached_media_mod.MEDIA_VIDEO_MINIAPP_RTP_PORT]
+
+
+def test_transport_deactivate_without_recovery_shim_is_noop():
+    attached_media_mod = _attached_media_mod()
+    transport = attached_media_mod.ComelitAttachedRingMediaTransport(
+        _FakeAttachedRuntime()
+    )
+    transport._active = False
+    transport._video_recovery_shim = None
+
+    asyncio.run(transport.async_deactivate_miniapp_output())
+
+
+def test_transport_deactivate_swallow_stopped_recovery_shim_runtime_error():
+    attached_media_mod = _attached_media_mod()
+    shim = _FakeAttachedShim()
+    shim.deactivate_error = RuntimeError("h264_recovery_rtp_shim_not_running")
+    transport = attached_media_mod.ComelitAttachedRingMediaTransport(
+        _FakeAttachedRuntime()
+    )
+    transport._active = False
+    transport._video_recovery_shim = shim
+
+    asyncio.run(transport.async_deactivate_miniapp_output())
+
+
 class _FakeAttachedTransport:
     def __init__(self):
         self.active = False
@@ -3451,7 +3668,10 @@ class _FakeAttachedTransport:
         self.local_sdp_path = Path("/run/comelit-attached/local.sdp")
         self.start_calls = 0
         self.stop_calls = 0
+        self.activate_miniapp_output_calls = 0
+        self.deactivate_miniapp_output_calls = 0
         self.fail_next_start: str | None = None
+        self.events: list[str] = []
 
     async def async_start(self, panel):
         self.start_calls += 1
@@ -3468,6 +3688,13 @@ class _FakeAttachedTransport:
         self.active = False
         self.local_sdp_ready = False
 
+    async def async_activate_miniapp_output(self):
+        self.events.append("activate_miniapp_output")
+        self.activate_miniapp_output_calls += 1
+
+    async def async_deactivate_miniapp_output(self):
+        self.deactivate_miniapp_output_calls += 1
+
     async def async_wait_inactive(self, _timeout):
         return not self.active
 
@@ -3477,13 +3704,21 @@ class _FakeAttachedStreamProvider:
         self.consumers = {}
         self.release_calls = []
         self.close_calls = 0
+        self.events: list[str] = []
         self.stream = types.SimpleNamespace(
             set_update_callback=lambda _callback: None,
             outputs=lambda: {},
             stop=lambda: None,
-            add_provider=lambda _provider: None,
+            add_provider=self._add_provider,
+            start=self._start,
             endpoint_url=lambda _provider: "/api/hls/facefeed/master_playlist.m3u8",
         )
+
+    def _add_provider(self, _provider):
+        self.events.append("add_provider")
+
+    def _start(self):
+        self.events.append("start")
 
     async def async_acquire_consumer(self, reason):
         self.consumers[reason] = self.consumers.get(reason, 0) + 1

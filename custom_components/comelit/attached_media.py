@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
+import time
+from collections.abc import Awaitable, Callable
 from typing import Protocol
 
 from .h264_recovery import H264RecoveryRtpShim
@@ -19,6 +21,8 @@ _ATTACHED_LOCAL_SDP_FILE = _ATTACHED_RUN_DIR / "attached-local-rtp.sdp"
 _ATTACHED_MINIAPP_SDP_FILE = _ATTACHED_RUN_DIR / "attached-miniapp-rtp.sdp"
 _ATTACHED_MEDIA_OPEN_TIMEOUT_SECONDS = 15.0
 _ATTACHED_MEDIA_STOP_TIMEOUT_SECONDS = 10.0
+_MINIAPP_UDP_LISTENER_WAIT_TIMEOUT_SECONDS = 1.5
+_MINIAPP_UDP_LISTENER_WAIT_INTERVAL_SECONDS = 0.02
 
 _LOCAL_RTP_SDP = f"""v=0\r
 o=- 0 0 IN IP4 127.0.0.1\r
@@ -87,6 +91,38 @@ def _remove_local_sdps() -> None:
             pass
 
 
+def _udp_listener_bound(port: int) -> bool:
+    expected = f":{port:04X}"
+    for path in ("/proc/net/udp", "/proc/net/udp6"):
+        try:
+            lines = Path(path).read_text(encoding="ascii").splitlines()
+        except OSError:
+            return True
+        for line in lines[1:]:
+            fields = line.split()
+            if len(fields) > 1 and fields[1].upper().endswith(expected):
+                return True
+    return False
+
+
+async def async_wait_for_udp_listener(
+    port: int,
+    *,
+    probe: Callable[[int], bool],
+    timeout_seconds: float,
+    interval_seconds: float,
+    monotonic_clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> bool:
+    deadline = monotonic_clock() + timeout_seconds
+    while True:
+        if probe(port):
+            return True
+        if monotonic_clock() >= deadline:
+            return False
+        await sleep(min(interval_seconds, max(0.0, deadline - monotonic_clock())))
+
+
 class ComelitAttachedRingMediaTransport:
     """Bridge the persistent listener's call-bound RTP into HA Stream.
 
@@ -96,8 +132,14 @@ class ComelitAttachedRingMediaTransport:
     listener and never performs a second cloud/P2P bootstrap.
     """
 
-    def __init__(self, runtime: AttachedRingRuntime) -> None:
+    def __init__(
+        self,
+        runtime: AttachedRingRuntime,
+        *,
+        udp_listener_probe: Callable[[int], bool] | None = None,
+    ) -> None:
         self._runtime = runtime
+        self._udp_listener_probe = udp_listener_probe or _udp_listener_bound
         self._active = False
         self._video_recovery_shim: H264RecoveryRtpShim | None = None
         self._lock = asyncio.Lock()
@@ -161,6 +203,7 @@ class ComelitAttachedRingMediaTransport:
                     MEDIA_VIDEO_HA_RTP_PORT,
                     MEDIA_VIDEO_MINIAPP_RTP_PORT,
                 ),
+                inactive_output_ports=(MEDIA_VIDEO_MINIAPP_RTP_PORT,),
             )
             try:
                 await shim.async_start()
@@ -180,6 +223,36 @@ class ComelitAttachedRingMediaTransport:
 
             self._video_recovery_shim = shim
             self._active = True
+
+    async def async_activate_miniapp_output(self) -> None:
+        async with self._lock:
+            if not self.active or self._video_recovery_shim is None:
+                raise ComelitAttachedMediaError("attached_media_not_active")
+            shim = self._video_recovery_shim
+        ready = await async_wait_for_udp_listener(
+            MEDIA_VIDEO_MINIAPP_RTP_PORT,
+            probe=self._udp_listener_probe,
+            timeout_seconds=_MINIAPP_UDP_LISTENER_WAIT_TIMEOUT_SECONDS,
+            interval_seconds=_MINIAPP_UDP_LISTENER_WAIT_INTERVAL_SECONDS,
+        )
+        if ready:
+            _LOGGER.info("miniapp_sink_ready")
+        else:
+            _LOGGER.info("miniapp_sink_ready_timeout")
+        async with self._lock:
+            if not self.active or self._video_recovery_shim is not shim:
+                raise ComelitAttachedMediaError("attached_media_not_active")
+            await shim.async_activate_output_port(MEDIA_VIDEO_MINIAPP_RTP_PORT)
+
+    async def async_deactivate_miniapp_output(self) -> None:
+        async with self._lock:
+            shim = self._video_recovery_shim
+            if shim is None:
+                return
+            try:
+                await shim.async_deactivate_output_port(MEDIA_VIDEO_MINIAPP_RTP_PORT)
+            except RuntimeError:
+                return
 
     async def async_wait_inactive(self, timeout: float) -> bool:
         """Wait until the remote/native attached media channel closes."""
@@ -299,6 +372,12 @@ class ComelitAttachedRingMediaSession:
             if reason == "miniapp_attached_view":
                 _LOGGER.info("miniapp_attached_lease_acquired")
             return self.status()
+
+    async def async_activate_miniapp_output(self) -> None:
+        await self._transport.async_activate_miniapp_output()
+
+    async def async_deactivate_miniapp_output(self) -> None:
+        await self._transport.async_deactivate_miniapp_output()
 
     async def async_wait_inactive(self, timeout: float) -> bool:
         """Wait for the authoritative inbound call media lifetime to end."""

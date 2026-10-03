@@ -396,6 +396,18 @@ class ComelitMiniAppController:
                 result = add_provider(HLS_PROVIDER)
                 if asyncio.iscoroutine(result):
                     await result
+            start = getattr(stream, "start", None)
+            if callable(start):
+                result = start()
+                if asyncio.iscoroutine(result):
+                    await result
+            activate_miniapp_output = getattr(
+                session,
+                "async_activate_miniapp_output",
+                None,
+            )
+            if callable(activate_miniapp_output):
+                await activate_miniapp_output()
         except Exception:
             if consumer_acquired:
                 try:
@@ -441,6 +453,19 @@ class ComelitMiniAppController:
             )
         finally:
             await resource.session.async_release(reason=_MINIAPP_ATTACHED_VIEW_REASON)
+        deactivate_miniapp_output = getattr(
+            resource.session,
+            "async_deactivate_miniapp_output",
+            None,
+        )
+        if callable(deactivate_miniapp_output):
+            try:
+                await deactivate_miniapp_output()
+            except Exception as err:
+                _LOGGER.warning(
+                    "Mini App attached sink deactivate failed: %s",
+                    err,
+                )
         _LOGGER.info(
             "miniapp_attached_stream_closed miniapp_attached_viewers=0 "
             "miniapp_attached_stream_active=false"

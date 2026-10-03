@@ -4,11 +4,15 @@ import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 import struct
+import time
 from typing import Any
 
 RTP_VERSION = 2
 H264_PAYLOAD_TYPE = 99
 MAX_SAFE_COUNTER = (1 << 63) - 1
+DEFAULT_BOOTSTRAP_MAX_PACKETS = 512
+DEFAULT_BOOTSTRAP_MAX_BYTES = 1_000_000
+DEFAULT_BOOTSTRAP_AU_TIMEOUT_SECONDS = 2.0
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,22 @@ class _AccessUnitState:
     seen_recovery_point_sei: bool = False
     injected_recovery_point: bool = False
     unprovable_recovery_signal: bool = False
+
+
+@dataclass
+class _BootstrapAccessUnit:
+    key: tuple[int, int]
+    packets: list[bytes]
+    packet_bytes: int
+    has_idr: bool
+    started_at: float
+
+
+@dataclass
+class _OutputSink:
+    port: int | None
+    transport: asyncio.DatagramTransport
+    active: bool
 
 
 class _BitReader:
@@ -248,6 +268,171 @@ def _make_injected_packet(template: _RtpPacket, sequence: int, payload: bytes) -
     header[1] &= 0x7F
     struct.pack_into("!H", header, 2, sequence & 0xFFFF)
     return bytes(header) + payload
+
+
+def _h264_payload_nal_types(payload: bytes) -> tuple[set[int], bool]:
+    if not payload:
+        return set(), False
+    nal_type = payload[0] & 0x1F
+    if 1 <= nal_type <= 23:
+        return {nal_type}, True
+    if nal_type == 24:
+        pos = 1
+        nal_types: set[int] = set()
+        while pos < len(payload):
+            if pos + 2 > len(payload):
+                return nal_types, False
+            nal_len = struct.unpack_from("!H", payload, pos)[0]
+            pos += 2
+            if nal_len == 0 or pos + nal_len > len(payload):
+                return nal_types, False
+            nal_types.add(payload[pos] & 0x1F)
+            pos += nal_len
+        return nal_types, True
+    if nal_type == 28:
+        if len(payload) < 2:
+            return set(), False
+        return {payload[1] & 0x1F}, True
+    return {nal_type}, True
+
+
+def _h264_payload_has_idr_start(payload: bytes) -> bool:
+    if not payload:
+        return False
+    nal_type = payload[0] & 0x1F
+    if nal_type == 5:
+        return True
+    if nal_type == 24:
+        pos = 1
+        while pos < len(payload):
+            if pos + 2 > len(payload):
+                return False
+            nal_len = struct.unpack_from("!H", payload, pos)[0]
+            pos += 2
+            if nal_len == 0 or pos + nal_len > len(payload):
+                return False
+            if payload[pos] & 0x1F == 5:
+                return True
+            pos += nal_len
+        return False
+    if nal_type == 28 and len(payload) >= 2:
+        return bool(payload[1] & 0x80) and payload[1] & 0x1F == 5
+    return False
+
+
+class _H264BootstrapCache:
+    def __init__(
+        self,
+        *,
+        max_packets: int = DEFAULT_BOOTSTRAP_MAX_PACKETS,
+        max_bytes: int = DEFAULT_BOOTSTRAP_MAX_BYTES,
+        au_timeout_seconds: float = DEFAULT_BOOTSTRAP_AU_TIMEOUT_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._max_packets = max(1, max_packets)
+        self._max_bytes = max(1, max_bytes)
+        self._au_timeout_seconds = max(0.001, au_timeout_seconds)
+        self._clock = clock
+        self._last_sps: bytes | None = None
+        self._last_pps: bytes | None = None
+        self._last_idr_au: tuple[bytes, ...] = ()
+        self._open_units: dict[tuple[int, int], _BootstrapAccessUnit] = {}
+        self._last_key_by_ssrc: dict[int, tuple[int, int]] = {}
+
+    def snapshot(self) -> tuple[bytes, ...]:
+        packets: list[bytes] = []
+        seen: set[bytes] = set()
+        for packet in (self._last_sps, self._last_pps, *self._last_idr_au):
+            if packet is None or packet in seen:
+                continue
+            packets.append(packet)
+            seen.add(packet)
+        return tuple(packets)
+
+    def _cached_packets(self) -> tuple[bytes, ...]:
+        return self.snapshot()
+
+    def _enforce_total_bounds(self) -> None:
+        while True:
+            packets = self._cached_packets()
+            if (
+                len(packets) <= self._max_packets
+                and sum(len(packet) for packet in packets) <= self._max_bytes
+            ):
+                return
+            if self._last_idr_au:
+                self._last_idr_au = ()
+            elif self._last_pps is not None:
+                self._last_pps = None
+            elif self._last_sps is not None:
+                self._last_sps = None
+            else:
+                return
+
+    def observe_packet(self, packet: bytes) -> None:
+        rtp = _parse_rtp(packet)
+        if rtp is None or rtp.payload_type != H264_PAYLOAD_TYPE:
+            return
+        nal_types, usable = _h264_payload_nal_types(rtp.payload)
+        if not usable:
+            return
+        raw_nal_type = rtp.payload[0] & 0x1F if rtp.payload else 0
+        if raw_nal_type != 28 and 7 in nal_types and len(packet) <= self._max_bytes:
+            self._last_sps = packet
+        if raw_nal_type != 28 and 8 in nal_types and len(packet) <= self._max_bytes:
+            self._last_pps = packet
+        self._enforce_total_bounds()
+        self._observe_access_unit(rtp, packet, _h264_payload_has_idr_start(rtp.payload))
+
+    def _observe_access_unit(
+        self,
+        rtp: _RtpPacket,
+        packet: bytes,
+        has_idr_packet: bool,
+    ) -> None:
+        now = self._clock()
+        self._evict_expired(now)
+        key = (rtp.ssrc, rtp.timestamp)
+        previous_key = self._last_key_by_ssrc.get(rtp.ssrc)
+        if previous_key is not None and previous_key != key:
+            self._open_units.pop(previous_key, None)
+        self._last_key_by_ssrc[rtp.ssrc] = key
+
+        unit = self._open_units.get(key)
+        if unit is None:
+            unit = _BootstrapAccessUnit(
+                key=key,
+                packets=[],
+                packet_bytes=0,
+                has_idr=False,
+                started_at=now,
+            )
+            self._open_units[key] = unit
+        unit.packets.append(packet)
+        unit.packet_bytes += len(packet)
+        unit.has_idr = unit.has_idr or has_idr_packet
+
+        if (
+            len(unit.packets) > self._max_packets
+            or unit.packet_bytes > self._max_bytes
+        ):
+            self._open_units.pop(key, None)
+            return
+        if not rtp.marker:
+            return
+        self._open_units.pop(key, None)
+        if unit.has_idr:
+            self._last_idr_au = tuple(unit.packets)
+            self._enforce_total_bounds()
+
+    def _evict_expired(self, now: float) -> None:
+        expired = [
+            key
+            for key, unit in self._open_units.items()
+            if now - unit.started_at > self._au_timeout_seconds
+        ]
+        for key in expired:
+            self._open_units.pop(key, None)
 
 
 class H264RecoveryRewriter:
@@ -485,17 +670,46 @@ class RecoveryRtpShimProtocol(asyncio.DatagramProtocol):
         self,
         rewriter: H264RecoveryRewriter,
         output_transports: Sequence[asyncio.DatagramTransport],
+        *,
+        output_ports: Sequence[int | None] | None = None,
+        inactive_output_ports: Sequence[int] = (),
+        bootstrap_max_packets: int = DEFAULT_BOOTSTRAP_MAX_PACKETS,
+        bootstrap_max_bytes: int = DEFAULT_BOOTSTRAP_MAX_BYTES,
+        bootstrap_au_timeout_seconds: float = DEFAULT_BOOTSTRAP_AU_TIMEOUT_SECONDS,
     ) -> None:
         self._rewriter = rewriter
-        self._output_transports = tuple(output_transports)
+        ports = tuple(output_ports) if output_ports is not None else ()
+        if ports and len(ports) != len(output_transports):
+            raise ValueError("output_ports must match output_transports")
+        inactive = set(inactive_output_ports)
+        self._sinks = tuple(
+            _OutputSink(
+                port=ports[idx] if ports else None,
+                transport=transport,
+                active=(ports[idx] not in inactive) if ports else True,
+            )
+            for idx, transport in enumerate(output_transports)
+        )
+        self._bootstrap_cache = _H264BootstrapCache(
+            max_packets=bootstrap_max_packets,
+            max_bytes=bootstrap_max_bytes,
+            au_timeout_seconds=bootstrap_au_timeout_seconds,
+        )
+        self._activation_queues: dict[int, list[bytes]] = {}
         self.last_error: str | None = None
 
     def datagram_received(self, data: bytes, addr: Any) -> None:
         try:
             for packet in self._rewriter.rewrite_rtp_packet(data):
-                for transport in self._output_transports:
+                self._bootstrap_cache.observe_packet(packet)
+                for sink in self._sinks:
+                    if sink.port in self._activation_queues:
+                        self._activation_queues[sink.port].append(packet)
+                        continue
+                    if not sink.active:
+                        continue
                     try:
-                        transport.sendto(packet)
+                        sink.transport.sendto(packet)
                     except Exception:
                         self.last_error = "fanout_send_exception"
         except Exception:
@@ -507,6 +721,39 @@ class RecoveryRtpShimProtocol(asyncio.DatagramProtocol):
         self.last_error = "udp_error"
         self._rewriter.last_error = "udp_error"
 
+    def activate_output_port(self, port: int) -> bool:
+        for sink in self._sinks:
+            if sink.port != port:
+                continue
+            if sink.active:
+                return True
+            bootstrap = self._bootstrap_cache.snapshot()
+            self._activation_queues[port] = []
+            try:
+                for packet in bootstrap:
+                    try:
+                        sink.transport.sendto(packet)
+                    except Exception:
+                        self.last_error = "fanout_send_exception"
+            finally:
+                queued = self._activation_queues.pop(port, [])
+            sink.active = True
+            for packet in queued:
+                try:
+                    sink.transport.sendto(packet)
+                except Exception:
+                    self.last_error = "fanout_send_exception"
+            return True
+        return False
+
+    def deactivate_output_port(self, port: int) -> bool:
+        for sink in self._sinks:
+            if sink.port != port:
+                continue
+            sink.active = False
+            return True
+        return False
+
 
 class H264RecoveryRtpShim:
     def __init__(
@@ -515,10 +762,14 @@ class H264RecoveryRtpShim:
         input_port: int,
         output_port: int,
         output_ports: Sequence[int] | None = None,
+        inactive_output_ports: Sequence[int] = (),
         host: str = "127.0.0.1",
         endpoint_factory: Callable[..., Awaitable[tuple[asyncio.DatagramTransport, Any]]]
         | None = None,
         on_decodable_frame: Callable[[], None] | None = None,
+        bootstrap_max_packets: int = DEFAULT_BOOTSTRAP_MAX_PACKETS,
+        bootstrap_max_bytes: int = DEFAULT_BOOTSTRAP_MAX_BYTES,
+        bootstrap_au_timeout_seconds: float = DEFAULT_BOOTSTRAP_AU_TIMEOUT_SECONDS,
     ) -> None:
         self._host = host
         self._input_port = input_port
@@ -528,9 +779,15 @@ class H264RecoveryRtpShim:
         if output_port not in ports:
             ports = (output_port, *ports)
         self._output_ports = tuple(dict.fromkeys(ports))
+        self._inactive_output_ports = tuple(
+            port for port in dict.fromkeys(inactive_output_ports) if port in ports
+        )
         self._output_port = output_port
         self._endpoint_factory = endpoint_factory
         self._rewriter = H264RecoveryRewriter(on_decodable_frame=on_decodable_frame)
+        self._bootstrap_max_packets = bootstrap_max_packets
+        self._bootstrap_max_bytes = bootstrap_max_bytes
+        self._bootstrap_au_timeout_seconds = bootstrap_au_timeout_seconds
         self._input_transport: asyncio.DatagramTransport | None = None
         self._output_transports: tuple[asyncio.DatagramTransport, ...] = ()
         self._protocol: RecoveryRtpShimProtocol | None = None
@@ -550,6 +807,10 @@ class H264RecoveryRtpShim:
     @property
     def output_ports(self) -> tuple[int, ...]:
         return self._output_ports
+
+    @property
+    def inactive_output_ports(self) -> tuple[int, ...]:
+        return self._inactive_output_ports
 
     def diagnostics(self) -> RecoveryShimDiagnostics:
         diagnostics = self._rewriter.diagnostics(running=self.running)
@@ -591,7 +852,15 @@ class H264RecoveryRtpShim:
                     remote_addr=(self._host, port),
                 )
                 output_transports.append(output_transport)
-            protocol = RecoveryRtpShimProtocol(self._rewriter, output_transports)
+            protocol = RecoveryRtpShimProtocol(
+                self._rewriter,
+                output_transports,
+                output_ports=self._output_ports,
+                inactive_output_ports=self._inactive_output_ports,
+                bootstrap_max_packets=self._bootstrap_max_packets,
+                bootstrap_max_bytes=self._bootstrap_max_bytes,
+                bootstrap_au_timeout_seconds=self._bootstrap_au_timeout_seconds,
+            )
             input_transport, _ = await endpoint_factory(
                 lambda: protocol,
                 local_addr=(self._host, self._input_port),
@@ -620,3 +889,17 @@ class H264RecoveryRtpShim:
         for output_transport in output_transports:
             output_transport.close()
         await asyncio.sleep(0)
+
+    async def async_activate_output_port(self, port: int) -> None:
+        protocol = self._protocol
+        if protocol is None:
+            raise RuntimeError("h264_recovery_rtp_shim_not_running")
+        if not protocol.activate_output_port(port):
+            raise ValueError("unknown_output_port")
+
+    async def async_deactivate_output_port(self, port: int) -> None:
+        protocol = self._protocol
+        if protocol is None:
+            raise RuntimeError("h264_recovery_rtp_shim_not_running")
+        if not protocol.deactivate_output_port(port):
+            raise ValueError("unknown_output_port")

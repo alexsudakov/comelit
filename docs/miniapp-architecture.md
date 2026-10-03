@@ -189,6 +189,29 @@ the camera Stream lifecycle releases it. The browser still receives only an
 opaque `/api/comelit/miniapp/media/{media_id}/...` URL, never the local SDP path
 or raw HA HLS source.
 
+The Mini App attached RTP output is registered inactive when the attached media
+bridge starts. The single H264 recovery/rewrite state continues feeding the
+camera/ring SDP immediately, while the Mini App video port receives no live
+fan-out traffic until the Mini App attached HA Stream exists. At that point the
+bridge snapshots a bounded decodable bootstrap and sends it exactly once to the
+Mini App RTP sink before marking that sink live. The bootstrap consists of the
+last usable SPS, the last usable PPS, and the complete last finished IDR access
+unit in rewritten RTP order. FU-A fragmented IDR access units are grouped by
+SSRC and RTP timestamp until the marker packet closes the access unit; incomplete
+or oversized access units are evicted instead of cached.
+
+The real-UDP late-subscriber harness is kept out of normal pytest collection:
+
+```bash
+cd /path/to/comelit
+python3 tests/miniapp/tools/late_subscriber_rtp_harness.py \
+  --module custom_components/comelit/h264_recovery.py \
+  --label local-fua-green \
+  --join-delay 2.5 \
+  --total 8.0 \
+  --out /tmp/comelit-late-subscriber.json
+```
+
 ## 7. Surveillance cameras
 
 The integration option `miniapp_surveillance_label` accepts a Home Assistant
@@ -571,6 +594,11 @@ primitive from the browser. `close` is idempotent. Multiple viewer ids in the
 same Mini App session refcount independently; attached Ring teardown is
 requested only when the last relevant Entrance viewer is gone.
 
+For the Mini App attached HLS path, the controller adds the HLS provider and
+starts the internal HA Stream before activating the Mini App RTP sink. This lets
+the HA Stream worker bind the Mini App RTP port before the recovery bridge sends
+the bounded bootstrap.
+
 The browser sends heartbeat about every 5 seconds. The server expires a lease
 after about 15 seconds without heartbeat, so WebView loss is bounded even if
 `pagehide` or disconnect cleanup is not delivered. `visibilitychange=hidden` is
@@ -585,6 +613,10 @@ of the Mini App's own `miniapp_attached_view` lease and internal HA Stream. It
 does not release `camera_view`; the normal camera Stream lifecycle remains the
 only owner of that lease. The final attached-session lease release drives the
 existing attached-media R58/SIGUSR2 stop path.
+
+Ending the last Mini App viewer also deactivates the Mini App RTP sink. If the
+attached media session remains alive for another lease holder, a later Mini App
+viewer starts inactive again and receives a fresh bootstrap before live fan-out.
 
 Home Assistant HLS idle cleanup (`OUTPUT_IDLE_TIMEOUT`, HA Core ref 2026.9.2)
 does not fit the Mini App's 15-second viewer-loss bound by itself, so Mini App
