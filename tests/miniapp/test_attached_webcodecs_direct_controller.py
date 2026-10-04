@@ -2,11 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import importlib.util
 from pathlib import Path
+import sys
 
 import pytest
 
-from tests.miniapp import test_controller_runtime as base
+
+_HELPER_PATH = Path(__file__).with_name("test_controller_runtime.py")
+_HELPER_NAME = "comelit_test_controller_runtime_shared"
+_spec = importlib.util.spec_from_file_location(_HELPER_NAME, _HELPER_PATH)
+assert _spec is not None and _spec.loader is not None
+base = importlib.util.module_from_spec(_spec)
+sys.modules[_HELPER_NAME] = base
+_spec.loader.exec_module(base)
 
 
 def _fixed_controller():
@@ -58,7 +67,7 @@ def test_direct_attached_webcodecs_does_not_start_ha_stream_before_pyav_consumer
             "miniapp_attached_view": 1,
         }
 
-        # Model PyAV binding UDP 18099.  Only then may output activation finish.
+        # Model PyAV binding UDP 18099. Only then may output activation finish.
         pyav_bound.set()
         await lease.wait_activation()
         assert events == [
