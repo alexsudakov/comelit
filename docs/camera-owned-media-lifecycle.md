@@ -191,9 +191,14 @@ access units are cached only once the RTP marker closes the access unit.
 Activation follows production ordering: `add_provider(HLS)` starts the HLS
 output, `Stream.start()` spawns the HA Stream worker, the readiness gate polls
 for the Mini App UDP port in `/proc/net/udp{,6}`, and then the sink is
-activated. The readiness gate is bounded and fail-open. If readiness is not
-observed before the deadline, or procfs cannot be read, the Mini App sink is
-activated anyway so live RTP is not blacked out.
+activated only after that port is proven bound. The readiness gate is bounded
+and fail-closed. If readiness is not observed before the deadline, or procfs
+cannot prove readiness, the Mini App sink stays inactive and no bootstrap packet
+is sent. The request is rejected with the bounded internal reason
+`miniapp_attached_consumer_not_ready`; the internal Mini App HA Stream,
+provider consumer, and `miniapp_attached_view` lease are released. The ordinary
+HA camera/ring sink is untouched, and the upstream attached transport remains
+governed only by any leases still present.
 
 Mini App OPEN acquires `miniapp_attached_view`, creates/reuses the internal Mini
 App HA Stream, and increments a viewer refcount. Closing one of multiple Mini
@@ -202,6 +207,9 @@ viewer closes the internal Mini App stream, releases `miniapp_attached_view`,
 and requests `ring_media` stop. If `camera_view` is still present, the upstream
 attached transport remains active; only the later camera-view release reaches
 zero attached-session leases and performs exactly one transport stop.
+The 15-second viewer lease expiry remains the authoritative fallback for a lost
+WebView; readiness rejection only cleans up the Mini App resource that failed to
+prove a bound UDP consumer.
 
 ## Switch migration
 

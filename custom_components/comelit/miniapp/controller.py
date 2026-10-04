@@ -36,6 +36,7 @@ from ..const import (
     MAIN_ENTRANCE_UNIQUE_ID,
     MAIN_GATE_UNIQUE_ID,
 )
+from ..attached_media import ComelitAttachedMediaError
 from .session import (
     MiniAppMediaGrantStore,
     MiniAppSession,
@@ -84,6 +85,7 @@ _WEBCODECS_ENTRANCE_PARK_SECONDS = 60.0
 _WEBCODECS_ENTRANCE_VIEWER_REASON = "miniapp_webcodecs"
 _WEBCODECS_ENTRANCE_PARK_REASON = "miniapp_webcodecs_park"
 _MINIAPP_ATTACHED_VIEW_REASON = "miniapp_attached_view"
+_MINIAPP_ATTACHED_CONSUMER_NOT_READY = "miniapp_attached_consumer_not_ready"
 ATTACHED_VIEWER_HEARTBEAT_INTERVAL_SECONDS = 5
 ATTACHED_VIEWER_LEASE_EXPIRY_SECONDS = 15
 _ATTACHED_VIEWER_ACTIONS = frozenset({"open", "heartbeat", "close"})
@@ -408,7 +410,7 @@ class ComelitMiniAppController:
             )
             if callable(activate_miniapp_output):
                 await activate_miniapp_output()
-        except Exception:
+        except Exception as exc:
             if consumer_acquired:
                 try:
                     release_consumer = getattr(
@@ -425,6 +427,15 @@ class ComelitMiniAppController:
                     _LOGGER.exception("Mini App attached stream consumer cleanup failed")
             if lease_acquired:
                 await session.async_release(reason=_MINIAPP_ATTACHED_VIEW_REASON)
+            if (
+                isinstance(exc, ComelitAttachedMediaError)
+                and str(exc) == _MINIAPP_ATTACHED_CONSUMER_NOT_READY
+            ):
+                raise MiniAppOperationError(
+                    _MINIAPP_ATTACHED_CONSUMER_NOT_READY
+                ) from exc
+            if isinstance(exc, ComelitAttachedMediaError):
+                raise MiniAppOperationError("attached_media_unavailable") from exc
             raise
 
         self._miniapp_attached_resource = _MiniAppAttachedResource(

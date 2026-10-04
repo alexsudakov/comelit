@@ -97,7 +97,7 @@ def _udp_listener_bound(port: int) -> bool:
         try:
             lines = Path(path).read_text(encoding="ascii").splitlines()
         except OSError:
-            return True
+            return False
         for line in lines[1:]:
             fields = line.split()
             if len(fields) > 1 and fields[1].upper().endswith(expected):
@@ -120,7 +120,7 @@ async def async_wait_for_udp_listener(
             if probe(port):
                 return True
         except OSError:
-            return True
+            return False
         if monotonic_clock() >= deadline:
             return False
         await sleep(min(interval_seconds, max(0.0, deadline - monotonic_clock())))
@@ -241,7 +241,10 @@ class ComelitAttachedRingMediaTransport:
         if ready:
             _LOGGER.info("miniapp_sink_ready")
         else:
-            _LOGGER.info("miniapp_sink_ready_timeout")
+            _LOGGER.info(
+                "miniapp_sink_ready_failed reason=miniapp_attached_consumer_not_ready"
+            )
+            raise ComelitAttachedMediaError("miniapp_attached_consumer_not_ready")
         async with self._lock:
             if not self.active or self._video_recovery_shim is not shim:
                 raise ComelitAttachedMediaError("attached_media_not_active")

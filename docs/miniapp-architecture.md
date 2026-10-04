@@ -192,8 +192,9 @@ or raw HA HLS source.
 The Mini App attached RTP output is registered inactive when the attached media
 bridge starts. The single H264 recovery/rewrite state continues feeding the
 camera/ring SDP immediately, while the Mini App video port receives no live
-fan-out traffic until the Mini App attached HA Stream exists. At that point the
-bridge snapshots a bounded decodable bootstrap and sends it exactly once to the
+fan-out traffic until the Mini App attached HA Stream exists and its UDP port is
+proven bound during the bounded readiness wait. Only after that proof does the
+bridge snapshot a bounded decodable bootstrap and send it exactly once to the
 Mini App RTP sink before marking that sink live. The bootstrap consists of the
 last usable SPS, the last usable PPS, and the complete last finished IDR access
 unit in rewritten RTP order. FU-A fragmented IDR access units are grouped by
@@ -600,9 +601,13 @@ the HA Stream worker bind the Mini App RTP port before the recovery bridge sends
 the bounded bootstrap. The readiness check is the Mini App RTP port appearing
 in `/proc/net/udp` or `/proc/net/udp6`, which is the point where the HA Stream
 worker has opened the SDP and bound the UDP socket. The wait is bounded and
-fail-open: if the port is not observed before the deadline, or procfs cannot be
-read, the Mini App sink is still activated so live RTP continues flowing instead
-of creating a silent blackout.
+fail-closed: if the port is not observed before the deadline, or procfs cannot
+prove readiness, the Mini App sink is not activated and no bootstrap packet is
+sent. The request is rejected with the bounded internal reason
+`miniapp_attached_consumer_not_ready`; the internal Mini App HA Stream,
+provider consumer, and `miniapp_attached_view` lease are released. The ordinary
+HA camera/ring sink is untouched, and the upstream attached transport remains
+governed only by any leases still present.
 
 TEST1 on release 1.7.32b1 proved why that ordering matters. A real inbound Ring
 created exactly one upstream Comelit media transport and the main attached HA
@@ -636,6 +641,8 @@ existing attached-media R58/SIGUSR2 stop path.
 Ending the last Mini App viewer also deactivates the Mini App RTP sink. If the
 attached media session remains alive for another lease holder, a later Mini App
 viewer starts inactive again and receives a fresh bootstrap before live fan-out.
+The same recovery applies after a fail-closed readiness timeout: a later Mini
+App request can succeed once the UDP consumer is actually bound.
 
 Home Assistant HLS idle cleanup (`OUTPUT_IDLE_TIMEOUT`, HA Core ref 2026.9.2)
 does not fit the Mini App's 15-second viewer-loss bound by itself, so Mini App

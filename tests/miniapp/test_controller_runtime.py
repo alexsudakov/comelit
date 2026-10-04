@@ -718,6 +718,119 @@ def test_entrance_camera_uses_miniapp_attached_stream_and_returns_only_proxy_cap
     )
 
 
+def test_miniapp_attached_readiness_timeout_cleans_resource_and_preserves_ha_viewer():
+    controller, hass = _controller()
+    coordinator = _install_attached_ring_coordinator(hass)
+    token, session = controller.sessions.create(424242, 12345678)
+
+    async def run():
+        await coordinator.attached_session.async_acquire(
+            panel="entrance",
+            reason="camera_view",
+        )
+        coordinator.attached_transport.fail_next_activate = (
+            "miniapp_attached_consumer_not_ready"
+        )
+        with pytest.raises(
+            controller_mod.MiniAppOperationError,
+            match="miniapp_attached_consumer_not_ready",
+        ):
+            await controller.async_attached_viewer_event(
+                token,
+                session,
+                action="open",
+                viewer_id="viewer_fail1",
+            )
+
+    asyncio.run(run())
+
+    assert coordinator.attached_transport.activate_miniapp_output_calls == 0
+    assert coordinator.attached_transport.miniapp_sink_active is False
+    assert coordinator.attached_provider.release_calls == ["miniapp_attached_view"]
+    assert coordinator.attached_provider.consumers == {}
+    assert coordinator.attached_provider.close_calls == 1
+    assert coordinator.attached_session.status()["leases"] == {"camera_view": 1}
+    assert coordinator.attached_transport.stop_calls == 0
+    assert controller._miniapp_attached_resource is None
+    assert coordinator.requests == []
+
+
+def test_miniapp_attached_request_recovers_after_readiness_timeout():
+    controller, hass = _controller()
+    coordinator = _install_attached_ring_coordinator(hass)
+    token, session = controller.sessions.create(424242, 12345678)
+
+    async def run():
+        await coordinator.attached_session.async_acquire(
+            panel="entrance",
+            reason="camera_view",
+        )
+        coordinator.attached_transport.fail_next_activate = (
+            "miniapp_attached_consumer_not_ready"
+        )
+        with pytest.raises(controller_mod.MiniAppOperationError):
+            await controller.async_attached_viewer_event(
+                token,
+                session,
+                action="open",
+                viewer_id="viewer_recover1",
+            )
+        opened = await controller.async_attached_viewer_event(
+            token,
+            session,
+            action="open",
+            viewer_id="viewer_recover1",
+        )
+        assert coordinator.attached_transport.activate_miniapp_output_calls == 1
+        assert coordinator.attached_transport.miniapp_sink_active is True
+        await controller.async_attached_viewer_event(
+            token,
+            session,
+            action="close",
+            viewer_id="viewer_recover1",
+        )
+        await coordinator.attached_session.async_release(reason="camera_view")
+        return opened
+
+    opened = asyncio.run(run())
+
+    assert opened["viewer_count"] == 1
+    assert coordinator.attached_transport.activate_miniapp_output_calls == 1
+    assert coordinator.attached_transport.miniapp_sink_active is False
+    assert coordinator.attached_provider.release_calls == [
+        "miniapp_attached_view",
+        "miniapp_attached_view",
+    ]
+    assert coordinator.attached_session.status()["leases"] == {}
+    assert controller._miniapp_attached_resource is None
+
+
+def test_miniapp_attached_other_transport_failure_uses_bounded_unavailable_reason():
+    controller, hass = _controller()
+    coordinator = _install_attached_ring_coordinator(hass)
+    token, session = controller.sessions.create(424242, 12345678)
+
+    async def run():
+        coordinator.attached_transport.fail_next_activate = "unexpected_transport_state"
+        with pytest.raises(
+            controller_mod.MiniAppOperationError,
+            match="attached_media_unavailable",
+        ):
+            await controller.async_attached_viewer_event(
+                token,
+                session,
+                action="open",
+                viewer_id="viewer_fail2",
+            )
+
+    asyncio.run(run())
+
+    assert coordinator.attached_transport.activate_miniapp_output_calls == 0
+    assert coordinator.attached_provider.release_calls == ["miniapp_attached_view"]
+    assert coordinator.attached_session.status()["leases"] == {}
+    assert controller._miniapp_attached_resource is None
+
+
 def test_miniapp_attached_hls_activation_order_starts_stream_before_transport():
     controller, hass = _controller()
     coordinator = _install_attached_ring_coordinator(hass)
@@ -3648,6 +3761,27 @@ def test_async_wait_for_udp_listener_returns_true_after_ordered_probe():
     assert calls == [18099, 18099, 18099]
 
 
+def test_async_wait_for_udp_listener_returns_true_when_ready_immediately():
+    attached_media_mod = _attached_media_mod()
+    calls: list[int] = []
+
+    def probe(port):
+        calls.append(port)
+        return True
+
+    result = asyncio.run(
+        attached_media_mod.async_wait_for_udp_listener(
+            18099,
+            probe=probe,
+            timeout_seconds=1.0,
+            interval_seconds=0.02,
+        )
+    )
+
+    assert result is True
+    assert calls == [18099]
+
+
 def test_async_wait_for_udp_listener_returns_false_when_bounded():
     attached_media_mod = _attached_media_mod()
     calls: list[int] = []
@@ -3679,7 +3813,7 @@ def test_async_wait_for_udp_listener_returns_false_when_bounded():
     assert calls == [18099, 18099, 18099]
 
 
-def test_async_wait_for_udp_listener_oserror_fails_open():
+def test_async_wait_for_udp_listener_oserror_fails_closed():
     attached_media_mod = _attached_media_mod()
 
     def probe(_port):
@@ -3694,10 +3828,27 @@ def test_async_wait_for_udp_listener_oserror_fails_open():
         )
     )
 
-    assert result is True
+    assert result is False
 
 
-def test_transport_activates_after_udp_listener_probe_succeeds(monkeypatch):
+def test_transport_activates_immediately_when_udp_listener_ready():
+    attached_media_mod = _attached_media_mod()
+    seen: list[int] = []
+    shim = _FakeAttachedShim()
+    transport = attached_media_mod.ComelitAttachedRingMediaTransport(
+        _FakeAttachedRuntime(),
+        udp_listener_probe=lambda port: seen.append(port) or True,
+    )
+    transport._active = True
+    transport._video_recovery_shim = shim
+
+    asyncio.run(transport.async_activate_miniapp_output())
+
+    assert seen == [attached_media_mod.MEDIA_VIDEO_MINIAPP_RTP_PORT]
+    assert shim.activations == [attached_media_mod.MEDIA_VIDEO_MINIAPP_RTP_PORT]
+
+
+def test_transport_activates_after_50ms_udp_listener_delay(monkeypatch):
     attached_media_mod = _attached_media_mod()
     values = iter([False, False, True])
     seen: list[bool] = []
@@ -3708,17 +3859,79 @@ def test_transport_activates_after_udp_listener_probe_succeeds(monkeypatch):
     )
     transport._active = True
     transport._video_recovery_shim = shim
+    now = 0.0
+
+    def clock():
+        return now
+
+    async def sleep(delay):
+        nonlocal now
+        now += delay
+
+    original_wait = attached_media_mod.async_wait_for_udp_listener
+
+    async def wait_with_fake_clock(port, **kwargs):
+        kwargs["monotonic_clock"] = clock
+        kwargs["sleep"] = sleep
+        kwargs["interval_seconds"] = 0.025
+        return await original_wait(port, **kwargs)
+
     monkeypatch.setattr(
-        attached_media_mod, "_MINIAPP_UDP_LISTENER_WAIT_INTERVAL_SECONDS", 0.0
+        attached_media_mod, "async_wait_for_udp_listener", wait_with_fake_clock
     )
 
     asyncio.run(transport.async_activate_miniapp_output())
 
+    assert now == pytest.approx(0.05)
     assert len(seen) == 3
     assert shim.activations == [attached_media_mod.MEDIA_VIDEO_MINIAPP_RTP_PORT]
 
 
-def test_udp_listener_probe_oserror_is_ready_fail_open(monkeypatch):
+def test_transport_activates_after_500ms_udp_listener_delay(monkeypatch):
+    attached_media_mod = _attached_media_mod()
+    calls = 0
+    shim = _FakeAttachedShim()
+    transport = attached_media_mod.ComelitAttachedRingMediaTransport(
+        _FakeAttachedRuntime(),
+        udp_listener_probe=lambda _port: False,
+    )
+    transport._active = True
+    transport._video_recovery_shim = shim
+    now = 0.0
+
+    def clock():
+        return now
+
+    async def sleep(delay):
+        nonlocal now
+        now += delay
+
+    def probe(_port):
+        nonlocal calls
+        calls += 1
+        return now + 1e-9 >= 0.5
+
+    transport._udp_listener_probe = probe
+    original_wait = attached_media_mod.async_wait_for_udp_listener
+
+    async def wait_with_fake_clock(port, **kwargs):
+        kwargs["monotonic_clock"] = clock
+        kwargs["sleep"] = sleep
+        kwargs["interval_seconds"] = 0.05
+        return await original_wait(port, **kwargs)
+
+    monkeypatch.setattr(
+        attached_media_mod, "async_wait_for_udp_listener", wait_with_fake_clock
+    )
+
+    asyncio.run(transport.async_activate_miniapp_output())
+
+    assert now == pytest.approx(0.5)
+    assert calls == 11
+    assert shim.activations == [attached_media_mod.MEDIA_VIDEO_MINIAPP_RTP_PORT]
+
+
+def test_udp_listener_probe_oserror_is_not_ready_fail_closed(monkeypatch):
     attached_media_mod = _attached_media_mod()
 
     def read_text(_self, *, encoding):
@@ -3726,10 +3939,10 @@ def test_udp_listener_probe_oserror_is_ready_fail_open(monkeypatch):
         raise OSError("procfs unavailable")
 
     monkeypatch.setattr(attached_media_mod.Path, "read_text", read_text)
-    assert attached_media_mod._udp_listener_bound(18099) is True
+    assert attached_media_mod._udp_listener_bound(18099) is False
 
 
-def test_transport_probe_oserror_ready_still_activates():
+def test_transport_probe_oserror_fails_closed_without_activation():
     attached_media_mod = _attached_media_mod()
     shim = _FakeAttachedShim()
     transport = attached_media_mod.ComelitAttachedRingMediaTransport(
@@ -3741,11 +3954,15 @@ def test_transport_probe_oserror_ready_still_activates():
     transport._active = True
     transport._video_recovery_shim = shim
 
-    asyncio.run(transport.async_activate_miniapp_output())
-    assert shim.activations == [attached_media_mod.MEDIA_VIDEO_MINIAPP_RTP_PORT]
+    with pytest.raises(
+        attached_media_mod.ComelitAttachedMediaError,
+        match="miniapp_attached_consumer_not_ready",
+    ):
+        asyncio.run(transport.async_activate_miniapp_output())
+    assert shim.activations == []
 
 
-def test_transport_activation_times_out_open(monkeypatch):
+def test_transport_activation_times_out_fail_closed(monkeypatch):
     attached_media_mod = _attached_media_mod()
     events: list[str] = []
     shim = _FakeAttachedShim()
@@ -3763,14 +3980,15 @@ def test_transport_activation_times_out_open(monkeypatch):
         attached_media_mod, "_MINIAPP_UDP_LISTENER_WAIT_INTERVAL_SECONDS", 0.0
     )
 
-    asyncio.run(transport.async_activate_miniapp_output())
+    with pytest.raises(
+        attached_media_mod.ComelitAttachedMediaError,
+        match="miniapp_attached_consumer_not_ready",
+    ):
+        asyncio.run(transport.async_activate_miniapp_output())
 
     assert events.count("readiness_probe") >= 1
-    assert events[-1:] == ["shim_activate_output_port"]
-    assert events == ["readiness_probe"] * events.count("readiness_probe") + [
-        "shim_activate_output_port"
-    ]
-    assert shim.activations == [attached_media_mod.MEDIA_VIDEO_MINIAPP_RTP_PORT]
+    assert "shim_activate_output_port" not in events
+    assert shim.activations == []
 
 
 def test_transport_deactivate_without_recovery_shim_is_noop():
@@ -3809,6 +4027,8 @@ class _FakeAttachedTransport:
         self.activate_miniapp_output_calls = 0
         self.deactivate_miniapp_output_calls = 0
         self.fail_next_start: str | None = None
+        self.fail_next_activate: str | None = None
+        self.miniapp_sink_active = False
         self.events: list[str] = []
 
     async def async_start(self, panel):
@@ -3825,13 +4045,20 @@ class _FakeAttachedTransport:
         self.stop_calls += 1
         self.active = False
         self.local_sdp_ready = False
+        self.miniapp_sink_active = False
 
     async def async_activate_miniapp_output(self):
+        if self.fail_next_activate is not None:
+            reason = self.fail_next_activate
+            self.fail_next_activate = None
+            raise _attached_media_mod().ComelitAttachedMediaError(reason)
         self.events.append("activate_miniapp_output")
         self.activate_miniapp_output_calls += 1
+        self.miniapp_sink_active = True
 
     async def async_deactivate_miniapp_output(self):
         self.deactivate_miniapp_output_calls += 1
+        self.miniapp_sink_active = False
 
     async def async_wait_inactive(self, _timeout):
         return not self.active
