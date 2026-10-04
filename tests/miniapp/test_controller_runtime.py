@@ -2660,17 +2660,20 @@ def test_h264_sdp_access_unit_source_uses_local_rtp_whitelist(monkeypatch):
         await source.aclose()
 
     asyncio.run(run())
-    assert calls == [
-        (
-            "/run/comelit-media/local-rtp.sdp",
-            {
-                "mode": "r",
-                "format": "sdp",
-                "options": {"protocol_whitelist": "file,udp,rtp"},
-                "timeout": 5.0,
-            },
-        )
-    ]
+    assert len(calls) == 1
+    source_path, kwargs = calls[0]
+    assert source_path == "/run/comelit-media/local-rtp.sdp"
+    assert kwargs["mode"] == "r"
+    assert kwargs["format"] == "sdp"
+    assert kwargs["timeout"] == 5.0
+    options = kwargs["options"]
+    # Local-only protocol whitelist stays a hard requirement: no http/rtsp/remote file access.
+    assert options["protocol_whitelist"] == "file,udp,rtp"
+    # PR281: the attached SDP source is a paced live RTP stream, so stream detection is
+    # bounded explicitly instead of using ffmpeg's ~5 s defaults.
+    assert options["analyzeduration"] == "100000"
+    assert options["probesize"] == "32768"
+    assert set(options) == {"protocol_whitelist", "analyzeduration", "probesize"}
 
 
 def _rtp_packet(sequence: int, timestamp: int, payload: bytes, *, payload_type=99):
