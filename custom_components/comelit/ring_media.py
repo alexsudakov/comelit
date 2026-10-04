@@ -257,6 +257,14 @@ class HAStreamMediaProvider:
             )
             self._hass.data[STREAM_DOMAIN][ATTR_STREAMS].append(stream)
             self._stream = stream
+            try:
+                _LOGGER.info(
+                    "ha_stream_created stream_label=%s source_basename=%s",
+                    self._stream_label,
+                    Path(source).name,
+                )
+            except Exception:
+                pass
             return stream
 
     async def async_capture_jpeg(self) -> bytes | None:

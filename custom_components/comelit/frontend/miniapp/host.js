@@ -45,11 +45,19 @@
     "ready_state",
   ];
   const HLS_COUNTER_PRIORITY = [
+    "ready_state",
+    "current_time_ms",
+    "duration_ms",
+    "buffered_count",
+    "buffered_start_ms",
+    "buffered_end_ms",
+    "video_width",
+    "video_height",
+    "total_video_frames",
+    "dropped_video_frames",
     "paused",
     "ended",
-    "ready_state",
     "network_state",
-    "buffered_count",
     "seekable_count",
     "buffered_s",
     "seekable_s",
@@ -426,6 +434,7 @@
         lastTriple: "",
         queuedTriples: new Set(),
         queuedTimers: new Set(),
+        hlsMilestones: new Set(),
       };
     }
 
@@ -584,6 +593,52 @@
         counters.live_latency_s = this._boundedCounter(duration - Number(video.currentTime || 0));
       }
       return counters;
+    }
+
+    _mediaMilestoneCounters(video) {
+      const counters = {
+        ready_state: this._boundedCounter(video.readyState),
+        buffered_count: this._boundedCounter(video.buffered?.length || 0),
+        video_width: this._boundedCounter(video.videoWidth || 0),
+        video_height: this._boundedCounter(video.videoHeight || 0),
+      };
+      const currentTime = Number(video.currentTime);
+      if (Number.isFinite(currentTime)) {
+        counters.current_time_ms = this._boundedCounter(currentTime * 1000);
+      }
+      const duration = Number(video.duration);
+      if (Number.isFinite(duration)) {
+        counters.duration_ms = this._boundedCounter(duration * 1000);
+      }
+      if (video.buffered?.length) {
+        counters.buffered_start_ms = this._boundedCounter(video.buffered.start(0) * 1000);
+        counters.buffered_end_ms = this._boundedCounter(
+          video.buffered.end(video.buffered.length - 1) * 1000,
+        );
+      }
+      if (typeof video.getVideoPlaybackQuality === "function") {
+        const quality = video.getVideoPlaybackQuality();
+        counters.total_video_frames = this._boundedCounter(quality?.totalVideoFrames || 0);
+        counters.dropped_video_frames = this._boundedCounter(quality?.droppedVideoFrames || 0);
+      }
+      return counters;
+    }
+
+    _reportHlsMilestone(event, generation, video) {
+      const diagnostics = this._diagnostics;
+      if (
+        !diagnostics ||
+        diagnostics.generation !== generation ||
+        generation !== this._requestGeneration ||
+        !this.isConnected ||
+        diagnostics.hlsMilestones.has(event)
+      ) {
+        return;
+      }
+      diagnostics.hlsMilestones.add(event);
+      this._reportDiagnostics(event, {
+        counters: video ? this._mediaMilestoneCounters(video) : undefined,
+      });
     }
 
     _hlsErrorReason(data) {
@@ -785,7 +840,7 @@
         : 0;
       this._setTransportLabel("HLS · первый кадр " + elapsed.toFixed(1) + " с");
       this._reportDiagnostics("hls_first_frame", {
-        counters: this._video ? this._videoCounters(this._video) : undefined,
+        counters: this._video ? this._mediaMilestoneCounters(this._video) : undefined,
       });
     }
 
@@ -1255,9 +1310,7 @@
           ) {
             return;
           }
-          this._reportDiagnostics("hls_manifest", {
-            counters: this._videoCounters(video),
-          });
+          this._reportHlsMilestone("hls_manifest", generation, video);
           video.play().then(() => {
             this._reportDiagnostics("hls_play", {
               state: "resolved",
@@ -1275,6 +1328,18 @@
             });
             this._setTransportLabel("HLS · нажмите Play");
           });
+        });
+        hls.on(HlsClass.Events.LEVEL_LOADED, () => {
+          this._reportHlsMilestone("hls_level_loaded", generation, video);
+        });
+        hls.on(HlsClass.Events.FRAG_LOADED, () => {
+          this._reportHlsMilestone("hls_frag_loaded", generation, video);
+        });
+        hls.on(HlsClass.Events.FRAG_BUFFERED, () => {
+          this._reportHlsMilestone("hls_frag_buffered", generation, video);
+        });
+        hls.on(HlsClass.Events.BUFFER_APPENDED, () => {
+          this._reportHlsMilestone("hls_buffer_appended", generation, video);
         });
 
         hls.on(HlsClass.Events.ERROR, (_event, data) => {
@@ -1298,14 +1363,17 @@
           );
         });
 
+        this._reportHlsMilestone("hls_manifest_request", generation, video);
         hls.loadSource(source);
         hls.attachMedia(video);
         return;
       }
 
       if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        this._reportHlsMilestone("hls_manifest_request", generation, video);
         video.src = source;
         try {
+          this._reportHlsMilestone("hls_manifest", generation, video);
           await video.play();
           this._reportDiagnostics("hls_play", {
             state: "resolved",

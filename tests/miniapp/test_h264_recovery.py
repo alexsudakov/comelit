@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import struct
 
 import pytest
@@ -413,3 +414,102 @@ def test_activation_bootstrap_is_not_interleaved_by_reentrant_live_packet():
     assert protocol.activate_output_port(18099) is True
 
     assert late.packets == [*bootstrap, live]
+
+
+def test_empty_cache_activation_diagnostics_record_current_behavior(caplog):
+    protocol, _rewriter, _ha, late = _protocol()
+
+    with caplog.at_level(
+        logging.INFO,
+        logger="custom_components.comelit.h264_recovery",
+    ):
+        assert protocol.activate_output_port(18099) is True
+
+    assert late.packets == []
+    text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "output_sink_activation port=18099" in text
+    assert "bootstrap_packets=0" in text
+    assert "bootstrap_has_sps=false" in text
+    assert "bootstrap_has_pps=false" in text
+    assert "bootstrap_has_complete_idr=false" in text
+    assert "activation_result=activated" in text
+    assert "output_sink_bootstrap_sent port=18099 attempted_packets=0" in text
+
+
+def test_bootstrap_diagnostics_report_stap_sps_pps_and_complete_fua_idr():
+    protocol, _rewriter, _ha, _late = _protocol()
+    stap = _rtp_packet(140, 90_000, _stap_a(b"\x67\x64", b"\x68\xee"), marker=True)
+    fragments = [
+        _rtp_packet(141, 180_000, _fu_a(5, b"start", start=True)),
+        _rtp_packet(142, 180_000, _fu_a(5, b"middle")),
+        _rtp_packet(143, 180_000, _fu_a(5, b"end", end=True), marker=True),
+    ]
+    for packet in (stap, *fragments):
+        protocol.datagram_received(packet, ("127.0.0.1", 1))
+
+    diagnostics = protocol._bootstrap_cache.diagnostics()
+
+    assert diagnostics.has_sps is True
+    assert diagnostics.has_pps is True
+    assert diagnostics.has_complete_idr_au is True
+    assert diagnostics.snapshot_packet_count == len(protocol._bootstrap_cache.snapshot())
+    assert diagnostics.idr_au_packet_count == 3
+    assert diagnostics.idr_ssrc == 0x12345678
+    assert diagnostics.idr_timestamp == 180_000
+    assert diagnostics.first_sequence == 141
+    assert diagnostics.last_sequence == 143
+    assert diagnostics.completed_idr_age_ms is not None
+
+
+def test_bootstrap_diagnostics_report_incomplete_fua_idr_as_incomplete():
+    protocol, _rewriter, _ha, _late = _protocol()
+    for packet in (
+        _rtp_packet(150, 90_000, b"\x67\x64", marker=True),
+        _rtp_packet(151, 180_000, b"\x68\xee", marker=True),
+        _rtp_packet(152, 270_000, _fu_a(5, b"start", start=True)),
+    ):
+        protocol.datagram_received(packet, ("127.0.0.1", 1))
+
+    diagnostics = protocol._bootstrap_cache.diagnostics()
+
+    assert diagnostics.has_sps is True
+    assert diagnostics.has_pps is True
+    assert diagnostics.has_complete_idr_au is False
+    assert diagnostics.idr_au_packet_count == 0
+
+
+def test_activation_twice_does_not_emit_second_bootstrap_send(caplog):
+    protocol, _rewriter, _ha, _late = _protocol()
+    protocol.datagram_received(
+        _rtp_packet(160, 90_000, b"\x65\x88", marker=True),
+        ("127.0.0.1", 1),
+    )
+
+    with caplog.at_level(
+        logging.INFO,
+        logger="custom_components.comelit.h264_recovery",
+    ):
+        assert protocol.activate_output_port(18099) is True
+        assert protocol.activate_output_port(18099) is True
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert sum("output_sink_bootstrap_sent port=18099" in msg for msg in messages) == 1
+    assert any("activation_result=already_active" in msg for msg in messages)
+
+
+def test_activation_markers_distinguish_ha_and_miniapp_ports(caplog):
+    protocol, _rewriter, _ha, _late = _protocol()
+
+    with caplog.at_level(
+        logging.INFO,
+        logger="custom_components.comelit.h264_recovery",
+    ):
+        assert protocol.activate_output_port(17999) is True
+        assert protocol.activate_output_port(18099) is True
+
+    text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "output_sink_activation port=17999" in text
+    assert "activation_result=already_active" in text
+    assert "output_sink_activation port=18099" in text
+    assert "activation_result=activated" in text
+    assert "output_sink_bootstrap_sent port=18099" in text
