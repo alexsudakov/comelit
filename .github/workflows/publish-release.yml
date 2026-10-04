@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - candidate/1.7.32b2
+      - candidate/1.7.32b3
     paths:
       - custom_components/comelit/manifest.json
       - .github/workflows/publish-release.yml
