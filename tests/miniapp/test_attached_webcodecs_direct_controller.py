@@ -92,13 +92,15 @@ def test_direct_attached_webcodecs_fails_closed_before_activation_when_sdp_not_r
     controller, hass, _module = _fixed_controller()
     coordinator = base._install_attached_ring_coordinator(hass)
     transport = coordinator.attached_transport
-    transport.miniapp_local_sdp_ready = False
 
     async def run():
         await coordinator.attached_session.async_acquire(
             panel="entrance",
             reason="camera_view",
         )
+        # Starting the attached session marks both SDP files ready; model the
+        # failure after that transition, immediately before WebCodecs acquire.
+        transport.miniapp_local_sdp_ready = False
         target = controller.get_webcodecs_camera_target("camera.comelit_entrance")
         with pytest.raises(
             base.controller_mod.MiniAppOperationError,
