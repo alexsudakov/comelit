@@ -175,6 +175,7 @@ _install_module(
 _install_module(
     "homeassistant.components.http",
     HomeAssistantView=object,
+    StaticPathConfig=lambda *args, **kwargs: (args, kwargs),
 )
 _install_module(
     "homeassistant.components.stream",
@@ -192,6 +193,8 @@ _install_module(
 _install_module(
     "homeassistant.core",
     HomeAssistant=_HomeAssistant,
+    ServiceCall=object,
+    SupportsResponse=types.SimpleNamespace(OPTIONAL="optional"),
 )
 _install_module(
     "homeassistant.exceptions",
@@ -214,11 +217,19 @@ _install_module(
     NoURLAvailableError=ValueError,
     get_url=lambda *args, **kwargs: "http://127.0.0.1:8123",
 )
+_install_module("homeassistant.helpers.typing", ConfigType=dict)
 _install_module(
     "webrtc_models",
     RTCIceCandidateInit=types.SimpleNamespace(
         from_dict=lambda value: value,
     ),
+)
+_install_module(
+    "voluptuous",
+    In=lambda value: value,
+    Optional=lambda value: value,
+    Required=lambda value: value,
+    Schema=lambda value: value,
 )
 
 _custom_components = _install_module("custom_components")
@@ -227,6 +238,38 @@ _comelit = _install_module("custom_components.comelit")
 _comelit.__path__ = [str(PKG_ROOT)]
 _miniapp = _install_module("custom_components.comelit.miniapp")
 _miniapp.__path__ = [str(MINIAPP_ROOT)]
+_miniapp.ComelitMiniAppController = object
+_miniapp.async_register_miniapp_views = lambda *args, **kwargs: None
+_install_module("custom_components.comelit.client", ComelitBridgeClient=object)
+_install_module("custom_components.comelit.oauth", ComelitOAuthManager=object)
+_install_module(
+    "custom_components.comelit.runtime",
+    ComelitRingRuntime=type(
+        "_ComelitRingRuntime",
+        (),
+        {
+            "__init__": lambda self, *args, **kwargs: None,
+            "set_ring_media_coordinator": lambda self, coordinator: None,
+            "set_synthetic_ring_media_coordinator": lambda self, coordinator: None,
+        },
+    ),
+)
+_install_module(
+    "custom_components.comelit.supervisor",
+    ComelitRuntimeSupervisor=type(
+        "_ComelitRuntimeSupervisor",
+        (),
+        {
+            "__init__": lambda self, *args, **kwargs: None,
+            "async_start": lambda self: None,
+        },
+    ),
+)
+_install_module(
+    "custom_components.comelit.test_control",
+    async_register_test_control=lambda *args, **kwargs: None,
+    async_unregister_test_control=lambda *args, **kwargs: None,
+)
 _install_module(
     "custom_components.comelit.media_transport",
     ComelitEntranceMediaTransport=object,
@@ -314,6 +357,16 @@ def _camera_mod():
     return _load(
         PKG_ROOT / "camera.py",
         "custom_components.comelit.camera",
+    )
+
+
+def _integration_mod():
+    module = sys.modules.get("custom_components.comelit")
+    if module is not None and hasattr(module, "_register_attached_media_providers"):
+        return module
+    return _load(
+        PKG_ROOT / "__init__.py",
+        "custom_components.comelit",
     )
 
 
@@ -663,6 +716,34 @@ def test_entrance_camera_uses_miniapp_attached_stream_and_returns_only_proxy_cap
         coordinator.attached_session._transport.deactivate_miniapp_output_calls
         == 1
     )
+
+
+def test_miniapp_attached_hls_activation_order_starts_stream_before_transport():
+    controller, hass = _controller()
+    coordinator = _install_attached_ring_coordinator(hass)
+    events = coordinator.attached_provider.events
+    token, session = controller.sessions.create(424242, 12345678)
+
+    async def run():
+        await controller.async_attached_viewer_event(
+            token,
+            session,
+            action="open",
+            viewer_id="viewer_order1",
+        )
+        await controller.async_create_camera_media(
+            token,
+            session,
+            "camera.comelit_entrance",
+        )
+
+    asyncio.run(run())
+
+    assert events == [
+        "add_provider",
+        "start",
+        "activate_miniapp_output",
+    ]
 
 
 def test_camera_rejects_unlisted_entity_without_starting_stream():
@@ -3522,8 +3603,11 @@ class _FakeAttachedShim:
         self.activations: list[int] = []
         self.deactivations: list[int] = []
         self.deactivate_error: Exception | None = None
+        self.events: list[str] | None = None
 
     async def async_activate_output_port(self, port):
+        if self.events is not None:
+            self.events.append("shim_activate_output_port")
         self.activations.append(port)
 
     async def async_deactivate_output_port(self, port):
@@ -3595,6 +3679,24 @@ def test_async_wait_for_udp_listener_returns_false_when_bounded():
     assert calls == [18099, 18099, 18099]
 
 
+def test_async_wait_for_udp_listener_oserror_fails_open():
+    attached_media_mod = _attached_media_mod()
+
+    def probe(_port):
+        raise OSError("procfs unavailable")
+
+    result = asyncio.run(
+        attached_media_mod.async_wait_for_udp_listener(
+            18099,
+            probe=probe,
+            timeout_seconds=1.0,
+            interval_seconds=0.02,
+        )
+    )
+
+    assert result is True
+
+
 def test_transport_activates_after_udp_listener_probe_succeeds(monkeypatch):
     attached_media_mod = _attached_media_mod()
     values = iter([False, False, True])
@@ -3616,12 +3718,41 @@ def test_transport_activates_after_udp_listener_probe_succeeds(monkeypatch):
     assert shim.activations == [attached_media_mod.MEDIA_VIDEO_MINIAPP_RTP_PORT]
 
 
-def test_transport_activation_times_out_open(monkeypatch):
+def test_udp_listener_probe_oserror_is_ready_fail_open(monkeypatch):
+    attached_media_mod = _attached_media_mod()
+
+    def read_text(_self, *, encoding):
+        assert encoding == "ascii"
+        raise OSError("procfs unavailable")
+
+    monkeypatch.setattr(attached_media_mod.Path, "read_text", read_text)
+    assert attached_media_mod._udp_listener_bound(18099) is True
+
+
+def test_transport_probe_oserror_ready_still_activates():
     attached_media_mod = _attached_media_mod()
     shim = _FakeAttachedShim()
     transport = attached_media_mod.ComelitAttachedRingMediaTransport(
         _FakeAttachedRuntime(),
-        udp_listener_probe=lambda _port: False,
+        udp_listener_probe=lambda _port: (_ for _ in ()).throw(
+            OSError("procfs unavailable")
+        ),
+    )
+    transport._active = True
+    transport._video_recovery_shim = shim
+
+    asyncio.run(transport.async_activate_miniapp_output())
+    assert shim.activations == [attached_media_mod.MEDIA_VIDEO_MINIAPP_RTP_PORT]
+
+
+def test_transport_activation_times_out_open(monkeypatch):
+    attached_media_mod = _attached_media_mod()
+    events: list[str] = []
+    shim = _FakeAttachedShim()
+    shim.events = events
+    transport = attached_media_mod.ComelitAttachedRingMediaTransport(
+        _FakeAttachedRuntime(),
+        udp_listener_probe=lambda _port: events.append("readiness_probe") and False,
     )
     transport._active = True
     transport._video_recovery_shim = shim
@@ -3634,6 +3765,11 @@ def test_transport_activation_times_out_open(monkeypatch):
 
     asyncio.run(transport.async_activate_miniapp_output())
 
+    assert events.count("readiness_probe") >= 1
+    assert events[-1:] == ["shim_activate_output_port"]
+    assert events == ["readiness_probe"] * events.count("readiness_probe") + [
+        "shim_activate_output_port"
+    ]
     assert shim.activations == [attached_media_mod.MEDIA_VIDEO_MINIAPP_RTP_PORT]
 
 
@@ -3666,6 +3802,8 @@ class _FakeAttachedTransport:
         self.active = False
         self.local_sdp_ready = False
         self.local_sdp_path = Path("/run/comelit-attached/local.sdp")
+        self.miniapp_local_sdp_ready = False
+        self.miniapp_local_sdp_path = Path("/run/comelit-attached/miniapp.sdp")
         self.start_calls = 0
         self.stop_calls = 0
         self.activate_miniapp_output_calls = 0
@@ -3986,6 +4124,116 @@ def test_camera_setup_entry_does_not_wire_ring_media_release_callback(
     assert attached_session.status()["active"] is False
     assert attached_transport.stop_calls == 1
     assert attached_provider.release_calls == ["ring_media", "camera_view"]
+
+
+def test_setup_entry_keeps_miniapp_attached_hls_on_distinct_sdp(monkeypatch):
+    _controller_obj, hass = _controller(surveillance_label="Outside")
+    integration_mod = _integration_mod()
+    camera_mod = _camera_mod()
+    attached_media_mod = _attached_media_mod()
+    ring_media_mod = _ring_media_mod()
+    created_sources: list[str] = []
+
+    class _RecordingStream:
+        def __init__(self, _hass, source, **_kwargs):
+            self.source = source
+            created_sources.append(source)
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(ring_media_mod, "Stream", _RecordingStream)
+
+    async def dynamic_stream_settings(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        ring_media_mod,
+        "get_dynamic_camera_stream_settings",
+        dynamic_stream_settings,
+    )
+    hass.data[ring_media_mod.STREAM_DOMAIN] = {
+        ring_media_mod.ATTR_SETTINGS: {},
+        ring_media_mod.ATTR_STREAMS: [],
+    }
+    domain_data = hass.data.setdefault(camera_mod.DOMAIN, {})
+    entry = _ConfigEntry(entry_id="entry-identity")
+    attached_transport = _FakeAttachedTransport()
+    attached_transport.active = True
+    attached_transport.local_sdp_ready = True
+    attached_transport.local_sdp_path = Path("/run/comelit-p2p/attached-local-rtp.sdp")
+    attached_transport.miniapp_local_sdp_ready = True
+    attached_transport.miniapp_local_sdp_path = Path(
+        "/run/comelit-p2p/attached-miniapp-rtp.sdp"
+    )
+    attached_session = attached_media_mod.ComelitAttachedRingMediaSession(
+        attached_transport
+    )
+    domain_data.setdefault(camera_mod.DATA_MEDIA_SESSIONS, {})[entry.entry_id] = (
+        _FakeWebCodecsMediaManager(_FakeWebCodecsMediaTransport())
+    )
+    domain_data.setdefault(camera_mod.DATA_MEDIA_TRANSPORTS, {})[entry.entry_id] = (
+        _FakeWebCodecsMediaTransport()
+    )
+    domain_data.setdefault(camera_mod.DATA_MEDIA_PROVIDERS, {})[entry.entry_id] = (
+        _FakeAttachedStreamProvider()
+    )
+    domain_data.setdefault(camera_mod.DATA_ATTACHED_MEDIA_SESSIONS, {})[
+        entry.entry_id
+    ] = attached_session
+    domain_data.setdefault(camera_mod.DATA_ATTACHED_MEDIA_TRANSPORTS, {})[
+        entry.entry_id
+    ] = attached_transport
+    ring_provider, miniapp_provider = integration_mod._register_attached_media_providers(
+        hass,
+        domain_data,
+        entry,
+        attached_session,
+        attached_transport,
+    )
+    added = []
+
+    async def run():
+        await camera_mod.async_setup_entry(hass, entry, added.extend)
+        camera = added[0]
+        assert camera._attached_provider is ring_provider
+        ring_stream = await ring_provider.async_get_stream()
+        miniapp_stream = await miniapp_provider.async_get_stream()
+        return ring_stream, miniapp_stream
+
+    ring_stream, miniapp_stream = asyncio.run(run())
+
+    assert (
+        domain_data[camera_mod.DATA_ATTACHED_MEDIA_PROVIDERS][entry.entry_id]
+        is ring_provider
+    )
+    assert (
+        domain_data[controller_mod.DATA_MINIAPP_ATTACHED_MEDIA_PROVIDERS][
+            entry.entry_id
+        ]
+        is miniapp_provider
+    )
+    assert miniapp_provider._local_sdp_path_attr == "miniapp_local_sdp_path"
+    assert miniapp_provider._local_sdp_ready_attr == "miniapp_local_sdp_ready"
+    assert ring_stream.source == "/run/comelit-p2p/attached-local-rtp.sdp"
+    assert miniapp_stream.source == "/run/comelit-p2p/attached-miniapp-rtp.sdp"
+    assert ring_stream is not miniapp_stream
+    assert created_sources == [
+        "/run/comelit-p2p/attached-local-rtp.sdp",
+        "/run/comelit-p2p/attached-miniapp-rtp.sdp",
+    ]
+
+    broken_miniapp_provider = ring_media_mod.HAStreamMediaProvider(
+        hass,
+        attached_session,
+        attached_transport,
+        local_sdp_path_attr="local_sdp_path",
+        local_sdp_ready_attr="local_sdp_ready",
+        stream_label="comelit_miniapp_attached",
+    )
+    broken_stream = asyncio.run(broken_miniapp_provider.async_get_stream())
+    assert broken_stream.source == "/run/comelit-p2p/attached-local-rtp.sdp"
+    assert broken_stream.source != miniapp_stream.source
 
 
 def test_camera_setup_entry_without_ring_media_still_adds_camera():

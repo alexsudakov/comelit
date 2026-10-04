@@ -65,6 +65,38 @@ _FRONTEND_URL = "/api/comelit/frontend"
 _FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
 
 
+def _register_attached_media_providers(
+    hass: HomeAssistant,
+    domain_data: dict[str, object],
+    entry: ConfigEntry,
+    attached_session: ComelitAttachedRingMediaSession,
+    attached_transport: ComelitAttachedRingMediaTransport,
+) -> tuple[HAStreamMediaProvider, HAStreamMediaProvider]:
+    """Register Ring Media and Mini App providers for the attached stream."""
+    ring_media_provider = HAStreamMediaProvider(
+        hass,
+        attached_session,
+        attached_transport,
+    )
+    attached_providers = domain_data.setdefault(
+        DATA_ATTACHED_MEDIA_PROVIDERS, {}
+    )
+    attached_providers[entry.entry_id] = ring_media_provider
+    miniapp_attached_provider = HAStreamMediaProvider(
+        hass,
+        attached_session,
+        attached_transport,
+        local_sdp_path_attr="miniapp_local_sdp_path",
+        local_sdp_ready_attr="miniapp_local_sdp_ready",
+        stream_label="comelit_miniapp_attached",
+    )
+    miniapp_attached_providers = domain_data.setdefault(
+        DATA_MINIAPP_ATTACHED_MEDIA_PROVIDERS, {}
+    )
+    miniapp_attached_providers[entry.entry_id] = miniapp_attached_provider
+    return ring_media_provider, miniapp_attached_provider
+
+
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Register direct Comelit services and the bundled Lovelace card."""
 
@@ -241,27 +273,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Physical CALL_INIT events use the already-live persistent call
         # transaction. No listener pause and no second cloud/P2P bootstrap.
-        ring_media_provider = HAStreamMediaProvider(
-            hass,
-            attached_session,
-            attached_transport,
+        ring_media_provider, _miniapp_attached_provider = (
+            _register_attached_media_providers(
+                hass,
+                domain_data,
+                entry,
+                attached_session,
+                attached_transport,
+            )
         )
-        attached_providers = domain_data.setdefault(
-            DATA_ATTACHED_MEDIA_PROVIDERS, {}
-        )
-        attached_providers[entry.entry_id] = ring_media_provider
-        miniapp_attached_provider = HAStreamMediaProvider(
-            hass,
-            attached_session,
-            attached_transport,
-            local_sdp_path_attr="miniapp_local_sdp_path",
-            local_sdp_ready_attr="miniapp_local_sdp_ready",
-            stream_label="comelit_miniapp_attached",
-        )
-        miniapp_attached_providers = domain_data.setdefault(
-            DATA_MINIAPP_ATTACHED_MEDIA_PROVIDERS, {}
-        )
-        miniapp_attached_providers[entry.entry_id] = miniapp_attached_provider
         ring_media = RingMediaCoordinator(
             hass,
             attached_session,

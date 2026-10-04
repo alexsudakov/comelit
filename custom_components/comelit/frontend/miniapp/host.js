@@ -362,6 +362,8 @@
       this._attachedViewerPagehideHandler = () => {
         this._closeAttachedViewerLease(true);
       };
+      // Do not close on visibilitychange: Telegram overlays and tab switches can
+      // hide the WebView while the Entrance viewer is still alive.
       window.addEventListener("pagehide", this._attachedViewerPagehideHandler);
     }
 

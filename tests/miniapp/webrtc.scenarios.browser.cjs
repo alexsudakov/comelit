@@ -963,6 +963,50 @@ async function main() {
     }
 
     {
+      const {page, posts, attachedViewerPosts} = await setupBootstrappedPage(browser, {
+        entity_id: ENTRANCE_ENTITY_ID,
+        platform: "comelit",
+        unique_id: "comelit_entrance_camera",
+        labels: ["surveillance"],
+        name: "Entrance",
+      });
+      try {
+        await page.clock.install();
+        await installMSEFakes(page);
+        await createLiveViewer(page, ENTRANCE_ENTITY_ID);
+        await page.waitForFunction(() => window.__hlsOpenCount === 1);
+        await flush(page, 1);
+        const visibility = await page.evaluate(() => {
+          Object.defineProperty(document, "visibilityState", {
+            configurable: true,
+            value: "hidden",
+          });
+          Object.defineProperty(document, "hidden", {
+            configurable: true,
+            value: true,
+          });
+          document.dispatchEvent(new Event("visibilitychange"));
+          return {
+            hidden: document.hidden,
+            visibilityState: document.visibilityState,
+          };
+        });
+        await flush(page, 5100);
+        assert.deepEqual(visibility, {
+          hidden: true,
+          visibilityState: "hidden",
+        });
+        assert.deepEqual(
+          attachedViewerPosts.map((payload) => payload.action),
+          ["open", "heartbeat"],
+        );
+        await finishScenario(posts);
+      } finally {
+        await page.close();
+      }
+    }
+
+    {
       const {page, posts} = await setupBootstrappedPage(browser, {
         entity_id: ORDINARY_BOOTSTRAP_ENTITY_ID,
         platform: "comelit",

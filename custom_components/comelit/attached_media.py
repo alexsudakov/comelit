@@ -116,7 +116,10 @@ async def async_wait_for_udp_listener(
 ) -> bool:
     deadline = monotonic_clock() + timeout_seconds
     while True:
-        if probe(port):
+        try:
+            if probe(port):
+                return True
+        except OSError:
             return True
         if monotonic_clock() >= deadline:
             return False

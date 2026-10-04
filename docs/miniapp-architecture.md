@@ -597,12 +597,31 @@ requested only when the last relevant Entrance viewer is gone.
 For the Mini App attached HLS path, the controller adds the HLS provider and
 starts the internal HA Stream before activating the Mini App RTP sink. This lets
 the HA Stream worker bind the Mini App RTP port before the recovery bridge sends
-the bounded bootstrap.
+the bounded bootstrap. The readiness check is the Mini App RTP port appearing
+in `/proc/net/udp` or `/proc/net/udp6`, which is the point where the HA Stream
+worker has opened the SDP and bound the UDP socket. The wait is bounded and
+fail-open: if the port is not observed before the deadline, or procfs cannot be
+read, the Mini App sink is still activated so live RTP continues flowing instead
+of creating a silent blackout.
+
+TEST1 on release 1.7.32b1 proved why that ordering matters. A real inbound Ring
+created exactly one upstream Comelit media transport and the main attached HA
+path was healthy: Telegram snapshots were delivered and a 25.807 s MP4
+recording completed. The separate Mini App HLS resource still showed no first
+frame because it was a late RTP subscriber. The initial SPS/PPS STAP-A packet
+and the FU-A fragmented IDR access unit had already passed before the Mini App
+HA Stream bound its port, leaving only undecodable P-fragments for that sink.
+The recovery cache therefore stores a bounded per-sink bootstrap and closes
+fragmented H.264 access units on the RTP marker bit, not on a single FU-A
+packet.
 
 The browser sends heartbeat about every 5 seconds. The server expires a lease
 after about 15 seconds without heartbeat, so WebView loss is bounded even if
-`pagehide` or disconnect cleanup is not delivered. `visibilitychange=hidden` is
-not terminal because short system overlays must not close media.
+`pagehide` or disconnect cleanup is not delivered. Explicit close remains
+best-effort: `pagehide` and element disconnect use fetch `keepalive`, but
+`sendBeacon` is not used because the close endpoint must retain the Mini App
+marker header and session gate. `visibilitychange=hidden` is not terminal
+because short system overlays and tab switches must not close media.
 
 When the last lease is released or expires, the controller asks
 `RingMediaCoordinator.async_request_stop(viewer_closed|viewer_lease_expired)`.

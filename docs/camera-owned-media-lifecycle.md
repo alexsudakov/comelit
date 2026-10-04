@@ -111,7 +111,11 @@ Mini App Entrance viewer is also represented by a bounded server-side lease:
 open and heartbeat are refreshed about every 5 seconds, and the server expires
 the lease after about 15 seconds without a heartbeat. Explicit Hide/destroy,
 Mini App close, and `pagehide` only accelerate release; server-side expiry is
-authoritative if the WebView disappears.
+authoritative if the WebView disappears. Browser explicit close is best-effort
+rather than guaranteed: fetch `keepalive` is used for terminal close, while
+`sendBeacon` is avoided because it cannot carry the Mini App marker header
+required by the session-gated close endpoint. `visibilitychange=hidden` is not
+a terminal event.
 
 If the viewer terminates during recording, the coordinator first asks the HA
 Stream recording task to stop/cancel in bounded fashion. A non-empty partial
@@ -173,6 +177,23 @@ The camera/ring SDP remains `attached-local-rtp.sdp` with video 17999 and audio
 Mini App browser player is muted and no second Comelit audio transport is
 created. These ports are distinct, so two HA Stream objects never read the same
 local UDP sink.
+
+TEST1 on release 1.7.32b1 showed the Mini App HLS stream can fail even when the
+main attached HA path is healthy. In that production window the normal attached
+path delivered Telegram snapshots and completed a 25.807 s MP4 recording, while
+the separate Mini App HLS resource never reached a first frame. The root cause
+was late subscription on the Mini App RTP sink: SPS/PPS and the FU-A fragmented
+IDR access unit had already been sent before the Mini App HA Stream worker bound
+`attached-miniapp-rtp.sdp`. The fix keeps one upstream Comelit transport and one
+H.264 rewrite pipeline, but adds a bounded per-sink bootstrap replay. FU-A
+access units are cached only once the RTP marker closes the access unit.
+
+Activation follows production ordering: `add_provider(HLS)` starts the HLS
+output, `Stream.start()` spawns the HA Stream worker, the readiness gate polls
+for the Mini App UDP port in `/proc/net/udp{,6}`, and then the sink is
+activated. The readiness gate is bounded and fail-open. If readiness is not
+observed before the deadline, or procfs cannot be read, the Mini App sink is
+activated anyway so live RTP is not blacked out.
 
 Mini App OPEN acquires `miniapp_attached_view`, creates/reuses the internal Mini
 App HA Stream, and increments a viewer refcount. Closing one of multiple Mini
