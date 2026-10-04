@@ -3,9 +3,13 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
+import logging
 import struct
 import time
 from typing import Any
+
+_LOGGER = logging.getLogger(__name__)
 
 RTP_VERSION = 2
 H264_PAYLOAD_TYPE = 99
@@ -63,6 +67,8 @@ class _BootstrapAccessUnit:
     packet_bytes: int
     has_idr: bool
     started_at: float
+    first_sequence: int
+    last_sequence: int
 
 
 @dataclass
@@ -70,6 +76,22 @@ class _OutputSink:
     port: int | None
     transport: asyncio.DatagramTransport
     active: bool
+
+
+@dataclass(frozen=True)
+class H264BootstrapDiagnostics:
+    has_sps: bool
+    has_pps: bool
+    has_complete_idr_au: bool
+    snapshot_packet_count: int
+    snapshot_total_bytes: int
+    idr_au_packet_count: int
+    idr_au_total_bytes: int
+    idr_ssrc: int | None
+    idr_timestamp: int | None
+    first_sequence: int | None
+    last_sequence: int | None
+    completed_idr_age_ms: int | None
 
 
 class _BitReader:
@@ -130,6 +152,17 @@ class _BitWriter:
 
 def _inc(value: int) -> int:
     return min(value + 1, MAX_SAFE_COUNTER)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _safe_log_info(message: str, *args: object) -> None:
+    try:
+        _LOGGER.info(message, *args)
+    except Exception:
+        return
 
 
 def _remove_emulation_prevention(data: bytes) -> bytes:
@@ -336,6 +369,10 @@ class _H264BootstrapCache:
         self._last_sps: bytes | None = None
         self._last_pps: bytes | None = None
         self._last_idr_au: tuple[bytes, ...] = ()
+        self._last_idr_key: tuple[int, int] | None = None
+        self._last_idr_first_sequence: int | None = None
+        self._last_idr_last_sequence: int | None = None
+        self._last_idr_completed_at: float | None = None
         self._open_units: dict[tuple[int, int], _BootstrapAccessUnit] = {}
         self._last_key_by_ssrc: dict[int, tuple[int, int]] = {}
 
@@ -352,6 +389,31 @@ class _H264BootstrapCache:
     def _cached_packets(self) -> tuple[bytes, ...]:
         return self.snapshot()
 
+    def diagnostics(self) -> H264BootstrapDiagnostics:
+        packets = self.snapshot()
+        now = self._clock()
+        completed_age: int | None = None
+        if self._last_idr_completed_at is not None:
+            completed_age = max(0, int((now - self._last_idr_completed_at) * 1000))
+        idr_ssrc = self._last_idr_key[0] if self._last_idr_key is not None else None
+        idr_timestamp = (
+            self._last_idr_key[1] if self._last_idr_key is not None else None
+        )
+        return H264BootstrapDiagnostics(
+            has_sps=self._last_sps is not None,
+            has_pps=self._last_pps is not None,
+            has_complete_idr_au=bool(self._last_idr_au),
+            snapshot_packet_count=len(packets),
+            snapshot_total_bytes=sum(len(packet) for packet in packets),
+            idr_au_packet_count=len(self._last_idr_au),
+            idr_au_total_bytes=sum(len(packet) for packet in self._last_idr_au),
+            idr_ssrc=idr_ssrc,
+            idr_timestamp=idr_timestamp,
+            first_sequence=self._last_idr_first_sequence,
+            last_sequence=self._last_idr_last_sequence,
+            completed_idr_age_ms=completed_age,
+        )
+
     def _enforce_total_bounds(self) -> None:
         while True:
             packets = self._cached_packets()
@@ -362,6 +424,10 @@ class _H264BootstrapCache:
                 return
             if self._last_idr_au:
                 self._last_idr_au = ()
+                self._last_idr_key = None
+                self._last_idr_first_sequence = None
+                self._last_idr_last_sequence = None
+                self._last_idr_completed_at = None
             elif self._last_pps is not None:
                 self._last_pps = None
             elif self._last_sps is not None:
@@ -406,11 +472,14 @@ class _H264BootstrapCache:
                 packet_bytes=0,
                 has_idr=False,
                 started_at=now,
+                first_sequence=rtp.sequence,
+                last_sequence=rtp.sequence,
             )
             self._open_units[key] = unit
         unit.packets.append(packet)
         unit.packet_bytes += len(packet)
         unit.has_idr = unit.has_idr or has_idr_packet
+        unit.last_sequence = rtp.sequence
 
         if (
             len(unit.packets) > self._max_packets
@@ -423,6 +492,10 @@ class _H264BootstrapCache:
         self._open_units.pop(key, None)
         if unit.has_idr:
             self._last_idr_au = tuple(unit.packets)
+            self._last_idr_key = key
+            self._last_idr_first_sequence = unit.first_sequence
+            self._last_idr_last_sequence = unit.last_sequence
+            self._last_idr_completed_at = now
             self._enforce_total_bounds()
 
     def _evict_expired(self, now: float) -> None:
@@ -696,12 +769,221 @@ class RecoveryRtpShimProtocol(asyncio.DatagramProtocol):
             au_timeout_seconds=bootstrap_au_timeout_seconds,
         )
         self._activation_queues: dict[int, list[bytes]] = {}
+        self._first_rtp_logged = False
+        self._first_sps_logged = False
+        self._first_pps_logged = False
+        self._first_idr_start_logged = False
+        self._first_complete_idr_logged = False
+        self._input_rtp_packets = 0
+        self._first_rtp_at: str | None = None
+        self._last_rtp_at: str | None = None
+        self._first_rtp_monotonic: float | None = None
+        self._last_rtp_monotonic: float | None = None
+        self._summary_emitted = False
         self.last_error: str | None = None
+
+    def _mark_input_rtp(self, rtp: _RtpPacket, packet_len: int) -> None:
+        try:
+            now = _utc_now_iso()
+            monotonic_now = time.monotonic()
+            self._input_rtp_packets = _inc(self._input_rtp_packets)
+            if self._first_rtp_at is None:
+                self._first_rtp_at = now
+                self._first_rtp_monotonic = monotonic_now
+            self._last_rtp_at = now
+            self._last_rtp_monotonic = monotonic_now
+            if self._first_rtp_logged:
+                return
+            self._first_rtp_logged = True
+            _safe_log_info(
+                "shim_first_rtp at=%s ssrc=%d sequence=%d bytes=%d",
+                now,
+                rtp.ssrc,
+                rtp.sequence,
+                packet_len,
+            )
+        except Exception:
+            return
+
+    def _log_cache_milestones(self, rtp: _RtpPacket, packet_len: int) -> None:
+        try:
+            if (
+                self._first_sps_logged
+                and self._first_pps_logged
+                and self._first_idr_start_logged
+            ):
+                return
+            now = _utc_now_iso()
+            nal_types, usable = _h264_payload_nal_types(rtp.payload)
+            if not usable:
+                return
+            raw_nal_type = rtp.payload[0] & 0x1F if rtp.payload else 0
+            if (
+                not self._first_sps_logged
+                and raw_nal_type != 28
+                and 7 in nal_types
+            ):
+                self._first_sps_logged = True
+                _safe_log_info(
+                    "shim_first_sps_cached at=%s ssrc=%d sequence=%d bytes=%d",
+                    now,
+                    rtp.ssrc,
+                    rtp.sequence,
+                    packet_len,
+                )
+            if (
+                not self._first_pps_logged
+                and raw_nal_type != 28
+                and 8 in nal_types
+            ):
+                self._first_pps_logged = True
+                _safe_log_info(
+                    "shim_first_pps_cached at=%s ssrc=%d sequence=%d bytes=%d",
+                    now,
+                    rtp.ssrc,
+                    rtp.sequence,
+                    packet_len,
+                )
+            if (
+                not self._first_idr_start_logged
+                and _h264_payload_has_idr_start(rtp.payload)
+            ):
+                self._first_idr_start_logged = True
+                _safe_log_info(
+                    "shim_first_idr_start_seen at=%s ssrc=%d sequence=%d bytes=%d",
+                    now,
+                    rtp.ssrc,
+                    rtp.sequence,
+                    packet_len,
+                )
+        except Exception:
+            return
+
+    def _log_complete_idr_milestone(
+        self,
+        before: H264BootstrapDiagnostics,
+        after: H264BootstrapDiagnostics,
+    ) -> None:
+        try:
+            if self._first_complete_idr_logged or not after.has_complete_idr_au:
+                return
+            if before.has_complete_idr_au:
+                return
+            self._first_complete_idr_logged = True
+            _safe_log_info(
+                "shim_first_complete_idr_cached at=%s ssrc=%d sequence=%d bytes=%d",
+                _utc_now_iso(),
+                after.idr_ssrc if after.idr_ssrc is not None else 0,
+                after.first_sequence if after.first_sequence is not None else 0,
+                after.idr_au_total_bytes,
+            )
+        except Exception:
+            return
+
+    def _format_age(self, age_ms: int | None) -> str:
+        return str(age_ms) if age_ms is not None else "NA"
+
+    def _bootstrap_diagnostics_safe(self) -> H264BootstrapDiagnostics:
+        try:
+            return self._bootstrap_cache.diagnostics()
+        except Exception:
+            return H264BootstrapDiagnostics(
+                has_sps=False,
+                has_pps=False,
+                has_complete_idr_au=False,
+                snapshot_packet_count=0,
+                snapshot_total_bytes=0,
+                idr_au_packet_count=0,
+                idr_au_total_bytes=0,
+                idr_ssrc=None,
+                idr_timestamp=None,
+                first_sequence=None,
+                last_sequence=None,
+                completed_idr_age_ms=None,
+            )
+
+    def _log_activation(
+        self,
+        *,
+        port: int,
+        diagnostics: H264BootstrapDiagnostics,
+        queued_live_packets: int,
+        activation_result: str,
+    ) -> None:
+        _safe_log_info(
+            "output_sink_activation port=%d bootstrap_packets=%d "
+            "bootstrap_bytes=%d bootstrap_has_sps=%s bootstrap_has_pps=%s "
+            "bootstrap_has_complete_idr=%s bootstrap_idr_packets=%d "
+            "bootstrap_age_ms=%s queued_live_packets=%d activation_result=%s",
+            port,
+            diagnostics.snapshot_packet_count,
+            diagnostics.snapshot_total_bytes,
+            str(diagnostics.has_sps).lower(),
+            str(diagnostics.has_pps).lower(),
+            str(diagnostics.has_complete_idr_au).lower(),
+            diagnostics.idr_au_packet_count,
+            self._format_age(diagnostics.completed_idr_age_ms),
+            queued_live_packets,
+            activation_result,
+        )
+
+    def _log_bootstrap_sent(
+        self,
+        *,
+        port: int,
+        attempted_packets: int,
+        sent_packets: int,
+        send_errors: int,
+    ) -> None:
+        _safe_log_info(
+            "output_sink_bootstrap_sent port=%d attempted_packets=%d "
+            "sent_packets=%d send_errors=%d",
+            port,
+            attempted_packets,
+            sent_packets,
+            send_errors,
+        )
+
+    def emit_input_summary(self) -> None:
+        if self._summary_emitted:
+            return
+        self._summary_emitted = True
+        duration_ms = 0
+        if (
+            self._first_rtp_monotonic is not None
+            and self._last_rtp_monotonic is not None
+        ):
+            duration_ms = max(
+                0, int((self._last_rtp_monotonic - self._first_rtp_monotonic) * 1000)
+            )
+        _safe_log_info(
+            "input_rtp_summary input_rtp_packets=%d first_rtp_at=%s "
+            "last_rtp_at=%s input_rtp_duration_ms=%d",
+            self._input_rtp_packets,
+            self._first_rtp_at or "NA",
+            self._last_rtp_at or "NA",
+            duration_ms,
+        )
 
     def datagram_received(self, data: bytes, addr: Any) -> None:
         try:
+            input_rtp = _parse_rtp(data)
+            if input_rtp is not None:
+                self._mark_input_rtp(input_rtp, len(data))
             for packet in self._rewriter.rewrite_rtp_packet(data):
+                parsed = _parse_rtp(packet)
+                if parsed is not None:
+                    self._log_cache_milestones(parsed, len(packet))
+                should_check_complete_idr = not self._first_complete_idr_logged
+                before = (
+                    self._bootstrap_diagnostics_safe()
+                    if should_check_complete_idr
+                    else None
+                )
                 self._bootstrap_cache.observe_packet(packet)
+                if before is not None:
+                    after = self._bootstrap_diagnostics_safe()
+                    self._log_complete_idr_milestone(before, after)
                 for sink in self._sinks:
                     if sink.port in self._activation_queues:
                         self._activation_queues[sink.port].append(packet)
@@ -726,17 +1008,40 @@ class RecoveryRtpShimProtocol(asyncio.DatagramProtocol):
             if sink.port != port:
                 continue
             if sink.active:
+                self._log_activation(
+                    port=port,
+                    diagnostics=self._bootstrap_diagnostics_safe(),
+                    queued_live_packets=0,
+                    activation_result="already_active",
+                )
                 return True
             bootstrap = self._bootstrap_cache.snapshot()
+            bootstrap_diagnostics = self._bootstrap_diagnostics_safe()
             self._activation_queues[port] = []
+            sent_packets = 0
+            send_errors = 0
+            self._log_activation(
+                port=port,
+                diagnostics=bootstrap_diagnostics,
+                queued_live_packets=0,
+                activation_result="activated",
+            )
             try:
                 for packet in bootstrap:
                     try:
                         sink.transport.sendto(packet)
+                        sent_packets = _inc(sent_packets)
                     except Exception:
+                        send_errors = _inc(send_errors)
                         self.last_error = "fanout_send_exception"
             finally:
                 queued = self._activation_queues.pop(port, [])
+            self._log_bootstrap_sent(
+                port=port,
+                attempted_packets=len(bootstrap),
+                sent_packets=sent_packets,
+                send_errors=send_errors,
+            )
             sink.active = True
             for packet in queued:
                 try:
@@ -744,6 +1049,12 @@ class RecoveryRtpShimProtocol(asyncio.DatagramProtocol):
                 except Exception:
                     self.last_error = "fanout_send_exception"
             return True
+        self._log_activation(
+            port=port,
+            diagnostics=self._bootstrap_diagnostics_safe(),
+            queued_live_packets=0,
+            activation_result="unknown_port",
+        )
         return False
 
     def deactivate_output_port(self, port: int) -> bool:
@@ -881,6 +1192,9 @@ class H264RecoveryRtpShim:
     async def async_stop(self) -> None:
         input_transport = self._input_transport
         output_transports = self._output_transports
+        protocol = self._protocol
+        if protocol is not None:
+            protocol.emit_input_summary()
         self._input_transport = None
         self._output_transports = ()
         self._protocol = None

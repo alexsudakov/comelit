@@ -77,6 +77,7 @@ def _register_attached_media_providers(
         hass,
         attached_session,
         attached_transport,
+        stream_label="comelit_attached",
     )
     attached_providers = domain_data.setdefault(
         DATA_ATTACHED_MEDIA_PROVIDERS, {}
