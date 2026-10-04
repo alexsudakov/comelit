@@ -155,6 +155,20 @@ class MiniAppWebCodecsEntranceLease:
 
 
 @dataclass(slots=True)
+class MiniAppAttachedWebCodecsEntranceLease:
+    controller: "ComelitMiniAppController"
+    local_sdp_path: Path
+    released: bool = False
+
+    async def release(self) -> None:
+        if self.released:
+            return
+        self.released = True
+        async with self.controller._attached_viewer_lock:
+            await self.controller._release_miniapp_attached_resource_locked()
+
+
+@dataclass(slots=True)
 class _AttachedViewerLease:
     token: str
     viewer_id: str
@@ -494,6 +508,61 @@ class ComelitMiniAppController:
         if not isinstance(upstream_master, str):
             return None
         return upstream_master
+
+    def _attached_webcodecs_source_path_locked(self) -> Path | None:
+        resource = self._miniapp_attached_resource
+        stream = resource.stream if resource is not None else None
+        source = getattr(stream, "source", None)
+        if isinstance(source, str) and source:
+            return Path(source)
+        return None
+
+    async def attached_webcodecs_entrance_ready(self) -> bool:
+        """Return whether Entrance has an active attached Mini App SDP source."""
+        try:
+            session, provider = self._miniapp_attached_runtime()
+        except MiniAppOperationError:
+            return False
+        if self._miniapp_attached_resource is not None:
+            return True
+        if not getattr(session, "active", False):
+            return False
+        stream_source = getattr(provider, "_async_stream_source", None)
+        if callable(stream_source):
+            try:
+                return await stream_source() is not None
+            except Exception:
+                return False
+        return True
+
+    async def acquire_attached_webcodecs_entrance(
+        self,
+        target: MiniAppWebCodecsTarget,
+    ) -> MiniAppAttachedWebCodecsEntranceLease:
+        if target.kind != "entrance":
+            raise MiniAppOperationError("invalid_webcodecs_target")
+
+        async with self._attached_viewer_lock:
+            session, _provider = self._miniapp_attached_runtime()
+            if not getattr(session, "active", False):
+                raise MiniAppOperationError("attached_webcodecs_bootstrap_not_ready")
+            try:
+                await self._ensure_miniapp_attached_resource_locked()
+            except MiniAppOperationError as exc:
+                code = str(exc)
+                if code == _MINIAPP_ATTACHED_CONSUMER_NOT_READY:
+                    raise MiniAppOperationError(
+                        "attached_webcodecs_bootstrap_not_ready"
+                    ) from exc
+                raise MiniAppOperationError("attached_webcodecs_source_failed") from exc
+            source_path = self._attached_webcodecs_source_path_locked()
+            if source_path is None:
+                await self._release_miniapp_attached_resource_locked()
+                raise MiniAppOperationError("attached_webcodecs_source_failed")
+            return MiniAppAttachedWebCodecsEntranceLease(
+                controller=self,
+                local_sdp_path=source_path,
+            )
 
     async def _request_attached_ring_stop(
         self,

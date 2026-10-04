@@ -2110,6 +2110,172 @@ def test_webcodecs_entrance_live_path_uses_manager_local_sdp_and_releases(monkey
     assert transport.active is False
 
 
+def test_attached_webcodecs_active_ring_selects_miniapp_sdp_without_second_media_open(monkeypatch):
+    controller, hass = _controller(surveillance_label="Outside")
+    manager, _cold_transport = _install_webcodecs_entrance_runtime(hass)
+    coordinator = _install_attached_ring_coordinator(hass)
+    token, _session = controller.sessions.create(424242, 12345678)
+    opened_sources = []
+    events = coordinator.attached_provider.events
+
+    async def open_sdp(source):
+        events.append(f"pyav_open:{Path(source).name}")
+        opened_sources.append(source)
+        return _AsyncUnitSource(
+            [unit async for unit in _single_webcodecs_unit(source)]
+        )
+
+    async def activate_ring():
+        await coordinator.attached_session.async_acquire(
+            panel="entrance",
+            reason="camera_view",
+        )
+
+    asyncio.run(activate_ring())
+    start_calls_before_viewer = coordinator.attached_transport.start_calls
+    monkeypatch.setattr(
+        views_mod.webcodecs_mod,
+        "open_h264_sdp_access_unit_source",
+        open_sdp,
+    )
+    view = views_mod.MiniAppCameraWebCodecsView(controller)
+
+    with _MSEWebSocketPatch(
+        monkeypatch,
+        _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+        messages=("wait_forever",),
+    ):
+        asyncio.run(
+            view.get(_mse_request(controller, token), "camera.comelit_entrance")
+        )
+
+    texts = _json_texts(_CaptureWebSocket.instances[-1])
+    hello = next(item for item in texts if item["type"] == "hello")
+    assert hello["source_kind"] == "comelit_attached_miniapp_rtp"
+    assert hello["attached_webcodecs"] is True
+    assert opened_sources == ["/run/comelit-p2p/attached-miniapp-rtp.sdp"]
+    assert manager.acquire_calls == []
+    assert manager.start_count == 0
+    assert coordinator.attached_transport.start_calls == start_calls_before_viewer
+    assert coordinator.attached_session.status()["leases"] == {"camera_view": 1}
+    assert coordinator.attached_provider.release_calls == ["miniapp_attached_view"]
+    # Ordering edit that turns this RED: move PyAV source selection back to local_sdp_path.
+    assert events == [
+        "add_provider",
+        "start",
+        "activate_miniapp_output",
+        "pyav_open:attached-miniapp-rtp.sdp",
+    ]
+
+
+def test_attached_webcodecs_close_preserves_camera_view_until_final_owner(monkeypatch):
+    controller, hass = _controller(surveillance_label="Outside")
+    _install_webcodecs_entrance_runtime(hass)
+    coordinator = _install_attached_ring_coordinator(hass)
+    token, _session = controller.sessions.create(424242, 12345678)
+
+    async def slow_sdp(_source):
+        class _SlowSource(_AsyncUnitSource):
+            async def __anext__(self):
+                await asyncio.sleep(10)
+                raise StopAsyncIteration
+
+        return _SlowSource([])
+
+    async def run_viewer():
+        await coordinator.attached_session.async_acquire(
+            panel="entrance",
+            reason="camera_view",
+        )
+        with _MSEWebSocketPatch(
+            monkeypatch,
+            _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+            messages=(_FakeWSMessage(views_mod.WSMsgType.CLOSE),),
+        ):
+            monkeypatch.setattr(
+                views_mod.webcodecs_mod,
+                "open_h264_sdp_access_unit_source",
+                slow_sdp,
+            )
+            view = views_mod.MiniAppCameraWebCodecsView(controller)
+            await view.get(_mse_request(controller, token), "camera.comelit_entrance")
+
+    asyncio.run(run_viewer())
+
+    assert coordinator.attached_session.status()["leases"] == {"camera_view": 1}
+    assert coordinator.attached_transport.stop_calls == 0
+
+    async def final_close():
+        await coordinator.attached_session.async_release(reason="camera_view")
+
+    asyncio.run(final_close())
+    assert coordinator.attached_session.status()["leases"] == {}
+    assert coordinator.attached_transport.stop_calls == 1
+
+
+def test_attached_webcodecs_source_failure_and_second_viewer_use_bounded_hls_fallback_errors(monkeypatch):
+    controller, hass = _controller(surveillance_label="Outside")
+    _install_webcodecs_entrance_runtime(hass)
+    coordinator = _install_attached_ring_coordinator(hass)
+    token, _session = controller.sessions.create(424242, 12345678)
+
+    async def activate_ring():
+        await coordinator.attached_session.async_acquire(
+            panel="entrance",
+            reason="camera_view",
+        )
+
+    asyncio.run(activate_ring())
+
+    async def failing_sdp(_source):
+        raise webcodecs_mod.WebCodecsSourceError("source_open_failed")
+
+    monkeypatch.setattr(
+        views_mod.webcodecs_mod,
+        "open_h264_sdp_access_unit_source",
+        failing_sdp,
+    )
+    view = views_mod.MiniAppCameraWebCodecsView(controller)
+    with _MSEWebSocketPatch(
+        monkeypatch,
+        _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+        messages=("wait_forever",),
+    ):
+        asyncio.run(
+            view.get(_mse_request(controller, token), "camera.comelit_entrance")
+        )
+    assert {"type": "error", "code": "attached_webcodecs_source_failed"} in _json_texts(
+        _CaptureWebSocket.instances[-1]
+    )
+
+    registry = webcodecs_mod.WebCodecsSessionRegistry(max_sessions=1)
+    monkeypatch.setattr(views_mod.webcodecs_mod, "SESSION_REGISTRY", registry)
+
+    async def session_limited():
+        lease = await registry.acquire("camera.comelit_entrance")
+        try:
+            with _MSEWebSocketPatch(
+                monkeypatch,
+                _FakeWSMessage(
+                    views_mod.WSMsgType.TEXT,
+                    '{"type":"webcodecs","value":"h264"}',
+                ),
+                messages=("wait_forever",),
+            ):
+                await view.get(
+                    _mse_request(controller, token),
+                    "camera.comelit_entrance",
+                )
+        finally:
+            await lease.release()
+
+    asyncio.run(session_limited())
+    assert _json_texts(_CaptureWebSocket.instances[-1]) == [
+        {"type": "error", "code": "attached_webcodecs_session_limit"}
+    ]
+    assert coordinator.attached_session.status()["leases"] == {"camera_view": 1}
+
+
 def test_webcodecs_entrance_park_holds_transport_and_reuses_without_restart():
     controller, hass = _controller(surveillance_label="Outside")
     manager, transport = _install_webcodecs_entrance_runtime(hass)
@@ -4040,11 +4206,13 @@ class _FakeAttachedTransport:
         assert panel == "entrance"
         self.active = True
         self.local_sdp_ready = True
+        self.miniapp_local_sdp_ready = True
 
     async def async_stop(self):
         self.stop_calls += 1
         self.active = False
         self.local_sdp_ready = False
+        self.miniapp_local_sdp_ready = False
         self.miniapp_sink_active = False
 
     async def async_activate_miniapp_output(self):
@@ -4071,6 +4239,7 @@ class _FakeAttachedStreamProvider:
         self.close_calls = 0
         self.events: list[str] = []
         self.stream = types.SimpleNamespace(
+            source="/run/comelit-p2p/attached-miniapp-rtp.sdp",
             set_update_callback=lambda _callback: None,
             outputs=lambda: {},
             stop=lambda: None,

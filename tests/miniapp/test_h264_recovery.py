@@ -162,6 +162,39 @@ def test_new_sink_receives_bootstrap_before_live_and_live_after_activation():
     assert late.packets == [*bootstrap, live]
 
 
+def test_attached_late_sink_ordering_uses_single_append_only_event_list():
+    protocol, _rewriter, _ha, late = _protocol()
+    events: list[str] = []
+    bootstrap = [
+        _rtp_packet(130, 90_000, b"\x67\x64", marker=True),
+        _rtp_packet(131, 180_000, b"\x68\xee", marker=True),
+        _rtp_packet(132, 270_000, b"\x65\x88", marker=True),
+    ]
+    for packet in bootstrap:
+        protocol.datagram_received(packet, ("127.0.0.1", 1))
+        events.append(f"input:{_seq(packet)}")
+
+    protocol.activate_output_port(18099)
+    events.extend(f"late:{_seq(packet)}" for packet in late.packets)
+    live = _rtp_packet(133, 360_000, b"\x41\xb8", marker=True)
+    protocol.datagram_received(live, ("127.0.0.1", 1))
+    events.append(f"input:{_seq(live)}")
+    events.extend(f"late:{_seq(packet)}" for packet in late.packets[3:])
+
+    # Ordering edit that turns this RED: replay queued live packets before
+    # _H264BootstrapCache.snapshot() in RecoveryRtpShimProtocol.activate_output_port.
+    assert events == [
+        "input:130",
+        "input:131",
+        "input:132",
+        "late:130",
+        "late:131",
+        "late:132",
+        "input:133",
+        "late:133",
+    ]
+
+
 def test_early_sink_keeps_existing_rewritten_packet_sequence():
     protocol, rewriter, ha, _late = _protocol()
     protocol.datagram_received(_rtp_packet(40, 90_000, b"\x67\x64"), ("127.0.0.1", 1))
