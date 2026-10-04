@@ -89,7 +89,7 @@ def test_direct_attached_webcodecs_does_not_start_ha_stream_before_pyav_consumer
 
 
 def test_direct_attached_webcodecs_fails_closed_before_activation_when_sdp_not_ready():
-    controller, hass, _module = _fixed_controller()
+    controller, hass, module = _fixed_controller()
     coordinator = base._install_attached_ring_coordinator(hass)
     transport = coordinator.attached_transport
 
@@ -103,7 +103,7 @@ def test_direct_attached_webcodecs_fails_closed_before_activation_when_sdp_not_r
         transport.miniapp_local_sdp_ready = False
         target = controller.get_webcodecs_camera_target("camera.comelit_entrance")
         with pytest.raises(
-            base.controller_mod.MiniAppOperationError,
+            module.MiniAppOperationError,
             match="attached_webcodecs_bootstrap_not_ready",
         ):
             await controller.acquire_attached_webcodecs_entrance(target)
