@@ -358,6 +358,19 @@ class ComelitCard extends HTMLElement {
     };
   }
 
+  _panelLockedByCall(panel, call) {
+    const gateDuringEntranceCall =
+      panel === "gate" &&
+      call.active &&
+      call.panel === "entrance";
+    return (
+      call.active &&
+      Boolean(call.panel) &&
+      call.panel !== panel &&
+      !gateDuringEntranceCall
+    );
+  }
+
   _maybeFocusIncomingCall() {
     if (!this._registryLoaded || !this._hass) {
       return false;
@@ -842,7 +855,7 @@ class ComelitCard extends HTMLElement {
       );
       panel.classList.toggle(
         "call-locked",
-        call.active && call.panel && call.panel !== panelId,
+        this._panelLockedByCall(panelId, call),
       );
     }
 
@@ -863,8 +876,7 @@ class ComelitCard extends HTMLElement {
   _doorPresentation(panel, model, call) {
     const item = panel === "entrance" ? model.entranceDoor : model.gateDoor;
     const state = item.state;
-    const lockedByCall =
-      call.active && Boolean(call.panel) && call.panel !== panel;
+    const lockedByCall = this._panelLockedByCall(panel, call);
     const inFlight = this._doorActionInFlight.has(panel);
     const pressAllowed =
       Boolean(state) &&
@@ -982,10 +994,8 @@ class ComelitCard extends HTMLElement {
 
     const entranceSelected = this._selectedIntercomPanel === "entrance";
     const gateSelected = this._selectedIntercomPanel === "gate";
-    const entranceLocked =
-      call.active && Boolean(call.panel) && call.panel !== "entrance";
-    const gateLocked =
-      call.active && Boolean(call.panel) && call.panel !== "gate";
+    const entranceLocked = this._panelLockedByCall("entrance", call);
+    const gateLocked = this._panelLockedByCall("gate", call);
 
     const entranceDoor = this._doorPresentation("entrance", model, call);
     const gateDoor = this._doorPresentation("gate", model, call);
@@ -1132,7 +1142,7 @@ class ComelitCard extends HTMLElement {
         ) {
           return;
         }
-        if (call.active && call.panel && call.panel !== panel) {
+        if (this._panelLockedByCall(panel, call)) {
           return;
         }
         if (panel !== this._selectedIntercomPanel) {

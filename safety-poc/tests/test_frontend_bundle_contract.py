@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shutil
+import subprocess
+import textwrap
 import unittest
 
 
@@ -9,6 +12,21 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CARD = REPO_ROOT / "custom_components" / "comelit" / "frontend" / "comelit-card.js"
 INIT = REPO_ROOT / "custom_components" / "comelit" / "__init__.py"
 MANIFEST = REPO_ROOT / "custom_components" / "comelit" / "manifest.json"
+
+
+def _extract_js_method(source: str, name: str) -> str:
+    start = source.index(f"{name}(")
+    brace = source.index("{", start)
+    depth = 0
+    for index in range(brace, len(source)):
+        char = source[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : index + 1]
+    raise AssertionError(f"Could not extract JavaScript method {name}")
 
 
 class FrontendBundleContractTest(unittest.TestCase):
@@ -87,11 +105,63 @@ class FrontendBundleContractTest(unittest.TestCase):
 
     def test_active_call_locks_other_intercom_panel(self) -> None:
         source = CARD.read_text(encoding="utf-8")
+        panel_lock_method = _extract_js_method(source, "_panelLockedByCall")
 
         self.assertIn("data-intercom-select", source)
-        self.assertIn("call.active && call.panel && call.panel !== panel", source)
         self.assertIn('data-door-action="entrance"', source)
         self.assertIn('data-door-action="gate"', source)
+        self.assertIn("call.active", panel_lock_method)
+        self.assertIn("Boolean(call.panel)", panel_lock_method)
+        self.assertIn("call.panel !== panel", panel_lock_method)
+        self.assertIn('panel === "gate"', panel_lock_method)
+        self.assertIn('call.panel === "entrance"', panel_lock_method)
+        self.assertIn("!gateDuringEntranceCall", panel_lock_method)
+        self.assertIn(
+            'panel.classList.toggle(\n        "call-locked",\n        this._panelLockedByCall(panelId, call),\n      );',
+            source,
+        )
+        self.assertIn(
+            "const lockedByCall = this._panelLockedByCall(panel, call);",
+            source,
+        )
+        self.assertIn(
+            'const entranceLocked = this._panelLockedByCall("entrance", call);',
+            source,
+        )
+        self.assertIn(
+            'const gateLocked = this._panelLockedByCall("gate", call);',
+            source,
+        )
+        self.assertIn("if (this._panelLockedByCall(panel, call))", source)
+        self.assertIn("state.attributes?.standard_press_allowed === true", source)
+        self.assertIn("disabled: !pressAllowed || lockedByCall || inFlight", source)
+        self.assertIn("No automatic retry is allowed here.", source)
+
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is required to evaluate the frontend lock helper")
+        script = textwrap.dedent(
+            f"""
+            const component = {{
+              {panel_lock_method}
+            }};
+            const cases = [
+              ["gate is selectable during an entrance call", "gate", {{active: true, panel: "entrance"}}, false],
+              ["entrance is locked during a gate call", "entrance", {{active: true, panel: "gate"}}, true],
+              ["entrance stays selectable during an entrance call", "entrance", {{active: true, panel: "entrance"}}, false],
+              ["gate stays selectable during a gate call", "gate", {{active: true, panel: "gate"}}, false],
+              ["inactive call does not lock", "entrance", {{active: false, panel: "gate"}}, false],
+              ["missing call panel does not lock", "entrance", {{active: true, panel: null}}, false],
+            ];
+            for (const [label, panel, call, expected] of cases) {{
+              const actual = component._panelLockedByCall(panel, call);
+              if (actual !== expected) {{
+                throw new Error(`${{label}}: expected ${{expected}}, got ${{actual}}`);
+              }}
+            }}
+            """
+        )
+        subprocess.run([node, "-e", script], check=True)
 
     def test_card_uses_authoritative_call_state_for_one_shot_focus(self) -> None:
         source = CARD.read_text(encoding="utf-8")
