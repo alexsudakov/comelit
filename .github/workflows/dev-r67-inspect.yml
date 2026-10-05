@@ -8,29 +8,29 @@ on:
       - safety-poc/research/media/v1/entrance_p116_r66_call_time_door_transform.py
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   inspect:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Generate current R66 listener source and inspect refresh/media anchors
+      - name: Generate current R66 listener source
         shell: bash
         run: |
           set -euo pipefail
           MEDIA=safety-poc/research/media/v1
           SOURCE=safety-poc/research/door/v1_5_7/comelit-v4-persistent-ctpp-door.c
-          OUT=/tmp/r66.c
+          OUT="$MEDIA/_dev_r66_generated.c"
           PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$MEDIA" python3 "$MEDIA/entrance_p116_r66_call_time_door_transform.py" --source "$SOURCE" --output "$OUT"
           sha256sum "$OUT"
-          echo '=== SYMBOLS ==='
-          grep -n -E 'r42_|R42_|p78_|P78_|p97_|P97_|p80_media_forwarding_enabled|p80_video_rtp_packets|v4_ctpp_channel_id|p12_consume_post_ack|pseudotcp_open|SIGUSR2|media_stop' "$OUT" | head -n 350
-          echo '=== MEDIA OPEN CONTEXT ==='
-          grep -n -B 12 -A 28 -E 'r42_queue_media_channel_open|MEDIA_ACTIVE=true|R42_MEDIA_ACTIVE|MEDIAREQ26_OPEN' "$OUT" | head -n 350
-          echo '=== RX ACK CONTEXT ==='
-          grep -n -B 20 -A 50 -E 'p97_handle_device_ack|p12_consume_post_ack' "$OUT" | head -n 400
-          echo '=== STOP CONTEXT ==='
-          grep -n -B 25 -A 60 -E 'SIGUSR2|r42_.*stop|media.*stop|MEDIA_STOP' "$OUT" | head -n 450
-          echo '=== TX ENUM/COMPLETION CONTEXT ==='
-          grep -n -B 20 -A 80 -E 'P12TxKind|P78_TX_RTPC_CLIENT_001A|p12_tx_kind' "$OUT" | head -n 500
+          grep -n -E 'P76_|p76_|0x001A|0x001a|001A|001a|R42_ATTACHED_MEDIA_ACTIVE|P12_TX_R42_MEDIA|r58_stop_writer' "$OUT" || true
+      - name: Commit generated inspection source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add safety-poc/research/media/v1/_dev_r66_generated.c
+          git commit -m 'chore(dev): persist generated R66 listener [skip ci]'
+          git push origin HEAD:fix/pr281-attached-refresh-terminal
