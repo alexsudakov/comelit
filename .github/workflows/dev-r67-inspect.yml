@@ -1,0 +1,36 @@
+name: dev-r67-inspect
+on:
+  push:
+    branches:
+      - fix/pr281-attached-refresh-terminal
+    paths:
+      - .github/workflows/dev-r67-inspect.yml
+      - safety-poc/research/media/v1/entrance_p116_r66_call_time_door_transform.py
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate current R66 listener source and inspect refresh/media anchors
+        shell: bash
+        run: |
+          set -euo pipefail
+          MEDIA=safety-poc/research/media/v1
+          SOURCE=safety-poc/research/door/v1_5_7/comelit-v4-persistent-ctpp-door.c
+          OUT=/tmp/r66.c
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$MEDIA" python3 "$MEDIA/entrance_p116_r66_call_time_door_transform.py" --source "$SOURCE" --output "$OUT"
+          sha256sum "$OUT"
+          echo '=== SYMBOLS ==='
+          grep -n -E 'r42_|R42_|p78_|P78_|p97_|P97_|p80_media_forwarding_enabled|p80_video_rtp_packets|v4_ctpp_channel_id|p12_consume_post_ack|pseudotcp_open|SIGUSR2|media_stop' "$OUT" | head -n 350
+          echo '=== MEDIA OPEN CONTEXT ==='
+          grep -n -B 12 -A 28 -E 'r42_queue_media_channel_open|MEDIA_ACTIVE=true|R42_MEDIA_ACTIVE|MEDIAREQ26_OPEN' "$OUT" | head -n 350
+          echo '=== RX ACK CONTEXT ==='
+          grep -n -B 20 -A 50 -E 'p97_handle_device_ack|p12_consume_post_ack' "$OUT" | head -n 400
+          echo '=== STOP CONTEXT ==='
+          grep -n -B 25 -A 60 -E 'SIGUSR2|r42_.*stop|media.*stop|MEDIA_STOP' "$OUT" | head -n 450
+          echo '=== TX ENUM/COMPLETION CONTEXT ==='
+          grep -n -B 20 -A 80 -E 'P12TxKind|P78_TX_RTPC_CLIENT_001A|p12_tx_kind' "$OUT" | head -n 500
