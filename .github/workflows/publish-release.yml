@@ -1,3 +1,4 @@
+# Candidate release retry: no runtime change; retrigger after runner queue cancellation.
 name: Publish integration release
 
 on:
