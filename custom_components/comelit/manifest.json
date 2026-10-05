@@ -1,7 +1,7 @@
 {
   "domain": "comelit",
   "name": "Comelit",
-  "version": "1.7.31",
+  "version": "1.7.32b9",
   "documentation": "https://github.com/alexsudakov/comelit",
   "issue_tracker": "https://github.com/alexsudakov/comelit/issues",
   "codeowners": [
