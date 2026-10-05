@@ -960,8 +960,10 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                     unit_source: webcodecs_mod.H264AccessUnitSource | None = None
                     send_source_eof = True
                     first_source_packet_queued = False
+                    source_open_queued = False
                     try:
                         unit_source = await source_opener(source)
+                        source_open_queued = True
                         await queue.put(
                             ("source_open", webcodecs_mod.monotonic_ms(started))
                         )
@@ -1003,13 +1005,17 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                         raise
                     except webcodecs_mod.WebCodecsSourceError as exc:
                         send_source_eof = False
+                        code = exc.code
+                        if attached_webcodecs:
+                            code = (
+                                "attached_webcodecs_transport_closed"
+                                if source_open_queued
+                                else "attached_webcodecs_source_failed"
+                            )
                         await queue.put(
                             (
                                 "error",
-                                "attached_webcodecs_source_failed"
-                                if attached_webcodecs
-                                and exc.code == "source_open_failed"
-                                else exc.code,
+                                code,
                             )
                         )
                     except Exception:
@@ -1017,7 +1023,10 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                         await queue.put(
                             (
                                 "error",
-                                "attached_webcodecs_source_failed"
+                                "attached_webcodecs_transport_closed"
+                                if attached_webcodecs
+                                and source_open_queued
+                                else "attached_webcodecs_source_failed"
                                 if attached_webcodecs
                                 else "source_open_failed",
                             )

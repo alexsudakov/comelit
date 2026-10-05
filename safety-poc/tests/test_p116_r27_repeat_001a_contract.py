@@ -16,8 +16,8 @@ ROOT = Path(__file__).resolve().parents[2]
 MEDIA = ROOT / "safety-poc" / "research" / "media" / "v1"
 SOURCE = ROOT / "safety-poc" / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-ctpp-door.c"
 TRANSFORM = MEDIA / "entrance_p116_r27_repeat_001a_transform.py"
-EXPECTED_GENERATED_SOURCE_SHA = "a422264be5f00f453278155c069144720b3149c8b957f0a3ed5488357977fb93"
-RUNNER_EXPECTED_SOURCE_SHA = "a422264be5f00f453278155c069144720b3149c8b957f0a3ed5488357977fb93"
+EXPECTED_GENERATED_SOURCE_SHA = "935fd3f421ff4f2f489efa8221ede229013f088754f7d063f18e089a3970bdd4"
+RUNNER_EXPECTED_SOURCE_SHA = "935fd3f421ff4f2f489efa8221ede229013f088754f7d063f18e089a3970bdd4"
 RUNNER_HISTORICAL_PRE_R30D_SOURCE_SHA = "62e0023521cef0e4178248beb78408f89752d108d9d009c388ff153d94195368"
 
 # This is an explicit source-local declaration-order gate for R27-added code in
@@ -132,8 +132,8 @@ def _compile_and_run_harness(candidate: str) -> str:
         #define P76_FACT_GENERATED 2
         #define P78_RTPC_COMPLETE 77
         #define R27_TX_RTPC_CLIENT_001A_REPEAT 78
-        #define R27_REFRESH_CADENCE_SECONDS 25u
-        #define R27_CADENCE_SAFETY_MARGIN_SECONDS 11u
+        #define R27_REFRESH_CADENCE_SECONDS 15u
+        #define R27_CADENCE_SAFETY_MARGIN_SECONDS 21u
         #define R27_MAX_REFRESH_COUNT 4u
         #define R27_MAX_SINGLE_SESSION_SECONDS 120u
         #define R27_VIDEO_PAST_35S_SECONDS 35u
@@ -905,8 +905,8 @@ class P116R27Repeat001AContractTests(unittest.TestCase):
             self.assertIn(derived, self.candidate)
 
     def test_stop_before_cadence_has_no_repeat_callback_path(self) -> None:
-        self.assertIn("R27_REFRESH_CADENCE_SECONDS 25u", self.r27_state)
-        self.assertIn("R27_CADENCE_SAFETY_MARGIN_SECONDS 11u", self.r27_state)
+        self.assertIn("R27_REFRESH_CADENCE_SECONDS 15u", self.r27_state)
+        self.assertIn("R27_CADENCE_SAFETY_MARGIN_SECONDS 21u", self.r27_state)
         self.assertIn("r27_repeat_timer_cancelled || pseudotcp_graceful_stop_started", self.r27_helpers)
         self.assertIn("return G_SOURCE_REMOVE;", self.r27_helpers)
 

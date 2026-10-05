@@ -554,6 +554,62 @@ async function main() {
       manualFallbackButton: false,
     });
 
+    await page.evaluate(() => {
+      window.__webcodecs.legacyMounts = 0;
+      const card = document.getElementById("card");
+      card.shadowRoot.querySelector("[data-intercom-camera-toggle]").click();
+      card.shadowRoot.querySelector("[data-intercom-camera-toggle]").click();
+    });
+    await page.waitForFunction(() => window.__webcodecs.sockets.length === 4);
+    await page.waitForFunction(() => window.__webcodecs.sockets[3].sent.length === 1);
+    await page.evaluate(() => {
+      const socket = window.__webcodecs.sockets[3];
+      socket.emitText({ type: "intercom_media_ready", server_elapsed_ms: 100 });
+      socket.emitText({ type: "source_open", server_elapsed_ms: 130 });
+      socket.emitText({ type: "source_packet", server_elapsed_ms: 150 });
+      socket.emitText({
+        type: "hello",
+        protocol: 2,
+        entity_id: "camera.comelit_entrance",
+        codec: "avc1.42C01E",
+        max_unit_bytes: 1048576,
+        session_max_seconds: 600,
+        zero_transcode: true,
+        source_kind: "comelit_attached_miniapp_rtp",
+        comelit_entrance_open: true,
+        comelit_media_started: true,
+        attached_webcodecs: true,
+      });
+      socket.emitBinary(window.__frame());
+    });
+    await page.waitForFunction(() => window.__webcodecs.drawCount === 4);
+    await page.evaluate(() => {
+      window.__webcodecs.sockets[3].emitText({
+        type: "error",
+        code: "attached_webcodecs_transport_closed",
+      });
+    });
+    await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    const attachedCloseTerminal = await page.evaluate(() => {
+      const card = document.getElementById("card");
+      return {
+        legacyMounts: window.__webcodecs.legacyMounts,
+        mode: card._intercomViewerMode,
+        reason: card._intercomViewerFallbackReason,
+        viewerConnected: Boolean(
+          card.shadowRoot.querySelector(
+            "#intercom-viewer miniapp-webcodecs-viewer",
+          )?.isConnected,
+        ),
+      };
+    });
+    assert.deepEqual(attachedCloseTerminal, {
+      legacyMounts: 0,
+      mode: "webcodecs",
+      reason: "attached_webcodecs_transport_closed",
+      viewerConnected: true,
+    });
+
     // Explicit reopen resets the primary mode. If WebCodecs is unavailable in
     // the WebView, fallback is automatic before opening any WebCodecs socket.
     await page.evaluate(() => {
@@ -564,7 +620,7 @@ async function main() {
       card.shadowRoot.querySelector("[data-intercom-camera-toggle]").click();
     });
     await page.waitForFunction(() => window.__webcodecs.legacyMounts === 2);
-    assert.equal(await page.evaluate(() => window.__webcodecs.sockets.length), 3);
+    assert.equal(await page.evaluate(() => window.__webcodecs.sockets.length), 4);
     // Restore WebCodecs, reopen Entrance successfully, then switch directly
     // to Surveillance. The tab transition must acquire the 60-second warm
     // server lease before disconnecting the Entrance WSS/decoder, and only
@@ -575,10 +631,10 @@ async function main() {
       card.shadowRoot.querySelector("[data-intercom-camera-toggle]").click();
       card.shadowRoot.querySelector("[data-intercom-camera-toggle]").click();
     });
-    await page.waitForFunction(() => window.__webcodecs.sockets.length === 4);
-    await page.waitForFunction(() => window.__webcodecs.sockets[3].sent.length === 1);
+    await page.waitForFunction(() => window.__webcodecs.sockets.length === 5);
+    await page.waitForFunction(() => window.__webcodecs.sockets[4].sent.length === 1);
     await page.evaluate(() => {
-      const socket = window.__webcodecs.sockets[3];
+      const socket = window.__webcodecs.sockets[4];
       socket.emitText({ type: "intercom_media_ready", server_elapsed_ms: 180 });
       socket.emitText({ type: "source_open", server_elapsed_ms: 200 });
       socket.emitText({ type: "source_packet", server_elapsed_ms: 220 });
@@ -596,7 +652,7 @@ async function main() {
       });
       socket.emitBinary(window.__frame());
     });
-    await page.waitForFunction(() => window.__webcodecs.drawCount === 4);
+    await page.waitForFunction(() => window.__webcodecs.drawCount === 6);
 
     // Production ordinary surveillance path: the normal two-tab surface uses
     // the already live-validated WebCodecs transport first. Terminal failures
@@ -609,11 +665,11 @@ async function main() {
       card.shadowRoot.querySelector('[data-tab="surveillance"]').click();
       return window.__webcodecs.surveillanceSocketBase;
     });
-    assert.equal(surveillanceSocketBase, 4);
+    assert.equal(surveillanceSocketBase, 5);
     await page.waitForFunction(() => window.__webcodecs.parkCalls.length === 1);
     await page.waitForFunction(
       (index) => window.__webcodecs.sockets[index].readyState === WebSocket.CLOSED,
-      3,
+      4,
     );
     assert.deepEqual(
       await page.evaluate(() => window.__webcodecs.parkCalls[0]),

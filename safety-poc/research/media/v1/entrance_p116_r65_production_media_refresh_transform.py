@@ -81,17 +81,17 @@ if _LIVE_OBSERVATION_FORWARD_DECL not in r27._STATE_NEW:
 # macro names (all downstream comparisons and prints already reference them
 # by name) but raises their values so they describe the indefinite
 # production lifecycle instead of the bounded research one:
-#   floor(600 / 25) == 24 refreshes at the proven 25s cadence exhaust the
-#   600s ComelitMediaSessionManager hard deadline; 32 leaves a defense-in-
+#   floor(600 / 15) == 40 refreshes at the production 15s cadence exhaust the
+#   600s ComelitMediaSessionManager hard deadline; 48 leaves a defense-in-
 #   depth margin above that so the manager's kill -- not this native
 #   counter -- is always the governing bound in normal operation.
-_R65_MAX_REFRESH_COUNT = 32
+_R65_MAX_REFRESH_COUNT = 48
 _R65_MAX_SESSION_SECONDS = 600  # mirrors MEDIA_SESSION_HARD_LIMIT_SECONDS
 
 _REFRESH_COUNT_OLD = "#define R27_MAX_REFRESH_COUNT 4u\n"
 _REFRESH_COUNT_NEW = (
     "/* R65: raised from the R27 live-proof cap (4) to a defense-in-depth\n"
-    " * backstop above floor(600s manager deadline / 25s cadence) == 24; the\n"
+    " * backstop above floor(600s manager deadline / 15s cadence) == 40; the\n"
     " * manager's hard timeout remains the real governing bound. */\n"
     f"#define R27_MAX_REFRESH_COUNT {_R65_MAX_REFRESH_COUNT}u\n"
 )
@@ -146,9 +146,9 @@ def report() -> str:
             "R65_REFRESH_SELF_TIMEOUT=false",
             "R65_REFRESH_BOUND_BY=MANAGER_600S_DEADLINE_OR_TEARDOWN",
             f"R65_PRODUCTION_MAX_REFRESH_COUNT={_R65_MAX_REFRESH_COUNT}",
-            "REFRESH_CADENCE_SECONDS=25",
+            "REFRESH_CADENCE_SECONDS=15",
             "CADENCE_SOURCE=LOCAL_LIVE_EVIDENCE",
-            "CADENCE_SAFETY_MARGIN_SECONDS=11",
+            "CADENCE_SAFETY_MARGIN_SECONDS=21",
             "REFRESH_OVERLAP=false",
             "REFRESH_RETRY=false",
             "DOOR_ACTION_SENT=false",

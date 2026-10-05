@@ -15,7 +15,7 @@ MEDIA = ROOT / "safety-poc" / "research" / "media" / "v1"
 SOURCE = ROOT / "safety-poc" / "research" / "door" / "v1_5_7" / "comelit-v4-persistent-ctpp-door.c"
 TRANSFORM = MEDIA / "entrance_p116_r65_production_media_refresh_transform.py"
 EXPECTED_GENERATED_SOURCE_SHA = (
-    "4448e8368bd6275a2cd398c35ef171d012f315d2bb5bd05daf2e33a13d4c0001"
+    "499c1feb6546e91fed8422f01f4a6249f6907f2bddbd93e82435ea58fb2c5240"
 )
 
 sys.path.insert(0, str(MEDIA))
@@ -59,7 +59,7 @@ class P116R65ProductionMediaRefreshContractTests(unittest.TestCase):
     def test_refresh_count_and_session_cap_raised_for_production(self) -> None:
         self.assertIn("#define R27_MAX_REFRESH_COUNT 4u", self.r27_candidate)
         self.assertNotIn("#define R27_MAX_REFRESH_COUNT 4u", self.candidate)
-        self.assertIn("#define R27_MAX_REFRESH_COUNT 32u", self.candidate)
+        self.assertIn("#define R27_MAX_REFRESH_COUNT 48u", self.candidate)
         self.assertIn("#define R27_MAX_SINGLE_SESSION_SECONDS 600u", self.candidate)
 
     def test_production_promotion_markers_present(self) -> None:
@@ -74,10 +74,14 @@ class P116R65ProductionMediaRefreshContractTests(unittest.TestCase):
             'printf("R27_REPEAT_DELAY_PROMOTED_TO_PRODUCTION=false\\n");', self.candidate
         )
 
-    def test_cadence_and_safety_margin_unchanged_from_live_evidence(self) -> None:
-        self.assertIn("#define R27_REFRESH_CADENCE_SECONDS 25u", self.candidate)
-        self.assertIn("#define R27_CADENCE_SAFETY_MARGIN_SECONDS 11u", self.candidate)
+    def test_cadence_safety_margin_and_backstop_are_synchronised(self) -> None:
+        self.assertIn("#define R27_REFRESH_CADENCE_SECONDS 15u", self.candidate)
+        self.assertIn("#define R27_CADENCE_SAFETY_MARGIN_SECONDS 21u", self.candidate)
         self.assertIn('printf("CADENCE_SOURCE=LOCAL_LIVE_EVIDENCE\\n");', self.candidate)
+        self.assertIn("floor(600s manager deadline / 15s cadence) == 40", self.candidate)
+        self.assertGreater(r65_transform._R65_MAX_REFRESH_COUNT, 600 // 15)
+        self.assertEqual(r65_transform.report().count("REFRESH_CADENCE_SECONDS=15"), 1)
+        self.assertEqual(r65_transform.report().count("CADENCE_SAFETY_MARGIN_SECONDS=21"), 1)
 
     def test_single_outstanding_no_retry_and_fail_closed_are_inherited_unchanged(self) -> None:
         # These are the R27-proven safety properties; R65 must not touch them.
@@ -140,7 +144,7 @@ def _compile_and_run_harness(candidate: str) -> str:
     real_define = _extract_max_refresh_count_define(candidate)
     if "R27_MAX_REFRESH_COUNT" not in real_queue_fn:
         raise AssertionError("extracted queue function does not reference R27_MAX_REFRESH_COUNT")
-    if "32u" not in real_define:
+    if "48u" not in real_define:
         raise AssertionError(f"unexpected production refresh count define: {real_define!r}")
 
     harness = textwrap.dedent(
