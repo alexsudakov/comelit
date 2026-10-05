@@ -1065,6 +1065,18 @@ class RecoveryRtpShimProtocol(asyncio.DatagramProtocol):
             return True
         return False
 
+    def input_rtp_diagnostics(self) -> dict[str, int | str | None]:
+        """Return bounded live timing/count diagnostics for the shim input."""
+        age_ms: int | None = None
+        if self._last_rtp_monotonic is not None:
+            age_ms = max(0, int((time.monotonic() - self._last_rtp_monotonic) * 1000))
+        return {
+            "input_packets": self._input_rtp_packets,
+            "first_rtp_at": self._first_rtp_at,
+            "last_rtp_at": self._last_rtp_at,
+            "last_rtp_age_ms": age_ms,
+        }
+
 
 class H264RecoveryRtpShim:
     def __init__(
@@ -1122,6 +1134,18 @@ class H264RecoveryRtpShim:
     @property
     def inactive_output_ports(self) -> tuple[int, ...]:
         return self._inactive_output_ports
+
+    def input_rtp_diagnostics(self) -> dict[str, int | str | None]:
+        """Expose only bounded input RTP timing/count diagnostics."""
+        protocol = self._protocol
+        if protocol is None:
+            return {
+                "input_packets": 0,
+                "first_rtp_at": None,
+                "last_rtp_at": None,
+                "last_rtp_age_ms": None,
+            }
+        return protocol.input_rtp_diagnostics()
 
     def diagnostics(self) -> RecoveryShimDiagnostics:
         diagnostics = self._rewriter.diagnostics(running=self.running)
