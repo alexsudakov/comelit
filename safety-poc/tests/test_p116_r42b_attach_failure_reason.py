@@ -21,9 +21,16 @@ def _load_attached_module() -> types.ModuleType:
     h264 = types.ModuleType(f"{package_name}.h264_recovery")
 
     class H264RecoveryRtpShim:
-        def __init__(self, *, input_port: int, output_port: int) -> None:
+        def __init__(
+            self,
+            *,
+            input_port: int,
+            output_port: int,
+            output_ports=None,
+        ) -> None:
             self.input_port = input_port
             self.output_port = output_port
+            self.output_ports = output_ports or (output_port,)
             self.running = False
 
         async def async_start(self) -> None:
@@ -38,6 +45,7 @@ def _load_attached_module() -> types.ModuleType:
     media_transport = types.ModuleType(f"{package_name}.media_transport")
     media_transport.MEDIA_AUDIO_RTP_PORT = 17808
     media_transport.MEDIA_VIDEO_HA_RTP_PORT = 17999
+    media_transport.MEDIA_VIDEO_MINIAPP_RTP_PORT = 18099
     media_transport.MEDIA_VIDEO_RTP_PORT = 17899
     sys.modules[media_transport.__name__] = media_transport
 

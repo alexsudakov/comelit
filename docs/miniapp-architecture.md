@@ -154,13 +154,64 @@ hass.states
 entity_registry
 label_registry
 hass.services
-camera async_request_stream
+camera async_request_stream for ordinary surveillance cameras
+internal attached Mini App HA Stream for real inbound Entrance media
 ```
 
 There is no HA Long-Lived Access Token.
 
 The browser receives only the filtered states and registry metadata required by
 the Comelit card.
+
+For the intercom Entrance during a real inbound Ring, the Mini App does not use
+`async_request_stream(hass, "camera.comelit_entrance", HLS_PROVIDER)`. Home
+Assistant HLS has no per-browser ownership identity: an HLS URL identifies the
+HA `Stream`, not an individual viewer. The Mini App therefore owns a separate
+internal attached media resource:
+
+```text
+one native attached inbound RTP transport
+  -> one H264 recovery/rewrite state
+  -> local RTP fan-out
+       -> camera/ring SDP: attached-local-rtp.sdp, video 17999 + audio 17808
+       -> Mini App SDP: attached-miniapp-rtp.sdp, video 18099 only
+  -> separate HA Stream objects
+       -> camera.comelit_entrance / ring snapshot-recording provider
+       -> Mini App session-bound HLS proxy provider
+```
+
+The upstream Comelit call/media transaction remains single. Mini App viewers
+refcount only the internal Mini App stream and the
+`miniapp_attached_view` attached-session lease. Closing or expiring the last Mini
+App viewer releases only Mini App ownership and requests ring-media convergence;
+an ordinary HA frontend viewer keeps its independent `camera_view` lease until
+the camera Stream lifecycle releases it. The browser still receives only an
+opaque `/api/comelit/miniapp/media/{media_id}/...` URL, never the local SDP path
+or raw HA HLS source.
+
+The Mini App attached RTP output is registered inactive when the attached media
+bridge starts. The single H264 recovery/rewrite state continues feeding the
+camera/ring SDP immediately, while the Mini App video port receives no live
+fan-out traffic until the Mini App attached HA Stream exists and its UDP port is
+proven bound during the bounded readiness wait. Only after that proof does the
+bridge snapshot a bounded decodable bootstrap and send it exactly once to the
+Mini App RTP sink before marking that sink live. The bootstrap consists of the
+last usable SPS, the last usable PPS, and the complete last finished IDR access
+unit in rewritten RTP order. FU-A fragmented IDR access units are grouped by
+SSRC and RTP timestamp until the marker packet closes the access unit; incomplete
+or oversized access units are evicted instead of cached.
+
+The real-UDP late-subscriber harness is kept out of normal pytest collection:
+
+```bash
+cd /path/to/comelit
+python3 tests/miniapp/tools/late_subscriber_rtp_harness.py \
+  --module custom_components/comelit/h264_recovery.py \
+  --label local-fua-green \
+  --join-delay 2.5 \
+  --total 8.0 \
+  --out /tmp/comelit-late-subscriber.json
+```
 
 ## 7. Surveillance cameras
 
@@ -522,6 +573,121 @@ evidence before production use.
 Explicit camera close, Mini App close, terminal Entrance WebCodecs failure, and
 Entrance HLS fallback do not request the warm park and retain their normal
 teardown/fallback semantics.
+
+### Entrance attached Ring viewer lease
+
+During real inbound Ring media, the Mini App Entrance viewer is the HLS/HA
+Stream path, not the on-demand Entrance WebCodecs path. The WebCodecs request is
+allowed to fail closed with `intercom_media_busy` while the already-attached
+inbound transport feeds Home Assistant Stream and HLS.
+
+That HLS viewer is represented by a session-bound server lease:
+
+```text
+POST /api/comelit/miniapp/attached-viewer
+  action=open | heartbeat | close
+  viewer_id=<browser-generated opaque id>
+```
+
+The endpoint uses the existing Mini App session cookie and marker header. It
+does not accept an entity id, source URL, SDP, event id, or any transport stop
+primitive from the browser. `close` is idempotent. Multiple viewer ids in the
+same Mini App session refcount independently; attached Ring teardown is
+requested only when the last relevant Entrance viewer is gone.
+
+For the Mini App attached HLS path, the controller adds the HLS provider and
+starts the internal HA Stream before activating the Mini App RTP sink. This lets
+the HA Stream worker bind the Mini App RTP port before the recovery bridge sends
+the bounded bootstrap. The readiness check is the Mini App RTP port appearing
+in `/proc/net/udp` or `/proc/net/udp6`, which is the point where the HA Stream
+worker has opened the SDP and bound the UDP socket. The wait is bounded and
+fail-closed: if the port is not observed before the deadline, or procfs cannot
+prove readiness, the Mini App sink is not activated and no bootstrap packet is
+sent. The request is rejected with the bounded internal reason
+`miniapp_attached_consumer_not_ready`; the internal Mini App HA Stream,
+provider consumer, and `miniapp_attached_view` lease are released. The ordinary
+HA camera/ring sink is untouched, and the upstream attached transport remains
+governed only by any leases still present.
+
+TEST1 on release 1.7.32b1 proved why that ordering matters. A real inbound Ring
+created exactly one upstream Comelit media transport and the main attached HA
+path was healthy: Telegram snapshots were delivered and a 25.807 s MP4
+recording completed. The separate Mini App HLS resource still showed no first
+frame because it was a late RTP subscriber. The initial SPS/PPS STAP-A packet
+and the FU-A fragmented IDR access unit had already passed before the Mini App
+HA Stream bound its port, leaving only undecodable P-fragments for that sink.
+The recovery cache therefore stores a bounded per-sink bootstrap and closes
+fragmented H.264 access units on the RTP marker bit, not on a single FU-A
+packet.
+
+The browser sends heartbeat about every 5 seconds. The server expires a lease
+after about 15 seconds without heartbeat, so WebView loss is bounded even if
+`pagehide` or disconnect cleanup is not delivered. Explicit close remains
+best-effort: `pagehide` and element disconnect use fetch `keepalive`, but
+`sendBeacon` is not used because the close endpoint must retain the Mini App
+marker header and session gate. `visibilitychange=hidden` is not terminal
+because short system overlays and tab switches must not close media.
+
+When the last lease is released or expires, the controller asks
+`RingMediaCoordinator.async_request_stop(viewer_closed|viewer_lease_expired)`.
+The HTTP view never calls attached-media `async_force_stop` or native transport
+cleanup directly. The coordinator owns the ordered cleanup: bounded recording
+stop/cancel, release of the `ring_media` lease and stream consumer, and release
+of the Mini App's own `miniapp_attached_view` lease and internal HA Stream. It
+does not release `camera_view`; the normal camera Stream lifecycle remains the
+only owner of that lease. The final attached-session lease release drives the
+existing attached-media R58/SIGUSR2 stop path.
+
+Ending the last Mini App viewer also deactivates the Mini App RTP sink. If the
+attached media session remains alive for another lease holder, a later Mini App
+viewer starts inactive again and receives a fresh bootstrap before live fan-out.
+The same recovery applies after a fail-closed readiness timeout: a later Mini
+App request can succeed once the UDP consumer is actually bound.
+
+Home Assistant HLS idle cleanup (`OUTPUT_IDLE_TIMEOUT`, HA Core ref 2026.9.2)
+does not fit the Mini App's 15-second viewer-loss bound by itself, so Mini App
+close/expiry releases the explicit Mini App resource instead of trying to infer
+ordinary HA viewers.
+
+### HA HLS viewer identity and Mini App isolation
+
+The Mini App attached-viewer lease is visible to the integration. Ordinary Home
+Assistant frontend/dashboard HLS viewers are not. HA Core tracks one HLS output
+per `Stream` and per format in
+`homeassistant/components/stream/__init__.py` with
+`_outputs: dict[str, StreamOutput]`; `outputs()` returns those format outputs,
+and `add_provider()` reuses `self._outputs[fmt]` for an existing output.
+
+HLS idle is shared per track/provider and refreshed by any HLS client through
+`homeassistant/components/stream/hls.py` `track.idle_timer.awake()`.
+`homeassistant/components/stream/core.py` owns the `IdleTimer`, and
+`homeassistant/components/stream/const.py` sets `OUTPUT_IDLE_TIMEOUT = 30`.
+This timer is not ownership evidence and cannot be used as a per-viewer signal.
+
+The `/api/hls/<token>/...` URL identifies the `Stream` by its `access_token`,
+not an individual client. `homeassistant/components/stream/__init__.py`
+constructs `endpoint_url()` from that token, and
+`homeassistant/components/stream/core.py` resolves the stream by token.
+
+The ordinary camera path is intentionally separate from Mini App attached HLS.
+In
+`homeassistant/components/camera/__init__.py`, Home Assistant documents that
+there is at most one stream, meaning one decode worker, per camera.
+`async_request_stream(hass, entity_id, fmt)` calls `stream.add_provider(fmt)`
+and then `stream.endpoint_url(fmt)`. The Mini App therefore does not use that
+API for real inbound attached Entrance media; it creates an internal HA Stream
+from `attached-miniapp-rtp.sdp` instead.
+
+HA 2026.9.2 exposes per-session identity for WebRTC through
+`camera/__init__.py` `async_handle_web_rtc_offer(..., session_id)` and
+`close_webrtc_session(session_id)`. HLS and the attached path do not provide an
+equivalent client identity.
+
+Because Mini App has its own downstream video port and HA Stream, Mini App close
+releases only Mini App ownership. If an ordinary HA viewer owns `camera_view`,
+the upstream attached transport remains active until that camera lease is later
+released. The integration still must not simulate a per-viewer HA HLS signal;
+it relies on explicit local ownership instead.
 
 ## 12.1 WebCodecs transport and diagnostic tab
 

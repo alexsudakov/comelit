@@ -664,10 +664,21 @@ class H264AccessUnitSource:
 
     @classmethod
     async def open_sdp(cls, source: str) -> "H264AccessUnitSource":
+        # The attached MiniApp SDP source is a paced live RTP stream whose
+        # bootstrap replay (SPS/PPS/IDR) arrives immediately after activation.
+        # ffmpeg's defaults want ~5 s of stream for stream detection, and
+        # measured open latency tracks analyzeduration one-for-one on this
+        # source (PR281, 10/10 runs each): default -> ~2135 ms, 0.1 s -> ~598 ms,
+        # 0.25 s -> ~733 ms, 0.5 s -> ~999 ms, 0.1 s + probesize 32768 -> ~467 ms.
+        # Only the SDP path is bounded here; the RTSP cold path is untouched.
         return await cls._open(
             source,
             input_format="sdp",
-            options={"protocol_whitelist": "file,udp,rtp"},
+            options={
+                "protocol_whitelist": "file,udp,rtp",
+                "analyzeduration": "100000",
+                "probesize": "32768",
+            },
             missing_h264_code="source_not_h264_sdp",
         )
 
@@ -813,6 +824,13 @@ def webcodecs_summary_line(
         "source_open_failed",
         "backlog_exceeded",
         "session_limit",
+        "attached_webcodecs_bootstrap_not_ready",
+        "attached_webcodecs_source_failed",
+        "attached_webcodecs_decoder_init_failed",
+        "attached_webcodecs_transport_closed",
+        "attached_webcodecs_backlog_exceeded",
+        "attached_webcodecs_session_limit",
+        "attached_webcodecs_browser_unsupported",
         "intercom_media_busy",
         "intercom_media_start_failed",
         "intercom_media_unavailable",

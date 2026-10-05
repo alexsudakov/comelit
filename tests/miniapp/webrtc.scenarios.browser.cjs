@@ -133,6 +133,7 @@ async function setupPage(browser) {
 async function setupBootstrappedPage(browser, registryEntry) {
   const page = await browser.newPage({ viewport: { width: 390, height: 780 } });
   const posts = [];
+  const attachedViewerPosts = [];
   const entityId = registryEntry.entity_id;
   const states = {
     [entityId]: {
@@ -217,6 +218,15 @@ async function setupBootstrappedPage(browser, registryEntry) {
       });
       return;
     }
+    if (url.includes("/api/comelit/miniapp/attached-viewer")) {
+      attachedViewerPosts.push(JSON.parse(request.postData() || "{}"));
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: '{"ok":true,"heartbeat_interval_seconds":5,"lease_expiry_seconds":15}',
+      });
+      return;
+    }
     if (url.includes("/api/comelit/miniapp/session")) {
       await route.fulfill({
         status: 200,
@@ -267,7 +277,7 @@ async function setupBootstrappedPage(browser, registryEntry) {
     null,
     { timeout: 1500 },
   );
-  return { page, posts };
+  return { page, posts, attachedViewerPosts };
 }
 
 function event(posts, name) {
@@ -891,7 +901,7 @@ async function main() {
     }
 
     {
-      const {page, posts} = await setupBootstrappedPage(browser, {
+      const {page, posts, attachedViewerPosts} = await setupBootstrappedPage(browser, {
         entity_id: ENTRANCE_ENTITY_ID,
         platform: "comelit",
         unique_id: "comelit_entrance_camera",
@@ -903,6 +913,7 @@ async function main() {
         await installMSEFakes(page);
         await createLiveViewer(page, ENTRANCE_ENTITY_ID);
         await page.waitForFunction(() => window.__hlsOpenCount === 1);
+        await page.waitForTimeout(0);
         const state = await page.evaluate(() => ({
           hls: window.__hlsOpenCount,
           sockets: window.__mseSockets.map((socket) => socket.url),
@@ -910,6 +921,85 @@ async function main() {
         assert.equal(state.hls, 1);
         assert.deepEqual(state.sockets, []);
         assert.equal(event(posts, "mse_connect"), undefined);
+        await flush(page, 5100);
+        await page.waitForTimeout(0);
+        await page.evaluate(() => window.testViewer.disconnectedCallback());
+        await flush(page, 5100);
+        assert.deepEqual(
+          attachedViewerPosts.map((payload) => payload.action),
+          ["open", "heartbeat", "close"],
+        );
+        assert.equal(new Set(attachedViewerPosts.map((payload) => payload.viewer_id)).size, 1);
+        await finishScenario(posts);
+      } finally {
+        await page.close();
+      }
+    }
+
+    {
+      const {page, posts, attachedViewerPosts} = await setupBootstrappedPage(browser, {
+        entity_id: ENTRANCE_ENTITY_ID,
+        platform: "comelit",
+        unique_id: "comelit_entrance_camera",
+        labels: ["surveillance"],
+        name: "Entrance",
+      });
+      try {
+        await page.clock.install();
+        await installMSEFakes(page);
+        await createLiveViewer(page, ENTRANCE_ENTITY_ID);
+        await page.waitForFunction(() => window.__hlsOpenCount === 1);
+        await flush(page, 1);
+        await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide")));
+        await flush(page, 5100);
+        assert.deepEqual(
+          attachedViewerPosts.map((payload) => payload.action),
+          ["open", "close"],
+        );
+        await finishScenario(posts);
+      } finally {
+        await page.close();
+      }
+    }
+
+    {
+      const {page, posts, attachedViewerPosts} = await setupBootstrappedPage(browser, {
+        entity_id: ENTRANCE_ENTITY_ID,
+        platform: "comelit",
+        unique_id: "comelit_entrance_camera",
+        labels: ["surveillance"],
+        name: "Entrance",
+      });
+      try {
+        await page.clock.install();
+        await installMSEFakes(page);
+        await createLiveViewer(page, ENTRANCE_ENTITY_ID);
+        await page.waitForFunction(() => window.__hlsOpenCount === 1);
+        await flush(page, 1);
+        const visibility = await page.evaluate(() => {
+          Object.defineProperty(document, "visibilityState", {
+            configurable: true,
+            value: "hidden",
+          });
+          Object.defineProperty(document, "hidden", {
+            configurable: true,
+            value: true,
+          });
+          document.dispatchEvent(new Event("visibilitychange"));
+          return {
+            hidden: document.hidden,
+            visibilityState: document.visibilityState,
+          };
+        });
+        await flush(page, 5100);
+        assert.deepEqual(visibility, {
+          hidden: true,
+          visibilityState: "hidden",
+        });
+        assert.deepEqual(
+          attachedViewerPosts.map((payload) => payload.action),
+          ["open", "heartbeat"],
+        );
         await finishScenario(posts);
       } finally {
         await page.close();

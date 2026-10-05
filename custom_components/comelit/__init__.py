@@ -35,6 +35,7 @@ from .const import (
     DATA_MEDIA_PROVIDERS,
     DATA_MEDIA_SESSIONS,
     DATA_MEDIA_TRANSPORTS,
+    DATA_MINIAPP_ATTACHED_MEDIA_PROVIDERS,
     DATA_MINIAPP,
     DATA_RING_MEDIA,
     DATA_RUNTIMES,
@@ -62,6 +63,39 @@ _LOGGER = logging.getLogger(__name__)
 
 _FRONTEND_URL = "/api/comelit/frontend"
 _FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
+
+
+def _register_attached_media_providers(
+    hass: HomeAssistant,
+    domain_data: dict[str, object],
+    entry: ConfigEntry,
+    attached_session: ComelitAttachedRingMediaSession,
+    attached_transport: ComelitAttachedRingMediaTransport,
+) -> tuple[HAStreamMediaProvider, HAStreamMediaProvider]:
+    """Register Ring Media and Mini App providers for the attached stream."""
+    ring_media_provider = HAStreamMediaProvider(
+        hass,
+        attached_session,
+        attached_transport,
+        stream_label="comelit_attached",
+    )
+    attached_providers = domain_data.setdefault(
+        DATA_ATTACHED_MEDIA_PROVIDERS, {}
+    )
+    attached_providers[entry.entry_id] = ring_media_provider
+    miniapp_attached_provider = HAStreamMediaProvider(
+        hass,
+        attached_session,
+        attached_transport,
+        local_sdp_path_attr="miniapp_local_sdp_path",
+        local_sdp_ready_attr="miniapp_local_sdp_ready",
+        stream_label="comelit_miniapp_attached",
+    )
+    miniapp_attached_providers = domain_data.setdefault(
+        DATA_MINIAPP_ATTACHED_MEDIA_PROVIDERS, {}
+    )
+    miniapp_attached_providers[entry.entry_id] = miniapp_attached_provider
+    return ring_media_provider, miniapp_attached_provider
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -240,15 +274,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Physical CALL_INIT events use the already-live persistent call
         # transaction. No listener pause and no second cloud/P2P bootstrap.
-        ring_media_provider = HAStreamMediaProvider(
-            hass,
-            attached_session,
-            attached_transport,
+        ring_media_provider, _miniapp_attached_provider = (
+            _register_attached_media_providers(
+                hass,
+                domain_data,
+                entry,
+                attached_session,
+                attached_transport,
+            )
         )
-        attached_providers = domain_data.setdefault(
-            DATA_ATTACHED_MEDIA_PROVIDERS, {}
-        )
-        attached_providers[entry.entry_id] = ring_media_provider
         ring_media = RingMediaCoordinator(
             hass,
             attached_session,
@@ -307,6 +341,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     media_providers = domain_data.get(DATA_MEDIA_PROVIDERS, {})
     attached_sessions = domain_data.get(DATA_ATTACHED_MEDIA_SESSIONS, {})
     attached_providers = domain_data.get(DATA_ATTACHED_MEDIA_PROVIDERS, {})
+    miniapp_attached_providers = domain_data.get(
+        DATA_MINIAPP_ATTACHED_MEDIA_PROVIDERS, {}
+    )
     attached_transports = domain_data.get(DATA_ATTACHED_MEDIA_TRANSPORTS, {})
     ring_media_lifecycles = domain_data.get(DATA_RING_MEDIA, {})
     synthetic_lifecycles = domain_data.get(DATA_SYNTHETIC_RING_MEDIA, {})
@@ -321,6 +358,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     media_providers.pop(entry.entry_id, None)
     attached_session = attached_sessions.pop(entry.entry_id, None)
     attached_providers.pop(entry.entry_id, None)
+    miniapp_attached_providers.pop(entry.entry_id, None)
     attached_transports.pop(entry.entry_id, None)
     ring_media = ring_media_lifecycles.pop(entry.entry_id, None)
     synthetic_ring_media = synthetic_lifecycles.pop(entry.entry_id, None)

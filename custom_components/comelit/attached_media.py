@@ -1,20 +1,28 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
+import time
+from collections.abc import Awaitable, Callable
 from typing import Protocol
 
 from .h264_recovery import H264RecoveryRtpShim
 from .media_transport import (
     MEDIA_AUDIO_RTP_PORT,
     MEDIA_VIDEO_HA_RTP_PORT,
+    MEDIA_VIDEO_MINIAPP_RTP_PORT,
     MEDIA_VIDEO_RTP_PORT,
 )
 
+_LOGGER = logging.getLogger(__name__)
 _ATTACHED_RUN_DIR = Path("/run/comelit-p2p")
 _ATTACHED_LOCAL_SDP_FILE = _ATTACHED_RUN_DIR / "attached-local-rtp.sdp"
+_ATTACHED_MINIAPP_SDP_FILE = _ATTACHED_RUN_DIR / "attached-miniapp-rtp.sdp"
 _ATTACHED_MEDIA_OPEN_TIMEOUT_SECONDS = 15.0
 _ATTACHED_MEDIA_STOP_TIMEOUT_SECONDS = 10.0
+_MINIAPP_UDP_LISTENER_WAIT_TIMEOUT_SECONDS = 1.5
+_MINIAPP_UDP_LISTENER_WAIT_INTERVAL_SECONDS = 0.02
 
 _LOCAL_RTP_SDP = f"""v=0\r
 o=- 0 0 IN IP4 127.0.0.1\r
@@ -27,6 +35,17 @@ a=fmtp:99 packetization-mode=1\r
 a=recvonly\r
 m=audio {MEDIA_AUDIO_RTP_PORT} RTP/AVP 8\r
 a=rtpmap:8 PCMA/8000/1\r
+a=recvonly\r
+"""
+
+_MINIAPP_RTP_SDP = f"""v=0\r
+o=- 0 0 IN IP4 127.0.0.1\r
+s=Comelit Mini App attached inbound ring media\r
+c=IN IP4 127.0.0.1\r
+t=0 0\r
+m=video {MEDIA_VIDEO_MINIAPP_RTP_PORT} RTP/AVP 99\r
+a=rtpmap:99 H264/90000\r
+a=fmtp:99 packetization-mode=1\r
 a=recvonly\r
 """
 
@@ -52,19 +71,59 @@ class ComelitAttachedMediaError(RuntimeError):
     """The call-bound attached inbound media lifecycle failed safely."""
 
 
-def _write_local_sdp() -> None:
+def _write_local_sdps() -> None:
     _ATTACHED_RUN_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = _ATTACHED_LOCAL_SDP_FILE.with_suffix(".tmp")
     tmp.write_text(_LOCAL_RTP_SDP, encoding="ascii")
     tmp.chmod(0o600)
     tmp.replace(_ATTACHED_LOCAL_SDP_FILE)
+    miniapp_tmp = _ATTACHED_MINIAPP_SDP_FILE.with_suffix(".tmp")
+    miniapp_tmp.write_text(_MINIAPP_RTP_SDP, encoding="ascii")
+    miniapp_tmp.chmod(0o600)
+    miniapp_tmp.replace(_ATTACHED_MINIAPP_SDP_FILE)
 
 
-def _remove_local_sdp() -> None:
-    try:
-        _ATTACHED_LOCAL_SDP_FILE.unlink()
-    except FileNotFoundError:
-        pass
+def _remove_local_sdps() -> None:
+    for path in (_ATTACHED_LOCAL_SDP_FILE, _ATTACHED_MINIAPP_SDP_FILE):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _udp_listener_bound(port: int) -> bool:
+    expected = f":{port:04X}"
+    for path in ("/proc/net/udp", "/proc/net/udp6"):
+        try:
+            lines = Path(path).read_text(encoding="ascii").splitlines()
+        except OSError:
+            return False
+        for line in lines[1:]:
+            fields = line.split()
+            if len(fields) > 1 and fields[1].upper().endswith(expected):
+                return True
+    return False
+
+
+async def async_wait_for_udp_listener(
+    port: int,
+    *,
+    probe: Callable[[int], bool],
+    timeout_seconds: float,
+    interval_seconds: float,
+    monotonic_clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> bool:
+    deadline = monotonic_clock() + timeout_seconds
+    while True:
+        try:
+            if probe(port):
+                return True
+        except OSError:
+            return False
+        if monotonic_clock() >= deadline:
+            return False
+        await sleep(min(interval_seconds, max(0.0, deadline - monotonic_clock())))
 
 
 class ComelitAttachedRingMediaTransport:
@@ -76,8 +135,14 @@ class ComelitAttachedRingMediaTransport:
     listener and never performs a second cloud/P2P bootstrap.
     """
 
-    def __init__(self, runtime: AttachedRingRuntime) -> None:
+    def __init__(
+        self,
+        runtime: AttachedRingRuntime,
+        *,
+        udp_listener_probe: Callable[[int], bool] | None = None,
+    ) -> None:
         self._runtime = runtime
+        self._udp_listener_probe = udp_listener_probe or _udp_listener_bound
         self._active = False
         self._video_recovery_shim: H264RecoveryRtpShim | None = None
         self._lock = asyncio.Lock()
@@ -96,6 +161,10 @@ class ComelitAttachedRingMediaTransport:
         return _ATTACHED_LOCAL_SDP_FILE
 
     @property
+    def miniapp_local_sdp_path(self) -> Path:
+        return _ATTACHED_MINIAPP_SDP_FILE
+
+    @property
     def local_sdp_ready(self) -> bool:
         shim = self._video_recovery_shim
         return (
@@ -103,6 +172,16 @@ class ComelitAttachedRingMediaTransport:
             and shim is not None
             and shim.running
             and _ATTACHED_LOCAL_SDP_FILE.is_file()
+        )
+
+    @property
+    def miniapp_local_sdp_ready(self) -> bool:
+        shim = self._video_recovery_shim
+        return (
+            self.active
+            and shim is not None
+            and shim.running
+            and _ATTACHED_MINIAPP_SDP_FILE.is_file()
         )
 
     @property
@@ -123,10 +202,16 @@ class ComelitAttachedRingMediaTransport:
             shim = H264RecoveryRtpShim(
                 input_port=MEDIA_VIDEO_RTP_PORT,
                 output_port=MEDIA_VIDEO_HA_RTP_PORT,
+                output_ports=(
+                    MEDIA_VIDEO_HA_RTP_PORT,
+                    MEDIA_VIDEO_MINIAPP_RTP_PORT,
+                ),
+                inactive_output_ports=(MEDIA_VIDEO_MINIAPP_RTP_PORT,),
             )
             try:
                 await shim.async_start()
-                await asyncio.to_thread(_write_local_sdp)
+                await asyncio.to_thread(_write_local_sdps)
+                _LOGGER.info("attached_rtp_fanout_started")
                 if not await self._runtime.async_wait_attached_media_open(
                     _ATTACHED_MEDIA_OPEN_TIMEOUT_SECONDS
                 ):
@@ -136,11 +221,44 @@ class ComelitAttachedRingMediaTransport:
             except Exception as exc:
                 self._last_error = str(exc)
                 await shim.async_stop()
-                await asyncio.to_thread(_remove_local_sdp)
+                await asyncio.to_thread(_remove_local_sdps)
                 raise
 
             self._video_recovery_shim = shim
             self._active = True
+
+    async def async_activate_miniapp_output(self) -> None:
+        async with self._lock:
+            if not self.active or self._video_recovery_shim is None:
+                raise ComelitAttachedMediaError("attached_media_not_active")
+            shim = self._video_recovery_shim
+        ready = await async_wait_for_udp_listener(
+            MEDIA_VIDEO_MINIAPP_RTP_PORT,
+            probe=self._udp_listener_probe,
+            timeout_seconds=_MINIAPP_UDP_LISTENER_WAIT_TIMEOUT_SECONDS,
+            interval_seconds=_MINIAPP_UDP_LISTENER_WAIT_INTERVAL_SECONDS,
+        )
+        if ready:
+            _LOGGER.info("miniapp_sink_ready")
+        else:
+            _LOGGER.info(
+                "miniapp_sink_ready_failed reason=miniapp_attached_consumer_not_ready"
+            )
+            raise ComelitAttachedMediaError("miniapp_attached_consumer_not_ready")
+        async with self._lock:
+            if not self.active or self._video_recovery_shim is not shim:
+                raise ComelitAttachedMediaError("attached_media_not_active")
+            await shim.async_activate_output_port(MEDIA_VIDEO_MINIAPP_RTP_PORT)
+
+    async def async_deactivate_miniapp_output(self) -> None:
+        async with self._lock:
+            shim = self._video_recovery_shim
+            if shim is None:
+                return
+            try:
+                await shim.async_deactivate_output_port(MEDIA_VIDEO_MINIAPP_RTP_PORT)
+            except RuntimeError:
+                return
 
     async def async_wait_inactive(self, timeout: float) -> bool:
         """Wait until the remote/native attached media channel closes."""
@@ -168,7 +286,7 @@ class ComelitAttachedRingMediaTransport:
             self._active = False
             if shim is not None:
                 await shim.async_stop()
-            await asyncio.to_thread(_remove_local_sdp)
+            await asyncio.to_thread(_remove_local_sdps)
 
             if stop_error is not None:
                 self._last_error = str(stop_error)
@@ -215,6 +333,11 @@ class ComelitAttachedRingMediaSession:
             "last_error": self._last_error,
             "listener_paused": False,
             "ownership": "attached_inbound_session",
+            "miniapp_attached_viewers": self._leases.get("miniapp_attached_view", 0),
+            "miniapp_attached_stream_active": self._leases.get(
+                "miniapp_attached_view", 0
+            )
+            > 0,
         }
 
     async def async_acquire(self, *, panel: str, reason: str) -> dict[str, object]:
@@ -226,6 +349,8 @@ class ComelitAttachedRingMediaSession:
         async with self._lock:
             if self.active:
                 self._leases[reason] = self._leases.get(reason, 0) + 1
+                if reason == "miniapp_attached_view":
+                    _LOGGER.info("miniapp_attached_lease_acquired")
                 return self.status()
             if self._leases:
                 raise ComelitAttachedMediaError("attached_media_state_mismatch")
@@ -250,7 +375,15 @@ class ComelitAttachedRingMediaSession:
                 self._panel = None
                 self._leases.clear()
                 raise ComelitAttachedMediaError(self._last_error) from exc
+            if reason == "miniapp_attached_view":
+                _LOGGER.info("miniapp_attached_lease_acquired")
             return self.status()
+
+    async def async_activate_miniapp_output(self) -> None:
+        await self._transport.async_activate_miniapp_output()
+
+    async def async_deactivate_miniapp_output(self) -> None:
+        await self._transport.async_deactivate_miniapp_output()
 
     async def async_wait_inactive(self, timeout: float) -> bool:
         """Wait for the authoritative inbound call media lifetime to end."""
@@ -279,6 +412,8 @@ class ComelitAttachedRingMediaSession:
                 self._leases.pop(reason, None)
             else:
                 self._leases[reason] = count - 1
+            if reason == "miniapp_attached_view":
+                _LOGGER.info("miniapp_attached_lease_released")
 
             if not self._leases:
                 # Always tear down the local bridge when the last lease ends.

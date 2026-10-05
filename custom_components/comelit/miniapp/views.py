@@ -296,6 +296,40 @@ class MiniAppEntranceParkView(_MiniAppView):
         return _json_response(result)
 
 
+class MiniAppAttachedViewerView(_MiniAppView):
+    url = "/api/comelit/miniapp/attached-viewer"
+    name = "api:comelit:miniapp:attached_viewer"
+
+    async def post(self, request: web.Request) -> web.Response:
+        self._require_miniapp_marker(request)
+        token, session = self._require_session(request)
+        body = await request.content.read(1024)
+        try:
+            payload = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            raise web.HTTPBadRequest from None
+        if not isinstance(payload, dict):
+            raise web.HTTPBadRequest
+        action = payload.get("action")
+        viewer_id = payload.get("viewer_id")
+        if not isinstance(action, str) or not isinstance(viewer_id, str):
+            raise web.HTTPBadRequest
+
+        try:
+            result = await self.controller.async_attached_viewer_event(
+                token,
+                session,
+                action=action,
+                viewer_id=viewer_id,
+            )
+        except MiniAppOperationError as exc:
+            return _json_response(
+                {"error": str(exc)},
+                status=HTTPStatus.CONFLICT,
+            )
+        return _json_response(result)
+
+
 class MiniAppCameraStreamView(_MiniAppView):
     url = r"/api/comelit/miniapp/camera/{entity_id}/stream"
     name = "api:comelit:miniapp:camera_stream"
@@ -742,6 +776,7 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
         source_task: asyncio.Task[None] | None = None
         client_watch_task: asyncio.Task[None] | None = None
         entrance_lease = None
+        attached_webcodecs = False
         queued_bytes = 0
         queued_units = 0
         queue: asyncio.Queue[object] = asyncio.Queue(
@@ -788,6 +823,13 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
             errors += 1
             if code in {
                 "session_limit",
+                "attached_webcodecs_session_limit",
+                "attached_webcodecs_bootstrap_not_ready",
+                "attached_webcodecs_source_failed",
+                "attached_webcodecs_decoder_init_failed",
+                "attached_webcodecs_transport_closed",
+                "attached_webcodecs_backlog_exceeded",
+                "attached_webcodecs_browser_unsupported",
                 "backlog_exceeded",
                 "source_open_failed",
                 "intercom_media_busy",
@@ -821,11 +863,19 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                 await close_with_error("invalid_webcodecs_command")
                 return websocket
 
+            attached_webcodecs_candidate = (
+                target.kind == "entrance"
+                and await self.controller.attached_webcodecs_entrance_ready()
+            )
             try:
                 lease = await webcodecs_mod.SESSION_REGISTRY.acquire(entity_id)
             except webcodecs_mod.WebCodecsSourceError:
                 log_event("session_limit")
-                await close_with_error("session_limit")
+                await close_with_error(
+                    "attached_webcodecs_session_limit"
+                    if attached_webcodecs_candidate
+                    else "session_limit"
+                )
                 return websocket
 
             async with lease:
@@ -834,14 +884,24 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                 source_opener = webcodecs_mod.open_h264_access_unit_source
                 if target.kind == "entrance":
                     try:
-                        entrance_lease = await self.controller.acquire_webcodecs_entrance(
-                            target
-                        )
+                        if attached_webcodecs_candidate:
+                            entrance_lease = await self.controller.acquire_attached_webcodecs_entrance(
+                                target
+                            )
+                            attached_webcodecs = True
+                        else:
+                            entrance_lease = await self.controller.acquire_webcodecs_entrance(
+                                target
+                            )
                     except MiniAppOperationError as exc:
                         await close_with_error(str(exc))
                         return websocket
                     source = str(entrance_lease.local_sdp_path)
-                    source_kind = "comelit_entrance_rtp"
+                    source_kind = (
+                        "comelit_attached_miniapp_rtp"
+                        if attached_webcodecs
+                        else "comelit_entrance_rtp"
+                    )
                     source_opener = webcodecs_mod.open_h264_sdp_access_unit_source
                     log_event("intercom_media_ready")
                     if not await send_json(
@@ -926,7 +986,14 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                                 > webcodecs_mod.WEBCODECS_MAX_QUEUE_BYTES
                             ):
                                 send_source_eof = False
-                                await queue.put(("error", "backlog_exceeded"))
+                                await queue.put(
+                                    (
+                                        "error",
+                                        "attached_webcodecs_backlog_exceeded"
+                                        if attached_webcodecs
+                                        else "backlog_exceeded",
+                                    )
+                                )
                                 return
                             await queue.put(unit)
                             queued_units += 1
@@ -936,10 +1003,25 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                         raise
                     except webcodecs_mod.WebCodecsSourceError as exc:
                         send_source_eof = False
-                        await queue.put(("error", exc.code))
+                        await queue.put(
+                            (
+                                "error",
+                                "attached_webcodecs_source_failed"
+                                if attached_webcodecs
+                                and exc.code == "source_open_failed"
+                                else exc.code,
+                            )
+                        )
                     except Exception:
                         send_source_eof = False
-                        await queue.put(("error", "source_open_failed"))
+                        await queue.put(
+                            (
+                                "error",
+                                "attached_webcodecs_source_failed"
+                                if attached_webcodecs
+                                else "source_open_failed",
+                            )
+                        )
                     finally:
                         if unit_source is not None:
                             await unit_source.aclose()
@@ -1017,23 +1099,28 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                                     sps[0] if sps else None
                                 )
                             if codec is None:
-                                await close_with_error("source_open_failed")
+                                await close_with_error(
+                                    "attached_webcodecs_source_failed"
+                                    if attached_webcodecs
+                                    else "source_open_failed"
+                                )
                                 break
                             if sequence == 0:
-                                if not await send_json(
-                                    {
-                                        "type": "hello",
-                                        "protocol": webcodecs_mod.WEBCODECS_PROTOCOL_VERSION,
-                                        "entity_id": entity_id,
-                                        "codec": codec,
-                                        "max_unit_bytes": webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES,
-                                        "session_max_seconds": target_session_max_seconds,
-                                        "zero_transcode": True,
-                                        "source_kind": source_kind,
-                                        "comelit_entrance_open": target.kind == "entrance",
-                                        "comelit_media_started": target.kind == "entrance",
-                                    }
-                                ):
+                                hello_payload = {
+                                    "type": "hello",
+                                    "protocol": webcodecs_mod.WEBCODECS_PROTOCOL_VERSION,
+                                    "entity_id": entity_id,
+                                    "codec": codec,
+                                    "max_unit_bytes": webcodecs_mod.WEBCODECS_MAX_UNIT_BYTES,
+                                    "session_max_seconds": target_session_max_seconds,
+                                    "zero_transcode": True,
+                                    "source_kind": source_kind,
+                                    "comelit_entrance_open": target.kind == "entrance",
+                                    "comelit_media_started": target.kind == "entrance",
+                                }
+                                if attached_webcodecs:
+                                    hello_payload["attached_webcodecs"] = True
+                                if not await send_json(hello_payload):
                                     break
                             sequence += 1
                             send_now_ns = time.monotonic_ns()
@@ -1223,6 +1310,7 @@ def async_register_miniapp_views(
     hass.http.register_view(MiniAppStateView(controller))
     hass.http.register_view(MiniAppDoorView(controller))
     hass.http.register_view(MiniAppEntranceParkView(controller))
+    hass.http.register_view(MiniAppAttachedViewerView(controller))
     hass.http.register_view(MiniAppCameraStreamView(controller))
     hass.http.register_view(MiniAppCameraMSEView(controller))
     hass.http.register_view(MiniAppCameraWebCodecsView(controller))

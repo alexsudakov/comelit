@@ -45,17 +45,27 @@
     "ready_state",
   ];
   const HLS_COUNTER_PRIORITY = [
+    "ready_state",
+    "current_time_ms",
+    "duration_ms",
+    "buffered_count",
+    "buffered_start_ms",
+    "buffered_end_ms",
+    "video_width",
+    "video_height",
+    "total_video_frames",
+    "dropped_video_frames",
     "paused",
     "ended",
-    "ready_state",
     "network_state",
-    "buffered_count",
     "seekable_count",
     "buffered_s",
     "seekable_s",
     "live_latency_s",
     "fatal",
   ];
+  const ATTACHED_VIEWER_HEARTBEAT_MS = 5000;
+  const ATTACHED_VIEWER_ENDPOINT = "/api/comelit/miniapp/attached-viewer";
 
   // The shared comelit-card mounts this viewer inside its Shadow DOM.
   // Page-level styles.css cannot style descendants across that boundary.
@@ -168,6 +178,10 @@
       this._failed = false;
       this._requestGeneration = 0;
       this._diagnostics = null;
+      this._attachedViewerId = null;
+      this._attachedViewerOpen = false;
+      this._attachedViewerHeartbeatTimer = null;
+      this._attachedViewerPagehideHandler = null;
     }
 
     setConfig(config) {
@@ -191,6 +205,7 @@
         this._reportDiagnostics("mse_fallback", {reason: "navigate"});
       }
       this._requestGeneration += 1;
+      this._closeAttachedViewerLease(true);
       this._destroyPlayback();
       this._video = null;
       this._labelElement = null;
@@ -290,6 +305,7 @@
 
     _destroyPlayback() {
       this._playbackMode = null;
+      this._closeAttachedViewerLease(false);
       this._destroyMSE();
       this._destroyWebRTC();
 
@@ -303,6 +319,76 @@
         this._video.removeAttribute("src");
         this._video.load();
       }
+    }
+
+    _ensureAttachedViewerId() {
+      if (this._attachedViewerId) {
+        return this._attachedViewerId;
+      }
+      const random = new Uint32Array(4);
+      if (window.crypto?.getRandomValues) {
+        window.crypto.getRandomValues(random);
+        this._attachedViewerId = Array.from(random, (value) =>
+          value.toString(36),
+        ).join("");
+      } else {
+        this._attachedViewerId =
+          String(Date.now()) + Math.random().toString(36).slice(2);
+      }
+      return this._attachedViewerId;
+    }
+
+    _sendAttachedViewerEvent(action, keepalive = false) {
+      const viewerId = this._ensureAttachedViewerId();
+      const body = JSON.stringify({
+        action,
+        viewer_id: viewerId,
+      });
+      return fetch(ATTACHED_VIEWER_ENDPOINT, {
+        method: "POST",
+        credentials: "same-origin",
+        keepalive,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Comelit-MiniApp-Request": "1",
+        },
+        body,
+      }).catch(() => {});
+    }
+
+    async _startAttachedViewerLease() {
+      if (this._attachedViewerOpen) {
+        return;
+      }
+      this._attachedViewerOpen = true;
+      await this._sendAttachedViewerEvent("open");
+      this._attachedViewerHeartbeatTimer = setInterval(() => {
+        if (this._attachedViewerOpen && this.isConnected) {
+          this._sendAttachedViewerEvent("heartbeat");
+        }
+      }, ATTACHED_VIEWER_HEARTBEAT_MS);
+      this._attachedViewerPagehideHandler = () => {
+        this._closeAttachedViewerLease(true);
+      };
+      // Do not close on visibilitychange: Telegram overlays and tab switches can
+      // hide the WebView while the Entrance viewer is still alive.
+      window.addEventListener("pagehide", this._attachedViewerPagehideHandler);
+    }
+
+    _closeAttachedViewerLease(keepalive = false) {
+      if (!this._attachedViewerOpen) {
+        return;
+      }
+      this._attachedViewerOpen = false;
+      if (this._attachedViewerHeartbeatTimer) {
+        clearInterval(this._attachedViewerHeartbeatTimer);
+        this._attachedViewerHeartbeatTimer = null;
+      }
+      if (this._attachedViewerPagehideHandler) {
+        window.removeEventListener("pagehide", this._attachedViewerPagehideHandler);
+        this._attachedViewerPagehideHandler = null;
+      }
+      this._sendAttachedViewerEvent("close", keepalive);
     }
 
     _showPlaybackError(message) {
@@ -348,6 +434,7 @@
         lastTriple: "",
         queuedTriples: new Set(),
         queuedTimers: new Set(),
+        hlsMilestones: new Set(),
       };
     }
 
@@ -506,6 +593,52 @@
         counters.live_latency_s = this._boundedCounter(duration - Number(video.currentTime || 0));
       }
       return counters;
+    }
+
+    _mediaMilestoneCounters(video) {
+      const counters = {
+        ready_state: this._boundedCounter(video.readyState),
+        buffered_count: this._boundedCounter(video.buffered?.length || 0),
+        video_width: this._boundedCounter(video.videoWidth || 0),
+        video_height: this._boundedCounter(video.videoHeight || 0),
+      };
+      const currentTime = Number(video.currentTime);
+      if (Number.isFinite(currentTime)) {
+        counters.current_time_ms = this._boundedCounter(currentTime * 1000);
+      }
+      const duration = Number(video.duration);
+      if (Number.isFinite(duration)) {
+        counters.duration_ms = this._boundedCounter(duration * 1000);
+      }
+      if (video.buffered?.length) {
+        counters.buffered_start_ms = this._boundedCounter(video.buffered.start(0) * 1000);
+        counters.buffered_end_ms = this._boundedCounter(
+          video.buffered.end(video.buffered.length - 1) * 1000,
+        );
+      }
+      if (typeof video.getVideoPlaybackQuality === "function") {
+        const quality = video.getVideoPlaybackQuality();
+        counters.total_video_frames = this._boundedCounter(quality?.totalVideoFrames || 0);
+        counters.dropped_video_frames = this._boundedCounter(quality?.droppedVideoFrames || 0);
+      }
+      return counters;
+    }
+
+    _reportHlsMilestone(event, generation, video) {
+      const diagnostics = this._diagnostics;
+      if (
+        !diagnostics ||
+        diagnostics.generation !== generation ||
+        generation !== this._requestGeneration ||
+        !this.isConnected ||
+        diagnostics.hlsMilestones.has(event)
+      ) {
+        return;
+      }
+      diagnostics.hlsMilestones.add(event);
+      this._reportDiagnostics(event, {
+        counters: video ? this._mediaMilestoneCounters(video) : undefined,
+      });
     }
 
     _hlsErrorReason(data) {
@@ -707,7 +840,7 @@
         : 0;
       this._setTransportLabel("HLS · первый кадр " + elapsed.toFixed(1) + " с");
       this._reportDiagnostics("hls_first_frame", {
-        counters: this._video ? this._videoCounters(this._video) : undefined,
+        counters: this._video ? this._mediaMilestoneCounters(this._video) : undefined,
       });
     }
 
@@ -1177,9 +1310,7 @@
           ) {
             return;
           }
-          this._reportDiagnostics("hls_manifest", {
-            counters: this._videoCounters(video),
-          });
+          this._reportHlsMilestone("hls_manifest", generation, video);
           video.play().then(() => {
             this._reportDiagnostics("hls_play", {
               state: "resolved",
@@ -1197,6 +1328,18 @@
             });
             this._setTransportLabel("HLS · нажмите Play");
           });
+        });
+        hls.on(HlsClass.Events.LEVEL_LOADED, () => {
+          this._reportHlsMilestone("hls_level_loaded", generation, video);
+        });
+        hls.on(HlsClass.Events.FRAG_LOADED, () => {
+          this._reportHlsMilestone("hls_frag_loaded", generation, video);
+        });
+        hls.on(HlsClass.Events.FRAG_BUFFERED, () => {
+          this._reportHlsMilestone("hls_frag_buffered", generation, video);
+        });
+        hls.on(HlsClass.Events.BUFFER_APPENDED, () => {
+          this._reportHlsMilestone("hls_buffer_appended", generation, video);
         });
 
         hls.on(HlsClass.Events.ERROR, (_event, data) => {
@@ -1220,14 +1363,17 @@
           );
         });
 
+        this._reportHlsMilestone("hls_manifest_request", generation, video);
         hls.loadSource(source);
         hls.attachMedia(video);
         return;
       }
 
       if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        this._reportHlsMilestone("hls_manifest_request", generation, video);
         video.src = source;
         try {
+          this._reportHlsMilestone("hls_manifest", generation, video);
           await video.play();
           this._reportDiagnostics("hls_play", {
             state: "resolved",
@@ -1648,7 +1794,11 @@
       this._startDiagnostics(entityId, generation);
 
       if (isIntercomCameraEntity(entityId)) {
-        this._openHls(entityId, generation);
+        this._startAttachedViewerLease().then(() => {
+          if (generation === this._requestGeneration) {
+            this._openHls(entityId, generation);
+          }
+        });
       } else {
         this._openMSE(entityId, generation);
       }

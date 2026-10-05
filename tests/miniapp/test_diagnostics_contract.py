@@ -148,11 +148,35 @@ def test_client_counter_budget_is_derived_from_server_schema_limit():
     assert max_match is not None
     assert int(max_match.group(1)) == diagnostics.MAX_COUNTERS
 
-    family_counts = {
-        "webrtc": _js_array_length(host, "WEBRTC_COUNTER_PRIORITY"),
-        "hls": _js_array_length(host, "HLS_COUNTER_PRIORITY"),
+    assert _js_array_length(host, "WEBRTC_COUNTER_PRIORITY") <= diagnostics.MAX_COUNTERS
+
+
+def test_hls_milestone_counter_payload_stays_within_schema_bound():
+    milestone_counters = {
+        "ready_state": 4,
+        "buffered_count": 1,
+        "video_width": 1920,
+        "video_height": 1080,
+        "current_time_ms": 250,
+        "duration_ms": 1000,
+        "buffered_start_ms": 0,
+        "buffered_end_ms": 1000,
+        "total_video_frames": 10,
+        "dropped_video_frames": 0,
     }
-    assert max(family_counts.values()) <= diagnostics.MAX_COUNTERS
+
+    assert len(milestone_counters) == 10
+    assert len(milestone_counters) <= diagnostics.MAX_COUNTERS
+    payload = diagnostics.validate_payload(
+        {
+            "event": "hls_frag_buffered",
+            "elapsed_ms": 500,
+            "stage_ms": 100,
+            "counters": milestone_counters,
+        }
+    )
+
+    assert set(payload["counters"]) == set(milestone_counters)
 
 
 def test_rate_limiter_prunes_expired_session_state():

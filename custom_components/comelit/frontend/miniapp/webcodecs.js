@@ -262,6 +262,40 @@
       );
     }
 
+    _selectedCamera() {
+      return this._cameras.find((camera) => this._cameraId(camera) === this._selected);
+    }
+
+    _attachedTerminalReason(reason) {
+      const selectedCamera = this._selectedCamera();
+      if (!this._embedded || selectedCamera?.kind !== "intercom_entrance") {
+        return reason;
+      }
+      const code = String(reason || "unknown");
+      if (code.startsWith("attached_webcodecs_")) {
+        return code;
+      }
+      if (code === "codec_unsupported" || code === "webcodecs_unavailable") {
+        return "attached_webcodecs_browser_unsupported";
+      }
+      if (code === "decoder_error" || code === "protocol_mismatch") {
+        return "attached_webcodecs_decoder_init_failed";
+      }
+      if (code === "ws_closed" || code === "ws_error" || code === "startup_timeout") {
+        return "attached_webcodecs_transport_closed";
+      }
+      if (code === "backlog_exceeded" || code === "decode_backlog") {
+        return "attached_webcodecs_backlog_exceeded";
+      }
+      if (code === "session_limit") {
+        return "attached_webcodecs_session_limit";
+      }
+      if (code === "source_open_failed" || code === "source_not_h264_rtsp") {
+        return "attached_webcodecs_source_failed";
+      }
+      return code;
+    }
+
     _cameraListFingerprint(cameras) {
       return cameras
         .map((camera) => (
@@ -313,6 +347,7 @@
         sourceKind: "n/a",
         comelitEntranceOpen: false,
         comelitMediaStarted: false,
+        attachedWebCodecs: false,
         unsupported: false,
         error: null,
       };
@@ -457,8 +492,9 @@
       if (!("VideoDecoder" in globalThis) || !("EncodedVideoChunk" in globalThis)) {
         this._stats = this._newStats();
         this._stats.error = "webcodecs_unavailable";
-        this._emitFinal("codec_unsupported");
-        this._notifyEmbeddedTerminal("codec_unsupported");
+        const reason = this._attachedTerminalReason("webcodecs_unavailable");
+        this._emitFinal(reason);
+        this._notifyEmbeddedTerminal(reason);
         return;
       }
       this._running = true;
@@ -542,6 +578,7 @@
         this._stats.sourceKind = String(message.source_kind || "n/a");
         this._stats.comelitEntranceOpen = message.comelit_entrance_open === true;
         this._stats.comelitMediaStarted = message.comelit_media_started === true;
+        this._stats.attachedWebCodecs = message.attached_webcodecs === true;
         const config = {
           codec: this._stats.codec,
           optimizeForLatency: true,
@@ -551,21 +588,21 @@
           if (!support.supported) {
             this._stats.unsupported = true;
             this._stats.error = "codec_unsupported";
-            this._stop("codec_unsupported", true);
+            this._stop(this._attachedTerminalReason("codec_unsupported"), true);
             return;
           }
           this._decoder = new VideoDecoder({
             output: (frame) => this._drawFrame(frame),
             error: () => {
               this._stats.error = "decoder_error";
-              this._stop("decoder_error", true);
+              this._stop(this._attachedTerminalReason("decoder_error"), true);
             },
           });
           this._decoder.configure(config);
         } catch (_) {
           this._stats.unsupported = true;
           this._stats.error = "codec_unsupported";
-          this._stop("codec_unsupported", true);
+          this._stop(this._attachedTerminalReason("codec_unsupported"), true);
           return;
         }
         for (const data of this._pendingBinary.splice(0)) {
@@ -608,7 +645,7 @@
       }
       if (message.type === "error") {
         this._stats.error = String(message.code || "ws_error");
-        this._stop(this._stats.error, true);
+        this._stop(this._attachedTerminalReason(this._stats.error), true);
         return;
       }
       if (message.type === "eos") {
@@ -776,9 +813,7 @@
       this._setStatus("остановлено");
       if (emit) {
         this._emitFinal(reason);
-        const selectedCamera = this._cameras.find(
-          (camera) => this._cameraId(camera) === this._selected,
-        );
+        const selectedCamera = this._selectedCamera();
         const entranceEmbedded = selectedCamera?.kind === "intercom_entrance";
         const embeddedFallback =
           this._embedded &&
