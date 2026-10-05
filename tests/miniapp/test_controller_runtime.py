@@ -2276,6 +2276,54 @@ def test_attached_webcodecs_source_failure_and_second_viewer_use_bounded_hls_fal
     assert coordinator.attached_session.status()["leases"] == {"camera_view": 1}
 
 
+def test_attached_webcodecs_transport_close_after_source_open_is_terminal_reason(monkeypatch):
+    controller, hass = _controller(surveillance_label="Outside")
+    _install_webcodecs_entrance_runtime(hass)
+    coordinator = _install_attached_ring_coordinator(hass)
+    token, _session = controller.sessions.create(424242, 12345678)
+
+    async def closing_after_open(_source):
+        class _ClosingSource(_AsyncUnitSource):
+            async def __anext__(self):
+                raise webcodecs_mod.WebCodecsSourceError("source_open_failed")
+
+        return _ClosingSource([])
+
+    async def activate_ring():
+        await coordinator.attached_session.async_acquire(
+            panel="entrance",
+            reason="camera_view",
+        )
+
+    asyncio.run(activate_ring())
+    monkeypatch.setattr(
+        views_mod.webcodecs_mod,
+        "open_h264_sdp_access_unit_source",
+        closing_after_open,
+    )
+    view = views_mod.MiniAppCameraWebCodecsView(controller)
+
+    with _MSEWebSocketPatch(
+        monkeypatch,
+        _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+        messages=("wait_forever",),
+    ):
+        asyncio.run(
+            view.get(_mse_request(controller, token), "camera.comelit_entrance")
+        )
+
+    texts = _json_texts(_CaptureWebSocket.instances[-1])
+    assert texts[0]["type"] == "intercom_media_ready"
+    assert isinstance(texts[0]["server_elapsed_ms"], int)
+    assert texts[1]["type"] == "source_open"
+    assert isinstance(texts[1]["server_elapsed_ms"], int)
+    assert texts[2] == {
+        "type": "error",
+        "code": "attached_webcodecs_transport_closed",
+    }
+    assert coordinator.attached_session.status()["leases"] == {"camera_view": 1}
+
+
 def test_webcodecs_entrance_park_holds_transport_and_reuses_without_restart():
     controller, hass = _controller(surveillance_label="Outside")
     manager, transport = _install_webcodecs_entrance_runtime(hass)

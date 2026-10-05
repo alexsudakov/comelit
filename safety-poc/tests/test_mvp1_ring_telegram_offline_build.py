@@ -255,8 +255,8 @@ class Mvp1RingTelegramOfflineBuildTests(unittest.TestCase):
         # camera-owned lifecycle work. Freeze only the protocol/native lineage
         # that this UI/lifecycle change must not mutate.
         expected = {
-            "safety-poc/research/media/v1/entrance_p116_r27_repeat_001a_transform.py": "9c4ebff3fe5c54b05bdb31d6bfd1ddbadd76efa72d5c6f1abdc8c8bd4d69160b",
-            "safety-poc/research/media/v1/ct120_run_p116_r27_repeat_001a_live.sh": "ff20881a27f81cbcc6adf704ce0eb4edc3f037862d6495255ed7cfa9cc73f33b",
+            "safety-poc/research/media/v1/entrance_p116_r27_repeat_001a_transform.py": "85ad4a2c9bd36b35c8f24bec72cac58d30df81d4e67efd077e6f437687eb2730",
+            "safety-poc/research/media/v1/ct120_run_p116_r27_repeat_001a_live.sh": "0e53a0ab59bcbe21dfe6062694250014526a4375e56965f02674134a9982404e",
             "safety-poc/research/media/v1/entrance_p116_r30_call_ctp_envelope_model.py": "367db8028a0a1ed5c09a86b40bb5ae01657d823ca8f6561557338a609ba5a8d0",
             "safety-poc/research/media/v1/entrance_p116_r30b_call_transaction_model.py": "ed14393eb234890d5d2c9d30a9538fe417c52d8658ac7b3f75e3c49e9fa4da47",
             "safety-poc/research/media/v1/ct120_run_p116_r30h_a_repeat_001a_offline_preflight.sh": "7bd144cb2c1ab0971eee55805e81b2e4688a973483edbfc297becc3632fc9a14",

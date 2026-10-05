@@ -1403,6 +1403,12 @@ class ComelitCard extends HTMLElement {
       }
       this._intercomViewerFallbackReason =
         String(event?.detail?.reason || "webcodecs_error");
+      if (
+        this._intercomViewerFallbackReason ===
+        "attached_webcodecs_transport_closed"
+      ) {
+        return;
+      }
       this._showIntercomLegacyFallback(generation);
     });
 

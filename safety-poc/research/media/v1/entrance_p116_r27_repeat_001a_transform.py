@@ -40,8 +40,8 @@ _STATE_OLD = """static gboolean p97_signaling_finished = FALSE;
 _STATE_NEW = """static gboolean p97_signaling_finished = FALSE;
 
 /* R27 bounded same-session periodic refresh 0x001A research state. */
-#define R27_REFRESH_CADENCE_SECONDS 25u
-#define R27_CADENCE_SAFETY_MARGIN_SECONDS 11u
+#define R27_REFRESH_CADENCE_SECONDS 15u
+#define R27_CADENCE_SAFETY_MARGIN_SECONDS 21u
 #define R27_MAX_REFRESH_COUNT 4u
 #define R27_REPEAT_ACK_TIMEOUT_SECONDS 5u
 #define R27_MAX_LIVE_OBSERVATION_SECONDS 115u
@@ -834,10 +834,10 @@ def report() -> str:
             "R27_COMPOSES=P106_INCLUDE_P116",
             "R27_REPEAT_SEQUENCE_MODEL=LIVE_INITIAL_001A_SEQUENCE_PLUS_P97_DELTA",
             "CAPTURED_LITERAL_REUSE=false",
-            "R27_REPEAT_DELAY_SECONDS=25",
-            "REFRESH_CADENCE_SECONDS=25",
+            "R27_REPEAT_DELAY_SECONDS=15",
+            "REFRESH_CADENCE_SECONDS=15",
             "CADENCE_SOURCE=LOCAL_LIVE_EVIDENCE",
-            "CADENCE_SAFETY_MARGIN_SECONDS=11",
+            "CADENCE_SAFETY_MARGIN_SECONDS=21",
             "R27_REPEAT_DELAY_IS_PROTOCOL_CONSTANT=false",
             "R27_REPEAT_DELAY_PROMOTED_TO_PRODUCTION=false",
             "R27_PRODUCTION_REFRESH=false",

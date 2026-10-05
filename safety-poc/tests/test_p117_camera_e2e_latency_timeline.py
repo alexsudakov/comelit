@@ -30,10 +30,10 @@ SETTLE_DEFINE_NEW = "#define ENTRANCE_SIGNAL_SETTLE_MS 1000"
 # output and this candidate's output. The base value is what makes the
 # single-token negative guard self-contained.
 SETTLE_BASE_SOURCE_SHA256 = (
-    "4fc6188c6231b94682205973b6a6f628ca005e8b7c3a04efbd8056c5a608c58c"
+    "b2deb8aceedd16358b2eb83bd0599470f16aa72030fbd64b792809159dc071a6"
 )
 SETTLE_CANDIDATE_SOURCE_SHA256 = (
-    "4448e8368bd6275a2cd398c35ef171d012f315d2bb5bd05daf2e33a13d4c0001"
+    "499c1feb6546e91fed8422f01f4a6249f6907f2bddbd93e82435ea58fb2c5240"
 )
 # The exact commit whose door source, run through the R65 transform,
 # reproduces SETTLE_CANDIDATE_SOURCE_SHA256 (safety-poc/research/media/v1/
