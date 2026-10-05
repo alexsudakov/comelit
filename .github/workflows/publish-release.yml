@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - candidate/1.7.32b8
     paths:
       - custom_components/comelit/manifest.json
       - .github/workflows/publish-release.yml
@@ -58,8 +59,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          prerelease=()
+          if [[ "$VERSION" =~ [A-Za-z] ]]; then
+            prerelease+=(--prerelease)
+          fi
           gh release create "$VERSION" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "$VERSION" \
-            --generate-notes
+            --generate-notes \
+            "${prerelease[@]}"
