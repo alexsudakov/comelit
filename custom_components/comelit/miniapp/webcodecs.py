@@ -529,6 +529,10 @@ class _H264PyAVOwner:
                 try:
                     packet = next(iterator, None)
                     if packet is None:
+                        _LOGGER.info(
+                            "COMELIT_MINIAPP_WEBCODECS_SOURCE_TERMINAL "
+                            "terminal_cause=source_eof"
+                        )
                         future.set_result(None)
                         current_future = None
                         continue
@@ -541,6 +545,11 @@ class _H264PyAVOwner:
                     )
                     current_future = None
                 except Exception as exc:
+                    _LOGGER.info(
+                        "COMELIT_MINIAPP_WEBCODECS_SOURCE_TERMINAL "
+                        "terminal_cause=source_transport_closed:%s",
+                        type(exc).__name__,
+                    )
                     future.set_exception(exc)
                     current_future = None
         except BaseException as exc:
