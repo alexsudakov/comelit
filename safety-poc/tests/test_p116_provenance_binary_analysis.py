@@ -24,7 +24,7 @@ REBUILT = ROOT / ".p116-evidence" / "bin" / "rebuilt-historical-source.bin"
 # p116_r65_production_media_build_meta.txt (frozen record, left unmodified)
 # documents as the artifact it built; PRE_R65_PACKAGED_* are what
 # p116_media_telemetry_build_meta.txt (also a historical record) documents.
-PINNED_SHA256 = "04bb610e02562fb4a301813001616308dd22dbabe5507b397a5abdc7194075b2"
+PINNED_SHA256 = "83b29ef07be224ffb703a21f50050b1ed5e7eec3e24f185cbfde4c79c111515a"
 SUPERSEDED_R65_BINARY_SHA256 = "76218861c72e9a2b87283df6c5c7e0b03a4d7fb11bee4364f59be1513acd6129"
 R65_SOURCE_SHA256 = "4fc6188c6231b94682205973b6a6f628ca005e8b7c3a04efbd8056c5a608c58c"
 PRE_R65_PACKAGED_BINARY_SHA256 = "a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8"

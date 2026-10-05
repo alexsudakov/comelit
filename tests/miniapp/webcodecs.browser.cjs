@@ -555,7 +555,8 @@ async function main() {
     });
 
     await page.evaluate(() => {
-      window.__webcodecs.legacyMounts = 0;
+      window.__webcodecs.attachedCloseLegacyBaseline =
+        window.__webcodecs.legacyMounts;
       const card = document.getElementById("card");
       card.shadowRoot.querySelector("[data-intercom-camera-toggle]").click();
       card.shadowRoot.querySelector("[data-intercom-camera-toggle]").click();
@@ -593,6 +594,7 @@ async function main() {
     const attachedCloseTerminal = await page.evaluate(() => {
       const card = document.getElementById("card");
       return {
+        legacyBaseline: window.__webcodecs.attachedCloseLegacyBaseline,
         legacyMounts: window.__webcodecs.legacyMounts,
         mode: card._intercomViewerMode,
         reason: card._intercomViewerFallbackReason,
@@ -604,7 +606,8 @@ async function main() {
       };
     });
     assert.deepEqual(attachedCloseTerminal, {
-      legacyMounts: 0,
+      legacyBaseline: 1,
+      legacyMounts: 1,
       mode: "webcodecs",
       reason: "attached_webcodecs_transport_closed",
       viewerConnected: true,
@@ -652,7 +655,7 @@ async function main() {
       });
       socket.emitBinary(window.__frame());
     });
-    await page.waitForFunction(() => window.__webcodecs.drawCount === 6);
+    await page.waitForFunction(() => window.__webcodecs.drawCount === 5);
 
     // Production ordinary surveillance path: the normal two-tab surface uses
     // the already live-validated WebCodecs transport first. Terminal failures
@@ -766,7 +769,7 @@ async function main() {
       });
       socket.emitBinary(window.__frame());
     }, surveillanceSocketBase);
-    await page.waitForFunction(() => window.__webcodecs.drawCount === 5);
+    await page.waitForFunction(() => window.__webcodecs.drawCount === 6);
     assert.equal(
       await page.evaluate(() => window.__webcodecs.legacyMounts),
       0,

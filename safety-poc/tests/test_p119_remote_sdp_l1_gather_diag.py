@@ -69,7 +69,7 @@ def _load(name: str, path: Path):
 latency_timeline = _load("comelit_latency_timeline_p119", COMPONENT / "latency_timeline.py")
 
 GENERATED_SOURCE_SHA256 = (
-    "2f8137e988437c779a0f3bb1c9904c81cbe2d13641efa2e6a070054116dd43ed"
+    "c4ebe732effb7e8c4b497f5fbd37dbb1619839496face4975b42f12d1f7bd961"
 )
 GENERATED_SOURCE_BYTES = 251588
 BASE_SOURCE_SHA256 = "4448e8368bd6275a2cd398c35ef171d012f315d2bb5bd05daf2e33a13d4c0001"

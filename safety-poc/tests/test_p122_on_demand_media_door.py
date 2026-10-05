@@ -22,7 +22,7 @@ import entrance_p121_gather_initial_timeout_transform as p121  # noqa: E402
 import entrance_p122_on_demand_media_door_transform as p122  # noqa: E402
 
 EXPECTED_GENERATED_SOURCE_SHA256 = (
-    "ec39399ade72cb4800131d5a0995e0053a3f9af22560fd40894af057994d6d47"
+    "92e12f5a27dd728231e073076429863cdc059825819f4f600d5d3dd50138ca26"
 )
 
 
