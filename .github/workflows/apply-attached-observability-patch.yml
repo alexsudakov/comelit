@@ -1,0 +1,86 @@
+name: Apply attached observability patch
+
+on:
+  push:
+    branches:
+      - fix/attached-media-terminal-observability
+    paths:
+      - .github/workflows/apply-attached-observability-patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/attached-media-terminal-observability
+          fetch-depth: 0
+      - name: Apply exact bounded patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('custom_components/comelit/h264_recovery.py')
+          s = p.read_text()
+          s = s.replace(
+          '''class RecoveryShimDiagnostics:\n    running: bool\n    input_packets: int\n    output_packets: int\n    eligible_nonidr_i_count: int\n    injected_count: int\n    existing_recovery_count: int\n    idr_count: int\n    unsupported_packet_count: int\n    malformed_count: int\n    last_error: str | None\n''',
+          '''class RecoveryShimDiagnostics:\n    running: bool\n    input_packets: int\n    output_packets: int\n    eligible_nonidr_i_count: int\n    injected_count: int\n    existing_recovery_count: int\n    idr_count: int\n    unsupported_packet_count: int\n    malformed_count: int\n    input_rtp_packets: int\n    first_rtp_at: str | None\n    last_rtp_at: str | None\n    last_rtp_age_ms: int | None\n    last_error: str | None\n''')
+          s = s.replace(
+          '''            malformed_count=self.malformed_count,\n            last_error=self.last_error,\n''',
+          '''            malformed_count=self.malformed_count,\n            input_rtp_packets=0,\n            first_rtp_at=None,\n            last_rtp_at=None,\n            last_rtp_age_ms=None,\n            last_error=self.last_error,\n''', 1)
+          anchor = '''    def emit_input_summary(self) -> None:\n'''
+          insert = '''    def input_diagnostics(self) -> tuple[int, str | None, str | None, int | None]:\n        age_ms: int | None = None\n        if self._last_rtp_monotonic is not None:\n            age_ms = max(0, int((time.monotonic() - self._last_rtp_monotonic) * 1000))\n        return (\n            self._input_rtp_packets,\n            self._first_rtp_at,\n            self._last_rtp_at,\n            age_ms,\n        )\n\n'''
+          if insert not in s:
+              s = s.replace(anchor, insert + anchor, 1)
+          old = '''    def diagnostics(self) -> RecoveryShimDiagnostics:\n        diagnostics = self._rewriter.diagnostics(running=self.running)\n        protocol = self._protocol\n        if protocol is not None and protocol.last_error is not None:\n            return RecoveryShimDiagnostics(\n                running=diagnostics.running,\n                input_packets=diagnostics.input_packets,\n                output_packets=diagnostics.output_packets,\n                eligible_nonidr_i_count=diagnostics.eligible_nonidr_i_count,\n                injected_count=diagnostics.injected_count,\n                existing_recovery_count=diagnostics.existing_recovery_count,\n                idr_count=diagnostics.idr_count,\n                unsupported_packet_count=diagnostics.unsupported_packet_count,\n                malformed_count=diagnostics.malformed_count,\n                last_error=protocol.last_error,\n            )\n        return diagnostics\n'''
+          new = '''    def diagnostics(self) -> RecoveryShimDiagnostics:\n        diagnostics = self._rewriter.diagnostics(running=self.running)\n        protocol = self._protocol\n        input_rtp_packets = diagnostics.input_rtp_packets\n        first_rtp_at = diagnostics.first_rtp_at\n        last_rtp_at = diagnostics.last_rtp_at\n        last_rtp_age_ms = diagnostics.last_rtp_age_ms\n        last_error = diagnostics.last_error\n        if protocol is not None:\n            (\n                input_rtp_packets,\n                first_rtp_at,\n                last_rtp_at,\n                last_rtp_age_ms,\n            ) = protocol.input_diagnostics()\n            if protocol.last_error is not None:\n                last_error = protocol.last_error\n        return RecoveryShimDiagnostics(\n            running=diagnostics.running,\n            input_packets=diagnostics.input_packets,\n            output_packets=diagnostics.output_packets,\n            eligible_nonidr_i_count=diagnostics.eligible_nonidr_i_count,\n            injected_count=diagnostics.injected_count,\n            existing_recovery_count=diagnostics.existing_recovery_count,\n            idr_count=diagnostics.idr_count,\n            unsupported_packet_count=diagnostics.unsupported_packet_count,\n            malformed_count=diagnostics.malformed_count,\n            input_rtp_packets=input_rtp_packets,\n            first_rtp_at=first_rtp_at,\n            last_rtp_at=last_rtp_at,\n            last_rtp_age_ms=last_rtp_age_ms,\n            last_error=last_error,\n        )\n'''
+          if old not in s:
+              raise SystemExit('h264 diagnostics anchor mismatch')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          p = Path('custom_components/comelit/attached_media.py')
+          s = p.read_text()
+          anchor = '''    @property\n    def last_error(self) -> str | None:\n        return self._last_error\n\n'''
+          insert = '''    def diagnostics(self) -> dict[str, object]:\n        shim = self._video_recovery_shim\n        if shim is None:\n            return {\n                "attached_rtp_input_packets": 0,\n                "attached_rtp_output_packets": 0,\n                "attached_rtp_first_at": None,\n                "attached_rtp_last_at": None,\n                "attached_rtp_last_age_ms": None,\n                "attached_rtp_last_error": None,\n            }\n        diagnostics = shim.diagnostics()\n        return {\n            "attached_rtp_input_packets": diagnostics.input_rtp_packets,\n            "attached_rtp_output_packets": diagnostics.output_packets,\n            "attached_rtp_first_at": diagnostics.first_rtp_at,\n            "attached_rtp_last_at": diagnostics.last_rtp_at,\n            "attached_rtp_last_age_ms": diagnostics.last_rtp_age_ms,\n            "attached_rtp_last_error": diagnostics.last_error,\n        }\n\n'''
+          if insert not in s:
+              if anchor not in s:
+                  raise SystemExit('attached diagnostics anchor mismatch')
+              s = s.replace(anchor, anchor + insert, 1)
+          old = '''            "miniapp_attached_stream_active": self._leases.get(\n                "miniapp_attached_view", 0\n            )\n            > 0,\n        }\n'''
+          new = '''            "miniapp_attached_stream_active": self._leases.get(\n                "miniapp_attached_view", 0\n            )\n            > 0,\n            **self._transport.diagnostics(),\n        }\n'''
+          if old not in s:
+              raise SystemExit('attached status anchor mismatch')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          p = Path('custom_components/comelit/miniapp/webcodecs.py')
+          s = p.read_text()
+          old = '''                    packet = next(iterator, None)\n                    if packet is None:\n                        future.set_result(None)\n                        current_future = None\n                        continue\n'''
+          new = '''                    packet = next(iterator, None)\n                    if packet is None:\n                        _LOGGER.info(\n                            "COMELIT_MINIAPP_WEBCODECS_SOURCE_TERMINAL "\n                            "terminal_cause=source_eof"\n                        )\n                        future.set_result(None)\n                        current_future = None\n                        continue\n'''
+          if old not in s:
+              raise SystemExit('webcodecs eof anchor mismatch')
+          s = s.replace(old, new, 1)
+          old = '''                except Exception as exc:\n                    future.set_exception(exc)\n                    current_future = None\n'''
+          new = '''                except Exception as exc:\n                    _LOGGER.info(\n                        "COMELIT_MINIAPP_WEBCODECS_SOURCE_TERMINAL "\n                        "terminal_cause=source_transport_closed:%s",\n                        type(exc).__name__,\n                    )\n                    future.set_exception(exc)\n                    current_future = None\n'''
+          if old not in s:
+              raise SystemExit('webcodecs exception anchor mismatch')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          t = Path('safety-poc/tests/test_attached_media_runtime_observability_v2.py')
+          t.write_text('''from pathlib import Path\n\n\ndef test_attached_media_exports_last_rtp_observability() -> None:\n    source = Path("custom_components/comelit/attached_media.py").read_text(encoding="utf-8")\n    for token in (\n        '"attached_rtp_input_packets"',\n        '"attached_rtp_last_at"',\n        '"attached_rtp_last_age_ms"',\n        '**self._transport.diagnostics()',\n    ):\n        assert token in source\n\n\ndef test_h264_shim_exports_existing_last_rtp_clock() -> None:\n    source = Path("custom_components/comelit/h264_recovery.py").read_text(encoding="utf-8")\n    assert "def input_diagnostics" in source\n    assert "self._last_rtp_monotonic" in source\n    assert "last_rtp_age_ms" in source\n\n\ndef test_webcodecs_logs_bounded_source_terminal_cause() -> None:\n    source = Path("custom_components/comelit/miniapp/webcodecs.py").read_text(encoding="utf-8")\n    assert "COMELIT_MINIAPP_WEBCODECS_SOURCE_TERMINAL" in source\n    assert "terminal_cause=source_eof" in source\n    assert "terminal_cause=source_transport_closed:%s" in source\n    assert "type(exc).__name__" in source\n''')
+          PY
+          python3 -m compileall -q custom_components/comelit
+          python3 -m pytest -q safety-poc/tests/test_attached_media_runtime_observability_v2.py
+          git rm .github/workflows/apply-attached-observability-patch.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add custom_components/comelit/h264_recovery.py custom_components/comelit/attached_media.py custom_components/comelit/miniapp/webcodecs.py safety-poc/tests/test_attached_media_runtime_observability_v2.py
+          git commit -m 'feat(diagnostics): expose attached RTP terminal evidence'
+          git push origin HEAD:fix/attached-media-terminal-observability
