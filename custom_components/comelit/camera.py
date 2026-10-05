@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 import inspect
 import logging
 import re
@@ -311,6 +312,8 @@ class ComelitEntranceCamera(Camera):
         self._hls_http_probe_done = False
         self._hls_http_probe_result: dict[str, Any] | None = None
         self._latency_timeline: CameraRequestLatencyTimeline | None = None
+        self._camera_view_last_end_reason: str | None = None
+        self._camera_view_last_end_at: str | None = None
         self.entity_id = ENTRANCE_CAMERA_ENTITY_ID
 
     @property
@@ -357,12 +360,16 @@ class ComelitEntranceCamera(Camera):
             "thumbnail_starts_session": False,
             "preload_stream_allowed": False,
             "camera_view_owner": self._camera_view_owner_kind,
+            "camera_view_last_end_reason": self._camera_view_last_end_reason,
+            "camera_view_last_end_at": self._camera_view_last_end_at,
             "attached_media_active": bool(
                 self._attached_session is not None and self._attached_session.active
             ),
             "hard_limit_seconds": self._manager.hard_limit_seconds,
         }
         attrs.update(self._transport.video_recovery_diagnostics())
+        attrs.update(self._transport.native_runtime_identity_diagnostics())
+        attrs.update(self._transport.native_marker_diagnostics())
         attrs.update(self._hls_runtime_diagnostics())
         attrs.update(self._hls_http_boundary_diagnostics())
         return attrs
@@ -1032,6 +1039,8 @@ class ComelitEntranceCamera(Camera):
 
     async def _async_end_camera_view(self, reason: str) -> bool:
         _LOGGER.debug("Ending Comelit camera live view: %s", reason)
+        self._camera_view_last_end_reason = reason
+        self._camera_view_last_end_at = datetime.now(UTC).isoformat()
         await self._async_reset_stream()
         return await self._async_release_camera_view_media()
 
