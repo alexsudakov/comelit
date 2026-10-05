@@ -188,6 +188,27 @@ class ComelitAttachedRingMediaTransport:
     def last_error(self) -> str | None:
         return self._last_error
 
+    def diagnostics(self) -> dict[str, object]:
+        shim = self._video_recovery_shim
+        if shim is None:
+            return {
+                "attached_rtp_input_packets": 0,
+                "attached_rtp_output_packets": 0,
+                "attached_rtp_first_at": None,
+                "attached_rtp_last_at": None,
+                "attached_rtp_last_age_ms": None,
+                "attached_rtp_last_error": None,
+            }
+        diagnostics = shim.diagnostics()
+        return {
+            "attached_rtp_input_packets": diagnostics.input_rtp_packets,
+            "attached_rtp_output_packets": diagnostics.output_packets,
+            "attached_rtp_first_at": diagnostics.first_rtp_at,
+            "attached_rtp_last_at": diagnostics.last_rtp_at,
+            "attached_rtp_last_age_ms": diagnostics.last_rtp_age_ms,
+            "attached_rtp_last_error": diagnostics.last_error,
+        }
+
     async def async_start(self, panel: str) -> None:
         if panel != "entrance":
             raise ComelitAttachedMediaError("unsupported_attached_media_panel")
@@ -338,6 +359,7 @@ class ComelitAttachedRingMediaSession:
                 "miniapp_attached_view", 0
             )
             > 0,
+            **self._transport.diagnostics(),
         }
 
     async def async_acquire(self, *, panel: str, reason: str) -> dict[str, object]:

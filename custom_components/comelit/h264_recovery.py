@@ -30,6 +30,10 @@ class RecoveryShimDiagnostics:
     idr_count: int
     unsupported_packet_count: int
     malformed_count: int
+    input_rtp_packets: int
+    first_rtp_at: str | None
+    last_rtp_at: str | None
+    last_rtp_age_ms: int | None
     last_error: str | None
 
 
@@ -545,6 +549,10 @@ class H264RecoveryRewriter:
             idr_count=self.idr_count,
             unsupported_packet_count=self.unsupported_packet_count,
             malformed_count=self.malformed_count,
+            input_rtp_packets=0,
+            first_rtp_at=None,
+            last_rtp_at=None,
+            last_rtp_age_ms=None,
             last_error=self.last_error,
         )
 
@@ -944,6 +952,17 @@ class RecoveryRtpShimProtocol(asyncio.DatagramProtocol):
             send_errors,
         )
 
+    def input_diagnostics(self) -> tuple[int, str | None, str | None, int | None]:
+        age_ms: int | None = None
+        if self._last_rtp_monotonic is not None:
+            age_ms = max(0, int((time.monotonic() - self._last_rtp_monotonic) * 1000))
+        return (
+            self._input_rtp_packets,
+            self._first_rtp_at,
+            self._last_rtp_at,
+            age_ms,
+        )
+
     def emit_input_summary(self) -> None:
         if self._summary_emitted:
             return
@@ -1126,20 +1145,36 @@ class H264RecoveryRtpShim:
     def diagnostics(self) -> RecoveryShimDiagnostics:
         diagnostics = self._rewriter.diagnostics(running=self.running)
         protocol = self._protocol
-        if protocol is not None and protocol.last_error is not None:
-            return RecoveryShimDiagnostics(
-                running=diagnostics.running,
-                input_packets=diagnostics.input_packets,
-                output_packets=diagnostics.output_packets,
-                eligible_nonidr_i_count=diagnostics.eligible_nonidr_i_count,
-                injected_count=diagnostics.injected_count,
-                existing_recovery_count=diagnostics.existing_recovery_count,
-                idr_count=diagnostics.idr_count,
-                unsupported_packet_count=diagnostics.unsupported_packet_count,
-                malformed_count=diagnostics.malformed_count,
-                last_error=protocol.last_error,
-            )
-        return diagnostics
+        input_rtp_packets = diagnostics.input_rtp_packets
+        first_rtp_at = diagnostics.first_rtp_at
+        last_rtp_at = diagnostics.last_rtp_at
+        last_rtp_age_ms = diagnostics.last_rtp_age_ms
+        last_error = diagnostics.last_error
+        if protocol is not None:
+            (
+                input_rtp_packets,
+                first_rtp_at,
+                last_rtp_at,
+                last_rtp_age_ms,
+            ) = protocol.input_diagnostics()
+            if protocol.last_error is not None:
+                last_error = protocol.last_error
+        return RecoveryShimDiagnostics(
+            running=diagnostics.running,
+            input_packets=diagnostics.input_packets,
+            output_packets=diagnostics.output_packets,
+            eligible_nonidr_i_count=diagnostics.eligible_nonidr_i_count,
+            injected_count=diagnostics.injected_count,
+            existing_recovery_count=diagnostics.existing_recovery_count,
+            idr_count=diagnostics.idr_count,
+            unsupported_packet_count=diagnostics.unsupported_packet_count,
+            malformed_count=diagnostics.malformed_count,
+            input_rtp_packets=input_rtp_packets,
+            first_rtp_at=first_rtp_at,
+            last_rtp_at=last_rtp_at,
+            last_rtp_age_ms=last_rtp_age_ms,
+            last_error=last_error,
+        )
 
     async def async_start(self) -> None:
         if self.running:
