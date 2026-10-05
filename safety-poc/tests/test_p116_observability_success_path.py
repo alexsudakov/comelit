@@ -93,6 +93,10 @@ class P116ObservabilitySuccessPathTests(unittest.TestCase):
             oauth=MagicMock(),
         )
 
+    def tearDown(self) -> None:
+        media_transport._NATIVE_BINARY_IDENTITY_CACHE = None
+        media_transport._NATIVE_BINARY_IDENTITY_LOGGED = False
+
     def test_success_summary_emits_one_bounded_ha_log_after_sanitized_tail(self) -> None:
         protocol_markers = (
             "V4_CTPP_OPEN_SENT=PASS",
@@ -137,6 +141,91 @@ class P116ObservabilitySuccessPathTests(unittest.TestCase):
         self.assertIn("P116_VIDEO_PT_SET=8,99", message)
         self.assertIn("P116_UNKNOWN=<redacted>", message)
         self.assertNotIn("token secret", message)
+
+    def test_refresh_aggregates_survive_tail_eviction_and_summary(self) -> None:
+        refresh_markers = {
+            "REFRESH_SENT_COUNT=3",
+            "REFRESH_INDEX=2",
+            "REFRESH_CADENCE_SECONDS=15",
+            "REFRESH_MONOTONIC_MS=123456",
+            "REFRESH_OVERLAP=false",
+            "REFRESH_RETRY=true",
+            "REFRESH_FAIL_CLOSED=false",
+        }
+        for marker in refresh_markers:
+            self.transport._remember_native_marker(marker)
+        for index in range(media_transport._MEDIA_NATIVE_MARKER_TAIL_LIMIT + 10):
+            self.transport._remember_native_marker(f"P116_VIDEO_COUNT={index}")
+
+        self.assertTrue(
+            refresh_markers.isdisjoint(set(self.transport._native_marker_tail))
+        )
+        self.assertEqual(
+            self.transport.native_refresh_diagnostics(),
+            {
+                "refresh_sent_count": 3,
+                "refresh_last_index": 2,
+                "refresh_cadence_seconds": 15,
+                "refresh_last_monotonic_ms": 123456,
+                "refresh_overlap": False,
+                "refresh_retry": True,
+                "refresh_fail_closed": False,
+            },
+        )
+
+        with self.assertLogs(
+            "custom_components.comelit.media_transport",
+            level="INFO",
+        ) as captured:
+            self.transport._emit_native_success_summary()
+
+        message = captured.records[0].getMessage()
+        self.assertIn("refresh_diagnostics=", message)
+        for key in (
+            "refresh_sent_count",
+            "refresh_last_index",
+            "refresh_cadence_seconds",
+            "refresh_last_monotonic_ms",
+            "refresh_overlap",
+            "refresh_retry",
+            "refresh_fail_closed",
+        ):
+            self.assertIn(key, message)
+
+    def test_refresh_aggregates_are_scalars_and_reset_per_generation(self) -> None:
+        self.transport._remember_native_marker("REFRESH_SENT_COUNT=1")
+        self.transport._remember_native_marker("REFRESH_SENT_COUNT=2")
+        self.transport._remember_native_marker("REFRESH_OVERLAP=true")
+        diagnostics = self.transport.native_marker_diagnostics()
+
+        self.assertEqual(diagnostics["refresh_sent_count"], 2)
+        self.assertIs(diagnostics["refresh_overlap"], True)
+        self.assertTrue(
+            all(not isinstance(value, list) for value in diagnostics.values())
+        )
+
+        self.transport._native_refresh_diagnostics.clear()
+        self.assertIsNone(
+            self.transport.native_marker_diagnostics()["refresh_sent_count"]
+        )
+
+    def test_existing_ack_completion_scalars_are_optional_bounded_values(self) -> None:
+        self.transport._remember_native_marker("P80_DEVICE_ACK_000A_OBSERVED=PASS")
+        self.transport._remember_native_marker("P80_DEVICE_ACK_001A_OBSERVED=PASS")
+
+        self.assertEqual(
+            {
+                "p80_device_ack_000a_observed": True,
+                "p80_device_ack_001a_observed": True,
+            },
+            self.transport._native_ack_diagnostics,
+        )
+        self.assertTrue(
+            all(
+                not isinstance(value, list)
+                for value in self.transport.native_marker_diagnostics().values()
+            )
+        )
 
     def test_protocol_markers_survive_later_p116_progress_flood(self) -> None:
         self.transport._remember_native_marker("V4_CTPP_OPEN_SENT=PASS")
@@ -233,6 +322,102 @@ class P116ObservabilitySuccessPathTests(unittest.TestCase):
             run_cycle.index("self._capture_native_failure(rc)"),
         )
         self.assertIn("if self._stopping:", run_cycle)
+
+
+class NativeRuntimeIdentityDiagnosticTests(unittest.TestCase):
+    def setUp(self) -> None:
+        media_transport._NATIVE_BINARY_IDENTITY_CACHE = None
+        media_transport._NATIVE_BINARY_IDENTITY_LOGGED = False
+
+    def tearDown(self) -> None:
+        media_transport._NATIVE_BINARY_IDENTITY_CACHE = None
+        media_transport._NATIVE_BINARY_IDENTITY_LOGGED = False
+
+    def test_identity_match_mismatch_and_unreadable_are_sanitized(self) -> None:
+        path = ROOT / "safety-poc" / "tmp-native-identity-test"
+        path.write_bytes(b"native")
+        try:
+            with patch.object(media_transport, "_MEDIA_NATIVE_BINARY", path):
+                with patch.object(
+                    media_transport,
+                    "_sha256_file",
+                    return_value=media_transport.MEDIA_NATIVE_BINARY_SHA256,
+                ):
+                    match = media_transport._native_binary_identity_diagnostics()
+                self.assertEqual(
+                    match["native_binary_sha256"],
+                    media_transport.MEDIA_NATIVE_BINARY_SHA256,
+                )
+                self.assertIs(match["native_binary_sha256_match"], True)
+
+                media_transport._NATIVE_BINARY_IDENTITY_CACHE = None
+                with patch.object(
+                    media_transport,
+                    "_sha256_file",
+                    return_value="0" * 64,
+                ):
+                    mismatch = media_transport._native_binary_identity_diagnostics()
+                self.assertEqual(mismatch["native_binary_sha256"], "0" * 64)
+                self.assertIs(mismatch["native_binary_sha256_match"], False)
+
+                media_transport._NATIVE_BINARY_IDENTITY_CACHE = None
+                with patch.object(
+                    media_transport,
+                    "_sha256_file",
+                    side_effect=OSError("secret /tmp/native"),
+                ):
+                    unreadable = media_transport._native_binary_identity_diagnostics()
+                self.assertEqual(unreadable["native_binary_sha256"], "unreadable")
+                self.assertIs(unreadable["native_binary_sha256_match"], False)
+                self.assertNotIn("/tmp/native", str(unreadable))
+                self.assertNotIn("secret", str(unreadable))
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_identity_uses_size_mtime_cache_before_rehashing(self) -> None:
+        path = ROOT / "safety-poc" / "tmp-native-identity-cache-test"
+        path.write_bytes(b"native-one")
+        calls = 0
+
+        def fake_hash(_path: Path) -> str:
+            nonlocal calls
+            calls += 1
+            return f"{calls:064d}"[-64:]
+
+        try:
+            with patch.object(media_transport, "_MEDIA_NATIVE_BINARY", path):
+                with patch.object(media_transport, "_sha256_file", fake_hash):
+                    first = media_transport._native_binary_identity_diagnostics()
+                    second = media_transport._native_binary_identity_diagnostics()
+                    self.assertEqual(first, second)
+                    self.assertEqual(calls, 1)
+
+                    path.write_bytes(b"native-two")
+                    third = media_transport._native_binary_identity_diagnostics()
+                    self.assertNotEqual(first["native_binary_sha256"], third["native_binary_sha256"])
+                    self.assertEqual(calls, 2)
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_identity_info_line_emits_once_per_process(self) -> None:
+        path = ROOT / "safety-poc" / "tmp-native-identity-log-test"
+        path.write_bytes(b"native")
+        try:
+            with patch.object(media_transport, "_MEDIA_NATIVE_BINARY", path):
+                with patch.object(media_transport, "_sha256_file", return_value="0" * 64):
+                    with self.assertLogs(
+                        "custom_components.comelit.media_transport",
+                        level="INFO",
+                    ) as captured:
+                        media_transport._native_binary_identity_diagnostics()
+                        media_transport._native_binary_identity_diagnostics()
+            self.assertEqual(len(captured.records), 1)
+            message = captured.records[0].getMessage()
+            self.assertIn("native_binary_sha256=", message)
+            self.assertIn("native_binary_expected_sha256=", message)
+            self.assertIn("native_binary_sha256_match=", message)
+        finally:
+            path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

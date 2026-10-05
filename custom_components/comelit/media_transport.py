@@ -124,6 +124,19 @@ _MEDIA_NATIVE_MARKER_PREFIXES = (
 )
 _MEDIA_NATIVE_MARKER_TAIL_LIMIT = 40
 _MEDIA_NATIVE_PROTOCOL_MARKER_LIMIT = 80
+_MEDIA_NATIVE_REFRESH_MARKERS = {
+    "REFRESH_SENT_COUNT": ("refresh_sent_count", "int"),
+    "REFRESH_INDEX": ("refresh_last_index", "int"),
+    "REFRESH_CADENCE_SECONDS": ("refresh_cadence_seconds", "int"),
+    "REFRESH_MONOTONIC_MS": ("refresh_last_monotonic_ms", "int"),
+    "REFRESH_OVERLAP": ("refresh_overlap", "bool"),
+    "REFRESH_RETRY": ("refresh_retry", "bool"),
+    "REFRESH_FAIL_CLOSED": ("refresh_fail_closed", "bool"),
+}
+_MEDIA_NATIVE_ACK_MARKERS = {
+    "P80_DEVICE_ACK_000A_OBSERVED": "p80_device_ack_000a_observed",
+    "P80_DEVICE_ACK_001A_OBSERVED": "p80_device_ack_001a_observed",
+}
 _MEDIA_NATIVE_PROTOCOL_MARKER_PREFIXES = (
     "ICE_",
     "REMOTE_SDP_",
@@ -144,6 +157,10 @@ _MEDIA_NATIVE_PROTOCOL_MARKER_PREFIXES = (
     "P122_",
     "REFRESH_",
 )
+_NATIVE_BINARY_IDENTITY_CACHE: tuple[tuple[int, int] | str, dict[str, object]] | None = (
+    None
+)
+_NATIVE_BINARY_IDENTITY_LOGGED = False
 _MEDIA_STATUS_NOTIFY_MIN_INTERVAL_SECONDS = 1.0
 
 # Diagnostic-only: exact native stdout marker lines observed in existing live
@@ -307,6 +324,47 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _native_binary_identity_diagnostics() -> dict[str, object]:
+    global _NATIVE_BINARY_IDENTITY_CACHE, _NATIVE_BINARY_IDENTITY_LOGGED
+
+    try:
+        stat = _MEDIA_NATIVE_BINARY.stat()
+        cache_key: tuple[int, int] | str = (stat.st_size, stat.st_mtime_ns)
+    except OSError:
+        cache_key = "unreadable"
+
+    if (
+        _NATIVE_BINARY_IDENTITY_CACHE is not None
+        and _NATIVE_BINARY_IDENTITY_CACHE[0] == cache_key
+    ):
+        return dict(_NATIVE_BINARY_IDENTITY_CACHE[1])
+
+    actual_sha256 = "unreadable"
+    if cache_key != "unreadable":
+        try:
+            actual_sha256 = _sha256_file(_MEDIA_NATIVE_BINARY)
+        except OSError:
+            actual_sha256 = "unreadable"
+
+    diagnostics: dict[str, object] = {
+        "native_binary_sha256": actual_sha256,
+        "native_binary_expected_sha256": MEDIA_NATIVE_BINARY_SHA256,
+        "native_binary_sha256_match": actual_sha256 == MEDIA_NATIVE_BINARY_SHA256,
+    }
+    _NATIVE_BINARY_IDENTITY_CACHE = (cache_key, diagnostics)
+    if not _NATIVE_BINARY_IDENTITY_LOGGED:
+        _NATIVE_BINARY_IDENTITY_LOGGED = True
+        _LOGGER.info(
+            "Comelit native media identity: "
+            "native_binary_sha256=%s native_binary_expected_sha256=%s "
+            "native_binary_sha256_match=%s",
+            diagnostics["native_binary_sha256"],
+            diagnostics["native_binary_expected_sha256"],
+            diagnostics["native_binary_sha256_match"],
+        )
+    return dict(diagnostics)
+
+
 def _native_gate() -> None:
     if not _MEDIA_NATIVE_BINARY.is_file():
         raise ComelitMediaTransportError("media_native_binary_missing")
@@ -366,6 +424,8 @@ class ComelitEntranceMediaTransport:
         self._last_error: str | None = None
         self._native_marker_tail: list[str] = []
         self._native_protocol_markers: list[str] = []
+        self._native_refresh_diagnostics: dict[str, int | bool | None] = {}
+        self._native_ack_diagnostics: dict[str, bool] = {}
         self._last_native_exit_code: int | None = None
         self._last_native_failure_markers: list[str] = []
         self._progress = MediaProgressDiagnostics()
@@ -574,6 +634,27 @@ class ComelitEntranceMediaTransport:
             "video_recovery_last_error": diagnostics.last_error,
         }
 
+    def native_runtime_identity_diagnostics(self) -> dict[str, object]:
+        return _native_binary_identity_diagnostics()
+
+    def native_refresh_diagnostics(self) -> dict[str, int | bool | None]:
+        diagnostics: dict[str, int | bool | None] = {
+            "refresh_sent_count": None,
+            "refresh_last_index": None,
+            "refresh_cadence_seconds": None,
+            "refresh_last_monotonic_ms": None,
+            "refresh_overlap": None,
+            "refresh_retry": None,
+            "refresh_fail_closed": None,
+        }
+        diagnostics.update(self._native_refresh_diagnostics)
+        return diagnostics
+
+    def native_marker_diagnostics(self) -> dict[str, int | bool | None]:
+        diagnostics = self.native_refresh_diagnostics()
+        diagnostics.update(self._native_ack_diagnostics)
+        return diagnostics
+
     @property
     def last_error(self) -> str | None:
         return self._last_error
@@ -651,11 +732,31 @@ class ComelitEntranceMediaTransport:
         )
         return key, f"{key}={safe_value}"
 
+    def _observe_native_scalar_marker(self, key: str, marker: str) -> None:
+        _marker_key, _sep, value = marker.partition("=")
+        if value == "<redacted>":
+            return
+        refresh = _MEDIA_NATIVE_REFRESH_MARKERS.get(key)
+        if refresh is not None:
+            diagnostic_key, value_type = refresh
+            if value_type == "bool":
+                if value in {"true", "false"}:
+                    self._native_refresh_diagnostics[diagnostic_key] = (
+                        value == "true"
+                    )
+            elif value.isdigit():
+                self._native_refresh_diagnostics[diagnostic_key] = int(value)
+            return
+        ack_key = _MEDIA_NATIVE_ACK_MARKERS.get(key)
+        if ack_key is not None and value == "PASS":
+            self._native_ack_diagnostics[ack_key] = True
+
     def _remember_native_marker(self, line: str) -> None:
         safe_marker = self._safe_native_marker(line)
         if safe_marker is None:
             return
         key, marker = safe_marker
+        self._observe_native_scalar_marker(key, marker)
         self._native_marker_tail.append(marker)
         if len(self._native_marker_tail) > _MEDIA_NATIVE_MARKER_TAIL_LIMIT:
             del self._native_marker_tail[:-_MEDIA_NATIVE_MARKER_TAIL_LIMIT]
@@ -707,9 +808,12 @@ class ComelitEntranceMediaTransport:
         )
         _LOGGER.info(
             "Comelit entrance media transport completed: "
-            "protocol_native_markers=%s p116_native_markers=%s",
+            "protocol_native_markers=%s p116_native_markers=%s "
+            "refresh_diagnostics=%s ack_diagnostics=%s",
             protocol_markers,
             p116_markers,
+            self.native_refresh_diagnostics(),
+            dict(self._native_ack_diagnostics),
         )
 
     async def async_start(self, panel: str) -> None:
@@ -724,6 +828,8 @@ class ComelitEntranceMediaTransport:
         self._last_error = None
         self._native_marker_tail.clear()
         self._native_protocol_markers.clear()
+        self._native_refresh_diagnostics.clear()
+        self._native_ack_diagnostics.clear()
         self._last_native_exit_code = None
         self._last_native_failure_markers = []
         self._cancel_status_notify()
