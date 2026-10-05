@@ -368,6 +368,8 @@ class ComelitEntranceCamera(Camera):
             "hard_limit_seconds": self._manager.hard_limit_seconds,
         }
         attrs.update(self._transport.video_recovery_diagnostics())
+        if self._attached_transport is not None:
+            attrs.update(self._attached_transport.video_observability_diagnostics())
         attrs.update(self._transport.native_runtime_identity_diagnostics())
         attrs.update(self._transport.native_marker_diagnostics())
         attrs.update(self._hls_runtime_diagnostics())

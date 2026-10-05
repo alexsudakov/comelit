@@ -147,6 +147,7 @@ class ComelitAttachedRingMediaTransport:
         self._video_recovery_shim: H264RecoveryRtpShim | None = None
         self._lock = asyncio.Lock()
         self._last_error: str | None = None
+        self._last_video_observability: dict[str, object] = {}
 
     @property
     def active(self) -> bool:
@@ -188,6 +189,33 @@ class ComelitAttachedRingMediaTransport:
     def last_error(self) -> str | None:
         return self._last_error
 
+    def video_observability_diagnostics(self) -> dict[str, object]:
+        """Expose bounded attached RTP evidence, retaining the last stopped session."""
+        shim = self._video_recovery_shim
+        if shim is None:
+            cached = dict(self._last_video_observability)
+            return {
+                "attached_video_shim_running": False,
+                "attached_video_input_packets": cached.get("input_packets", 0),
+                "attached_video_output_packets": cached.get("output_packets", 0),
+                "attached_video_first_rtp_at": cached.get("first_rtp_at"),
+                "attached_video_last_rtp_at": cached.get("last_rtp_at"),
+                "attached_video_last_rtp_age_ms": cached.get("last_rtp_age_ms"),
+                "attached_video_last_error": cached.get("last_error", self._last_error),
+            }
+
+        timing = shim.input_rtp_diagnostics()
+        recovery = shim.diagnostics()
+        return {
+            "attached_video_shim_running": recovery.running,
+            "attached_video_input_packets": timing["input_packets"],
+            "attached_video_output_packets": recovery.output_packets,
+            "attached_video_first_rtp_at": timing["first_rtp_at"],
+            "attached_video_last_rtp_at": timing["last_rtp_at"],
+            "attached_video_last_rtp_age_ms": timing["last_rtp_age_ms"],
+            "attached_video_last_error": recovery.last_error,
+        }
+
     async def async_start(self, panel: str) -> None:
         if panel != "entrance":
             raise ComelitAttachedMediaError("unsupported_attached_media_panel")
@@ -199,6 +227,7 @@ class ComelitAttachedRingMediaTransport:
                 raise ComelitAttachedMediaError("listener_not_ready")
 
             self._last_error = None
+            self._last_video_observability = {}
             shim = H264RecoveryRtpShim(
                 input_port=MEDIA_VIDEO_RTP_PORT,
                 output_port=MEDIA_VIDEO_HA_RTP_PORT,
@@ -282,6 +311,14 @@ class ComelitAttachedRingMediaTransport:
                     stop_error = exc
 
             shim = self._video_recovery_shim
+            if shim is not None:
+                timing = shim.input_rtp_diagnostics()
+                recovery = shim.diagnostics()
+                self._last_video_observability = {
+                    **timing,
+                    "output_packets": recovery.output_packets,
+                    "last_error": recovery.last_error,
+                }
             self._video_recovery_shim = None
             self._active = False
             if shim is not None:
