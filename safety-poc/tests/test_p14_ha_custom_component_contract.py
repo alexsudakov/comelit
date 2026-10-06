@@ -7,6 +7,8 @@ import unittest
 import uuid
 from pathlib import Path
 
+from manifest_version_contract import is_valid_release_version
+
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "safety-poc" / "src"
 if str(SRC) not in sys.path:
@@ -114,7 +116,7 @@ class P14HomeAssistantContractTests(unittest.TestCase):
             (ROOT / "custom_components/comelit/manifest.json").read_text()
         )
         self.assertEqual(manifest["domain"], "comelit")
-        self.assertRegex(manifest["version"], r"^\d+\.\d+\.\d+$")
+        self.assertTrue(is_valid_release_version(manifest["version"]))
         self.assertTrue(manifest["config_flow"])
         self.assertTrue(manifest["single_config_entry"])
         self.assertEqual(manifest["requirements"], [])

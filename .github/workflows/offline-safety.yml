@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - 'feat/**'
+      - 'candidate/**'
   pull_request:
 
 permissions:

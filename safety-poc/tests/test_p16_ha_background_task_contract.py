@@ -4,6 +4,8 @@ import json
 import unittest
 from pathlib import Path
 
+from manifest_version_contract import release_tuple
+
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_NATIVE_SHA = "c171e7d1d342d059858f0cfca4f81dc8a07679f1d18992718bec2d6ead84db86"
@@ -23,8 +25,7 @@ class P16HomeAssistantBackgroundTaskContract(unittest.TestCase):
                 encoding="utf-8"
             )
         )
-        version = tuple(int(part) for part in manifest["version"].split("."))
-        self.assertGreaterEqual(version, (1, 5, 4))
+        self.assertGreaterEqual(release_tuple(manifest["version"]), (1, 5, 4))
 
     def test_long_lived_tasks_use_config_entry_background_lifecycle(self):
         init = (ROOT / "custom_components/comelit/__init__.py").read_text(
