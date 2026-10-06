@@ -3,6 +3,8 @@ import json
 import unittest
 from pathlib import Path
 
+from manifest_version_contract import release_tuple
+
 
 ROOT = Path(__file__).resolve().parents[2]
 CURRENT_BINARY = ROOT / "custom_components/comelit/native/comelit-v4"
@@ -21,10 +23,6 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def version_tuple(value: str) -> tuple[int, ...]:
-    return tuple(int(part) for part in value.split("."))
-
-
 class P28HaosMuslNativeHotfixContract(unittest.TestCase):
     def test_manifest_never_regresses_below_1_5_6(self):
         manifest = json.loads(
@@ -32,7 +30,7 @@ class P28HaosMuslNativeHotfixContract(unittest.TestCase):
                 encoding="utf-8"
             )
         )
-        self.assertGreaterEqual(version_tuple(manifest["version"]), (1, 5, 6))
+        self.assertGreaterEqual(release_tuple(manifest["version"]), (1, 5, 6))
 
     def test_current_native_remains_haos_compatible_musl(self):
         binary = CURRENT_BINARY.read_bytes()

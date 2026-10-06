@@ -7,6 +7,8 @@ import subprocess
 import textwrap
 import unittest
 
+from manifest_version_contract import is_valid_release_version
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CARD = REPO_ROOT / "custom_components" / "comelit" / "frontend" / "comelit-card.js"
@@ -187,7 +189,7 @@ class FrontendBundleContractTest(unittest.TestCase):
         self.assertIn("async_register_static_paths", init_source)
         self.assertIn("/api/comelit/frontend", init_source)
         self.assertIn("http", manifest["dependencies"])
-        self.assertRegex(manifest["version"], r"^\d+\.\d+\.\d+$")
+        self.assertTrue(is_valid_release_version(manifest["version"]))
 
 
 if __name__ == "__main__":

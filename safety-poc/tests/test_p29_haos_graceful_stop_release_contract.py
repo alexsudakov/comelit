@@ -3,6 +3,8 @@ import json
 from pathlib import Path
 import unittest
 
+from manifest_version_contract import release_tuple
+
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_SOURCE_SHA = "5827d9fd043b85fc0c59a31661a1a125c6b239771e2a70c3e5afdd95f1a03c73"
 EXPECTED_BINARY_SHA = "0942326900e12426ad75014ae844d70e97d813878019165b6480cca1e8730457"
@@ -21,8 +23,7 @@ class P29HaosGracefulStopReleaseContract(unittest.TestCase):
         manifest = json.loads(
             (ROOT / "custom_components/comelit/manifest.json").read_text(encoding="utf-8")
         )
-        version = tuple(int(part) for part in manifest["version"].split("."))
-        self.assertGreaterEqual(version, (1, 5, 7))
+        self.assertGreaterEqual(release_tuple(manifest["version"]), (1, 5, 7))
 
     def test_p29_release_source_identity_is_frozen(self):
         source = ROOT / "safety-poc/research/door/v1_5_7/comelit-v4-persistent-ctpp-door.c"
