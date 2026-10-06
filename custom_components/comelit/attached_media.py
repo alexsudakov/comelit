@@ -344,6 +344,7 @@ class ComelitAttachedRingMediaSession:
         self._panel: str | None = None
         self._leases: dict[str, int] = {}
         self._last_error: str | None = None
+        self._stop_failure_recovery: Callable[[], Awaitable[None]] | None = None
 
     @property
     def active(self) -> bool:
@@ -376,6 +377,18 @@ class ComelitAttachedRingMediaSession:
             )
             > 0,
         }
+
+    def set_stop_failure_recovery(
+        self,
+        recovery: Callable[[], Awaitable[None]] | None,
+    ) -> None:
+        """Register the single owner of full-runtime recovery after stop failure."""
+        self._stop_failure_recovery = recovery
+
+    async def _async_recover_stop_not_confirmed(self) -> None:
+        recovery = self._stop_failure_recovery
+        if recovery is not None:
+            await recovery()
 
     async def async_acquire(self, *, panel: str, reason: str) -> dict[str, object]:
         if panel != "entrance":
@@ -436,6 +449,11 @@ class ComelitAttachedRingMediaSession:
             self._leases.clear()
             try:
                 await self._transport.async_stop()
+            except ComelitAttachedMediaError as exc:
+                self._last_error = str(exc)
+                if str(exc) == "attached_media_stop_not_confirmed":
+                    await self._async_recover_stop_not_confirmed()
+                raise
             except Exception as exc:
                 self._last_error = f"stop_failed:{type(exc).__name__}"
                 raise ComelitAttachedMediaError(self._last_error) from exc
@@ -458,6 +476,11 @@ class ComelitAttachedRingMediaSession:
                 # which makes self.active false before HA releases its lease.
                 try:
                     await self._transport.async_stop()
+                except ComelitAttachedMediaError as exc:
+                    self._last_error = str(exc)
+                    if str(exc) == "attached_media_stop_not_confirmed":
+                        await self._async_recover_stop_not_confirmed()
+                    raise
                 except Exception as exc:
                     self._last_error = f"stop_failed:{type(exc).__name__}"
                     raise ComelitAttachedMediaError(self._last_error) from exc

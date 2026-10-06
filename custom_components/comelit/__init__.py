@@ -269,6 +269,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         attached_transports[entry.entry_id] = attached_transport
 
         attached_session = ComelitAttachedRingMediaSession(attached_transport)
+        attached_session.set_stop_failure_recovery(
+            supervisor.async_recover_attached_media_stop_failure
+        )
         attached_sessions = domain_data.setdefault(DATA_ATTACHED_MEDIA_SESSIONS, {})
         attached_sessions[entry.entry_id] = attached_session
 

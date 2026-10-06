@@ -22,6 +22,7 @@ LISTENER_STATE_RECONNECTING = "reconnecting"
 LISTENER_STATE_PAUSED_MEDIA = "paused_media"
 LISTENER_STATE_STOPPED = "stopped"
 LISTENER_STATE_ERROR = "error"
+ATTACHED_STOP_RECOVERY_ERROR = "attached_stop_recovery_failed"
 LISTENER_STATES = (
     LISTENER_STATE_STARTING,
     LISTENER_STATE_READY,
@@ -63,6 +64,8 @@ class ComelitRuntimeSupervisor:
         self._state = LISTENER_STATE_STOPPED
         self._last_ready: datetime | None = None
         self._status_listeners: set[Callable[[], None]] = set()
+        self._attached_stop_recovery_required = False
+        self._last_attached_stop_recovery_error: str | None = None
 
     @property
     def running(self) -> bool:
@@ -102,6 +105,15 @@ class ComelitRuntimeSupervisor:
             "last_native_failure_markers": runtime_status.get(
                 "last_native_failure_markers"
             ),
+            "last_attached_stop_failure_stage": runtime_status.get(
+                "last_attached_stop_failure_stage"
+            ),
+            "attached_stop_recovery_required": (
+                self._attached_stop_recovery_required
+            ),
+            "last_attached_stop_recovery_error": (
+                self._last_attached_stop_recovery_error
+            ),
             "cycle_duration_seconds": LISTENER_CYCLE_SECONDS,
         }
 
@@ -137,6 +149,8 @@ class ComelitRuntimeSupervisor:
         if self.running or self._media_paused or self._shutdown_requested:
             return
 
+        self._attached_stop_recovery_required = False
+        self._last_attached_stop_recovery_error = None
         self._stopping = False
         self._set_state(LISTENER_STATE_STARTING)
         await self._runtime.async_start()
@@ -173,6 +187,50 @@ class ComelitRuntimeSupervisor:
                 self._media_paused = False
                 self._set_state(LISTENER_STATE_ERROR)
                 raise RuntimeError("listener_pause_not_confirmed")
+
+    async def async_recover_attached_media_stop_failure(self) -> None:
+        """Recycle the listener after attached media stop was not confirmed."""
+        async with self._lifecycle_lock:
+            self._attached_stop_recovery_required = True
+            self._last_attached_stop_recovery_error = None
+            self._set_state(LISTENER_STATE_ERROR)
+            self._notify_status()
+
+            try:
+                await self._async_stop_locked(LISTENER_STATE_ERROR)
+            except Exception as exc:
+                self._last_attached_stop_recovery_error = (
+                    "runtime_stop_not_confirmed"
+                )
+                self._set_state(LISTENER_STATE_ERROR)
+                self._notify_status()
+                raise RuntimeError(ATTACHED_STOP_RECOVERY_ERROR) from exc
+            if self._runtime.running or self._runtime.listener_ready:
+                self._last_attached_stop_recovery_error = (
+                    "runtime_stop_not_confirmed"
+                )
+                self._set_state(LISTENER_STATE_ERROR)
+                self._notify_status()
+                raise RuntimeError(ATTACHED_STOP_RECOVERY_ERROR)
+
+            if self._shutdown_requested:
+                self._set_state(LISTENER_STATE_STOPPED)
+                return
+
+            await self._async_start_locked()
+            ready = await self._runtime.async_wait_ready(timeout=30.0)
+            if not ready:
+                await self._async_stop_locked(LISTENER_STATE_ERROR)
+                self._last_attached_stop_recovery_error = (
+                    "listener_ready_not_confirmed"
+                )
+                self._notify_status()
+                raise RuntimeError(ATTACHED_STOP_RECOVERY_ERROR)
+
+            self._attached_stop_recovery_required = False
+            self._last_attached_stop_recovery_error = None
+            self._set_state(LISTENER_STATE_READY)
+            self._notify_status()
 
     async def async_resume_after_media(self) -> None:
         """Release media exclusivity and restore the persistent listener."""
