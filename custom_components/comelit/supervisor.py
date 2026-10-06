@@ -8,7 +8,8 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import LISTENER_CYCLE_SECONDS
+from .const import DOOR_ENTRANCE, DOOR_GATE, LISTENER_CYCLE_SECONDS
+from .media_transport import ComelitEntranceMediaTransport
 from .runtime import ComelitRingRuntime
 
 _LOGGER = logging.getLogger(__name__)
@@ -188,6 +189,37 @@ class ComelitRuntimeSupervisor:
                 self._set_state(LISTENER_STATE_ERROR)
                 raise RuntimeError("listener_pause_not_confirmed")
 
+    async def async_open_entrance_door(
+        self,
+        media_transport: ComelitEntranceMediaTransport | None,
+        *,
+        event_id: str | None = None,
+    ) -> dict[str, object]:
+        """Open Entrance through the current exclusive connection owner."""
+        async with self._lifecycle_lock:
+            if self._media_paused:
+                if media_transport is None or not media_transport.active:
+                    raise RuntimeError("media_door_not_ready")
+                return await media_transport.async_open_door(event_id=event_id)
+            return await self._runtime.async_open_door(
+                DOOR_ENTRANCE,
+                event_id=event_id,
+            )
+
+    async def async_open_gate_door(
+        self,
+        *,
+        event_id: str | None = None,
+    ) -> dict[str, object]:
+        """Open Gate only when the persistent listener owns the connection."""
+        async with self._lifecycle_lock:
+            if self._media_paused:
+                raise RuntimeError("media_owns_connection")
+            return await self._runtime.async_open_door(
+                DOOR_GATE,
+                event_id=event_id,
+            )
+
     async def async_recover_attached_media_stop_failure(self) -> None:
         """Recycle the listener after attached media stop was not confirmed."""
         async with self._lifecycle_lock:
@@ -310,7 +342,10 @@ class ComelitRuntimeSupervisor:
                 if self._stopping or self._media_paused:
                     return
                 self._set_state(LISTENER_STATE_STARTING)
-                await self._runtime.async_start()
+                async with self._lifecycle_lock:
+                    if self._stopping or self._media_paused:
+                        return
+                    await self._runtime.async_start()
         except asyncio.CancelledError:
             raise
         except Exception:

@@ -174,17 +174,16 @@ class P122OnDemandMediaDoorTests(unittest.TestCase):
         self.assertIn('"physical_effect_asserted": False', self.transport)
 
         self.assertIn("media_transport.active", self.button)
-        self.assertIn("result = await transport.async_open_door()", self.button)
+        self.assertIn("async_open_entrance_door", self.button)
         self.assertIn('"ON_DEMAND_MEDIA_SINGLE"', self.button)
 
         self.assertIn("door == DOOR_ENTRANCE", self.init_py)
-        self.assertIn("and media_transport.active", self.init_py)
-        self.assertIn("return await media_transport.async_open_door(", self.init_py)
+        self.assertIn("await supervisor.async_open_entrance_door(", self.init_py)
 
     def test_gate_is_still_fail_closed_while_media_owns_connection(self) -> None:
         gate = self.button.split("class ComelitGateDoorButton", 1)[1]
         self.assertIn("media_paused=self._supervisor.media_paused", gate)
-        self.assertIn("if self._supervisor.media_paused:", gate)
+        self.assertIn("async_open_gate_door", gate)
         self.assertNotIn("async_open_door()", gate)
 
     def test_whole_generated_translation_unit_compiles(self) -> None:

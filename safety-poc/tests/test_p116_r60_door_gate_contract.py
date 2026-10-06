@@ -110,7 +110,7 @@ class P116R60DoorGateEntityMappingTests(unittest.TestCase):
         self.assertIn("self.entity_id = MAIN_GATE_ENTITY_ID", gate)
         self.assertIn("_attr_unique_id = MAIN_GATE_UNIQUE_ID", gate)
         self.assertIn("raise HomeAssistantError", gate)
-        self.assertIn("async_open_door(DOOR_GATE)", gate)
+        self.assertIn("async_open_gate_door", gate)
         self.assertIn('result.get("one_shot_sequence_sent") is True', gate)
 
     def test_one_add_entities_call_and_ids_unchanged(self) -> None:

@@ -134,7 +134,9 @@ class P14HomeAssistantContractTests(unittest.TestCase):
         self.assertIn("RECONNECT_DELAY_SECONDS = 5", supervisor)
         self.assertIn("await self._runtime.async_start()", supervisor)
         self.assertIn("await self._runtime.async_stop()", supervisor)
-        self.assertNotIn("async_open_door", supervisor)
+        self.assertIn("async def async_open_entrance_door", supervisor)
+        self.assertIn("async def async_open_gate_door", supervisor)
+        self.assertNotIn("for attempt", supervisor)
         self.assertIn("await supervisor.async_stop()", test_control)
         self.assertIn('status["supervisor_running"]', test_control)
 
@@ -206,7 +208,7 @@ class P14HomeAssistantContractTests(unittest.TestCase):
         self.assertIn('"ring_source": "00000610"', const)
         self.assertIn('"ring_source": capability.ring_source', button)
         self.assertIn(
-            "await self._runtime.async_open_door(DOOR_GATE)", button
+            "await self._supervisor.async_open_gate_door()", button
         )
         self.assertIn('"automatic_retry_allowed": False', button)
         self.assertIn('"physical_effect_asserted": False', button)
@@ -232,7 +234,7 @@ class P14HomeAssistantContractTests(unittest.TestCase):
             if isinstance(n, ast.AsyncFunctionDef) and n.name == "async_press"
         )
         self.assertTrue(any(isinstance(n, ast.Raise) for n in ast.walk(press)))
-        self.assertIn("await self._runtime.async_open_door(DOOR_ENTRANCE)", source)
+        self.assertIn("await self._supervisor.async_open_entrance_door(", source)
         self.assertIn('"automatic_retry_allowed": False', source)
         self.assertIn('"physical_effect_asserted": False', source)
         self.assertIn('"physical_door_state": "UNKNOWN"', source)

@@ -238,13 +238,13 @@ class P116R20HlsHttpBoundaryDiagnosticsTests(unittest.TestCase):
         button_source = BUTTON.read_text(encoding="utf-8")
         button_tree = ast.parse(button_source)
         self.assertIn(
-            "await self._runtime.async_open_door(DOOR_ENTRANCE)",
+            "await self._supervisor.async_open_entrance_door(",
             button_source,
         )
         self.assertIn('"automatic_retry_allowed": False', button_source)
         self.assertIn('"physical_effect_asserted": False', button_source)
         self.assertIn(
-            "await self._runtime.async_open_door(DOOR_GATE)",
+            "await self._supervisor.async_open_gate_door()",
             button_source,
         )
         self.assertTrue(any(

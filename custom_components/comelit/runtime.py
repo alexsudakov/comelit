@@ -1211,9 +1211,6 @@ class ComelitRingRuntime:
             raise ComelitRingRuntimeError("unsupported_door")
 
         async with self._door_lock:
-            if not self.running:
-                await self.async_start()
-
             if not await self.async_wait_ready(timeout=30):
                 result = {
                     "operation_id": None,
