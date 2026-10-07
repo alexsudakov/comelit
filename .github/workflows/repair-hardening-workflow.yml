@@ -1,0 +1,42 @@
+name: repair hardening workflow syntax
+
+on:
+  push:
+    branches:
+      - fix/runtime-reliability-security-hardening
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Repair YAML block indentation and remove repair workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('.github/workflows/self-apply-runtime-hardening.yml')
+          text = p.read_text(encoding='utf-8')
+          fixes = {
+              '\n        self.assertNotIn("self._stream = None", close.split("async def async_dispose", 1)[0])': '\n                  self.assertNotIn("self._stream = None", close.split("async def async_dispose", 1)[0])',
+              '\n        block = block[:block.index("continue") + len("continue")]': '\n                  block = block[:block.index("continue") + len("continue")]',
+          }
+          for old, new in fixes.items():
+              if text.count(old) != 1:
+                  raise SystemExit(f'expected one malformed line, found {text.count(old)}: {old!r}')
+              text = text.replace(old, new, 1)
+          p.write_text(text, encoding='utf-8')
+          PY
+          git config user.name "alexsudakov"
+          git config user.email "91778685+alexsudakov@users.noreply.github.com"
+          git rm .github/workflows/repair-hardening-workflow.yml
+          git add .github/workflows/self-apply-runtime-hardening.yml
+          git diff --cached --check
+          git commit -m "ci: repair runtime hardening workflow"
+          git push origin HEAD:fix/runtime-reliability-security-hardening
