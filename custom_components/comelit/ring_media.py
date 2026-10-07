@@ -275,9 +275,26 @@ class HAStreamMediaProvider:
 
     async def _async_close_unlocked(self) -> None:
         stream = self._stream
-        self._stream = None
         if stream is not None and hasattr(stream, "stop"):
             await stream.stop()
+
+    async def async_dispose(self) -> None:
+        """Stop and unregister the provider Stream during config-entry unload."""
+        async with self._consumer_lock:
+            self._consumers.clear()
+            stream = self._stream
+            self._stream = None
+            if stream is None:
+                return
+            if hasattr(stream, "stop"):
+                await stream.stop()
+            stream_domain = self._hass.data.get(STREAM_DOMAIN, {})
+            streams = stream_domain.get(ATTR_STREAMS)
+            if isinstance(streams, list):
+                try:
+                    streams.remove(stream)
+                except ValueError:
+                    pass
 
     async def async_close(self) -> None:
         """Close only when no named stream consumer still owns the provider."""

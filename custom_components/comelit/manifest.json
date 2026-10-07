@@ -13,7 +13,6 @@
   "iot_class": "cloud_push",
   "dependencies": [
     "http",
-    "webhook",
     "stream"
   ],
   "requirements": []
