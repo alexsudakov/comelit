@@ -24,6 +24,19 @@ LISTENER_STATE_PAUSED_MEDIA = "paused_media"
 LISTENER_STATE_STOPPED = "stopped"
 LISTENER_STATE_ERROR = "error"
 ATTACHED_STOP_RECOVERY_ERROR = "attached_stop_recovery_failed"
+_ATTACHED_STOP_FAILURE_STAGES = frozenset(
+    {
+        "NONE",
+        "SIGNAL",
+        "STALE_CALL",
+        "QUEUE",
+        "WRITE",
+        "FLUSH_TIMEOUT",
+        "DISPOSE",
+        "REMOTE_RACE",
+        "OTHER",
+    }
+)
 LISTENER_STATES = (
     LISTENER_STATE_STARTING,
     LISTENER_STATE_READY,
@@ -67,6 +80,7 @@ class ComelitRuntimeSupervisor:
         self._status_listeners: set[Callable[[], None]] = set()
         self._attached_stop_recovery_required = False
         self._last_attached_stop_recovery_error: str | None = None
+        self._last_attached_stop_failure_stage: str | None = None
 
     @property
     def running(self) -> bool:
@@ -90,6 +104,16 @@ class ComelitRuntimeSupervisor:
 
     def status(self) -> dict[str, object]:
         runtime_status = self._runtime.status()
+        runtime_stop_failure_stage = runtime_status.get(
+            "last_attached_stop_failure_stage"
+        )
+        if (
+            isinstance(runtime_stop_failure_stage, str)
+            and runtime_stop_failure_stage in _ATTACHED_STOP_FAILURE_STAGES
+        ):
+            last_attached_stop_failure_stage = runtime_stop_failure_stage
+        else:
+            last_attached_stop_failure_stage = self._last_attached_stop_failure_stage
         return {
             "state": self._state,
             "supervisor_running": self.running,
@@ -106,9 +130,7 @@ class ComelitRuntimeSupervisor:
             "last_native_failure_markers": runtime_status.get(
                 "last_native_failure_markers"
             ),
-            "last_attached_stop_failure_stage": runtime_status.get(
-                "last_attached_stop_failure_stage"
-            ),
+            "last_attached_stop_failure_stage": last_attached_stop_failure_stage,
             "attached_stop_recovery_required": (
                 self._attached_stop_recovery_required
             ),
@@ -139,10 +161,23 @@ class ComelitRuntimeSupervisor:
             self._last_ready = datetime.now(UTC)
         self._notify_status()
 
+    def _capture_attached_stop_failure_stage(self) -> None:
+        """Retain the bounded native stop-failure cause across runtime recycle."""
+        value = self._runtime.status().get("last_attached_stop_failure_stage")
+        if isinstance(value, str) and value in _ATTACHED_STOP_FAILURE_STAGES:
+            self._last_attached_stop_failure_stage = value
+
+    def _raise_if_attached_stop_recovery_blocked(self) -> None:
+        if not self._attached_stop_recovery_required:
+            return
+        self._set_state(LISTENER_STATE_ERROR)
+        raise RuntimeError(ATTACHED_STOP_RECOVERY_ERROR)
+
     async def async_start(self) -> None:
         async with self._lifecycle_lock:
             if self.running or self._media_paused:
                 return
+            self._raise_if_attached_stop_recovery_blocked()
             self._shutdown_requested = False
             await self._async_start_locked()
 
@@ -150,8 +185,6 @@ class ComelitRuntimeSupervisor:
         if self.running or self._media_paused or self._shutdown_requested:
             return
 
-        self._attached_stop_recovery_required = False
-        self._last_attached_stop_recovery_error = None
         self._stopping = False
         self._set_state(LISTENER_STATE_STARTING)
         await self._runtime.async_start()
@@ -171,6 +204,7 @@ class ComelitRuntimeSupervisor:
     async def async_pause_for_media(self) -> None:
         """Acquire the exclusive listener pause required by media bootstrap."""
         async with self._lifecycle_lock:
+            self._raise_if_attached_stop_recovery_blocked()
             if self._shutdown_requested:
                 raise RuntimeError("listener_shutdown_in_progress")
             if self._media_paused:
@@ -197,6 +231,7 @@ class ComelitRuntimeSupervisor:
     ) -> dict[str, object]:
         """Open Entrance through the current exclusive connection owner."""
         async with self._lifecycle_lock:
+            self._raise_if_attached_stop_recovery_blocked()
             if self._media_paused:
                 if media_transport is None or not media_transport.active:
                     raise RuntimeError("media_door_not_ready")
@@ -213,6 +248,7 @@ class ComelitRuntimeSupervisor:
     ) -> dict[str, object]:
         """Open Gate only when the persistent listener owns the connection."""
         async with self._lifecycle_lock:
+            self._raise_if_attached_stop_recovery_blocked()
             if self._media_paused:
                 raise RuntimeError("media_owns_connection")
             return await self._runtime.async_open_door(
@@ -225,6 +261,7 @@ class ComelitRuntimeSupervisor:
         async with self._lifecycle_lock:
             self._attached_stop_recovery_required = True
             self._last_attached_stop_recovery_error = None
+            self._capture_attached_stop_failure_stage()
             self._set_state(LISTENER_STATE_ERROR)
             self._notify_status()
 
@@ -249,13 +286,29 @@ class ComelitRuntimeSupervisor:
                 self._set_state(LISTENER_STATE_STOPPED)
                 return
 
-            await self._async_start_locked()
+            try:
+                await self._async_start_locked()
+            except Exception as exc:
+                self._last_attached_stop_recovery_error = "listener_start_failed"
+                self._set_state(LISTENER_STATE_ERROR)
+                self._notify_status()
+                raise RuntimeError(ATTACHED_STOP_RECOVERY_ERROR) from exc
+
             ready = await self._runtime.async_wait_ready(timeout=30.0)
             if not ready:
-                await self._async_stop_locked(LISTENER_STATE_ERROR)
+                try:
+                    await self._async_stop_locked(LISTENER_STATE_ERROR)
+                except Exception as exc:
+                    self._last_attached_stop_recovery_error = (
+                        "listener_ready_not_confirmed_stop_failed"
+                    )
+                    self._set_state(LISTENER_STATE_ERROR)
+                    self._notify_status()
+                    raise RuntimeError(ATTACHED_STOP_RECOVERY_ERROR) from exc
                 self._last_attached_stop_recovery_error = (
                     "listener_ready_not_confirmed"
                 )
+                self._set_state(LISTENER_STATE_ERROR)
                 self._notify_status()
                 raise RuntimeError(ATTACHED_STOP_RECOVERY_ERROR)
 
@@ -267,6 +320,7 @@ class ComelitRuntimeSupervisor:
     async def async_resume_after_media(self) -> None:
         """Release media exclusivity and restore the persistent listener."""
         async with self._lifecycle_lock:
+            self._raise_if_attached_stop_recovery_blocked()
             if not self._media_paused:
                 return
 
@@ -308,6 +362,9 @@ class ComelitRuntimeSupervisor:
 
                 if self._stopping or self._media_paused:
                     return
+                if self._attached_stop_recovery_required:
+                    self._set_state(LISTENER_STATE_ERROR)
+                    return
 
                 self._reconnect_count += 1
                 runtime_status = self._runtime.status()
@@ -339,11 +396,19 @@ class ComelitRuntimeSupervisor:
                 )
                 await asyncio.sleep(RECONNECT_DELAY_SECONDS)
 
-                if self._stopping or self._media_paused:
+                if (
+                    self._stopping
+                    or self._media_paused
+                    or self._attached_stop_recovery_required
+                ):
                     return
                 self._set_state(LISTENER_STATE_STARTING)
                 async with self._lifecycle_lock:
-                    if self._stopping or self._media_paused:
+                    if (
+                        self._stopping
+                        or self._media_paused
+                        or self._attached_stop_recovery_required
+                    ):
                         return
                     await self._runtime.async_start()
         except asyncio.CancelledError:
