@@ -1,0 +1,106 @@
+name: materialize clean b13 hardening
+
+on:
+  push:
+    branches:
+      - fix/runtime-reliability-security-hardening-b13
+
+permissions:
+  contents: write
+
+jobs:
+  materialize-verify:
+    if: ${{ !contains(github.event.head_commit.message, '[b13-materialized]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Restore finalized hardening onto clean main base
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC=60f7bfb170795c92d36c5bb6860c9c4ae3527d69
+          git fetch --no-tags origin fix/runtime-reliability-security-hardening
+          git cat-file -e "$SRC^{commit}"
+          git restore --source="$SRC" --staged --worktree -- custom_components/comelit safety-poc/tests
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path('custom_components/comelit/manifest.json')
+          data = json.loads(p.read_text(encoding='utf-8'))
+          if data.get('version') != '1.7.32b12':
+              raise SystemExit(f"unexpected source version: {data.get('version')!r}")
+          data['version'] = '1.7.32b13'
+          p.write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+          PY
+
+      - name: Diff footprint and syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          python3 -m compileall -q custom_components/comelit
+          node --check custom_components/comelit/frontend/comelit-card.js
+          cd safety-poc && python3 scripts/static_safety_check.py
+
+      - name: Hardening regression contract
+        run: python3 -m unittest safety-poc/tests/test_runtime_reliability_hardening.py -v
+
+      - name: Full safety-poc unit suite
+        shell: bash
+        run: |
+          set -o pipefail
+          cd safety-poc
+          PYTHONPATH="$PWD/src" PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v 2>&1 | tee /tmp/b13-full-suite.log
+
+      - name: Upload full-suite diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b13-full-suite-log
+          path: /tmp/b13-full-suite.log
+          if-no-files-found: ignore
+          retention-days: 1
+
+      - name: Mini App Python tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install -q pytest cryptography
+          pytest -q tests/miniapp
+
+      - name: Production safety controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          find custom_components/comelit -type d -name __pycache__ -prune -exec rm -rf {} +
+          test ! -e custom_components/comelit/test_control.py
+          ! grep -R --exclude='*.pyc' --exclude-dir='__pycache__' "child_env = os.environ.copy()" -n custom_components/comelit
+          ! grep -R --exclude='*.pyc' --exclude-dir='__pycache__' "async_register_test_control" -n custom_components/comelit
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          manifest = json.loads(Path('custom_components/comelit/manifest.json').read_text())
+          assert manifest['version'] == '1.7.32b13'
+          assert 'webhook' not in manifest['dependencies']
+          assert 'stream' in manifest['dependencies']
+          PY
+
+      - name: Commit clean verified b13 branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/materialize-b13-hardening.yml
+          git add -A
+          git diff --cached --check
+          git config user.name "alexsudakov"
+          git config user.email "91778685+alexsudakov@users.noreply.github.com"
+          git commit -m "fix(runtime): reliability and security hardening for 1.7.32b13 [b13-materialized]"
+          git push origin HEAD:fix/runtime-reliability-security-hardening-b13
