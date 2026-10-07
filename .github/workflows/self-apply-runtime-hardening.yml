@@ -1,0 +1,346 @@
+name: self-apply runtime hardening
+
+on:
+  push:
+    branches:
+      - fix/runtime-reliability-security-hardening
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-verify:
+    if: ${{ !contains(github.event.head_commit.message, '[hardening-generated]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Apply bounded hardening patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          ROOT = Path('.')
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = ROOT / path
+              text = p.read_text(encoding='utf-8')
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected exactly one replacement, found {count}: {old[:80]!r}')
+              p.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          def replace_tail(path: str, marker: str, new_tail: str) -> None:
+              p = ROOT / path
+              text = p.read_text(encoding='utf-8')
+              idx = text.find(marker)
+              if idx < 0:
+                  raise SystemExit(f'{path}: tail marker not found: {marker!r}')
+              p.write_text(text[:idx] + new_tail, encoding='utf-8')
+
+          # -----------------------------------------------------------------
+          # runtime.py: architecture gate, environment allowlist, call-state
+          # watchdog, reader-task supervision, bounded parser/reject handling.
+          # -----------------------------------------------------------------
+          replace_once(
+              'custom_components/comelit/runtime.py',
+              'import os\nfrom pathlib import Path\nimport re\n',
+              'import os\nfrom pathlib import Path\nimport platform\nimport re\n',
+          )
+          replace_once(
+              'custom_components/comelit/runtime.py',
+              '_DOOR_LOG_STAGE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,47}$")\n_DOOR_LOG_WRITE_RE = re.compile(\n',
+              '_DOOR_LOG_STAGE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,47}$")\n_NATIVE_ENV_PASSTHROUGH = frozenset({"HOME", "LANG", "LC_ALL", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR"})\n_SUPPORTED_NATIVE_ARCHITECTURES = frozenset({"x86_64", "amd64"})\n_CALL_STATE_TIMEOUT_SECONDS = 120.0\n_DOOR_LOG_WRITE_RE = re.compile(\n',
+          )
+          replace_once(
+              'custom_components/comelit/runtime.py',
+              'def _native_gate() -> None:\n    if not _NATIVE_BINARY.is_file():\n',
+              '''def _native_child_env() -> dict[str, str]:\n    env = {\n        "LD_LIBRARY_PATH": str(_NATIVE_LIB),\n        "PATH": os.environ.get(\n            "PATH",\n            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",\n        ),\n    }\n    for key in _NATIVE_ENV_PASSTHROUGH:\n        value = os.environ.get(key)\n        if value:\n            env[key] = value\n    return env\n\n\ndef _native_gate() -> None:\n    if platform.machine().lower() not in _SUPPORTED_NATIVE_ARCHITECTURES:\n        raise ComelitRingRuntimeError("unsupported_native_architecture")\n    if not _NATIVE_BINARY.is_file():\n''',
+          )
+          replace_once(
+              'custom_components/comelit/runtime.py',
+              '        self._call_state = ComelitCallStateTracker()\n',
+              '        self._call_state = ComelitCallStateTracker()\n        self._call_state_timeout_task: asyncio.Task[None] | None = None\n',
+          )
+          replace_once(
+              'custom_components/comelit/runtime.py',
+              '''        return tracker\n\n    def call_status(self) -> dict[str, object]:\n''',
+              '''        return tracker\n\n    def _cancel_call_state_timeout(self) -> None:\n        task = getattr(self, "_call_state_timeout_task", None)\n        if task is not None and not task.done():\n            task.cancel()\n        self._call_state_timeout_task = None\n\n    def _schedule_call_state_timeout(self, event_id: str) -> None:\n        self._cancel_call_state_timeout()\n        self._call_state_timeout_task = self._entry.async_create_background_task(\n            self._hass,\n            self._async_expire_call_state(event_id),\n            "comelit call-state watchdog",\n        )\n\n    async def _async_expire_call_state(self, event_id: str) -> None:\n        current = asyncio.current_task()\n        try:\n            await asyncio.sleep(_CALL_STATE_TIMEOUT_SECONDS)\n            snapshot = self._call_state_tracker().snapshot()\n            if snapshot.event_id != event_id:\n                return\n            if self._call_state_tracker().fail_active("call_state_timeout"):\n                _LOGGER.warning(\n                    "Comelit call-state watchdog expired after %ss; "\n                    "remote release was not observed",\n                    int(_CALL_STATE_TIMEOUT_SECONDS),\n                )\n                self._notify_status()\n        except asyncio.CancelledError:\n            return\n        finally:\n            if getattr(self, "_call_state_timeout_task", None) is current:\n                self._call_state_timeout_task = None\n\n    def call_status(self) -> dict[str, object]:\n''',
+          )
+          replace_once(
+              'custom_components/comelit/runtime.py',
+              '            "last_error": snapshot.last_error,\n        }\n',
+              '            "last_error": snapshot.last_error,\n            "state_timeout_seconds": int(_CALL_STATE_TIMEOUT_SECONDS),\n        }\n',
+          )
+          replace_once(
+              'custom_components/comelit/runtime.py',
+              '''                and self._call_state_tracker().begin(\n                    panel=panel,\n                    event_id=event_id,\n                    started_at=started_at,\n                )\n            ):\n                self._notify_status()\n''',
+              '''            ):\n                changed = self._call_state_tracker().begin(\n                    panel=panel,\n                    event_id=event_id,\n                    started_at=started_at,\n                )\n                self._schedule_call_state_timeout(event_id)\n                if changed:\n                    self._notify_status()\n''',
+          )
+          replace_once(
+              'custom_components/comelit/runtime.py',
+              '        self._media_diagnostics.reset()\n        self._call_state_tracker().reset()\n',
+              '        self._media_diagnostics.reset()\n        self._cancel_call_state_timeout()\n        self._call_state_tracker().reset()\n',
+          )
+          replace_once(
+              'custom_components/comelit/runtime.py',
+              '    async def async_stop(self) -> None:\n        self._stopping = True\n',
+              '    async def async_stop(self) -> None:\n        self._stopping = True\n        self._cancel_call_state_timeout()\n',
+          )
+          replace_once(
+              'custom_components/comelit/runtime.py',
+              '''        finally:\n            if (\n                not self._stopping\n''',
+              '''        finally:\n            self._cancel_call_state_timeout()\n            if (\n                not self._stopping\n''',
+          )
+          replace_once(
+              'custom_components/comelit/runtime.py',
+              '''        child_env = os.environ.copy()\n        child_env["LD_LIBRARY_PATH"] = str(_NATIVE_LIB)\n''',
+              '        child_env = _native_child_env()\n',
+          )
+          replace_once(
+              'custom_components/comelit/runtime.py',
+              '''            rc = await process.wait()\n            await reader_task\n            if rc != 0 and not self._stopping:\n                self._capture_native_failure(rc)\n                raise ComelitRingRuntimeError(f"native_exit:{rc}")\n''',
+              '''            process_completion = asyncio.create_task(\n                process.wait(),\n                name="wait Comelit ring helper",\n            )\n            done, _ = await asyncio.wait(\n                {process_completion, reader_task},\n                return_when=asyncio.FIRST_COMPLETED,\n            )\n            if reader_task in done and process_completion not in done:\n                reader_error = reader_task.exception()\n                if reader_error is not None:\n                    raise ComelitRingRuntimeError(\n                        f"native_reader_failed:{type(reader_error).__name__}"\n                    ) from reader_error\n                try:\n                    rc = await asyncio.wait_for(\n                        asyncio.shield(process_completion),\n                        timeout=0.5,\n                    )\n                except TimeoutError as exc:\n                    raise ComelitRingRuntimeError("native_reader_stopped") from exc\n            else:\n                rc = await process_completion\n\n            try:\n                await asyncio.wait_for(asyncio.shield(reader_task), timeout=2.0)\n            except TimeoutError as exc:\n                raise ComelitRingRuntimeError("native_reader_stuck_after_exit") from exc\n            except asyncio.CancelledError:\n                raise\n            except Exception as exc:\n                if rc == 0:\n                    raise ComelitRingRuntimeError(\n                        f"native_reader_failed:{type(exc).__name__}"\n                    ) from exc\n                _LOGGER.warning(\n                    "Comelit ring output reader failed while native exited; "\n                    "reader_failure=%s rc=%s",\n                    type(exc).__name__,\n                    rc,\n                )\n            if rc != 0 and not self._stopping:\n                self._capture_native_failure(rc)\n                raise ComelitRingRuntimeError(f"native_exit:{rc}")\n''',
+          )
+          replace_once(
+              'custom_components/comelit/runtime.py',
+              '''            if line in {\n                "R37_REMOTE_RELEASE_OBSERVED=true",\n                "R64_POST_CALL_REMOTE_RELEASE_OBSERVED=true",\n                "R64_TERMINAL_REMOTE_RELEASE_OBSERVED=true",\n            }:\n                if self._call_state_tracker().remote_release():\n                    self._notify_status()\n''',
+              '''            if line in {\n                "R37_REMOTE_RELEASE_OBSERVED=true",\n                "R64_POST_CALL_REMOTE_RELEASE_OBSERVED=true",\n                "R64_TERMINAL_REMOTE_RELEASE_OBSERVED=true",\n            }:\n                self._cancel_call_state_timeout()\n                if self._call_state_tracker().remote_release():\n                    self._notify_status()\n''',
+          )
+          replace_once(
+              'custom_components/comelit/runtime.py',
+              '''            if line.startswith("V4_DOOR_REJECT_STAGE="):\n                self._door_diagnostic["reject_stage"] = (\n                    line.split("=", 1)[1]\n                )\n                continue\n''',
+              '''            if line.startswith("V4_DOOR_REJECT_STAGE="):\n                reject_stage = line.split("=", 1)[1]\n                if _DOOR_LOG_STAGE_RE.fullmatch(reject_stage):\n                    self._door_diagnostic["reject_stage"] = reject_stage\n                else:\n                    _LOGGER.warning(\n                        "Ignoring malformed Comelit Door reject stage"\n                    )\n                continue\n''',
+          )
+          replace_once(
+              'custom_components/comelit/runtime.py',
+              '''            self._ring_lines.append(line)\n            present = {item.split("=", 1)[0] for item in self._ring_lines}\n''',
+              '''            if line == "V4_RING_OBSERVED=true":\n                self._ring_lines.clear()\n            self._ring_lines.append(line)\n            present = {item.split("=", 1)[0] for item in self._ring_lines}\n''',
+          )
+          replace_once(
+              'custom_components/comelit/runtime.py',
+              '''            try:\n                ring = parse_v4_safe_ring(batch)\n            except RingObservationError as exc:\n                raise ComelitRingRuntimeError(f"ring_contract:{exc}") from exc\n\n            if ring is None:\n''',
+              '''            try:\n                ring = parse_v4_safe_ring(batch)\n            except RingObservationError as exc:\n                _LOGGER.warning(\n                    "Ignoring malformed Comelit ring observation: %s",\n                    type(exc).__name__,\n                )\n                continue\n\n            if ring is None:\n''',
+          )
+
+          # -----------------------------------------------------------------
+          # call_state.py: bounded stale-ringing containment. This does not
+          # tear down media or assert that the remote call ended; it moves the
+          # user-facing state to ERROR after 120s without authoritative release.
+          # -----------------------------------------------------------------
+          replace_once(
+              'custom_components/comelit/call_state.py',
+              '''        "listener_failure",\n        "listener_stopped_during_call",\n''',
+              '''        "listener_failure",\n        "listener_stopped_during_call",\n        "call_state_timeout",\n''',
+          )
+
+          # -----------------------------------------------------------------
+          # media_transport.py: same environment/architecture hardening and
+          # supervision once the media helper is ACTIVE.
+          # -----------------------------------------------------------------
+          replace_once(
+              'custom_components/comelit/media_transport.py',
+              'import os\nfrom pathlib import Path\nimport re\n',
+              'import os\nfrom pathlib import Path\nimport platform\nimport re\n',
+          )
+          replace_once(
+              'custom_components/comelit/media_transport.py',
+              '_HEX32_RE = re.compile(r"^[0-9A-Fa-f]{32}$")\n',
+              '_HEX32_RE = re.compile(r"^[0-9A-Fa-f]{32}$")\n_NATIVE_ENV_PASSTHROUGH = frozenset({"HOME", "LANG", "LC_ALL", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR"})\n_SUPPORTED_NATIVE_ARCHITECTURES = frozenset({"x86_64", "amd64"})\n',
+          )
+          replace_once(
+              'custom_components/comelit/media_transport.py',
+              'def _native_gate() -> None:\n    if not _MEDIA_NATIVE_BINARY.is_file():\n',
+              '''def _native_child_env() -> dict[str, str]:\n    env = {\n        "LD_LIBRARY_PATH": str(_NATIVE_LIB),\n        "PATH": os.environ.get(\n            "PATH",\n            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",\n        ),\n    }\n    for key in _NATIVE_ENV_PASSTHROUGH:\n        value = os.environ.get(key)\n        if value:\n            env[key] = value\n    return env\n\n\ndef _native_gate() -> None:\n    if platform.machine().lower() not in _SUPPORTED_NATIVE_ARCHITECTURES:\n        raise ComelitMediaTransportError("unsupported_native_architecture")\n    if not _MEDIA_NATIVE_BINARY.is_file():\n''',
+          )
+          replace_once(
+              'custom_components/comelit/media_transport.py',
+              '''        child_env = os.environ.copy()\n        child_env["LD_LIBRARY_PATH"] = str(_NATIVE_LIB)\n''',
+              '        child_env = _native_child_env()\n',
+          )
+          replace_once(
+              'custom_components/comelit/media_transport.py',
+              '''            rc = await process.wait()\n            reader = self._reader_task\n            if reader is not None:\n                await reader\n            if self._stopping:\n                self._emit_native_success_summary()\n            if not self._stopping:\n                self._capture_native_failure(rc)\n                raise ComelitMediaTransportError(f"media_native_exit:{rc}")\n''',
+              '''            process_completion = asyncio.create_task(\n                process.wait(),\n                name="wait Comelit media helper",\n            )\n            reader = self._reader_task\n            if reader is None:\n                raise ComelitMediaTransportError("media_native_reader_missing")\n            done, _ = await asyncio.wait(\n                {process_completion, reader},\n                return_when=asyncio.FIRST_COMPLETED,\n            )\n            if reader in done and process_completion not in done:\n                reader_error = reader.exception()\n                if reader_error is not None:\n                    raise ComelitMediaTransportError(\n                        f"media_native_reader_failed:{type(reader_error).__name__}"\n                    ) from reader_error\n                try:\n                    rc = await asyncio.wait_for(\n                        asyncio.shield(process_completion),\n                        timeout=0.5,\n                    )\n                except TimeoutError as exc:\n                    raise ComelitMediaTransportError(\n                        "media_native_reader_stopped"\n                    ) from exc\n            else:\n                rc = await process_completion\n            try:\n                await asyncio.wait_for(asyncio.shield(reader), timeout=2.0)\n            except TimeoutError as exc:\n                raise ComelitMediaTransportError(\n                    "media_native_reader_stuck_after_exit"\n                ) from exc\n            except asyncio.CancelledError:\n                raise\n            except Exception as exc:\n                if rc == 0:\n                    raise ComelitMediaTransportError(\n                        f"media_native_reader_failed:{type(exc).__name__}"\n                    ) from exc\n                _LOGGER.warning(\n                    "Comelit media output reader failed while native exited; "\n                    "reader_failure=%s rc=%s",\n                    type(exc).__name__,\n                    rc,\n                )\n            if self._stopping:\n                self._emit_native_success_summary()\n            if not self._stopping:\n                self._capture_native_failure(rc)\n                raise ComelitMediaTransportError(f"media_native_exit:{rc}")\n''',
+          )
+
+          # -----------------------------------------------------------------
+          # OAuth: identify invalid_grant without logging body/token material,
+          # start Home Assistant reauth once, and let supervisor stop reconnects.
+          # -----------------------------------------------------------------
+          replace_once(
+              'custom_components/comelit/oauth.py',
+              '''class ComelitOAuthError(RuntimeError):\n    """Comelit OAuth refresh failed without exposing token material."""\n\n\n@dataclass(frozen=True)\n''',
+              '''class ComelitOAuthError(RuntimeError):\n    """Comelit OAuth refresh failed without exposing token material."""\n\n\nclass ComelitOAuthReauthRequired(ComelitOAuthError):\n    """The stored refresh grant is no longer usable and requires reauth."""\n\n\n@dataclass(frozen=True)\n''',
+          )
+          replace_once(
+              'custom_components/comelit/oauth.py',
+              '''    if not 200 <= status < 300:\n        raise ComelitOAuthError(f"oauth_http_status:{status}")\n\n    try:\n        obj = json.loads(raw.decode("utf-8", errors="replace"))\n''',
+              '''    if not 200 <= status < 300:\n        try:\n            error_obj = json.loads(raw.decode("utf-8", errors="replace"))\n        except (UnicodeError, json.JSONDecodeError):\n            error_obj = None\n        if (\n            isinstance(error_obj, dict)\n            and error_obj.get("error") == "invalid_grant"\n        ):\n            raise ComelitOAuthReauthRequired("oauth_reauth_required")\n        raise ComelitOAuthError(f"oauth_http_status:{status}")\n\n    try:\n        obj = json.loads(raw.decode("utf-8", errors="replace"))\n''',
+          )
+          replace_once(
+              'custom_components/comelit/oauth.py',
+              '''            refreshed = await async_refresh_oauth(\n                self._session,\n                refresh_token=refresh,\n                scope=scope,\n            )\n''',
+              '''            try:\n                refreshed = await async_refresh_oauth(\n                    self._session,\n                    refresh_token=refresh,\n                    scope=scope,\n                )\n            except ComelitOAuthReauthRequired:\n                self._entry.async_start_reauth(self._hass)\n                raise\n''',
+          )
+
+          # -----------------------------------------------------------------
+          # Config-flow reauth: replace only OAuth tokens/scope, preserving
+          # device UUID, ViP token and all unrelated entry data.
+          # -----------------------------------------------------------------
+          replace_once(
+              'custom_components/comelit/config_flow.py',
+              '''    CONF_OAUTH_ACCESS_TOKEN,\n    CONF_OAUTH_REFRESH_TOKEN,\n''',
+              '''    CONF_OAUTH_ACCESS_TOKEN,\n    CONF_OAUTH_EXPIRES_AT,\n    CONF_OAUTH_REFRESH_TOKEN,\n''',
+          )
+          marker = '\n\nclass ComelitOptionsFlow(config_entries.OptionsFlow):\n'
+          p = ROOT / 'custom_components/comelit/config_flow.py'
+          text = p.read_text(encoding='utf-8')
+          if text.count(marker) != 1:
+              raise SystemExit('config_flow.py: options-flow marker mismatch')
+          reauth_methods = '''\n    async def async_step_reauth(\n        self, entry_data: dict[str, Any]\n    ):\n        """Start reauthentication after an OAuth invalid_grant."""\n        return await self.async_step_reauth_confirm()\n\n    async def async_step_reauth_confirm(\n        self, user_input: dict[str, Any] | None = None\n    ):\n        """Replace only OAuth credentials and reload the existing entry."""\n        errors: dict[str, str] = {}\n        entry = self._get_reauth_entry()\n        if user_input is not None:\n            try:\n                access = _clean_required(user_input[CONF_OAUTH_ACCESS_TOKEN])\n                refresh = str(\n                    user_input.get(CONF_OAUTH_REFRESH_TOKEN) or ""\n                ).strip()\n                scope = str(user_input.get(CONF_OAUTH_SCOPE) or "").strip()\n            except (ValueError, KeyError):\n                errors["base"] = "invalid_config"\n            else:\n                data = dict(entry.data)\n                data[CONF_OAUTH_ACCESS_TOKEN] = access\n                if refresh:\n                    data[CONF_OAUTH_REFRESH_TOKEN] = refresh\n                else:\n                    data.pop(CONF_OAUTH_REFRESH_TOKEN, None)\n                if scope:\n                    data[CONF_OAUTH_SCOPE] = scope\n                else:\n                    data.pop(CONF_OAUTH_SCOPE, None)\n                data.pop(CONF_OAUTH_EXPIRES_AT, None)\n                return self.async_update_reload_and_abort(entry, data=data)\n\n        schema = vol.Schema(\n            {\n                vol.Required(CONF_OAUTH_ACCESS_TOKEN): TextSelector(\n                    TextSelectorConfig(type=TextSelectorType.PASSWORD)\n                ),\n                vol.Optional(CONF_OAUTH_REFRESH_TOKEN): TextSelector(\n                    TextSelectorConfig(type=TextSelectorType.PASSWORD)\n                ),\n                vol.Optional(\n                    CONF_OAUTH_SCOPE,\n                    default=str(entry.data.get(CONF_OAUTH_SCOPE) or ""),\n                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),\n            }\n        )\n        return self.async_show_form(\n            step_id="reauth_confirm",\n            data_schema=schema,\n            errors=errors,\n        )\n'''
+          text = text.replace(marker, reauth_methods + marker, 1)
+          p.write_text(text, encoding='utf-8')
+
+          # -----------------------------------------------------------------
+          # Supervisor: exponential bounded backoff for repeated failures and
+          # stop reconnecting after OAuth reauth has been requested.
+          # -----------------------------------------------------------------
+          replace_once(
+              'custom_components/comelit/supervisor.py',
+              'RECONNECT_DELAY_SECONDS = 5\nPOLL_INTERVAL_SECONDS = 1\n',
+              'RECONNECT_INITIAL_DELAY_SECONDS = 5\nRECONNECT_MAX_DELAY_SECONDS = 300\nRECONNECT_NORMAL_DELAY_SECONDS = 1\nPOLL_INTERVAL_SECONDS = 1\n',
+          )
+          replace_once(
+              'custom_components/comelit/supervisor.py',
+              '        self._reconnect_count = 0\n        self._state = LISTENER_STATE_STOPPED\n',
+              '        self._reconnect_count = 0\n        self._consecutive_failures = 0\n        self._reconnect_delay_seconds = 0\n        self._state = LISTENER_STATE_STOPPED\n',
+          )
+          replace_once(
+              'custom_components/comelit/supervisor.py',
+              '''            "reconnect_count": self._reconnect_count,\n            "last_ready": self._last_ready.isoformat() if self._last_ready else None,\n''',
+              '''            "reconnect_count": self._reconnect_count,\n            "consecutive_failures": self._consecutive_failures,\n            "reconnect_delay_seconds": self._reconnect_delay_seconds,\n            "last_ready": self._last_ready.isoformat() if self._last_ready else None,\n''',
+          )
+          replace_once(
+              'custom_components/comelit/supervisor.py',
+              '''    def _set_state(self, state: str) -> None:\n        if state == self._state:\n            return\n        self._state = state\n        if state == LISTENER_STATE_READY:\n            self._last_ready = datetime.now(UTC)\n''',
+              '''    def _set_state(self, state: str) -> None:\n        if state == LISTENER_STATE_READY:\n            self._consecutive_failures = 0\n            self._reconnect_delay_seconds = 0\n        if state == self._state:\n            return\n        self._state = state\n        if state == LISTENER_STATE_READY:\n            self._last_ready = datetime.now(UTC)\n''',
+          )
+          replace_once(
+              'custom_components/comelit/supervisor.py',
+              '''                if runtime_status.get("last_error"):\n                    self._set_state(LISTENER_STATE_ERROR)\n                else:\n                    self._set_state(LISTENER_STATE_RECONNECTING)\n                # reconnect_count may change even when the visible state does not.\n                self._notify_status()\n\n                _LOGGER.warning("RECONNECT_ATTEMPT=%s", self._reconnect_count)\n                _LOGGER.warning("RECONNECT_REASON=%s", reconnect_reason)\n                _LOGGER.warning(\n                    "Comelit listener cycle ended; reconnecting in %ss (count=%s)",\n                    RECONNECT_DELAY_SECONDS,\n                    self._reconnect_count,\n                )\n                await asyncio.sleep(RECONNECT_DELAY_SECONDS)\n''',
+              '''                if last_error == "oauth_reauth_required":\n                    self._set_state(LISTENER_STATE_ERROR)\n                    self._reconnect_delay_seconds = 0\n                    self._notify_status()\n                    _LOGGER.error(\n                        "Comelit listener requires OAuth reauthentication; "\n                        "automatic reconnect stopped"\n                    )\n                    return\n\n                if runtime_status.get("last_error"):\n                    self._set_state(LISTENER_STATE_ERROR)\n                    self._consecutive_failures += 1\n                    self._reconnect_delay_seconds = min(\n                        RECONNECT_INITIAL_DELAY_SECONDS\n                        * (2 ** max(0, self._consecutive_failures - 1)),\n                        RECONNECT_MAX_DELAY_SECONDS,\n                    )\n                else:\n                    self._set_state(LISTENER_STATE_RECONNECTING)\n                    self._consecutive_failures = 0\n                    self._reconnect_delay_seconds = RECONNECT_NORMAL_DELAY_SECONDS\n                # reconnect_count/delay may change even when visible state does not.\n                self._notify_status()\n\n                _LOGGER.warning("RECONNECT_ATTEMPT=%s", self._reconnect_count)\n                _LOGGER.warning("RECONNECT_REASON=%s", reconnect_reason)\n                _LOGGER.warning(\n                    "Comelit listener cycle ended; reconnecting in %ss (count=%s)",\n                    self._reconnect_delay_seconds,\n                    self._reconnect_count,\n                )\n                await asyncio.sleep(self._reconnect_delay_seconds)\n''',
+          )
+
+          # Surface backoff in diagnostic sensor.
+          replace_once(
+              'custom_components/comelit/sensor.py',
+              '''            "reconnect_count": status["reconnect_count"],\n            "last_ready": status["last_ready"],\n''',
+              '''            "reconnect_count": status["reconnect_count"],\n            "consecutive_failures": status.get("consecutive_failures"),\n            "reconnect_delay_seconds": status.get("reconnect_delay_seconds"),\n            "last_ready": status["last_ready"],\n''',
+          )
+          replace_once(
+              'custom_components/comelit/sensor.py',
+              '''            "last_error": status["last_error"],\n        }\n''',
+              '''            "last_error": status["last_error"],\n            "state_timeout_seconds": status.get("state_timeout_seconds"),\n        }\n''',
+          )
+
+          # -----------------------------------------------------------------
+          # HA Stream provider: reuse one Stream per provider across sessions,
+          # and explicitly dispose/unregister it only at config-entry unload.
+          # -----------------------------------------------------------------
+          replace_once(
+              'custom_components/comelit/ring_media.py',
+              '''    async def _async_close_unlocked(self) -> None:\n        stream = self._stream\n        self._stream = None\n        if stream is not None and hasattr(stream, "stop"):\n            await stream.stop()\n\n    async def async_close(self) -> None:\n''',
+              '''    async def _async_close_unlocked(self) -> None:\n        stream = self._stream\n        if stream is not None and hasattr(stream, "stop"):\n            await stream.stop()\n\n    async def async_dispose(self) -> None:\n        """Stop and unregister the provider Stream during config-entry unload."""\n        async with self._consumer_lock:\n            self._consumers.clear()\n            stream = self._stream\n            self._stream = None\n            if stream is None:\n                return\n            if hasattr(stream, "stop"):\n                await stream.stop()\n            stream_domain = self._hass.data.get(STREAM_DOMAIN, {})\n            streams = stream_domain.get(ATTR_STREAMS)\n            if isinstance(streams, list):\n                try:\n                    streams.remove(stream)\n                except ValueError:\n                    pass\n\n    async def async_close(self) -> None:\n''',
+          )
+
+          # -----------------------------------------------------------------
+          # __init__.py: remove production test webhook and make unload retain
+          # references until all teardown succeeds. Every owned subsystem gets
+          # a cleanup attempt; platforms unload only after core teardown passes.
+          # -----------------------------------------------------------------
+          replace_once(
+              'custom_components/comelit/__init__.py',
+              'from .test_control import async_register_test_control, async_unregister_test_control\n',
+              '',
+          )
+          replace_once(
+              'custom_components/comelit/__init__.py',
+              '''        # Transitional validation endpoint remains available, but normal\n        # operation no longer depends on CT120/Hermes: the supervisor starts\n        # with the config entry and reconnects entirely inside Home Assistant.\n        async_register_test_control(hass, runtime, supervisor)\n        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)\n''',
+              '''        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)\n''',
+          )
+          new_unload = '''async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:\n    domain_data = hass.data.get(DOMAIN, {})\n    runtimes = domain_data.get(DATA_RUNTIMES, {})\n    supervisors = domain_data.get(DATA_SUPERVISORS, {})\n    media_sessions = domain_data.get(DATA_MEDIA_SESSIONS, {})\n    media_transports = domain_data.get(DATA_MEDIA_TRANSPORTS, {})\n    media_providers = domain_data.get(DATA_MEDIA_PROVIDERS, {})\n    attached_sessions = domain_data.get(DATA_ATTACHED_MEDIA_SESSIONS, {})\n    attached_providers = domain_data.get(DATA_ATTACHED_MEDIA_PROVIDERS, {})\n    miniapp_attached_providers = domain_data.get(\n        DATA_MINIAPP_ATTACHED_MEDIA_PROVIDERS, {}\n    )\n    attached_transports = domain_data.get(DATA_ATTACHED_MEDIA_TRANSPORTS, {})\n    ring_media_lifecycles = domain_data.get(DATA_RING_MEDIA, {})\n    synthetic_lifecycles = domain_data.get(DATA_SYNTHETIC_RING_MEDIA, {})\n\n    runtime = runtimes.get(entry.entry_id)\n    supervisor = supervisors.get(entry.entry_id)\n    media_manager = media_sessions.get(entry.entry_id)\n    media_transport = media_transports.get(entry.entry_id)\n    media_provider = media_providers.get(entry.entry_id)\n    attached_session = attached_sessions.get(entry.entry_id)\n    attached_provider = attached_providers.get(entry.entry_id)\n    miniapp_attached_provider = miniapp_attached_providers.get(entry.entry_id)\n    ring_media = ring_media_lifecycles.get(entry.entry_id)\n    synthetic_ring_media = synthetic_lifecycles.get(entry.entry_id)\n\n    if runtime is None:\n        return True\n\n    unloaded = True\n\n    async def attempt(label: str, awaitable: object) -> None:\n        nonlocal unloaded\n        try:\n            await awaitable  # type: ignore[misc]\n        except Exception:\n            unloaded = False\n            _LOGGER.exception("Failed to %s during Comelit unload", label)\n\n    # Tear down every independently owned media surface even when an earlier\n    # one fails. Do not remove objects from hass.data until the whole teardown\n    # and platform unload have succeeded.\n    if ring_media is not None:\n        await attempt("shut down Ring media", ring_media.async_shutdown())\n    if synthetic_ring_media is not None:\n        await attempt(\n            "shut down synthetic Ring media",\n            synthetic_ring_media.async_shutdown(),\n        )\n    if attached_session is not None:\n        await attempt("shut down attached media", attached_session.async_shutdown())\n    if media_manager is not None:\n        await attempt("shut down on-demand media", media_manager.async_shutdown())\n    elif media_transport is not None:\n        await attempt("stop on-demand media transport", media_transport.async_stop())\n\n    for label, provider in (\n        ("dispose on-demand HA Stream", media_provider),\n        ("dispose attached HA Stream", attached_provider),\n        ("dispose Mini App attached HA Stream", miniapp_attached_provider),\n    ):\n        if provider is not None:\n            dispose = getattr(provider, "async_dispose", None)\n            if callable(dispose):\n                await attempt(label, dispose())\n\n    if supervisor is not None:\n        await attempt("stop runtime supervisor", supervisor.async_stop())\n    else:\n        await attempt("stop runtime", runtime.async_stop())\n\n    if not unloaded:\n        return False\n\n    try:\n        platforms_unloaded = await hass.config_entries.async_unload_platforms(\n            entry, PLATFORMS\n        )\n    except Exception:\n        _LOGGER.exception("Failed to unload Comelit platforms")\n        return False\n    if not platforms_unloaded:\n        return False\n\n    miniapp: ComelitMiniAppController | None = domain_data.get(DATA_MINIAPP)\n    if miniapp is not None:\n        miniapp.clear_entry(entry)\n\n    runtimes.pop(entry.entry_id, None)\n    supervisors.pop(entry.entry_id, None)\n    media_sessions.pop(entry.entry_id, None)\n    media_transports.pop(entry.entry_id, None)\n    media_providers.pop(entry.entry_id, None)\n    attached_sessions.pop(entry.entry_id, None)\n    attached_providers.pop(entry.entry_id, None)\n    miniapp_attached_providers.pop(entry.entry_id, None)\n    attached_transports.pop(entry.entry_id, None)\n    ring_media_lifecycles.pop(entry.entry_id, None)\n    synthetic_lifecycles.pop(entry.entry_id, None)\n    domain_data.pop(entry.entry_id, None)\n\n    if not runtimes:\n        domain_data.pop(DATA_RUNTIMES, None)\n    if not supervisors:\n        domain_data.pop(DATA_SUPERVISORS, None)\n    if not media_sessions:\n        domain_data.pop(DATA_MEDIA_SESSIONS, None)\n    if not media_transports:\n        domain_data.pop(DATA_MEDIA_TRANSPORTS, None)\n    if not media_providers:\n        domain_data.pop(DATA_MEDIA_PROVIDERS, None)\n    if not attached_sessions:\n        domain_data.pop(DATA_ATTACHED_MEDIA_SESSIONS, None)\n    if not attached_transports:\n        domain_data.pop(DATA_ATTACHED_MEDIA_TRANSPORTS, None)\n    if not attached_providers:\n        domain_data.pop(DATA_ATTACHED_MEDIA_PROVIDERS, None)\n    if not miniapp_attached_providers:\n        domain_data.pop(DATA_MINIAPP_ATTACHED_MEDIA_PROVIDERS, None)\n    if not ring_media_lifecycles:\n        domain_data.pop(DATA_RING_MEDIA, None)\n    if not synthetic_lifecycles:\n        domain_data.pop(DATA_SYNTHETIC_RING_MEDIA, None)\n    return True\n'''
+          replace_tail(
+              'custom_components/comelit/__init__.py',
+              'async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:\n',
+              new_unload,
+          )
+
+          # Remove the production-only validation webhook and its dependency.
+          test_control = ROOT / 'custom_components/comelit/test_control.py'
+          if test_control.exists():
+              test_control.unlink()
+          manifest_path = ROOT / 'custom_components/comelit/manifest.json'
+          manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+          manifest['dependencies'] = [
+              item for item in manifest.get('dependencies', []) if item != 'webhook'
+          ]
+          manifest_path.write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
+
+          # Config-flow strings for reauth.
+          for rel in ('custom_components/comelit/strings.json', 'custom_components/comelit/translations/en.json'):
+              p = ROOT / rel
+              obj = json.loads(p.read_text(encoding='utf-8'))
+              obj.setdefault('config', {}).setdefault('step', {})['reauth_confirm'] = {
+                  'title': 'Reconnect Comelit',
+                  'description': 'The saved OAuth refresh grant is no longer valid. Enter replacement OAuth credentials.',
+                  'data': {
+                      'oauth_access_token': 'OAuth access token',
+                      'oauth_refresh_token': 'OAuth refresh token',
+                      'oauth_scope': 'OAuth scope',
+                  },
+              }
+              p.write_text(json.dumps(obj, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+
+          # Regression/static contracts for this hardening round.
+          test_path = ROOT / 'safety-poc/tests/test_runtime_reliability_hardening.py'
+          test_path.write_text(r'''from pathlib import Path\nimport ast\nimport importlib.util\nimport unittest\n\nROOT = Path(__file__).resolve().parents[2]\n\n\ndef read(rel: str) -> str:\n    return (ROOT / rel).read_text(encoding="utf-8")\n\n\nclass RuntimeReliabilityHardeningTests(unittest.TestCase):\n    def test_listener_reader_is_supervised_and_ring_contract_is_nonfatal(self) -> None:\n        text = read("custom_components/comelit/runtime.py")\n        self.assertIn("native_reader_failed:", text)\n        self.assertIn("native_reader_stopped", text)\n        self.assertIn("Ignoring malformed Comelit ring observation", text)\n        self.assertNotIn("raise ComelitRingRuntimeError(f\\\"ring_contract:{exc}\\\")", text)\n        self.assertIn('if line == "V4_RING_OBSERVED=true":', text)\n        self.assertIn("self._ring_lines.clear()", text)\n\n    def test_native_children_use_allowlisted_environment(self) -> None:\n        for rel in (\n            "custom_components/comelit/runtime.py",\n            "custom_components/comelit/media_transport.py",\n        ):\n            text = read(rel)\n            self.assertIn("def _native_child_env()", text)\n            self.assertNotIn("child_env = os.environ.copy()", text)\n            self.assertIn("_SUPPORTED_NATIVE_ARCHITECTURES", text)\n            self.assertIn("unsupported_native_architecture", text)\n\n    def test_test_control_webhook_is_not_shipped(self) -> None:\n        self.assertFalse((ROOT / "custom_components/comelit/test_control.py").exists())\n        init_text = read("custom_components/comelit/__init__.py")\n        self.assertNotIn("async_register_test_control", init_text)\n        manifest = read("custom_components/comelit/manifest.json")\n        self.assertNotIn('"webhook"', manifest)\n\n    def test_unload_does_not_pop_runtime_before_teardown(self) -> None:\n        text = read("custom_components/comelit/__init__.py")\n        start = text.index("async def async_unload_entry")\n        block = text[start:]\n        self.assertIn("runtime = runtimes.get(entry.entry_id)", block)\n        self.assertNotIn("runtime = runtimes.pop(entry.entry_id, None)", block)\n        self.assertLess(block.index("await attempt(\"stop runtime"), block.index("runtimes.pop(entry.entry_id, None)"))\n\n    def test_stream_provider_reuses_and_disposes_single_stream(self) -> None:\n        text = read("custom_components/comelit/ring_media.py")\n        close = text[text.index("async def _async_close_unlocked"):text.index("async def async_record_mp4")]
+        self.assertNotIn("self._stream = None", close.split("async def async_dispose", 1)[0])\n        self.assertIn("async def async_dispose", close)\n        self.assertIn("streams.remove(stream)", close)\n\n    def test_oauth_invalid_grant_starts_reauth_and_backoff_is_bounded(self) -> None:\n        oauth = read("custom_components/comelit/oauth.py")\n        supervisor = read("custom_components/comelit/supervisor.py")\n        flow = read("custom_components/comelit/config_flow.py")\n        self.assertIn("ComelitOAuthReauthRequired", oauth)\n        self.assertIn('error_obj.get("error") == "invalid_grant"', oauth)\n        self.assertIn("async_start_reauth", oauth)\n        self.assertIn('last_error == "oauth_reauth_required"', supervisor)\n        self.assertIn("RECONNECT_MAX_DELAY_SECONDS = 300", supervisor)\n        self.assertIn("async_step_reauth_confirm", flow)\n\n    def test_call_state_timeout_is_bounded_error_not_fake_remote_release(self) -> None:\n        runtime = read("custom_components/comelit/runtime.py")\n        state = read("custom_components/comelit/call_state.py")\n        self.assertIn("_CALL_STATE_TIMEOUT_SECONDS = 120.0", runtime)\n        self.assertIn('fail_active("call_state_timeout")', runtime)\n        self.assertIn('"call_state_timeout"', state)\n\n    def test_reject_stage_is_validated_before_status_result(self) -> None:\n        text = read("custom_components/comelit/runtime.py")\n        block = text[text.index('if line.startswith("V4_DOOR_REJECT_STAGE=")'):]
+        block = block[:block.index("continue") + len("continue")]\n        self.assertIn("_DOOR_LOG_STAGE_RE.fullmatch(reject_stage)", block)\n\n    def test_python_sources_parse(self) -> None:\n        for rel in (\n            "custom_components/comelit/runtime.py",\n            "custom_components/comelit/media_transport.py",\n            "custom_components/comelit/supervisor.py",\n            "custom_components/comelit/oauth.py",\n            "custom_components/comelit/config_flow.py",\n            "custom_components/comelit/ring_media.py",\n            "custom_components/comelit/__init__.py",\n        ):\n            ast.parse(read(rel), filename=rel)\n\n\nif __name__ == "__main__":\n    unittest.main()\n'''.replace('\\n', '\n'), encoding='utf-8')
+          PY
+
+          git diff --check
+          python3 -m compileall -q custom_components/comelit
+          python3 safety-poc/scripts/static_safety_check.py
+          node --check custom_components/comelit/frontend/comelit-card.js
+          python3 -m unittest safety-poc/tests/test_runtime_reliability_hardening.py -v
+          (cd safety-poc && PYTHONPATH="$PWD/src" PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v)
+          python3 -m pip install -q pytest cryptography
+          pytest -q tests/miniapp
+
+          # Final negative controls: no production test webhook and no inherited
+          # HA environment copy for either native helper.
+          test ! -e custom_components/comelit/test_control.py
+          ! grep -R "child_env = os.environ.copy()" -n custom_components/comelit
+          ! grep -R "async_register_test_control" -n custom_components/comelit
+
+      - name: Commit verified patch and remove self-apply workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "alexsudakov"
+          git config user.email "91778685+alexsudakov@users.noreply.github.com"
+          git rm .github/workflows/self-apply-runtime-hardening.yml
+          git add -A
+          git diff --cached --check
+          git commit -m "fix(runtime): harden listener lifecycle and production safety [hardening-generated]"
+          git push origin HEAD:fix/runtime-reliability-security-hardening
