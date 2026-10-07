@@ -12,6 +12,15 @@
           "oauth_refresh_token": "OAuth refresh token",
           "oauth_scope": "OAuth scope"
         }
+      },
+      "reauth_confirm": {
+        "title": "Reconnect Comelit",
+        "description": "The saved OAuth refresh grant is no longer valid. Enter replacement OAuth credentials.",
+        "data": {
+          "oauth_access_token": "OAuth access token",
+          "oauth_refresh_token": "OAuth refresh token",
+          "oauth_scope": "OAuth scope"
+        }
       }
     },
     "error": {

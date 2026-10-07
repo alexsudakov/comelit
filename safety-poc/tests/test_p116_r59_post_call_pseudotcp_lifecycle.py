@@ -400,7 +400,11 @@ class P116R59SupervisorReconnectHarnessTests(unittest.TestCase):
         supervisor.async_add_status_listener(status_listener)
 
         async def scenario() -> None:
-            with mock.patch.object(module, "RECONNECT_DELAY_SECONDS", 0.05), mock.patch.object(
+            with mock.patch.object(
+                module, "RECONNECT_INITIAL_DELAY_SECONDS", 0.05
+            ), mock.patch.object(
+                module, "RECONNECT_MAX_DELAY_SECONDS", 0.05
+            ), mock.patch.object(
                 module, "POLL_INTERVAL_SECONDS", 0.01
             ):
                 with self.assertLogs("custom_components.comelit.supervisor", level="WARNING") as cm:

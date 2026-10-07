@@ -199,13 +199,8 @@ class MVP1SyntheticRingControlTests(unittest.TestCase):
         self.assertIn("EVENT_RING", shared)
         self.assertIn("async_start_for_ring", shared)
 
-    def test_synthetic_trigger_stays_on_local_restricted_test_control(self) -> None:
-        source = TEST_CONTROL.read_text(encoding="utf-8")
-        self.assertIn('_ALLOWED_REMOTE = "192.168.1.85"', source)
-        self.assertIn('if action == "simulate_entrance_ring":', source)
-        self.assertIn("await runtime.async_simulate_entrance_ring()", source)
-        self.assertIn("local_only=True", source)
-        self.assertIn('result["synthetic"] = True', source)
+    def test_synthetic_trigger_is_not_shipped_as_production_test_control(self) -> None:
+        self.assertFalse(TEST_CONTROL.exists())
 
     def test_synthetic_trigger_is_not_public_ha_service(self) -> None:
         const_source = CONST.read_text(encoding="utf-8")

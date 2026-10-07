@@ -15,6 +15,7 @@ from .const import (
     CONF_MINIAPP_ENABLED,
     CONF_MINIAPP_SURVEILLANCE_LABEL,
     CONF_OAUTH_ACCESS_TOKEN,
+    CONF_OAUTH_EXPIRES_AT,
     CONF_OAUTH_REFRESH_TOKEN,
     CONF_OAUTH_SCOPE,
     CONF_VIP_TOKEN,
@@ -122,6 +123,61 @@ class ComelitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             }
         )
         return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
+
+    async def async_step_reauth(
+        self, entry_data: dict[str, Any]
+    ):
+        """Start reauthentication after an OAuth invalid_grant."""
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ):
+        """Replace only OAuth credentials and reload the existing entry."""
+        errors: dict[str, str] = {}
+        entry = self._get_reauth_entry()
+        if user_input is not None:
+            try:
+                access = _clean_required(user_input[CONF_OAUTH_ACCESS_TOKEN])
+                refresh = str(
+                    user_input.get(CONF_OAUTH_REFRESH_TOKEN) or ""
+                ).strip()
+                scope = str(user_input.get(CONF_OAUTH_SCOPE) or "").strip()
+            except (ValueError, KeyError):
+                errors["base"] = "invalid_config"
+            else:
+                data = dict(entry.data)
+                data[CONF_OAUTH_ACCESS_TOKEN] = access
+                if refresh:
+                    data[CONF_OAUTH_REFRESH_TOKEN] = refresh
+                else:
+                    data.pop(CONF_OAUTH_REFRESH_TOKEN, None)
+                if scope:
+                    data[CONF_OAUTH_SCOPE] = scope
+                else:
+                    data.pop(CONF_OAUTH_SCOPE, None)
+                data.pop(CONF_OAUTH_EXPIRES_AT, None)
+                return self.async_update_reload_and_abort(entry, data=data)
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_OAUTH_ACCESS_TOKEN): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                ),
+                vol.Optional(CONF_OAUTH_REFRESH_TOKEN): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                ),
+                vol.Optional(
+                    CONF_OAUTH_SCOPE,
+                    default=str(entry.data.get(CONF_OAUTH_SCOPE) or ""),
+                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+            }
+        )
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=schema,
+            errors=errors,
+        )
 
 
 class ComelitOptionsFlow(config_entries.OptionsFlow):

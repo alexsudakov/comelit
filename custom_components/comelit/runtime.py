@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 import logging
 import os
 from pathlib import Path
+import platform
 import re
 import signal
 from uuid import uuid4
@@ -83,6 +84,9 @@ _DOOR_LOG_INTEGER_KEYS = frozenset(
 _DOOR_LOG_TARGETS = frozenset({"entrance", "gate"})
 _DOOR_LOG_PATHS = frozenset({"CALL_TIME_SINGLE"})
 _DOOR_LOG_STAGE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,47}$")
+_NATIVE_ENV_PASSTHROUGH = frozenset({"HOME", "LANG", "LC_ALL", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR"})
+_SUPPORTED_NATIVE_ARCHITECTURES = frozenset({"x86_64", "amd64"})
+_CALL_STATE_TIMEOUT_SECONDS = 120.0
 _DOOR_LOG_WRITE_RE = re.compile(
     r"^V4_DOOR_OPERATION_WRITE_([1-5])_SENT=(true|false)$"
 )
@@ -419,7 +423,24 @@ def _remove_door_target() -> None:
         pass
 
 
+def _native_child_env() -> dict[str, str]:
+    env = {
+        "LD_LIBRARY_PATH": str(_NATIVE_LIB),
+        "PATH": os.environ.get(
+            "PATH",
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        ),
+    }
+    for key in _NATIVE_ENV_PASSTHROUGH:
+        value = os.environ.get(key)
+        if value:
+            env[key] = value
+    return env
+
+
 def _native_gate() -> None:
+    if platform.machine().lower() not in _SUPPORTED_NATIVE_ARCHITECTURES:
+        raise ComelitRingRuntimeError("unsupported_native_architecture")
     if not _NATIVE_BINARY.is_file():
         raise ComelitRingRuntimeError("native_binary_missing")
     if not _NATIVE_LIB.is_dir():
@@ -489,6 +510,7 @@ class ComelitRingRuntime:
         self._media_diagnostics = MediaCallDiagnostics()
         self._status_listeners: set[Callable[[], None]] = set()
         self._call_state = ComelitCallStateTracker()
+        self._call_state_timeout_task: asyncio.Task[None] | None = None
 
     @property
     def running(self) -> bool:
@@ -540,6 +562,40 @@ class ComelitRingRuntime:
             self._call_state = tracker
         return tracker
 
+    def _cancel_call_state_timeout(self) -> None:
+        task = getattr(self, "_call_state_timeout_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._call_state_timeout_task = None
+
+    def _schedule_call_state_timeout(self, event_id: str) -> None:
+        self._cancel_call_state_timeout()
+        self._call_state_timeout_task = self._entry.async_create_background_task(
+            self._hass,
+            self._async_expire_call_state(event_id),
+            "comelit call-state watchdog",
+        )
+
+    async def _async_expire_call_state(self, event_id: str) -> None:
+        current = asyncio.current_task()
+        try:
+            await asyncio.sleep(_CALL_STATE_TIMEOUT_SECONDS)
+            snapshot = self._call_state_tracker().snapshot()
+            if snapshot.event_id != event_id:
+                return
+            if self._call_state_tracker().fail_active("call_state_timeout"):
+                _LOGGER.warning(
+                    "Comelit call-state watchdog expired after %ss; "
+                    "remote release was not observed",
+                    int(_CALL_STATE_TIMEOUT_SECONDS),
+                )
+                self._notify_status()
+        except asyncio.CancelledError:
+            return
+        finally:
+            if getattr(self, "_call_state_timeout_task", None) is current:
+                self._call_state_timeout_task = None
+
     def call_status(self) -> dict[str, object]:
         """Return bounded user-facing call state reconstructed from runtime evidence."""
         snapshot = self._call_state_tracker().snapshot()
@@ -551,6 +607,7 @@ class ComelitRingRuntime:
             "media_attached": self.attached_media_open,
             "conversation_active": snapshot.conversation_active,
             "last_error": snapshot.last_error,
+            "state_timeout_seconds": int(_CALL_STATE_TIMEOUT_SECONDS),
         }
 
     def status(self) -> dict[str, object]:
@@ -664,13 +721,15 @@ class ComelitRingRuntime:
                 isinstance(panel, str)
                 and isinstance(event_id, str)
                 and isinstance(started_at, str)
-                and self._call_state_tracker().begin(
+            ):
+                changed = self._call_state_tracker().begin(
                     panel=panel,
                     event_id=event_id,
                     started_at=started_at,
                 )
-            ):
-                self._notify_status()
+                self._schedule_call_state_timeout(event_id)
+                if changed:
+                    self._notify_status()
 
         self._last_ring_event = dict(event)
         self._hass.bus.async_fire(EVENT_RING, dict(event))
@@ -1041,6 +1100,7 @@ class ComelitRingRuntime:
         self._last_ring_event = None
         self._last_error = None
         self._media_diagnostics.reset()
+        self._cancel_call_state_timeout()
         self._call_state_tracker().reset()
         self._notify_status()
         self._task = self._entry.async_create_background_task(
@@ -1159,6 +1219,7 @@ class ComelitRingRuntime:
 
     async def async_stop(self) -> None:
         self._stopping = True
+        self._cancel_call_state_timeout()
         process = self._process
         if process is not None and process.returncode is None:
             stopped = await self._async_stop_native_process(process)
@@ -1414,6 +1475,7 @@ class ComelitRingRuntime:
                 self._notify_status()
             _LOGGER.exception("Unexpected Comelit ring listener failure")
         finally:
+            self._cancel_call_state_timeout()
             if (
                 not self._stopping
                 and self._last_error is None
@@ -1435,8 +1497,7 @@ class ComelitRingRuntime:
             _prepare_helper_secret, self._vip_token
         )
 
-        child_env = os.environ.copy()
-        child_env["LD_LIBRARY_PATH"] = str(_NATIVE_LIB)
+        child_env = _native_child_env()
 
         process = await asyncio.create_subprocess_exec(
             str(_NATIVE_BINARY),
@@ -1498,8 +1559,47 @@ class ComelitRingRuntime:
                 )
             await self._hass.async_add_executor_job(_write_remote, remote)
 
-            rc = await process.wait()
-            await reader_task
+            process_completion = asyncio.create_task(
+                process.wait(),
+                name="wait Comelit ring helper",
+            )
+            done, _ = await asyncio.wait(
+                {process_completion, reader_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if reader_task in done and process_completion not in done:
+                reader_error = reader_task.exception()
+                if reader_error is not None:
+                    raise ComelitRingRuntimeError(
+                        f"native_reader_failed:{type(reader_error).__name__}"
+                    ) from reader_error
+                try:
+                    rc = await asyncio.wait_for(
+                        asyncio.shield(process_completion),
+                        timeout=0.5,
+                    )
+                except TimeoutError as exc:
+                    raise ComelitRingRuntimeError("native_reader_stopped") from exc
+            else:
+                rc = await process_completion
+
+            try:
+                await asyncio.wait_for(asyncio.shield(reader_task), timeout=2.0)
+            except TimeoutError as exc:
+                raise ComelitRingRuntimeError("native_reader_stuck_after_exit") from exc
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if rc == 0:
+                    raise ComelitRingRuntimeError(
+                        f"native_reader_failed:{type(exc).__name__}"
+                    ) from exc
+                _LOGGER.warning(
+                    "Comelit ring output reader failed while native exited; "
+                    "reader_failure=%s rc=%s",
+                    type(exc).__name__,
+                    rc,
+                )
             if rc != 0 and not self._stopping:
                 self._capture_native_failure(rc)
                 raise ComelitRingRuntimeError(f"native_exit:{rc}")
@@ -1536,6 +1636,7 @@ class ComelitRingRuntime:
                 "R64_POST_CALL_REMOTE_RELEASE_OBSERVED=true",
                 "R64_TERMINAL_REMOTE_RELEASE_OBSERVED=true",
             }:
+                self._cancel_call_state_timeout()
                 if self._call_state_tracker().remote_release():
                     self._notify_status()
             if (
@@ -1577,9 +1678,13 @@ class ComelitRingRuntime:
                 continue
 
             if line.startswith("V4_DOOR_REJECT_STAGE="):
-                self._door_diagnostic["reject_stage"] = (
-                    line.split("=", 1)[1]
-                )
+                reject_stage = line.split("=", 1)[1]
+                if _DOOR_LOG_STAGE_RE.fullmatch(reject_stage):
+                    self._door_diagnostic["reject_stage"] = reject_stage
+                else:
+                    _LOGGER.warning(
+                        "Ignoring malformed Comelit Door reject stage"
+                    )
                 continue
 
             if line.startswith("V4_DOOR_PATH="):
@@ -1662,6 +1767,8 @@ class ComelitRingRuntime:
             if key not in _RING_KEYS:
                 continue
 
+            if line == "V4_RING_OBSERVED=true":
+                self._ring_lines.clear()
             self._ring_lines.append(line)
             present = {item.split("=", 1)[0] for item in self._ring_lines}
             if not _RING_KEYS.issubset(present):
@@ -1673,7 +1780,11 @@ class ComelitRingRuntime:
             try:
                 ring = parse_v4_safe_ring(batch)
             except RingObservationError as exc:
-                raise ComelitRingRuntimeError(f"ring_contract:{exc}") from exc
+                _LOGGER.warning(
+                    "Ignoring malformed Comelit ring observation: %s",
+                    type(exc).__name__,
+                )
+                continue
 
             if ring is None:
                 continue

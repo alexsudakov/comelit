@@ -44,9 +44,10 @@ class P16HomeAssistantBackgroundTaskContract(unittest.TestCase):
 
         self.assertEqual(
             runtime.count("self._entry.async_create_background_task("),
-            3,
+            4,
         )
         self.assertIn('"comelit ring media scheduler"', runtime)
+        self.assertIn('"comelit call-state watchdog"', runtime)
         self.assertEqual(
             supervisor.count("self._entry.async_create_background_task("),
             1,

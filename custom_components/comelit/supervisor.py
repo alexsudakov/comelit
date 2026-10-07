@@ -14,7 +14,9 @@ from .runtime import ComelitRingRuntime
 
 _LOGGER = logging.getLogger(__name__)
 
-RECONNECT_DELAY_SECONDS = 5
+RECONNECT_INITIAL_DELAY_SECONDS = 5
+RECONNECT_MAX_DELAY_SECONDS = 300
+RECONNECT_NORMAL_DELAY_SECONDS = 1
 POLL_INTERVAL_SECONDS = 1
 
 LISTENER_STATE_STARTING = "starting"
@@ -75,6 +77,8 @@ class ComelitRuntimeSupervisor:
         self._media_paused = False
         self._lifecycle_lock = asyncio.Lock()
         self._reconnect_count = 0
+        self._consecutive_failures = 0
+        self._reconnect_delay_seconds = 0
         self._state = LISTENER_STATE_STOPPED
         self._last_ready: datetime | None = None
         self._status_listeners: set[Callable[[], None]] = set()
@@ -124,6 +128,8 @@ class ComelitRuntimeSupervisor:
             ),
             "media_paused": self._media_paused,
             "reconnect_count": self._reconnect_count,
+            "consecutive_failures": self._consecutive_failures,
+            "reconnect_delay_seconds": self._reconnect_delay_seconds,
             "last_ready": self._last_ready.isoformat() if self._last_ready else None,
             "last_error": runtime_status.get("last_error"),
             "last_native_exit_code": runtime_status.get("last_native_exit_code"),
@@ -154,6 +160,9 @@ class ComelitRuntimeSupervisor:
             callback()
 
     def _set_state(self, state: str) -> None:
+        if state == LISTENER_STATE_READY:
+            self._consecutive_failures = 0
+            self._reconnect_delay_seconds = 0
         if state == self._state:
             return
         self._state = state
@@ -380,21 +389,39 @@ class ComelitRuntimeSupervisor:
                     reconnect_reason = "UNKNOWN"
                 else:
                     reconnect_reason = "LISTENER_CYCLE_ENDED"
+                if last_error == "oauth_reauth_required":
+                    self._set_state(LISTENER_STATE_ERROR)
+                    self._reconnect_delay_seconds = 0
+                    self._notify_status()
+                    _LOGGER.error(
+                        "Comelit listener requires OAuth reauthentication; "
+                        "automatic reconnect stopped"
+                    )
+                    return
+
                 if runtime_status.get("last_error"):
                     self._set_state(LISTENER_STATE_ERROR)
+                    self._consecutive_failures += 1
+                    self._reconnect_delay_seconds = min(
+                        RECONNECT_INITIAL_DELAY_SECONDS
+                        * (2 ** max(0, self._consecutive_failures - 1)),
+                        RECONNECT_MAX_DELAY_SECONDS,
+                    )
                 else:
                     self._set_state(LISTENER_STATE_RECONNECTING)
-                # reconnect_count may change even when the visible state does not.
+                    self._consecutive_failures = 0
+                    self._reconnect_delay_seconds = RECONNECT_NORMAL_DELAY_SECONDS
+                # reconnect_count/delay may change even when visible state does not.
                 self._notify_status()
 
                 _LOGGER.warning("RECONNECT_ATTEMPT=%s", self._reconnect_count)
                 _LOGGER.warning("RECONNECT_REASON=%s", reconnect_reason)
                 _LOGGER.warning(
                     "Comelit listener cycle ended; reconnecting in %ss (count=%s)",
-                    RECONNECT_DELAY_SECONDS,
+                    self._reconnect_delay_seconds,
                     self._reconnect_count,
                 )
-                await asyncio.sleep(RECONNECT_DELAY_SECONDS)
+                await asyncio.sleep(self._reconnect_delay_seconds)
 
                 if (
                     self._stopping
