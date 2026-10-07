@@ -2,6 +2,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <sys/select.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static volatile sig_atomic_t term_seen = 0;
@@ -11,13 +14,103 @@ static void on_term(int signum) {
     term_seen = 1;
 }
 
-static int emit_until_stage(int stage) {
+static void write_offer_file(void) {
+    const char *path = getenv("RESEARCH_OFFER_FILE");
+    if (!path || !*path) return;
+    FILE *handle = fopen(path, "w");
+    if (!handle) return;
+    fputs("v=0\r\n"
+          "o=- 1 1 IN IP4 127.0.0.1\r\n"
+          "s=Comelit research local offer\r\n"
+          "t=0 0\r\n"
+          "a=ice-ufrag:localufrag\r\n"
+          "a=ice-pwd:localpassword\r\n"
+          "a=candidate:1 1 UDP 2130706431 127.0.0.1 5000 typ host\r\n",
+          handle);
+    fclose(handle);
+}
+
+static void teardown(const char *reason) {
+    puts("RESEARCH_TEARDOWN_BEGIN=true");
+    printf("RESEARCH_STAGE_6_PAUSE_REASON=%s\n", reason);
+    printf("RESEARCH_TEARDOWN_REASON=%s\n", reason);
+    puts("RESEARCH_TEMP_SECRET_REMOVED=true");
+    puts("RESEARCH_CHILD_PROCESSES_LEFT=0");
+    puts("RESEARCH_SOCKETS_CLOSED=true");
+    puts("RESEARCH_TEARDOWN_DONE=true");
+    fflush(stdout);
+}
+
+static int wait_stage6_gate(int hold_ms) {
+    const char *control_path = getenv("RESEARCH_STAGE6_CONTROL_PATH");
+    int fd;
+    int elapsed = 0;
+    char buf[64];
+
+    write_offer_file();
+    puts("RESEARCH_STAGE_6_LOCAL_OFFER_READY");
+    puts("RESEARCH_STAGE_6_PAUSE_ENTERED=true");
+    fflush(stdout);
+
+    if (!control_path || !*control_path) {
+        teardown("CHANNEL_LOST");
+        return 72;
+    }
+
+    fd = open(control_path, O_RDONLY | O_NONBLOCK);
+    if (fd < 0) {
+        teardown("CHANNEL_LOST");
+        return 72;
+    }
+
+    while (elapsed < hold_ms && !term_seen) {
+        fd_set rfds;
+        struct timeval tv;
+        int selected;
+
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        tv.tv_sec = 0;
+        tv.tv_usec = 20000;
+        selected = select(fd + 1, &rfds, NULL, NULL, &tv);
+        if (selected > 0 && FD_ISSET(fd, &rfds)) {
+            ssize_t got = read(fd, buf, sizeof(buf) - 1);
+            if (got <= 0) {
+                close(fd);
+                teardown("CHANNEL_LOST");
+                return 72;
+            }
+            buf[got] = '\0';
+            if (strstr(buf, "CONTINUE")) {
+                close(fd);
+                puts("RESEARCH_STAGE_6_PAUSE_REASON=CONTINUE");
+                fflush(stdout);
+                return 0;
+            }
+            if (strstr(buf, "ABORT")) {
+                close(fd);
+                teardown("ABORT");
+                return 0;
+            }
+            close(fd);
+            teardown("CHANNEL_LOST");
+            return 72;
+        }
+        elapsed += 20;
+    }
+
+    close(fd);
+    if (term_seen) {
+        teardown("SIGTERM");
+        return 0;
+    }
+    teardown("TIMEOUT");
+    return 70;
+}
+
+static int emit_after_stage6(int stage) {
     puts("RESEARCH_STAGE_6_LOCAL_OFFER_READY");
     fflush(stdout);
-    if (stage == 6) return 0;
-    puts("RESEARCH_STAGE_7_BACKEND_P2P_ALLOCATED");
-    fflush(stdout);
-    if (stage == 7) return 0;
     puts("RESEARCH_STAGE_8_REMOTE_SDP_APPLIED");
     fflush(stdout);
     if (stage == 8) return 0;
@@ -53,7 +146,13 @@ int main(void) {
 
     printf("RESEARCH_STOP_AFTER_STAGE=%d\n", stage);
     fflush(stdout);
-    emit_until_stage(stage);
+    if (stage == 6 || stage == 7) {
+        int gate_rc = wait_stage6_gate(hold_ms);
+        if (gate_rc != 0 || stage == 6) return gate_rc;
+    } else {
+        emit_after_stage6(stage);
+    }
+
     puts("RESEARCH_HOLD_ENTERED=true");
     puts("SELF_ACTIVATION_SENT=false");
     puts("RTPC_OPENED=false");
@@ -68,12 +167,6 @@ int main(void) {
     for (int elapsed = 0; elapsed < hold_ms && !term_seen; elapsed += 20)
         usleep(20000);
 
-    puts("RESEARCH_TEARDOWN_BEGIN=true");
-    puts(term_seen ? "RESEARCH_TEARDOWN_REASON=sigterm" : "RESEARCH_TEARDOWN_REASON=timeout");
-    puts("RESEARCH_TEMP_SECRET_REMOVED=true");
-    puts("RESEARCH_CHILD_PROCESSES_LEFT=0");
-    puts("RESEARCH_SOCKETS_CLOSED=true");
-    puts("RESEARCH_TEARDOWN_DONE=true");
-    fflush(stdout);
+    teardown(term_seen ? "SIGTERM" : "TIMEOUT");
     return 0;
 }

@@ -7,6 +7,10 @@ an opt-in research stop gate controlled only by environment variables:
     RESEARCH_STOP_AFTER_STAGE=6|7|8|9|10|11|12
     RESEARCH_HOLD_MS=3000..5000
 
+Stage 7 is intentionally runner-owned. The native helper exposes only a
+resumable stage-6 pause gate; the runner performs any cloud allocation and then
+aborts before a remote SDP can be applied.
+
 Default is disabled.  With the variable unset the generated text is byte-for-
 byte identical to the production generator output for the same inputs.
 """
@@ -35,6 +39,10 @@ def _replace_once(source: str, old: str, new: str, label: str) -> str:
 
 _HELPERS = r'''
 /* === RESEARCH_STAGE_INTERLOCK_BEGIN === */
+#include <fcntl.h>
+#include <sys/select.h>
+#include <unistd.h>
+
 #define RESEARCH_STAGE_INTERLOCK_DEFAULT_HOLD_MS 4000u
 #define RESEARCH_STAGE_INTERLOCK_MAX_HOLD_MS 5000u
 
@@ -136,6 +144,85 @@ static gboolean research_hold_stop_check_cb(gpointer data)
     return G_SOURCE_CONTINUE;
 }
 
+static gboolean research_stage6_control_action(const char *control_path, char *out, size_t out_len)
+{
+    int fd;
+    fd_set rfds;
+    struct timeval tv;
+    ssize_t got;
+
+    if (!control_path || !*control_path)
+        return FALSE;
+
+    fd = open(control_path, O_RDONLY | O_NONBLOCK);
+    if (fd < 0)
+        return FALSE;
+
+    tv.tv_sec = research_hold_ms / 1000u;
+    tv.tv_usec = (research_hold_ms % 1000u) * 1000u;
+    FD_ZERO(&rfds);
+    FD_SET(fd, &rfds);
+    errno = 0;
+    if (select(fd + 1, &rfds, NULL, NULL, &tv) <= 0) {
+        close(fd);
+        g_strlcpy(out, errno == EINTR ? "SIGTERM" : "TIMEOUT", out_len);
+        return TRUE;
+    }
+
+    got = read(fd, out, out_len - 1u);
+    if (got <= 0) {
+        close(fd);
+        g_strlcpy(out, "CHANNEL_LOST", out_len);
+        return TRUE;
+    }
+
+    out[got] = '\0';
+    close(fd);
+    if (g_strrstr(out, "CONTINUE")) {
+        g_strlcpy(out, "CONTINUE", out_len);
+        return TRUE;
+    }
+    if (g_strrstr(out, "ABORT")) {
+        g_strlcpy(out, "ABORT", out_len);
+        return TRUE;
+    }
+    g_strlcpy(out, "CHANNEL_LOST", out_len);
+    return TRUE;
+}
+
+static gboolean research_enter_stage6_pause_gate(const char *marker)
+{
+    const char *control_path = getenv("RESEARCH_STAGE6_CONTROL_PATH");
+    char action[64] = {0};
+
+    if (!(research_stop_after_stage == 6 || research_stop_after_stage == 7))
+        return FALSE;
+
+    printf("%s\n", marker);
+    printf("RESEARCH_STAGE_6_PAUSE_ENTERED=true\n");
+    printf("RESEARCH_STOP_AFTER_STAGE=%d\n", research_stop_after_stage);
+    printf("RESEARCH_HOLD_MS=%u\n", research_hold_ms);
+    research_print_negative_markers();
+    fflush(stdout);
+
+    if (!research_stage6_control_action(control_path, action, sizeof(action)))
+        g_strlcpy(action, "CHANNEL_LOST", sizeof(action));
+
+    printf("RESEARCH_STAGE_6_PAUSE_REASON=%s\n", action);
+    fflush(stdout);
+
+    if (g_strcmp0(action, "CONTINUE") == 0)
+        return FALSE;
+
+    research_teardown_begin(action);
+    printf("RESEARCH_TEARDOWN_DONE=true\n");
+    fflush(stdout);
+    failed = (g_strcmp0(action, "ABORT") == 0) ? FALSE : TRUE;
+    if (loop)
+        g_main_loop_quit(loop);
+    return TRUE;
+}
+
 static gboolean research_enter_hold(int stage, const char *marker)
 {
     if (research_stop_after_stage != stage)
@@ -221,7 +308,7 @@ def _inject_interlock(candidate: str) -> str:
         candidate,
         "    ready = TRUE;\n\n    g_free(sdp);\n",
         (
-            '    if (research_enter_hold(6, "RESEARCH_STAGE_6_LOCAL_OFFER_READY"))\n'
+            '    if (research_enter_stage6_pause_gate("RESEARCH_STAGE_6_LOCAL_OFFER_READY"))\n'
             "        return;\n\n"
             "    ready = TRUE;\n\n    g_free(sdp);\n"
         ),
