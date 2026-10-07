@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
+import sys
 from typing import Iterable
 
 
@@ -137,6 +138,78 @@ def observe_lines(lines: Iterable[str]) -> dict[str, str]:
     return out
 
 
+def parse_key_value_lines(lines: Iterable[str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for raw in lines:
+        line = raw.strip()
+        if not line or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if re.fullmatch(r"[A-Z0-9_]+", key):
+            out[key] = value
+    return out
+
+
+def read_key_value_capture(path: Path | None) -> dict[str, str]:
+    if path is None:
+        return {}
+    if str(path) == "-":
+        return parse_key_value_lines(sys.stdin)
+    return parse_key_value_lines(path.read_text(encoding="utf-8").splitlines())
+
+
+def _readable_identity(value: str | None) -> bool:
+    return bool(value and value not in {"UNKNOWN", "NOT_OBSERVABLE", "NONE"})
+
+
+def identity_observation(capture: dict[str, str]) -> dict[str, str]:
+    if not capture:
+        return {}
+    generation = capture.get("LISTENER_PROCESS_GENERATION", "")
+    fingerprint = capture.get("LISTENER_SOCKET_FINGERPRINT_SHA256", "")
+    ready = capture.get("LISTENER_READY", "UNKNOWN") or "UNKNOWN"
+    missing: list[str] = []
+    if not _readable_identity(ready):
+        missing.append("listener readiness")
+    if not _readable_identity(generation):
+        missing.append("listener process generation")
+    if not _readable_identity(fingerprint):
+        missing.append("listener socket fingerprint")
+    return {
+        "LISTENER_READY": ready,
+        "LISTENER_PROCESS_GENERATION": generation or "NOT_OBSERVABLE",
+        "LISTENER_SOCKET_FINGERPRINT": fingerprint or "NOT_OBSERVABLE",
+        "LISTENER_PID_OBSERVABLE": "true" if _readable_identity(capture.get("LISTENER_PID")) else "false",
+        "LISTENER_PROCESS_GENERATION_OBSERVABLE": "true" if _readable_identity(generation) else "false",
+        "LISTENER_SOCKET_IDENTITY_OBSERVABLE": "true" if _readable_identity(fingerprint) else "false",
+        "CONFLICT_DETECTION_SUFFICIENT": "true" if not missing else "false",
+        "MISSING_CAPABILITY": ", ".join(missing) if missing else "NONE",
+    }
+
+
+def compare_identity_captures(before: dict[str, str], after: dict[str, str]) -> dict[str, str]:
+    before_obs = identity_observation(before)
+    after_obs = identity_observation(after)
+    out = dict(after_obs)
+    before_generation = before.get("LISTENER_PROCESS_GENERATION", "")
+    after_generation = after.get("LISTENER_PROCESS_GENERATION", "")
+    before_socket = before.get("LISTENER_SOCKET_FINGERPRINT_SHA256", "")
+    after_socket = after.get("LISTENER_SOCKET_FINGERPRINT_SHA256", "")
+    generation_readable = _readable_identity(before_generation) and _readable_identity(after_generation)
+    socket_readable = _readable_identity(before_socket) and _readable_identity(after_socket)
+    generation_changed = generation_readable and before_generation != after_generation
+    socket_changed = socket_readable and before_socket != after_socket
+    ready_recovered = before.get("LISTENER_READY") == "false" and after.get("LISTENER_READY") == "true"
+    out.update(
+        {
+            "PROCESS_GENERATION_CHANGED": "true" if generation_changed else "false" if generation_readable else "UNKNOWN",
+            "SOCKET_FINGERPRINT_CHANGED": "true" if socket_changed else "false" if socket_readable else "UNKNOWN",
+            "LISTENER_RECOVERY_OBSERVED": "true" if ready_recovered or generation_changed or socket_changed else "false",
+        }
+    )
+    return out
+
+
 def sample(path: Path) -> dict[str, str]:
     if path.suffix == ".json":
         obj = json.loads(path.read_text(encoding="utf-8"))
@@ -155,11 +228,22 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--log-file", type=Path)
     parser.add_argument("--status-json", type=Path, help="compatibility alias for fixture input")
+    parser.add_argument("--identity-file", type=Path, help="KEY=VALUE output from readonly-listener-identity, or '-' for stdin")
+    parser.add_argument("--identity-before", type=Path, help="first KEY=VALUE listener identity capture")
+    parser.add_argument("--identity-after", type=Path, help="second KEY=VALUE listener identity capture")
     args = parser.parse_args(argv)
     path = args.log_file or args.status_json
-    if path is None:
-        parser.error("--log-file is required")
-    for key, value in sample(path).items():
+    if (args.identity_before is None) != (args.identity_after is None):
+        parser.error("--identity-before and --identity-after must be supplied together")
+    if args.identity_before and args.identity_after:
+        out = compare_identity_captures(read_key_value_capture(args.identity_before), read_key_value_capture(args.identity_after))
+    elif args.identity_file:
+        out = identity_observation(read_key_value_capture(args.identity_file))
+    elif path is not None:
+        out = sample(path)
+    else:
+        parser.error("--log-file or --identity-file is required")
+    for key, value in out.items():
         print(f"{key}={value}")
     return 0
 

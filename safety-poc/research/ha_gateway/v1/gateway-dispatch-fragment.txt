@@ -1,0 +1,22 @@
+Place this branch inside the existing case "${SSH_ORIGINAL_COMMAND:-}" dispatch,
+before the COMELIT_HA_GATEWAY=DENY fallback:
+
+    readonly-listener-identity)
+        exec /config/tools/comelit-listener-identity.sh
+        ;;
+
+Contract:
+- takes zero user arguments; no caller-controlled positional values are passed
+  to the helper
+- read-only helper only; it does not deploy, restart, reload, POST, connect, or
+  call Home Assistant services
+- listener identity is decided inside the helper from production source-derived
+  executable identity: custom_components/comelit/runtime.py:41 launches
+  native/comelit-v4 for the persistent listener; media_transport.py:59 launches
+  native/comelit-media for media/Mini App and is explicitly excluded
+- a patched SSH forced-command script should take effect on the next SSH
+  session with no Home Assistant restart; only if the gateway were implemented
+  as a long-running service would an SSH add-on restart potentially be needed,
+  and that service model is UNPROVEN here
+- existing branches such as status, check, logs, logs-follow, deploy <sha>,
+  rollback, and restart USER_APPROVED are not modified by this addition
