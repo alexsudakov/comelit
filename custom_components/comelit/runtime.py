@@ -483,6 +483,7 @@ class ComelitRingRuntime:
         self._r64_pseudotcp_closed_after_open = False
         self._last_native_exit_code: int | None = None
         self._last_native_failure_markers: list[str] = []
+        self._last_attached_stop_failure_stage: str | None = None
         self._ring_media: RingMediaCoordinator | None = None
         self._synthetic_ring_media: RingMediaCoordinator | None = None
         self._media_diagnostics = MediaCallDiagnostics()
@@ -579,6 +580,9 @@ class ComelitRingRuntime:
             "last_native_exit_code": self._last_native_exit_code,
             "last_native_failure_markers": list(
                 self._last_native_failure_markers
+            ),
+            "last_attached_stop_failure_stage": (
+                getattr(self, "_last_attached_stop_failure_stage", None)
             ),
             "post_call_observability": {
                 "transport_state": self._derive_post_call_transport_state(),
@@ -736,6 +740,10 @@ class ComelitRingRuntime:
         self._native_marker_tail.append(f"{key}={safe_value}")
         if len(self._native_marker_tail) > _NATIVE_MARKER_TAIL_LIMIT:
             del self._native_marker_tail[:-_NATIVE_MARKER_TAIL_LIMIT]
+        if key == "R58_STOP_FAILURE_STAGE":
+            self._last_attached_stop_failure_stage = (
+                safe_value if safe_value in _R58_STOP_FAILURE_STAGES else None
+            )
 
     def _safe_native_marker_value(self, key: str, value: str) -> str | None:
         vocabulary = _P116_MARKER_VOCABULARIES.get(key)
@@ -992,6 +1000,24 @@ class ComelitRingRuntime:
         self._last_native_exit_code = returncode
         self._last_native_failure_markers = list(self._native_marker_tail)
 
+    async def _async_stop_native_process(
+        self,
+        process: asyncio.subprocess.Process,
+    ) -> bool:
+        if process.returncode is not None:
+            return True
+        await self._hass.async_add_executor_job(_touch_stop)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except TimeoutError:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=3)
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+        return process.returncode is not None
+
     async def async_start(self) -> None:
         if self.running:
             return
@@ -1011,6 +1037,7 @@ class ComelitRingRuntime:
         self._r64_terminal_snapshot = {}
         self._r64_pseudotcp_closed_before_open = False
         self._r64_pseudotcp_closed_after_open = False
+        self._last_attached_stop_failure_stage = None
         self._last_ring_event = None
         self._last_error = None
         self._media_diagnostics.reset()
@@ -1134,16 +1161,10 @@ class ComelitRingRuntime:
         self._stopping = True
         process = self._process
         if process is not None and process.returncode is None:
-            try:
-                await self._hass.async_add_executor_job(_touch_stop)
-                await asyncio.wait_for(process.wait(), timeout=5)
-            except TimeoutError:
-                process.terminate()
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=3)
-                except TimeoutError:
-                    process.kill()
-                    await process.wait()
+            stopped = await self._async_stop_native_process(process)
+            if not stopped:
+                self._last_native_failure_markers = list(self._native_marker_tail)
+                raise ComelitRingRuntimeError("runtime_stop_not_confirmed")
 
         task = self._task
         if task is not None and not task.done():
@@ -1190,9 +1211,6 @@ class ComelitRingRuntime:
             raise ComelitRingRuntimeError("unsupported_door")
 
         async with self._door_lock:
-            if not self.running:
-                await self.async_start()
-
             if not await self.async_wait_ready(timeout=30):
                 result = {
                     "operation_id": None,
@@ -1487,12 +1505,10 @@ class ComelitRingRuntime:
                 raise ComelitRingRuntimeError(f"native_exit:{rc}")
         finally:
             if process.returncode is None:
-                await self._hass.async_add_executor_job(_touch_stop)
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=5)
-                except TimeoutError:
-                    process.terminate()
-                    await process.wait()
+                stopped = await self._async_stop_native_process(process)
+                if not stopped:
+                    self._last_native_failure_markers = list(self._native_marker_tail)
+                    raise ComelitRingRuntimeError("runtime_stop_not_confirmed")
             if not reader_task.done():
                 reader_task.cancel()
                 try:

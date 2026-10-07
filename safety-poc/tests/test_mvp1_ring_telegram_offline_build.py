@@ -211,9 +211,10 @@ class Mvp1RingTelegramOfflineBuildTests(unittest.TestCase):
             class_node(self.button_text, "ComelitEntranceDoorButton"),
         )
 
-        self.assertIn("runtime.async_open_door(", handle)
+        self.assertIn("supervisor.async_open_entrance_door(", handle)
+        self.assertIn("supervisor.async_open_gate_door(", handle)
         self.assertIn("event_id=", handle)
-        self.assertIn("self._runtime.async_open_door(DOOR_ENTRANCE)", entrance_button)
+        self.assertIn("self._supervisor.async_open_entrance_door(", entrance_button)
         self.assertNotIn("async_fire(EVENT_DOOR_OPERATION", self.init_text)
         self.assertNotIn("async_fire(EVENT_DOOR_OPERATION", self.button_text)
         self._gate("DOOR_OPERATION_EVENT_FROM_SERVICE_AND_BUTTON_SHARED_PATH=PASS")
@@ -245,7 +246,7 @@ class Mvp1RingTelegramOfflineBuildTests(unittest.TestCase):
         )
         self.assertIn("- gate", self.services_text)
         self.assertIn("raise HomeAssistantError", gate_button)
-        self.assertIn("async_open_door(DOOR_GATE", gate_button)
+        self.assertIn("async_open_gate_door", gate_button)
         self.assertIn('"automatic_retry_allowed": False', gate_button)
         self.assertIn('"physical_effect_asserted": False', gate_button)
         self._gate("GATE_ACTUATION_VALIDATED_ONE_SHOT=PASS")

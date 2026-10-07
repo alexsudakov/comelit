@@ -471,7 +471,7 @@ class ComelitEntranceMediaTransport:
                 "command_accepted": False,
                 "queued": False,
                 "sent": False,
-                "write_count": 0,
+                "write_count": None,
                 "ack_observed": False,
                 "relay_event_observed": False,
                 "existing_ctpp_reused": False,
@@ -512,7 +512,13 @@ class ComelitEntranceMediaTransport:
                     self._door_result_future = None
 
             diagnostics = dict(self._door_diagnostics)
-            write_count = int(diagnostics.get("write_count", 0) or 0)
+            diagnostic_write_count = diagnostics.get("write_count")
+            write_count = (
+                diagnostic_write_count
+                if isinstance(diagnostic_write_count, int)
+                and not isinstance(diagnostic_write_count, bool)
+                else None
+            )
             one_shot_sent = bool(
                 diagnostics.get("sent") is True and write_count == 1
             )
@@ -1163,7 +1169,7 @@ class ComelitEntranceMediaTransport:
                     elif key == "P122_ONDEMAND_DOOR_SENT":
                         self._door_diagnostics["sent"] = value == "true"
                     elif key == "P122_ONDEMAND_DOOR_WRITE_COUNT" and value.isdigit():
-                        self._door_diagnostics["write_count"] = min(int(value), 1)
+                        self._door_diagnostics["write_count"] = int(value)
                     elif key == "P122_ONDEMAND_DOOR_ACK_OBSERVED":
                         self._door_diagnostics["ack_observed"] = value == "true"
                     elif key == "P122_ONDEMAND_DOOR_RELAY_EVENT_OBSERVED":

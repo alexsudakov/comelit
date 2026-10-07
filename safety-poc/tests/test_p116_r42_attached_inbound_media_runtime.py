@@ -398,7 +398,7 @@ class P116R42AttachedInboundMediaRuntimeTests(unittest.TestCase):
 
     def test_door_service_stays_available_during_attached_media(self) -> None:
         self.assertIn(
-            "if supervisor.media_paused:",
+            "supervisor.async_open_entrance_door(",
             self.init_source,
         )
         self.assertNotIn(
@@ -406,7 +406,7 @@ class P116R42AttachedInboundMediaRuntimeTests(unittest.TestCase):
             self.init_source,
         )
         self.assertIn(
-            "return await runtime.async_open_door(",
+            "supervisor.async_open_gate_door(",
             self.init_source,
         )
         self.assertIn(

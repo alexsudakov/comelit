@@ -160,7 +160,7 @@ class P115HaEntityMappingAndGateAvailabilityTests(unittest.TestCase):
             if isinstance(node, ast.AsyncFunctionDef) and node.name == "async_press"
         )
         self.assertTrue(any(isinstance(node, ast.Raise) for node in ast.walk(press)))
-        self.assertIn("async_open_door(DOOR_GATE)", self.button_text)
+        self.assertIn("async_open_gate_door", self.button_text)
         self.assertEqual(
             self.const.SUPPORTED_DOORS,
             (self.const.DOOR_ENTRANCE, self.const.DOOR_GATE),

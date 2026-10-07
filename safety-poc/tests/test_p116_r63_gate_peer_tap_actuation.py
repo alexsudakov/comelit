@@ -127,7 +127,7 @@ class P116R63GatePeerTapActuationTests(unittest.TestCase):
     def test_gate_button_uses_runtime_and_keeps_conservative_outcome(self) -> None:
         start = self.button_text.index("class ComelitGateDoorButton")
         gate = self.button_text[start:]
-        self.assertIn("await self._runtime.async_open_door(DOOR_GATE)", gate)
+        self.assertIn("await self._supervisor.async_open_gate_door()", gate)
         self.assertIn('"automatic_retry_allowed": False', gate)
         self.assertIn('"physical_effect_asserted": False', gate)
         self.assertIn('result.get("one_shot_sequence_sent") is True', gate)

@@ -43,6 +43,7 @@ from .const import (
     DATA_SUPERVISORS,
     DOMAIN,
     DOOR_ENTRANCE,
+    DOOR_GATE,
     EVENT_RING_INTERACTION,
     PLATFORMS,
     RING_INTERACTION_OUTCOMES,
@@ -128,30 +129,34 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         if supervisor is None:
             raise HomeAssistantError("Comelit runtime supervisor is unavailable")
         door = str(call.data[ATTR_DOOR])
-        if supervisor.media_paused:
+        event_id = call.data.get(ATTR_EVENT_ID)
+        if door == DOOR_ENTRANCE:
             media_transports = domain_data.get(DATA_MEDIA_TRANSPORTS, {})
             media_transport: ComelitEntranceMediaTransport | None = (
                 media_transports.get(entry_id)
             )
-            if (
-                door == DOOR_ENTRANCE
-                and media_transport is not None
-                and media_transport.active
-            ):
-                event_id = call.data.get(ATTR_EVENT_ID)
-                return await media_transport.async_open_door(
+            try:
+                return await supervisor.async_open_entrance_door(
+                    media_transport,
                     event_id=str(event_id) if event_id else None,
                 )
-            raise HomeAssistantError(
-                "Comelit Door is unavailable while the on-demand media "
-                "session owns the exclusive connection"
-            )
+            except RuntimeError as exc:
+                raise HomeAssistantError(
+                    "Comelit Door is unavailable while the on-demand media "
+                    "session owns the exclusive connection"
+                ) from exc
 
-        event_id = call.data.get(ATTR_EVENT_ID)
-        return await runtime.async_open_door(
-            door,
-            event_id=str(event_id) if event_id else None,
-        )
+        if door == DOOR_GATE:
+            try:
+                return await supervisor.async_open_gate_door(
+                    event_id=str(event_id) if event_id else None,
+                )
+            except RuntimeError as exc:
+                raise HomeAssistantError(
+                    "Comelit Door is unavailable while the on-demand media "
+                    "session owns the exclusive connection"
+                ) from exc
+        raise HomeAssistantError("Unsupported Comelit Door target")
 
     async def handle_emit_ring_interaction(call: ServiceCall) -> None:
         payload: dict[str, object] = {
@@ -269,6 +274,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         attached_transports[entry.entry_id] = attached_transport
 
         attached_session = ComelitAttachedRingMediaSession(attached_transport)
+        attached_session.set_stop_failure_recovery(
+            supervisor.async_recover_attached_media_stop_failure
+        )
         attached_sessions = domain_data.setdefault(DATA_ATTACHED_MEDIA_SESSIONS, {})
         attached_sessions[entry.entry_id] = attached_session
 

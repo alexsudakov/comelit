@@ -152,16 +152,15 @@ class ComelitEntranceDoorButton(ButtonEntity):
         self.async_write_ha_state()
 
     async def async_press(self) -> None:
-        if self._supervisor.media_paused:
-            transport = self._media_transport
-            if transport is None or not transport.active:
-                raise HomeAssistantError(
-                    "Comelit Door is unavailable because the on-demand "
-                    "media session is not active"
-                )
-            result = await transport.async_open_door()
-        else:
-            result = await self._runtime.async_open_door(DOOR_ENTRANCE)
+        try:
+            result = await self._supervisor.async_open_entrance_door(
+                self._media_transport,
+            )
+        except RuntimeError as exc:
+            raise HomeAssistantError(
+                "Comelit Door is unavailable because the on-demand media "
+                "session is not active"
+            ) from exc
         self._last_result = dict(result)
         self.async_write_ha_state()
         # A complete validated Door TX profile without a proven
@@ -255,13 +254,13 @@ class ComelitGateDoorButton(ButtonEntity):
         self.async_write_ha_state()
 
     async def async_press(self) -> None:
-        if self._supervisor.media_paused:
+        try:
+            result = await self._supervisor.async_open_gate_door()
+        except RuntimeError as exc:
             raise HomeAssistantError(
                 "Comelit Gate is temporarily unavailable while the intercom "
                 "media session owns the exclusive Comelit connection"
-            )
-
-        result = await self._runtime.async_open_door(DOOR_GATE)
+            ) from exc
         self._last_result = dict(result)
         self.async_write_ha_state()
 

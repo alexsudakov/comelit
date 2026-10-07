@@ -36,11 +36,12 @@ class P80MediaExclusivityStaticContractTests(unittest.TestCase):
         run = self.supervisor.split("async def _async_run", 1)[1]
         self.assertIn("not self._media_paused", run)
         self.assertIn("self._stopping or self._media_paused", run)
+        self.assertIn("async with self._lifecycle_lock:", run)
 
     def test_entrance_door_dispatches_only_to_active_media_owner_during_pause(self) -> None:
-        self.assertIn("if self._supervisor.media_paused:", self.button)
+        self.assertIn("async_open_entrance_door", self.button)
         self.assertIn("transport is not None and transport.active", self.button)
-        self.assertIn("result = await transport.async_open_door()", self.button)
+        self.assertIn("return await media_transport.async_open_door(event_id=event_id)", self.supervisor)
         self.assertIn('"ON_DEMAND_MEDIA_SINGLE"', self.button)
         self.assertIn(
             "self._supervisor.media_paused and not media_door_available",
@@ -48,10 +49,10 @@ class P80MediaExclusivityStaticContractTests(unittest.TestCase):
         )
 
     def test_direct_door_service_uses_active_media_owner_for_entrance_only(self) -> None:
-        self.assertIn("if supervisor.media_paused:", self.init)
+        self.assertIn("async_open_entrance_door", self.init)
         self.assertIn("door == DOOR_ENTRANCE", self.init)
-        self.assertIn("and media_transport.active", self.init)
-        self.assertIn("return await media_transport.async_open_door(", self.init)
+        self.assertIn("await supervisor.async_open_entrance_door(", self.init)
+        self.assertIn("return await media_transport.async_open_door(event_id=event_id)", self.supervisor)
         self.assertNotIn(
             "supervisor.media_paused or supervisor.attached_media_busy",
             self.init,
@@ -68,7 +69,8 @@ class P80MediaExclusivityStaticContractTests(unittest.TestCase):
     def test_gate_remains_fail_closed_during_media_pause(self) -> None:
         gate = self.button.split("class ComelitGateDoorButton", 1)[1]
         self.assertIn("media_paused=self._supervisor.media_paused", gate)
-        self.assertIn("if self._supervisor.media_paused:", gate)
+        self.assertIn("async_open_gate_door", gate)
+        self.assertIn('raise RuntimeError("media_owns_connection")', self.supervisor)
         self.assertNotIn("media_transport", gate)
 
     def test_listener_sensor_exposes_media_pause(self) -> None:

@@ -78,6 +78,15 @@ class ComelitListenerStatusSensor(SensorEntity):
             "last_native_failure_markers": status[
                 "last_native_failure_markers"
             ],
+            "last_attached_stop_failure_stage": status.get(
+                "last_attached_stop_failure_stage"
+            ),
+            "attached_stop_recovery_required": status.get(
+                "attached_stop_recovery_required"
+            ),
+            "last_attached_stop_recovery_error": status.get(
+                "last_attached_stop_recovery_error"
+            ),
             "cycle_duration_seconds": status["cycle_duration_seconds"],
         }
 

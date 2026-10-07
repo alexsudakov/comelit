@@ -166,7 +166,7 @@ class P116HaStreamRtpBridgeTests(unittest.TestCase):
     def test_t7_hard_limit_and_r63_gate_path_remains_bounded(self) -> None:
         self.assertIn("MEDIA_SESSION_HARD_LIMIT_SECONDS = 600", self.session)
         self.assertIn("- gate", self.services.lower())
-        self.assertIn("async_open_door(DOOR_GATE", self.button)
+        self.assertIn("async_open_gate_door", self.button)
         self.assertIn('"automatic_retry_allowed": False', self.button)
         self.assertIn('"physical_effect_asserted": False', self.button)
         self.assertIn('ENTRANCE_CAMERA_ENTITY_ID = "camera.comelit_entrance"', (COMPONENT / "const.py").read_text(encoding="utf-8"))
