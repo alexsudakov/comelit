@@ -976,6 +976,9 @@ async function main() {
         await createLiveViewer(page, ENTRANCE_ENTITY_ID);
         await page.waitForFunction(() => window.__hlsOpenCount === 1);
         await flush(page, 1);
+        await page.waitForFunction(
+          () => window.testViewer?._attachedViewerHeartbeatTimer !== null,
+        );
         const visibility = await page.evaluate(() => {
           Object.defineProperty(document, "visibilityState", {
             configurable: true,
