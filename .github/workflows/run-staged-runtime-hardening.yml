@@ -1,0 +1,70 @@
+name: run staged runtime hardening patch
+
+on:
+  push:
+    branches:
+      - fix/runtime-reliability-security-hardening
+
+permissions:
+  contents: write
+
+jobs:
+  apply-verify-push:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Extract staged patch, apply, test, and push code only
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git log -1 --format=%s | grep -Fq '[hardening-generated]'; then
+            echo 'Generated hardening commit already present; nothing to do.'
+            exit 0
+          fi
+
+          python3 - <<'PY'
+          from pathlib import Path
+          source = Path('.github/workflows/self-apply-runtime-hardening.yml').read_text(encoding='utf-8')
+          start_marker = "          python3 - <<'PY'\n"
+          end_marker = "\n          PY\n\n          git diff --check"
+          if source.count(start_marker) != 1 or source.count(end_marker) != 1:
+              raise SystemExit('staged patch markers are not unique')
+          body = source.split(start_marker, 1)[1].split(end_marker, 1)[0]
+          lines = []
+          for line in body.splitlines():
+              if line.startswith('          '):
+                  lines.append(line[10:])
+              else:
+                  # Two lines inside the raw regression-test literal were deliberately
+                  # less-indented than YAML permits. They are valid Python string data.
+                  lines.append(line)
+          Path('/tmp/apply_runtime_hardening.py').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+          compile(Path('/tmp/apply_runtime_hardening.py').read_text(encoding='utf-8'), '/tmp/apply_runtime_hardening.py', 'exec')
+          PY
+
+          python3 /tmp/apply_runtime_hardening.py
+          git diff --check
+          python3 -m compileall -q custom_components/comelit
+          (cd safety-poc && python3 scripts/static_safety_check.py)
+          node --check custom_components/comelit/frontend/comelit-card.js
+          python3 -m unittest safety-poc/tests/test_runtime_reliability_hardening.py -v
+          (cd safety-poc && PYTHONPATH="$PWD/src" PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v)
+          python3 -m pip install -q pytest cryptography
+          pytest -q tests/miniapp
+
+          test ! -e custom_components/comelit/test_control.py
+          ! grep -R "child_env = os.environ.copy()" -n custom_components/comelit
+          ! grep -R "async_register_test_control" -n custom_components/comelit
+
+          git config user.name "alexsudakov"
+          git config user.email "91778685+alexsudakov@users.noreply.github.com"
+          git add custom_components/comelit safety-poc/tests/test_runtime_reliability_hardening.py
+          git diff --cached --check
+          git commit -m "fix(runtime): harden listener lifecycle and production safety [hardening-generated]"
+          git push origin HEAD:fix/runtime-reliability-security-hardening
