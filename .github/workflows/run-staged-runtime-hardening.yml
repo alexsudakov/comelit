@@ -26,7 +26,7 @@ jobs:
         run: |
           if git log -1 --format=%s | grep -Fq '[hardening-generated]'; then
             echo 'present=true' >> "$GITHUB_OUTPUT"
-            echo 'Generated hardening commit already present; verification-only run.'
+            echo 'Generated hardening commit already present; nothing to apply.'
           else
             echo 'present=false' >> "$GITHUB_OUTPUT"
           fi
@@ -127,14 +127,15 @@ jobs:
           ! grep -R --exclude='*.pyc' --exclude-dir='__pycache__' "child_env = os.environ.copy()" -n custom_components/comelit
           ! grep -R --exclude='*.pyc' --exclude-dir='__pycache__' "async_register_test_control" -n custom_components/comelit
 
-      - name: Commit verified generated code
-        if: steps.generated.outputs.present != 'true'
+      - name: Commit generated code for diagnosis
+        if: always() && steps.generated.outputs.present != 'true'
         shell: bash
         run: |
           set -euo pipefail
+          find custom_components/comelit -type d -name __pycache__ -prune -exec rm -rf {} +
           git config user.name "alexsudakov"
           git config user.email "91778685+alexsudakov@users.noreply.github.com"
           git add custom_components/comelit safety-poc/tests/test_runtime_reliability_hardening.py
           git diff --cached --check
-          git commit -m "fix(runtime): harden listener lifecycle and production safety [hardening-generated]"
+          git commit -m "stage generated runtime hardening for diagnosis [hardening-generated]"
           git push origin HEAD:fix/runtime-reliability-security-hardening
