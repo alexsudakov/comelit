@@ -76,9 +76,12 @@ jobs:
           python3 -m pip install -q pytest cryptography
           pytest -q tests/miniapp
 
+          # compileall creates bytecode containing historical string literals;
+          # negative controls must inspect source, not generated pyc files.
+          find custom_components/comelit -type d -name __pycache__ -prune -exec rm -rf {} +
           test ! -e custom_components/comelit/test_control.py
-          ! grep -R "child_env = os.environ.copy()" -n custom_components/comelit
-          ! grep -R "async_register_test_control" -n custom_components/comelit
+          ! grep -R --exclude='*.pyc' --exclude-dir='__pycache__' "child_env = os.environ.copy()" -n custom_components/comelit
+          ! grep -R --exclude='*.pyc' --exclude-dir='__pycache__' "async_register_test_control" -n custom_components/comelit
 
           git config user.name "alexsudakov"
           git config user.email "91778685+alexsudakov@users.noreply.github.com"
