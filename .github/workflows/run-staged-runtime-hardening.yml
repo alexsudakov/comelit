@@ -41,14 +41,32 @@ jobs:
               if line.startswith('          '):
                   lines.append(line[10:])
               else:
-                  # Two lines inside the raw regression-test literal were deliberately
-                  # less-indented than YAML permits. They are valid Python string data.
                   lines.append(line)
           Path('/tmp/apply_runtime_hardening.py').write_text('\n'.join(lines) + '\n', encoding='utf-8')
           compile(Path('/tmp/apply_runtime_hardening.py').read_text(encoding='utf-8'), '/tmp/apply_runtime_hardening.py', 'exec')
           PY
 
           python3 /tmp/apply_runtime_hardening.py
+
+          # Correct the static Stream-provider regression test so it scopes the
+          # method search to HAStreamMediaProvider instead of matching a later
+          # class/method boundary in the whole module.
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('safety-poc/tests/test_runtime_reliability_hardening.py')
+          text = p.read_text(encoding='utf-8')
+          old = '        close = text[text.index("async def _async_close_unlocked"):text.index("async def async_record_mp4")]\n'
+          new = (
+              '        provider_start = text.index("class HAStreamMediaProvider:")\n'
+              '        close_start = text.index("async def _async_close_unlocked", provider_start)\n'
+              '        record_start = text.index("async def async_record_mp4", close_start)\n'
+              '        close = text[close_start:record_start]\n'
+          )
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one stream-test scope line, found {text.count(old)}')
+          p.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+
           git diff --check
           python3 -m compileall -q custom_components/comelit
           (cd safety-poc && python3 scripts/static_safety_check.py)
