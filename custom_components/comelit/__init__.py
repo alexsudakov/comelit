@@ -58,7 +58,6 @@ from .oauth import ComelitOAuthManager
 from .ring_media import HAStreamMediaProvider, RingMediaCoordinator
 from .runtime import ComelitRingRuntime
 from .supervisor import ComelitRuntimeSupervisor
-from .test_control import async_register_test_control, async_unregister_test_control
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -330,10 +329,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         synthetic_lifecycles[entry.entry_id] = synthetic_ring_media
         runtime.set_synthetic_ring_media_coordinator(synthetic_ring_media)
 
-        # Transitional validation endpoint remains available, but normal
-        # operation no longer depends on CT120/Hermes: the supervisor starts
-        # with the config entry and reconnects entirely inside Home Assistant.
-        async_register_test_control(hass, runtime, supervisor)
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
         await supervisor.async_start()
 
@@ -355,74 +350,113 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     attached_transports = domain_data.get(DATA_ATTACHED_MEDIA_TRANSPORTS, {})
     ring_media_lifecycles = domain_data.get(DATA_RING_MEDIA, {})
     synthetic_lifecycles = domain_data.get(DATA_SYNTHETIC_RING_MEDIA, {})
+
+    runtime = runtimes.get(entry.entry_id)
+    supervisor = supervisors.get(entry.entry_id)
+    media_manager = media_sessions.get(entry.entry_id)
+    media_transport = media_transports.get(entry.entry_id)
+    media_provider = media_providers.get(entry.entry_id)
+    attached_session = attached_sessions.get(entry.entry_id)
+    attached_provider = attached_providers.get(entry.entry_id)
+    miniapp_attached_provider = miniapp_attached_providers.get(entry.entry_id)
+    ring_media = ring_media_lifecycles.get(entry.entry_id)
+    synthetic_ring_media = synthetic_lifecycles.get(entry.entry_id)
+
+    if runtime is None:
+        return True
+
+    unloaded = True
+
+    async def attempt(label: str, awaitable: object) -> None:
+        nonlocal unloaded
+        try:
+            await awaitable  # type: ignore[misc]
+        except Exception:
+            unloaded = False
+            _LOGGER.exception("Failed to %s during Comelit unload", label)
+
+    # Tear down every independently owned media surface even when an earlier
+    # one fails. Do not remove objects from hass.data until the whole teardown
+    # and platform unload have succeeded.
+    if ring_media is not None:
+        await attempt("shut down Ring media", ring_media.async_shutdown())
+    if synthetic_ring_media is not None:
+        await attempt(
+            "shut down synthetic Ring media",
+            synthetic_ring_media.async_shutdown(),
+        )
+    if attached_session is not None:
+        await attempt("shut down attached media", attached_session.async_shutdown())
+    if media_manager is not None:
+        await attempt("shut down on-demand media", media_manager.async_shutdown())
+    elif media_transport is not None:
+        await attempt("stop on-demand media transport", media_transport.async_stop())
+
+    for label, provider in (
+        ("dispose on-demand HA Stream", media_provider),
+        ("dispose attached HA Stream", attached_provider),
+        ("dispose Mini App attached HA Stream", miniapp_attached_provider),
+    ):
+        if provider is not None:
+            dispose = getattr(provider, "async_dispose", None)
+            if callable(dispose):
+                await attempt(label, dispose())
+
+    if supervisor is not None:
+        await attempt("stop runtime supervisor", supervisor.async_stop())
+    else:
+        await attempt("stop runtime", runtime.async_stop())
+
+    if not unloaded:
+        return False
+
+    try:
+        platforms_unloaded = await hass.config_entries.async_unload_platforms(
+            entry, PLATFORMS
+        )
+    except Exception:
+        _LOGGER.exception("Failed to unload Comelit platforms")
+        return False
+    if not platforms_unloaded:
+        return False
+
     miniapp: ComelitMiniAppController | None = domain_data.get(DATA_MINIAPP)
     if miniapp is not None:
         miniapp.clear_entry(entry)
 
-    runtime = runtimes.pop(entry.entry_id, None)
-    supervisor = supervisors.pop(entry.entry_id, None)
-    media_manager = media_sessions.pop(entry.entry_id, None)
-    media_transport = media_transports.pop(entry.entry_id, None)
+    runtimes.pop(entry.entry_id, None)
+    supervisors.pop(entry.entry_id, None)
+    media_sessions.pop(entry.entry_id, None)
+    media_transports.pop(entry.entry_id, None)
     media_providers.pop(entry.entry_id, None)
-    attached_session = attached_sessions.pop(entry.entry_id, None)
+    attached_sessions.pop(entry.entry_id, None)
     attached_providers.pop(entry.entry_id, None)
     miniapp_attached_providers.pop(entry.entry_id, None)
     attached_transports.pop(entry.entry_id, None)
-    ring_media = ring_media_lifecycles.pop(entry.entry_id, None)
-    synthetic_ring_media = synthetic_lifecycles.pop(entry.entry_id, None)
+    ring_media_lifecycles.pop(entry.entry_id, None)
+    synthetic_lifecycles.pop(entry.entry_id, None)
+    domain_data.pop(entry.entry_id, None)
 
-    unloaded = True
-    if runtime is not None:
-        async_unregister_test_control(hass)
-
-        # Tear down media first without resuming the listener; then stop the
-        # supervisor. This avoids creating a short-lived replacement listener
-        # during config-entry unload.
-        try:
-            if ring_media is not None:
-                await ring_media.async_shutdown()
-            if synthetic_ring_media is not None:
-                await synthetic_ring_media.async_shutdown()
-            if attached_session is not None:
-                await attached_session.async_shutdown()
-            if media_manager is not None:
-                await media_manager.async_shutdown()
-            elif media_transport is not None:
-                await media_transport.async_stop()
-        except Exception:
-            _LOGGER.exception("Failed to shut down Comelit media during unload")
-            unloaded = False
-
-        if supervisor is not None:
-            await supervisor.async_stop()
-        else:
-            await runtime.async_stop()
-
-        platforms_unloaded = await hass.config_entries.async_unload_platforms(
-            entry, PLATFORMS
-        )
-        unloaded = unloaded and platforms_unloaded
-
-    if unloaded:
-        domain_data.pop(entry.entry_id, None)
-        if not runtimes:
-            domain_data.pop(DATA_RUNTIMES, None)
-        if not supervisors:
-            domain_data.pop(DATA_SUPERVISORS, None)
-        if not media_sessions:
-            domain_data.pop(DATA_MEDIA_SESSIONS, None)
-        if not media_transports:
-            domain_data.pop(DATA_MEDIA_TRANSPORTS, None)
-        if not media_providers:
-            domain_data.pop(DATA_MEDIA_PROVIDERS, None)
-        if not attached_sessions:
-            domain_data.pop(DATA_ATTACHED_MEDIA_SESSIONS, None)
-        if not attached_transports:
-            domain_data.pop(DATA_ATTACHED_MEDIA_TRANSPORTS, None)
-        if not attached_providers:
-            domain_data.pop(DATA_ATTACHED_MEDIA_PROVIDERS, None)
-        if not ring_media_lifecycles:
-            domain_data.pop(DATA_RING_MEDIA, None)
-        if not synthetic_lifecycles:
-            domain_data.pop(DATA_SYNTHETIC_RING_MEDIA, None)
-    return unloaded
+    if not runtimes:
+        domain_data.pop(DATA_RUNTIMES, None)
+    if not supervisors:
+        domain_data.pop(DATA_SUPERVISORS, None)
+    if not media_sessions:
+        domain_data.pop(DATA_MEDIA_SESSIONS, None)
+    if not media_transports:
+        domain_data.pop(DATA_MEDIA_TRANSPORTS, None)
+    if not media_providers:
+        domain_data.pop(DATA_MEDIA_PROVIDERS, None)
+    if not attached_sessions:
+        domain_data.pop(DATA_ATTACHED_MEDIA_SESSIONS, None)
+    if not attached_transports:
+        domain_data.pop(DATA_ATTACHED_MEDIA_TRANSPORTS, None)
+    if not attached_providers:
+        domain_data.pop(DATA_ATTACHED_MEDIA_PROVIDERS, None)
+    if not miniapp_attached_providers:
+        domain_data.pop(DATA_MINIAPP_ATTACHED_MEDIA_PROVIDERS, None)
+    if not ring_media_lifecycles:
+        domain_data.pop(DATA_RING_MEDIA, None)
+    if not synthetic_lifecycles:
+        domain_data.pop(DATA_SYNTHETIC_RING_MEDIA, None)
+    return True

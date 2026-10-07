@@ -6,6 +6,7 @@ import hashlib
 import logging
 import os
 from pathlib import Path
+import platform
 import re
 import signal
 from uuid import uuid4
@@ -75,6 +76,8 @@ MEDIA_VIDEO_MINIAPP_RTP_PORT = 18099
 MEDIA_AUDIO_RTP_PORT = 17808
 
 _HEX32_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
+_NATIVE_ENV_PASSTHROUGH = frozenset({"HOME", "LANG", "LC_ALL", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR"})
+_SUPPORTED_NATIVE_ARCHITECTURES = frozenset({"x86_64", "amd64"})
 _MEDIA_NATIVE_MARKER_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,79}$")
 _MEDIA_NATIVE_MARKER_SAFE_VALUE_RE = re.compile(
     r"^(?:PASS|FAIL|true|false|READY|OPEN|CLOSED|ACTIVE_MEDIA_SINGLE|"
@@ -365,7 +368,24 @@ def _native_binary_identity_diagnostics() -> dict[str, object]:
     return dict(diagnostics)
 
 
+def _native_child_env() -> dict[str, str]:
+    env = {
+        "LD_LIBRARY_PATH": str(_NATIVE_LIB),
+        "PATH": os.environ.get(
+            "PATH",
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        ),
+    }
+    for key in _NATIVE_ENV_PASSTHROUGH:
+        value = os.environ.get(key)
+        if value:
+            env[key] = value
+    return env
+
+
 def _native_gate() -> None:
+    if platform.machine().lower() not in _SUPPORTED_NATIVE_ARCHITECTURES:
+        raise ComelitMediaTransportError("unsupported_native_architecture")
     if not _MEDIA_NATIVE_BINARY.is_file():
         raise ComelitMediaTransportError("media_native_binary_missing")
     try:
@@ -1032,8 +1052,7 @@ class ComelitEntranceMediaTransport:
         await self._async_start_video_recovery_shim()
         await self._hass.async_add_executor_job(_prepare_helper_secret, self._vip_token)
 
-        child_env = os.environ.copy()
-        child_env["LD_LIBRARY_PATH"] = str(_NATIVE_LIB)
+        child_env = _native_child_env()
         process = await asyncio.create_subprocess_exec(
             str(_MEDIA_NATIVE_BINARY),
             stdout=asyncio.subprocess.PIPE,
@@ -1116,10 +1135,53 @@ class ComelitEntranceMediaTransport:
             if self.local_sdp_ready:
                 self._local_sdp_ready_event.set()
 
-            rc = await process.wait()
+            process_completion = asyncio.create_task(
+                process.wait(),
+                name="wait Comelit media helper",
+            )
             reader = self._reader_task
-            if reader is not None:
-                await reader
+            if reader is None:
+                raise ComelitMediaTransportError("media_native_reader_missing")
+            done, _ = await asyncio.wait(
+                {process_completion, reader},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if reader in done and process_completion not in done:
+                reader_error = reader.exception()
+                if reader_error is not None:
+                    raise ComelitMediaTransportError(
+                        f"media_native_reader_failed:{type(reader_error).__name__}"
+                    ) from reader_error
+                try:
+                    rc = await asyncio.wait_for(
+                        asyncio.shield(process_completion),
+                        timeout=0.5,
+                    )
+                except TimeoutError as exc:
+                    raise ComelitMediaTransportError(
+                        "media_native_reader_stopped"
+                    ) from exc
+            else:
+                rc = await process_completion
+            try:
+                await asyncio.wait_for(asyncio.shield(reader), timeout=2.0)
+            except TimeoutError as exc:
+                raise ComelitMediaTransportError(
+                    "media_native_reader_stuck_after_exit"
+                ) from exc
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if rc == 0:
+                    raise ComelitMediaTransportError(
+                        f"media_native_reader_failed:{type(exc).__name__}"
+                    ) from exc
+                _LOGGER.warning(
+                    "Comelit media output reader failed while native exited; "
+                    "reader_failure=%s rc=%s",
+                    type(exc).__name__,
+                    rc,
+                )
             if self._stopping:
                 self._emit_native_success_summary()
             if not self._stopping:

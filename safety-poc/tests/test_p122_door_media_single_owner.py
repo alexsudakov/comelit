@@ -470,7 +470,9 @@ class DoorMediaSingleOwnerContracts(unittest.TestCase):
 
     def test_reconnect_cannot_start_on_top_of_in_flight_door(self) -> None:
         module = _load_supervisor_module()
-        module.RECONNECT_DELAY_SECONDS = 0
+        module.RECONNECT_INITIAL_DELAY_SECONDS = 0
+        module.RECONNECT_MAX_DELAY_SECONDS = 0
+        module.RECONNECT_NORMAL_DELAY_SECONDS = 0
         module.POLL_INTERVAL_SECONDS = 0
         events: list[str] = []
         meter = OwnerMeter()

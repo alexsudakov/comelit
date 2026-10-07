@@ -50,8 +50,8 @@ class P80HaMediaEntityWiringTests(unittest.TestCase):
         self.assertIn("attached_providers[entry.entry_id] = ring_media_provider", self.init)
 
     def test_unload_stops_media_before_supervisor_without_listener_resume(self) -> None:
-        shutdown = self.init.index("await media_manager.async_shutdown()")
-        supervisor_stop = self.init.index("await supervisor.async_stop()", shutdown)
+        shutdown = self.init.index("media_manager.async_shutdown()")
+        supervisor_stop = self.init.index("supervisor.async_stop()", shutdown)
         self.assertLess(shutdown, supervisor_stop)
         shutdown_method = self.session.split("async def async_shutdown", 1)[1].split(
             "async def _async_expire_after_deadline", 1
@@ -172,7 +172,7 @@ class P80HaMediaEntityWiringTests(unittest.TestCase):
         self.assertNotIn("should_poll = True", self.camera)
 
     def test_stream_dependency_is_explicit(self) -> None:
-        self.assertIn("webhook", self.manifest["dependencies"])
+        self.assertNotIn("webhook", self.manifest["dependencies"])
         self.assertIn("stream", self.manifest["dependencies"])
 
     def test_hard_limit_and_no_hidden_retry_remain_explicit(self) -> None:

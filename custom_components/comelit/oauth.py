@@ -25,6 +25,10 @@ class ComelitOAuthError(RuntimeError):
     """Comelit OAuth refresh failed without exposing token material."""
 
 
+class ComelitOAuthReauthRequired(ComelitOAuthError):
+    """The stored refresh grant is no longer usable and requires reauth."""
+
+
 @dataclass(frozen=True)
 class OAuthRefreshResult:
     access_token: str
@@ -73,6 +77,15 @@ async def async_refresh_oauth(
         raise ComelitOAuthError(f"oauth_http_exception:{type(exc).__name__}") from exc
 
     if not 200 <= status < 300:
+        try:
+            error_obj = json.loads(raw.decode("utf-8", errors="replace"))
+        except (UnicodeError, json.JSONDecodeError):
+            error_obj = None
+        if (
+            isinstance(error_obj, dict)
+            and error_obj.get("error") == "invalid_grant"
+        ):
+            raise ComelitOAuthReauthRequired("oauth_reauth_required")
         raise ComelitOAuthError(f"oauth_http_status:{status}")
 
     try:
@@ -149,11 +162,15 @@ class ComelitOAuthManager:
                     raise ComelitOAuthError("oauth_access_token_missing")
                 raise ComelitOAuthError("oauth_refresh_token_missing")
 
-            refreshed = await async_refresh_oauth(
-                self._session,
-                refresh_token=refresh,
-                scope=scope,
-            )
+            try:
+                refreshed = await async_refresh_oauth(
+                    self._session,
+                    refresh_token=refresh,
+                    scope=scope,
+                )
+            except ComelitOAuthReauthRequired:
+                self._entry.async_start_reauth(self._hass)
+                raise
             new_data = dict(self._entry.data)
             new_data[CONF_OAUTH_ACCESS_TOKEN] = refreshed.access_token
             new_data[CONF_OAUTH_REFRESH_TOKEN] = refreshed.refresh_token or refresh

@@ -72,6 +72,8 @@ class ComelitListenerStatusSensor(SensorEntity):
             "listener_ready": status["listener_ready"],
             "media_paused": status["media_paused"],
             "reconnect_count": status["reconnect_count"],
+            "consecutive_failures": status.get("consecutive_failures"),
+            "reconnect_delay_seconds": status.get("reconnect_delay_seconds"),
             "last_ready": status["last_ready"],
             "last_error": status["last_error"],
             "last_native_exit_code": status["last_native_exit_code"],
@@ -128,6 +130,7 @@ class ComelitCallStateSensor(SensorEntity):
             "media_attached": status["media_attached"],
             "conversation_active": status["conversation_active"],
             "last_error": status["last_error"],
+            "state_timeout_seconds": status.get("state_timeout_seconds"),
         }
 
     async def async_added_to_hass(self) -> None:

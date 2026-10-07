@@ -32,6 +32,7 @@ _ALLOWED_ERRORS = frozenset(
     {
         "listener_failure",
         "listener_stopped_during_call",
+        "call_state_timeout",
     }
 )
 
