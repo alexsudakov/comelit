@@ -52,9 +52,10 @@ class RuntimeReliabilityHardeningTests(unittest.TestCase):
         close_start = text.index("async def _async_close_unlocked", provider_start)
         record_start = text.index("async def async_record_mp4", close_start)
         close = text[close_start:record_start]
-        self.assertNotIn("self._stream = None", close.split("async def async_dispose", 1)[0])
+        close_only = close.split("async def async_dispose", 1)[0]
+        self.assertIn("self._stream = None", close_only)
+        self.assertIn("streams.remove(stream)", close_only)
         self.assertIn("async def async_dispose", close)
-        self.assertIn("streams.remove(stream)", close)
 
     def test_oauth_invalid_grant_starts_reauth_and_backoff_is_bounded(self) -> None:
         oauth = read("custom_components/comelit/oauth.py")
