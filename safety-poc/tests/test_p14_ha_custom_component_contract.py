@@ -130,17 +130,16 @@ class P14HomeAssistantContractTests(unittest.TestCase):
     def test_production_supervisor_autostarts_and_never_invokes_door(self):
         init = (ROOT / "custom_components/comelit/__init__.py").read_text()
         supervisor = (ROOT / "custom_components/comelit/supervisor.py").read_text()
-        test_control = (ROOT / "custom_components/comelit/test_control.py").read_text()
         self.assertIn("await supervisor.async_start()", init)
         self.assertIn("ComelitRuntimeSupervisor", init)
-        self.assertIn("RECONNECT_DELAY_SECONDS = 5", supervisor)
+        self.assertIn("RECONNECT_INITIAL_DELAY_SECONDS = 5", supervisor)
+        self.assertIn("RECONNECT_MAX_DELAY_SECONDS = 300", supervisor)
         self.assertIn("await self._runtime.async_start()", supervisor)
         self.assertIn("await self._runtime.async_stop()", supervisor)
         self.assertIn("async def async_open_entrance_door", supervisor)
         self.assertIn("async def async_open_gate_door", supervisor)
         self.assertNotIn("for attempt", supervisor)
-        self.assertIn("await supervisor.async_stop()", test_control)
-        self.assertIn('status["supervisor_running"]', test_control)
+        self.assertFalse((ROOT / "custom_components/comelit/test_control.py").exists())
 
     def test_listener_status_sensor_is_diagnostic_and_event_driven(self):
         const = (ROOT / "custom_components/comelit/const.py").read_text()
