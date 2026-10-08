@@ -179,6 +179,22 @@ def test_hls_milestone_counter_payload_stays_within_schema_bound():
     assert set(payload["counters"]) == set(milestone_counters)
 
 
+def test_hls_nonfatal_buffer_stall_stays_diagnostic_only():
+    payload = diagnostics.validate_payload(
+        {
+            "event": "hls_error",
+            "reason": "bufferStalledError",
+            "counters": {"fatal": 0, "buffered_s": 1},
+        }
+    )
+
+    assert diagnostics.format_log_line("camera.parking_6048", payload) == (
+        "COMELIT_MINIAPP_DIAG entity=camera.parking_6048 event=hls_error "
+        "elapsed_ms=0 stage_ms=0 state=- reason=bufferStalledError "
+        "counters=buffered_s=1,fatal=0"
+    )
+
+
 def test_rate_limiter_prunes_expired_session_state():
     limiter = diagnostics.MiniAppDiagnosticsRateLimiter()
 

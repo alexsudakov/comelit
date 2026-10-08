@@ -119,9 +119,11 @@ _NATIVE_MARKER_PREFIXES = (
     "R54_",
     "R58_",
     "R64_",
+    "R67_",
     "P116_",
 )
 _NATIVE_MARKER_TAIL_LIMIT = 20
+_R67_VALUE_AWARE_DEDUP_LIMIT_PER_GENERATION = 8
 
 # R57: bounded vocabularies for the native P116NativeFailureId /
 # P116NativeFailurePhase enums (see
@@ -237,6 +239,68 @@ _POST_CALL_TRANSPORT_STATES = frozenset(
         "UNKNOWN",
     }
 )
+_R67_ATTACHED_REFRESH_RESULTS = frozenset(
+    {"NONE", "SENT", "BUSY_DEFERRED", "FAIL_CLOSED", "CANCELLED", "STOPPED"}
+)
+_R67_ATTACHED_REFRESH_REASONS = frozenset(
+    {
+        "NONE",
+        "precondition",
+        "tx-busy",
+        "overlap",
+        "serialize",
+        "queue",
+        "transport",
+        "timer",
+        "stale-generation",
+        "no-outstanding",
+        "cancelled",
+        "call-teardown",
+        "attached-media-stop",
+        "new-session",
+        "attached-media-active",
+        "unknown",
+        "tx-complete",
+    }
+)
+_R67_ATTACHED_REFRESH_OPCODES = frozenset({"0x0011"})
+_R67_ATTACHED_REFRESH_FRAMES = frozenset({"MEDIAREQ26_OPEN"})
+_R67_ATTACHED_REFRESH_MARKERS = frozenset(
+    {
+        "R67_ATTACHED_REFRESH_SESSION_RESET",
+        "R67_ATTACHED_REFRESH_SESSION_RESET_REASON",
+        "R67_ATTACHED_REFRESH_CALL_GENERATION",
+        "R67_ATTACHED_REFRESH_CHANNEL_GENERATION",
+        "R67_ATTACHED_REFRESH_TIMER_ARMED",
+        "R67_ATTACHED_REFRESH_TIMER_SOURCE_ID",
+        "R67_ATTACHED_REFRESH_QUEUED",
+        "R67_ATTACHED_REFRESH_QUEUED_COUNT",
+        "R67_ATTACHED_REFRESH_SENT_COUNT",
+        "R67_ATTACHED_REFRESH_FIRST_AGE_SECONDS",
+        "R67_ATTACHED_REFRESH_LAST_AGE_SECONDS",
+        "R67_ATTACHED_REFRESH_LAST_RESULT",
+        "R67_ATTACHED_REFRESH_LAST_ERROR",
+        "R67_ATTACHED_REFRESH_OUTSTANDING",
+        "R67_ATTACHED_REFRESH_OPCODE",
+        "R67_ATTACHED_REFRESH_FRAME",
+        "R67_ATTACHED_REFRESH_TIMER_REMOVED",
+        "R67_ATTACHED_REFRESH_TIMER_REMOVE_REASON",
+        "R67_ATTACHED_REFRESH_CANCELLED",
+        "R67_ATTACHED_REFRESH_CANCEL_REASON",
+        "R67_ATTACHED_REFRESH_STALE_TIMER_IGNORED",
+        "R67_ATTACHED_REFRESH_CANCELLED_COMPLETION_IGNORED",
+        "R67_ATTACHED_REFRESH_STALE_GENERATION",
+    }
+)
+_R67_VALUE_AWARE_DEDUP_KEYS = frozenset(
+    {
+        "R67_ATTACHED_REFRESH_QUEUED_COUNT",
+        "R67_ATTACHED_REFRESH_SENT_COUNT",
+        "R67_ATTACHED_REFRESH_FIRST_AGE_SECONDS",
+        "R67_ATTACHED_REFRESH_LAST_AGE_SECONDS",
+        "R67_ATTACHED_REFRESH_TIMER_SOURCE_ID",
+    }
+)
 _P116_MARKER_VOCABULARIES: dict[str, frozenset[str]] = {
     "P116_NATIVE_FAILURE_ID": _P116_FAILURE_IDS,
     "P116_NATIVE_FAILURE_PHASE": _P116_FAILURE_PHASES,
@@ -254,6 +318,13 @@ _P116_MARKER_VOCABULARIES: dict[str, frozenset[str]] = {
     "R58_STOP_FAILURE_STAGE": _R58_STOP_FAILURE_STAGES,
     "R58_CLOSED_BOUNDARY": _R58_CLOSED_BOUNDARIES,
     "POST_CALL_TRANSPORT_STATE": _POST_CALL_TRANSPORT_STATES,
+    "R67_ATTACHED_REFRESH_SESSION_RESET_REASON": _R67_ATTACHED_REFRESH_REASONS,
+    "R67_ATTACHED_REFRESH_LAST_RESULT": _R67_ATTACHED_REFRESH_RESULTS,
+    "R67_ATTACHED_REFRESH_LAST_ERROR": _R67_ATTACHED_REFRESH_REASONS,
+    "R67_ATTACHED_REFRESH_OPCODE": _R67_ATTACHED_REFRESH_OPCODES,
+    "R67_ATTACHED_REFRESH_FRAME": _R67_ATTACHED_REFRESH_FRAMES,
+    "R67_ATTACHED_REFRESH_TIMER_REMOVE_REASON": _R67_ATTACHED_REFRESH_REASONS,
+    "R67_ATTACHED_REFRESH_CANCEL_REASON": _R67_ATTACHED_REFRESH_REASONS,
 }
 _CALL_ADOPTION_FAILURE_STAGES = frozenset(
     {
@@ -329,6 +400,29 @@ _CANARY_OBSERVABILITY_MARKERS = {
     "R64_TERMINAL_CALL_READY": "TERMINAL_CALL_READY",
     "R64_TERMINAL_PSEUDOTCP_OPEN": "TERMINAL_PSEUDOTCP_OPEN",
     "R64_TERMINAL_SNAPSHOT": "TERMINAL_SNAPSHOT",
+    "R67_ATTACHED_REFRESH_SESSION_RESET": "R67_ATTACHED_REFRESH_SESSION_RESET",
+    "R67_ATTACHED_REFRESH_SESSION_RESET_REASON": "R67_ATTACHED_REFRESH_SESSION_RESET_REASON",
+    "R67_ATTACHED_REFRESH_CALL_GENERATION": "R67_ATTACHED_REFRESH_CALL_GENERATION",
+    "R67_ATTACHED_REFRESH_CHANNEL_GENERATION": "R67_ATTACHED_REFRESH_CHANNEL_GENERATION",
+    "R67_ATTACHED_REFRESH_TIMER_ARMED": "R67_ATTACHED_REFRESH_TIMER_ARMED",
+    "R67_ATTACHED_REFRESH_TIMER_SOURCE_ID": "R67_ATTACHED_REFRESH_TIMER_SOURCE_ID",
+    "R67_ATTACHED_REFRESH_QUEUED": "R67_ATTACHED_REFRESH_QUEUED",
+    "R67_ATTACHED_REFRESH_QUEUED_COUNT": "R67_ATTACHED_REFRESH_QUEUED_COUNT",
+    "R67_ATTACHED_REFRESH_SENT_COUNT": "R67_ATTACHED_REFRESH_SENT_COUNT",
+    "R67_ATTACHED_REFRESH_FIRST_AGE_SECONDS": "R67_ATTACHED_REFRESH_FIRST_AGE_SECONDS",
+    "R67_ATTACHED_REFRESH_LAST_AGE_SECONDS": "R67_ATTACHED_REFRESH_LAST_AGE_SECONDS",
+    "R67_ATTACHED_REFRESH_LAST_RESULT": "R67_ATTACHED_REFRESH_LAST_RESULT",
+    "R67_ATTACHED_REFRESH_LAST_ERROR": "R67_ATTACHED_REFRESH_LAST_ERROR",
+    "R67_ATTACHED_REFRESH_OUTSTANDING": "R67_ATTACHED_REFRESH_OUTSTANDING",
+    "R67_ATTACHED_REFRESH_OPCODE": "R67_ATTACHED_REFRESH_OPCODE",
+    "R67_ATTACHED_REFRESH_FRAME": "R67_ATTACHED_REFRESH_FRAME",
+    "R67_ATTACHED_REFRESH_TIMER_REMOVED": "R67_ATTACHED_REFRESH_TIMER_REMOVED",
+    "R67_ATTACHED_REFRESH_TIMER_REMOVE_REASON": "R67_ATTACHED_REFRESH_TIMER_REMOVE_REASON",
+    "R67_ATTACHED_REFRESH_CANCELLED": "R67_ATTACHED_REFRESH_CANCELLED",
+    "R67_ATTACHED_REFRESH_CANCEL_REASON": "R67_ATTACHED_REFRESH_CANCEL_REASON",
+    "R67_ATTACHED_REFRESH_STALE_TIMER_IGNORED": "R67_ATTACHED_REFRESH_STALE_TIMER_IGNORED",
+    "R67_ATTACHED_REFRESH_CANCELLED_COMPLETION_IGNORED": "R67_ATTACHED_REFRESH_CANCELLED_COMPLETION_IGNORED",
+    "R67_ATTACHED_REFRESH_STALE_GENERATION": "R67_ATTACHED_REFRESH_STALE_GENERATION",
 }
 _H264_CANARY_MARKERS = frozenset(
     {
@@ -496,6 +590,7 @@ class ComelitRingRuntime:
         self._native_marker_tail: list[str] = []
         self._canary_log_generation: int | None = None
         self._canary_log_seen: set[str] = set()
+        self._canary_log_value_emissions: dict[str, int] = {}
         self._post_call_transport_flags: dict[str, bool] = {}
         self._post_call_transport_emitted = False
         self._r64_post_call_snapshot: dict[str, object] = {}
@@ -786,6 +881,8 @@ class ComelitRingRuntime:
             return
         if not key.startswith(_NATIVE_MARKER_PREFIXES):
             return
+        if key.startswith("R67_") and key not in _R67_ATTACHED_REFRESH_MARKERS:
+            return
 
         vocabulary = _P116_MARKER_VOCABULARIES.get(key)
         if vocabulary is not None:
@@ -805,6 +902,8 @@ class ComelitRingRuntime:
             )
 
     def _safe_native_marker_value(self, key: str, value: str) -> str | None:
+        if key.startswith("R67_") and key not in _R67_ATTACHED_REFRESH_MARKERS:
+            return None
         vocabulary = _P116_MARKER_VOCABULARIES.get(key)
         if vocabulary is not None:
             return value if value in vocabulary else None
@@ -816,6 +915,17 @@ class ComelitRingRuntime:
             if value in _CALL_ADOPTION_FAILURE_STAGES:
                 return value
         return None
+
+    def _reset_canary_log_generation(self, generation: int) -> None:
+        self._canary_log_generation = generation
+        self._canary_log_seen = set()
+        self._canary_log_value_emissions = {}
+        self._post_call_transport_flags = {}
+        self._post_call_transport_emitted = False
+        self._r64_post_call_snapshot = {}
+        self._r64_terminal_snapshot = {}
+        self._r64_pseudotcp_closed_before_open = False
+        self._r64_pseudotcp_closed_after_open = False
 
     def _observe_canary_log_marker(self, line: str) -> None:
         if "=" not in line:
@@ -832,14 +942,11 @@ class ComelitRingRuntime:
         if key == "R42_CALL_GENERATION":
             generation = int(safe_value)
             if generation != getattr(self, "_canary_log_generation", None):
-                self._canary_log_generation = generation
-                self._canary_log_seen = set()
-                self._post_call_transport_flags = {}
-                self._post_call_transport_emitted = False
-                self._r64_post_call_snapshot = {}
-                self._r64_terminal_snapshot = {}
-                self._r64_pseudotcp_closed_before_open = False
-                self._r64_pseudotcp_closed_after_open = False
+                self._reset_canary_log_generation(generation)
+        elif key == "R67_ATTACHED_REFRESH_CALL_GENERATION":
+            generation = int(safe_value)
+            if generation != getattr(self, "_canary_log_generation", None):
+                self._reset_canary_log_generation(generation)
 
         criterion = _CANARY_OBSERVABILITY_MARKERS.get(key)
         if key in _H264_CANARY_MARKERS:
@@ -880,14 +987,28 @@ class ComelitRingRuntime:
         if seen is None:
             seen = set()
             self._canary_log_seen = seen
-        dedup_key = (
-            f"{criterion}={safe_value}"
-            if key == "R58_STOP_PHASE"
-            else criterion
-        )
+        value_emissions = getattr(self, "_canary_log_value_emissions", None)
+        if value_emissions is None:
+            value_emissions = {}
+            self._canary_log_value_emissions = value_emissions
+        if key in _R67_VALUE_AWARE_DEDUP_KEYS:
+            if (
+                value_emissions.get(key, 0)
+                >= _R67_VALUE_AWARE_DEDUP_LIMIT_PER_GENERATION
+            ):
+                return
+            dedup_key = f"{criterion}={safe_value}"
+        else:
+            dedup_key = (
+                f"{criterion}={safe_value}"
+                if key == "R58_STOP_PHASE"
+                else criterion
+            )
         if dedup_key in seen:
             return
         seen.add(dedup_key)
+        if key in _R67_VALUE_AWARE_DEDUP_KEYS:
+            value_emissions[key] = value_emissions.get(key, 0) + 1
 
         _LOGGER.info(
             "Comelit canary evidence %s marker=%s value=%s",
