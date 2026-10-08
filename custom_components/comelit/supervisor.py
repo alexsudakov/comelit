@@ -95,6 +95,14 @@ class ComelitRuntimeSupervisor:
         return self._media_paused
 
     @property
+    def listener_dispatch_ready(self) -> bool:
+        return (
+            self._state == LISTENER_STATE_READY
+            and self._runtime.running
+            and self._runtime.listener_ready
+        )
+
+    @property
     def attached_media_busy(self) -> bool:
         return self._runtime.attached_media_busy
 
@@ -239,16 +247,35 @@ class ComelitRuntimeSupervisor:
         event_id: str | None = None,
     ) -> dict[str, object]:
         """Open Entrance through the current exclusive connection owner."""
+        _LOGGER.warning("DOOR_DISPATCH_REQUESTED door=%s", DOOR_ENTRANCE)
         async with self._lifecycle_lock:
-            self._raise_if_attached_stop_recovery_blocked()
+            _LOGGER.warning("DOOR_LIFECYCLE_LOCK_ACQUIRED door=%s", DOOR_ENTRANCE)
+            if self._attached_stop_recovery_required:
+                _LOGGER.warning(
+                    "DOOR_DISPATCH_REJECT_REASON=RECOVERY_BLOCKED door=%s",
+                    DOOR_ENTRANCE,
+                )
+                self._raise_if_attached_stop_recovery_blocked()
             if self._media_paused:
                 if media_transport is None or not media_transport.active:
+                    _LOGGER.warning(
+                        "DOOR_DISPATCH_REJECT_REASON=MEDIA_NOT_READY door=%s",
+                        DOOR_ENTRANCE,
+                    )
                     raise RuntimeError("media_door_not_ready")
+                _LOGGER.warning(
+                    "DOOR_DISPATCH_OWNER=ON_DEMAND_MEDIA door=%s",
+                    DOOR_ENTRANCE,
+                )
                 return await media_transport.async_open_door(event_id=event_id)
-            return await self._runtime.async_open_door(
-                DOOR_ENTRANCE,
-                event_id=event_id,
-            )
+            if not self.listener_dispatch_ready:
+                _LOGGER.warning(
+                    "DOOR_DISPATCH_REJECT_REASON=LISTENER_NOT_READY door=%s",
+                    DOOR_ENTRANCE,
+                )
+                raise RuntimeError("listener_not_ready")
+            _LOGGER.warning("DOOR_DISPATCH_OWNER=LISTENER door=%s", DOOR_ENTRANCE)
+            return await self._runtime.async_open_door(DOOR_ENTRANCE, event_id=event_id)
 
     async def async_open_gate_door(
         self,
@@ -256,14 +283,29 @@ class ComelitRuntimeSupervisor:
         event_id: str | None = None,
     ) -> dict[str, object]:
         """Open Gate only when the persistent listener owns the connection."""
+        _LOGGER.warning("DOOR_DISPATCH_REQUESTED door=%s", DOOR_GATE)
         async with self._lifecycle_lock:
-            self._raise_if_attached_stop_recovery_blocked()
+            _LOGGER.warning("DOOR_LIFECYCLE_LOCK_ACQUIRED door=%s", DOOR_GATE)
+            if self._attached_stop_recovery_required:
+                _LOGGER.warning(
+                    "DOOR_DISPATCH_REJECT_REASON=RECOVERY_BLOCKED door=%s",
+                    DOOR_GATE,
+                )
+                self._raise_if_attached_stop_recovery_blocked()
             if self._media_paused:
+                _LOGGER.warning(
+                    "DOOR_DISPATCH_REJECT_REASON=MEDIA_NOT_READY door=%s",
+                    DOOR_GATE,
+                )
                 raise RuntimeError("media_owns_connection")
-            return await self._runtime.async_open_door(
-                DOOR_GATE,
-                event_id=event_id,
-            )
+            if not self.listener_dispatch_ready:
+                _LOGGER.warning(
+                    "DOOR_DISPATCH_REJECT_REASON=LISTENER_NOT_READY door=%s",
+                    DOOR_GATE,
+                )
+                raise RuntimeError("listener_not_ready")
+            _LOGGER.warning("DOOR_DISPATCH_OWNER=LISTENER door=%s", DOOR_GATE)
+            return await self._runtime.async_open_door(DOOR_GATE, event_id=event_id)
 
     async def async_recover_attached_media_stop_failure(self) -> None:
         """Recycle the listener after attached media stop was not confirmed."""

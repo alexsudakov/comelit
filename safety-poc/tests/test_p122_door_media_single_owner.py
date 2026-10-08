@@ -406,6 +406,7 @@ class DoorMediaSingleOwnerContracts(unittest.TestCase):
         meter = OwnerMeter()
         runtime = _RuntimeOwner(events, meter)
         supervisor = module.ComelitRuntimeSupervisor(object(), runtime, entry=_Entry(events))
+        supervisor._set_state(module.LISTENER_STATE_READY)
         async def race() -> None:
             await asyncio.gather(
                 supervisor.async_open_entrance_door(None),
@@ -477,15 +478,40 @@ class DoorMediaSingleOwnerContracts(unittest.TestCase):
         events: list[str] = []
         meter = OwnerMeter()
         runtime = _RuntimeOwner(events, meter)
-        runtime.running = False
         supervisor = module.ComelitRuntimeSupervisor(
             object(),
             runtime,
             entry=_Entry(events, real_tasks=True),
         )
+        supervisor._set_state(module.LISTENER_STATE_READY)
         async def run() -> None:
+            door_entered = asyncio.Event()
+            release_door = asyncio.Event()
+            async def blocked_open_door(
+                door: str,
+                *,
+                event_id: str | None = None,
+            ) -> dict[str, object]:
+                runtime.open_calls += 1
+                await meter.enter(events, f"door:{door}")
+                door_entered.set()
+                try:
+                    await release_door.wait()
+                    return {
+                        "state": "UNKNOWN_OUTCOME",
+                        "automatic_retry_allowed": False,
+                    }
+                finally:
+                    await meter.exit(events, f"door:{door}")
+            runtime.async_open_door = blocked_open_door
             door = asyncio.create_task(supervisor.async_open_gate_door())
+            await door_entered.wait()
+            runtime.running = False
+            runtime.listener_ready = False
             reconnect = asyncio.create_task(supervisor._async_run())
+            await asyncio.sleep(0)
+            self.assertEqual(runtime.start_calls, 0)
+            release_door.set()
             for _ in range(20):
                 if runtime.start_calls:
                     break

@@ -1392,6 +1392,12 @@ class ComelitRingRuntime:
         if door not in SUPPORTED_DOORS:
             raise ComelitRingRuntimeError("unsupported_door")
 
+        _LOGGER.warning(
+            "Comelit Door dispatch requested door=%s listener_ready=%s running=%s",
+            door,
+            self.listener_ready,
+            self.running,
+        )
         async with self._door_lock:
             if not await self.async_wait_ready(timeout=30):
                 result = {
