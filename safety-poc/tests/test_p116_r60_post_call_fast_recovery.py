@@ -27,6 +27,7 @@ NATIVE_BINARY = REPO / "custom_components" / "comelit" / "native" / "comelit-v4"
 R63_BUILD_INFO = MEDIA_V1 / "P116_R63_BUILD_INFO.txt"
 R64_BUILD_INFO = MEDIA_V1 / "P116_R64_BUILD_INFO.txt"
 R66_BUILD_INFO = MEDIA_V1 / "P116_R66_BUILD_INFO.txt"
+R67_BUILD_INFO = MEDIA_V1 / "P116_R67_BUILD_INFO.txt"
 
 
 class R60A2WindowDecompositionTests(unittest.TestCase):
@@ -120,10 +121,12 @@ class R60A3A5PseudoTcpForensicTests(unittest.TestCase):
 
         # R60's libnice decision is provenance for the R58 binary lineage,
         # not a permanent pin that forbids later validated native promotions.
-        # When a later build is shipped, its own repository build metadata
-        # becomes the current binary identity gate.
+        # The latest shipped build's repository metadata becomes the
+        # current binary identity gate.
         current_build_info = (
-            R66_BUILD_INFO
+            R67_BUILD_INFO
+            if R67_BUILD_INFO.is_file()
+            else R66_BUILD_INFO
             if R66_BUILD_INFO.is_file()
             else R64_BUILD_INFO
             if R64_BUILD_INFO.is_file()
