@@ -41,8 +41,12 @@ def _markers(stdout: str) -> dict[str, str]:
 
 HARNESS = r'''
 static guint g_timer_adds = 0u;
+static guint g_timer_removes = 0u;
 static guint g_last_timer_seconds = 0u;
 static gboolean (*g_timer_cb)(gpointer data) = NULL;
+static gpointer g_timer_data[16];
+static gboolean (*g_timer_callbacks[16])(gpointer data);
+static int g_timer_active[16];
 static unsigned char g_last_packet[128];
 static guint g_last_packet_len = 0u;
 static P12TxKind g_last_kind = P12_TX_NONE;
@@ -57,11 +61,26 @@ static guint g_rtpc_start_count = 0u;
 static guint
 g_timeout_add_seconds(guint seconds, gboolean (*cb)(gpointer data), gpointer data)
 {
-    (void)data;
     g_timer_adds++;
     g_last_timer_seconds = seconds;
     g_timer_cb = cb;
+    if (g_timer_adds < 16u) {
+        g_timer_callbacks[g_timer_adds] = cb;
+        g_timer_data[g_timer_adds] = data;
+        g_timer_active[g_timer_adds] = TRUE;
+    }
     return g_timer_adds;
+}
+
+static gboolean
+g_source_remove(guint source_id)
+{
+    if (source_id < 16u && g_timer_active[source_id]) {
+        g_timer_active[source_id] = FALSE;
+        g_timer_removes++;
+        return TRUE;
+    }
+    return FALSE;
 }
 
 static void reset_world(void)
@@ -95,22 +114,29 @@ static void reset_world(void)
     p12_tx_pending = FALSE;
 
     g_r67_attached_refresh_timer_armed = 0u;
+    g_r67_attached_refresh_timer_source_id = 0u;
     g_r67_attached_refresh_outstanding = 0u;
     g_r67_attached_refresh_fail_closed = 0u;
     g_r67_attached_refresh_cancelled = 0u;
+    g_r67_attached_refresh_queued_count = 0u;
     g_r67_attached_refresh_sent_count = 0u;
     g_r67_attached_refresh_first_elapsed_seconds = 0u;
     g_r67_attached_refresh_last_elapsed_seconds = 0u;
     g_r67_attached_refresh_tick_count = 0u;
     g_r67_attached_refresh_generation = 0u;
+    g_r67_attached_refresh_channel_generation = 0u;
     g_r67_attached_refresh_sequence_before = 0u;
     g_r67_attached_refresh_sequence_after = 0u;
     g_r67_attached_refresh_last_result = R67_REFRESH_RESULT_NONE;
     g_r67_attached_refresh_last_error = "NONE";
 
     g_timer_adds = 0u;
+    g_timer_removes = 0u;
     g_last_timer_seconds = 0u;
     g_timer_cb = NULL;
+    memset(g_timer_data, 0, sizeof(g_timer_data));
+    memset(g_timer_callbacks, 0, sizeof(g_timer_callbacks));
+    memset(g_timer_active, 0, sizeof(g_timer_active));
     memset(g_last_packet, 0, sizeof(g_last_packet));
     g_last_packet_len = 0u;
     g_last_kind = P12_TX_NONE;
@@ -215,10 +241,56 @@ static void complete_refresh_tx(void)
     (void)r67_attached_refresh_tx_completed();
 }
 
+static gboolean complete_refresh_tx_result(void)
+{
+    p12_tx_pending = FALSE;
+    return r67_attached_refresh_tx_completed();
+}
+
 static void run_refresh_tick(void)
 {
-    if (g_timer_cb)
-        (void)g_timer_cb(NULL);
+    guint source_id = g_r67_attached_refresh_timer_source_id;
+    if (source_id != 0u &&
+        source_id < 16u &&
+        g_timer_active[source_id] &&
+        g_timer_callbacks[source_id]) {
+        g_timer_active[source_id] = FALSE;
+        (void)g_timer_callbacks[source_id](g_timer_data[source_id]);
+    }
+}
+
+static void run_source_if_active(guint source_id)
+{
+    if (source_id < 16u &&
+        g_timer_active[source_id] &&
+        g_timer_callbacks[source_id]) {
+        g_timer_active[source_id] = FALSE;
+        (void)g_timer_callbacks[source_id](g_timer_data[source_id]);
+    }
+}
+
+static void start_new_call_generation(unsigned generation, unsigned channel_id)
+{
+    g_r35_session.call_ctp_valid = TRUE;
+    g_r35_session.call_transaction_alive = TRUE;
+    g_r35_session.listener_alive = TRUE;
+    g_r35_session.registration_alive = TRUE;
+    g_r35_session.pseudotcp_alive = TRUE;
+    g_r35_session.call_generation = generation;
+    g_r35_session.channel_generation = generation;
+    g_r35_session.channel_id = channel_id;
+    g_r35_session.channel_allocated = TRUE;
+    g_r35_session.channel_disposed = FALSE;
+    g_r35_session.open_sent = TRUE;
+    g_r35_session.open_count = 1u;
+    g_r35_session.stop_sent = FALSE;
+    g_r35_session.rtp_armed = TRUE;
+    g_r35_session.call_sequence = 0x20u;
+    p12_stage = P12_STAGE_V4_LISTEN_RING;
+    r42_media_stage = R42_MEDIA_ACTIVE;
+    r42_media_channel_id = (guint16)channel_id;
+    pseudotcp_graceful_stop_started = FALSE;
+    p12_tx_pending = FALSE;
 }
 
 static void case_lifecycle_15_30_45(void)
@@ -289,10 +361,104 @@ static void case_stop_teardown_failure_and_door_interop(void)
         g_rtpc_start_count == 0u);
 }
 
+static void case_multicall_no_reset_lifecycle(void)
+{
+    guint call1_source;
+    guint call2_source;
+
+    reset_world();
+    print_passfail("R67_MULTICALL_CALL1_START", r67_start_attached_refresh_loop("call1-active"));
+    call1_source = g_r67_attached_refresh_timer_source_id;
+    run_refresh_tick();
+    print_passfail("R67_MULTICALL_CALL1_QUEUED", g_r67_attached_refresh_queued_count == 1u);
+    complete_refresh_tx();
+    print_passfail("R67_MULTICALL_CALL1_SENT", g_r67_attached_refresh_sent_count == 1u);
+    r67_cancel_attached_refresh("attached-media-stop");
+
+    start_new_call_generation(8u, 0x4568u);
+    print_passfail("R67_MULTICALL_CALL2_START", r67_start_attached_refresh_loop("call2-active"));
+    call2_source = g_r67_attached_refresh_timer_source_id;
+    print_passfail("R67_MULTICALL_CALL2_NEW_TIMER", call2_source != 0u && call2_source != call1_source);
+    run_refresh_tick();
+    print_passfail(
+        "R67_MULTICALL_CALL2_REFRESH",
+        g_r67_attached_refresh_queued_count == 1u &&
+        g_r67_attached_refresh_generation == 8u);
+    complete_refresh_tx();
+    print_passfail("R67_MULTICALL_CALL2_SENT", g_r67_attached_refresh_sent_count == 1u);
+    print_passfail("R67_MULTICALL_NO_DUP_TIMER", g_timer_adds == 4u && g_r67_attached_refresh_timer_armed);
+}
+
+static void case_stale_timer_removed_before_call2(void)
+{
+    guint call1_source;
+
+    reset_world();
+    (void)r67_start_attached_refresh_loop("call1-active");
+    call1_source = g_r67_attached_refresh_timer_source_id;
+    r67_cancel_attached_refresh("attached-media-stop");
+    print_passfail("R67_STALE_CALL1_TIMER_REMOVED", g_timer_removes == 1u && !g_timer_active[call1_source]);
+    start_new_call_generation(8u, 0x4568u);
+    print_passfail("R67_STALE_TIMER_CALL2_START", r67_start_attached_refresh_loop("call2-active"));
+    run_source_if_active(call1_source);
+    print_passfail("R67_STALE_TIMER_NO_CALL2_TOUCH", g_r67_attached_refresh_queued_count == 0u);
+    run_refresh_tick();
+    print_passfail("R67_STALE_TIMER_CALL2_REFRESH", g_r67_attached_refresh_queued_count == 1u && g_r67_attached_refresh_generation == 8u);
+}
+
+static void case_inflight_cancel_completion_then_call2(void)
+{
+    reset_world();
+    (void)r67_start_attached_refresh_loop("call1-active");
+    run_refresh_tick();
+    print_passfail("R67_INFLIGHT_CALL1_OUTSTANDING", g_r67_attached_refresh_outstanding);
+    r67_cancel_attached_refresh("attached-media-stop");
+    print_passfail("R67_INFLIGHT_CANCEL_COMPLETION_NONFATAL", complete_refresh_tx_result());
+    print_passfail("R67_INFLIGHT_NO_CALL1_RESCHEDULE", !g_r67_attached_refresh_timer_armed);
+    start_new_call_generation(8u, 0x4568u);
+    print_passfail("R67_INFLIGHT_CALL2_START", r67_start_attached_refresh_loop("call2-active"));
+    run_refresh_tick();
+    print_passfail("R67_INFLIGHT_CALL2_REFRESH", g_r67_attached_refresh_queued_count == 1u && g_r67_attached_refresh_generation == 8u);
+}
+
+static void case_fail_closed_recovers_on_call2(void)
+{
+    reset_world();
+    (void)r67_start_attached_refresh_loop("call1-active");
+    g_r67_attached_refresh_outstanding = 1u;
+    run_refresh_tick();
+    print_passfail("R67_FAIL_CLOSED_CALL1_SET", g_r67_attached_refresh_fail_closed);
+    start_new_call_generation(8u, 0x4568u);
+    print_passfail("R67_FAIL_CLOSED_CALL2_START", r67_start_attached_refresh_loop("call2-active"));
+    run_refresh_tick();
+    print_passfail("R67_FAIL_CLOSED_CALL2_REFRESH", g_r67_attached_refresh_queued_count == 1u && !g_r67_attached_refresh_fail_closed);
+}
+
+static void case_call2_door_busy_deferred(void)
+{
+    reset_world();
+    (void)r67_start_attached_refresh_loop("call1-active");
+    r67_cancel_attached_refresh("call-teardown");
+    start_new_call_generation(8u, 0x4568u);
+    (void)r67_start_attached_refresh_loop("call2-active");
+    p12_tx_pending = TRUE;
+    run_refresh_tick();
+    print_passfail("R67_CALL2_DOOR_BUSY_DEFERRED", g_r67_attached_refresh_last_result == R67_REFRESH_RESULT_BUSY_DEFERRED);
+    print_passfail("R67_CALL2_DOOR_NO_QUEUE_WHILE_BUSY", g_r67_attached_refresh_queued_count == 0u);
+    p12_tx_pending = FALSE;
+    run_refresh_tick();
+    print_passfail("R67_CALL2_DOOR_REFRESH_AFTER_FREE", g_r67_attached_refresh_queued_count == 1u && g_r67_attached_refresh_generation == 8u);
+}
+
 int main(void)
 {
     case_lifecycle_15_30_45();
     case_stop_teardown_failure_and_door_interop();
+    case_multicall_no_reset_lifecycle();
+    case_stale_timer_removed_before_call2();
+    case_inflight_cancel_completion_then_call2();
+    case_fail_closed_recovers_on_call2();
+    case_call2_door_busy_deferred();
     return 0;
 }
 '''
@@ -353,6 +519,8 @@ typedef void *gpointer;
 #define NULL ((void *)0)
 #define G_SOURCE_REMOVE FALSE
 #define G_SOURCE_CONTINUE TRUE
+#define GUINT_TO_POINTER(v) ((gpointer)(unsigned long)(v))
+#define GPOINTER_TO_UINT(v) ((guint)(unsigned long)(v))
 
 #define R35_MEDIAREQ26_BODY_LEN 26u
 #define R35_MEDIAREQ26_OPCODE 0x0011u
@@ -443,6 +611,7 @@ static int r35_build_call_bound_packet(
 static gboolean p12_queue_vip_frame(guint32 request_id, const guint8 *body, guint body_len, P12TxKind kind);
 static gboolean p12_flush_tx(void);
 static guint g_timeout_add_seconds(guint seconds, gboolean (*cb)(gpointer data), gpointer data);
+static gboolean g_source_remove(guint source_id);
 '''
 
     def test_transform_is_deterministic_and_composes_r66(self) -> None:
@@ -456,10 +625,20 @@ static guint g_timeout_add_seconds(guint seconds, gboolean (*cb)(gpointer data),
         self.assertIn("R67_ATTACHED_REFRESH_CADENCE_SECONDS 15u", region)
         self.assertIn("R67_ATTACHED_REFRESH_OPCODE=0x0011", region)
         self.assertIn("R67_ATTACHED_REFRESH_FRAME=MEDIAREQ26_OPEN", region)
+        self.assertIn("R67_ATTACHED_REFRESH_QUEUED_COUNT=%u", region)
+        self.assertIn("R67_ATTACHED_REFRESH_SESSION_RESET=true", region)
+        self.assertIn("R67_ATTACHED_REFRESH_SESSION_RESET_REASON=%s", region)
+        self.assertIn("R67_ATTACHED_REFRESH_TIMER_SOURCE_ID=%u", region)
+        self.assertIn("R67_ATTACHED_REFRESH_TIMER_REMOVED=true", region)
+        self.assertIn("R67_ATTACHED_REFRESH_TIMER_REMOVE_REASON=%s", region)
+        self.assertIn("R67_ATTACHED_REFRESH_CANCELLED_COMPLETION_IGNORED=true", region)
+        self.assertIn("R67_ATTACHED_REFRESH_STALE_TIMER_IGNORED=true", region)
+        self.assertIn("R67_ATTACHED_REFRESH_CHANNEL_GENERATION=%u", region)
         self.assertIn("r35_serialize_mediareq26_open(body, &src)", region)
         self.assertIn("r35_build_call_bound_packet(", region)
         self.assertIn("p12_queue_vip_frame(", region)
         self.assertIn("g_timeout_add_seconds(", region)
+        self.assertIn("g_source_remove(source_id)", region)
         self.assertNotIn("0x001A", region)
         self.assertNotIn("0x1a", region)
         for forbidden in (
@@ -499,9 +678,47 @@ static guint g_timeout_add_seconds(guint seconds, gboolean (*cb)(gpointer data),
             "R67_STALE_GENERATION_DOES_NOT_REVIVE",
             "R67_OVERLAP_FAILS_CLOSED",
             "R67_NO_SECOND_TRANSPORT",
+            "R67_MULTICALL_CALL1_START",
+            "R67_MULTICALL_CALL1_QUEUED",
+            "R67_MULTICALL_CALL1_SENT",
+            "R67_MULTICALL_CALL2_START",
+            "R67_MULTICALL_CALL2_NEW_TIMER",
+            "R67_MULTICALL_CALL2_REFRESH",
+            "R67_MULTICALL_CALL2_SENT",
+            "R67_MULTICALL_NO_DUP_TIMER",
+            "R67_STALE_CALL1_TIMER_REMOVED",
+            "R67_STALE_TIMER_CALL2_START",
+            "R67_STALE_TIMER_NO_CALL2_TOUCH",
+            "R67_STALE_TIMER_CALL2_REFRESH",
+            "R67_INFLIGHT_CALL1_OUTSTANDING",
+            "R67_INFLIGHT_CANCEL_COMPLETION_NONFATAL",
+            "R67_INFLIGHT_NO_CALL1_RESCHEDULE",
+            "R67_INFLIGHT_CALL2_START",
+            "R67_INFLIGHT_CALL2_REFRESH",
+            "R67_FAIL_CLOSED_CALL1_SET",
+            "R67_FAIL_CLOSED_CALL2_START",
+            "R67_FAIL_CLOSED_CALL2_REFRESH",
+            "R67_CALL2_DOOR_BUSY_DEFERRED",
+            "R67_CALL2_DOOR_NO_QUEUE_WHILE_BUSY",
+            "R67_CALL2_DOOR_REFRESH_AFTER_FREE",
         ):
             self.assertEqual(self.harness_markers.get(marker), "PASS", self.harness_stdout)
         self.assertEqual(self.harness_markers.get("R67_REFRESH_SENT_COUNT"), "3")
+
+    def test_cross_call_poison_regression_guard(self) -> None:
+        start_body = self.region.split("r67_start_attached_refresh_loop", 1)[1].split(
+            "static gboolean\nr67_queue_attached_refresh", 1
+        )[0]
+        self.assertLess(
+            start_body.index("r67_reset_attached_refresh_session(reason)"),
+            start_body.index("r67_attached_refresh_preconditions_ok()"),
+        )
+        self.assertIn("r67_attached_refresh_session_preconditions_ok()", start_body)
+        self.assertNotIn(
+            "g_r67_attached_refresh_cancelled = 0u;\n    "
+            "g_r67_attached_refresh_fail_closed = 0u;",
+            start_body,
+        )
 
     def test_door_contract_remains_supervisor_lock_owned(self) -> None:
         supervisor = (ROOT.parent / "custom_components" / "comelit" / "supervisor.py").read_text(encoding="utf-8")

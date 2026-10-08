@@ -41,14 +41,17 @@ typedef enum {
 } R67AttachedRefreshResult;
 
 static guint g_r67_attached_refresh_timer_armed = 0u;
+static guint g_r67_attached_refresh_timer_source_id = 0u;
 static guint g_r67_attached_refresh_outstanding = 0u;
 static guint g_r67_attached_refresh_fail_closed = 0u;
 static guint g_r67_attached_refresh_cancelled = 0u;
+static guint g_r67_attached_refresh_queued_count = 0u;
 static guint g_r67_attached_refresh_sent_count = 0u;
 static guint g_r67_attached_refresh_first_elapsed_seconds = 0u;
 static guint g_r67_attached_refresh_last_elapsed_seconds = 0u;
 static guint g_r67_attached_refresh_tick_count = 0u;
 static guint g_r67_attached_refresh_generation = 0u;
+static guint g_r67_attached_refresh_channel_generation = 0u;
 static guint g_r67_attached_refresh_sequence_before = 0u;
 static guint g_r67_attached_refresh_sequence_after = 0u;
 static R67AttachedRefreshResult g_r67_attached_refresh_last_result =
@@ -82,6 +85,8 @@ r67_print_attached_refresh_diagnostics(void)
 {
     printf("R67_ATTACHED_REFRESH_CADENCE_SECONDS=%u\n",
         R67_ATTACHED_REFRESH_CADENCE_SECONDS);
+    printf("R67_ATTACHED_REFRESH_QUEUED_COUNT=%u\n",
+        g_r67_attached_refresh_queued_count);
     printf("R67_ATTACHED_REFRESH_SENT_COUNT=%u\n",
         g_r67_attached_refresh_sent_count);
     printf("R67_ATTACHED_REFRESH_FIRST_AGE_SECONDS=%u\n",
@@ -94,15 +99,15 @@ r67_print_attached_refresh_diagnostics(void)
         g_r67_attached_refresh_last_error);
     printf("R67_ATTACHED_REFRESH_OUTSTANDING=%s\n",
         g_r67_attached_refresh_outstanding ? "true" : "false");
+    printf("R67_ATTACHED_REFRESH_TIMER_SOURCE_ID=%u\n",
+        g_r67_attached_refresh_timer_source_id);
     fflush(stdout);
 }
 
 static gboolean
-r67_attached_refresh_preconditions_ok(void)
+r67_attached_refresh_session_preconditions_ok(void)
 {
-    return !g_r67_attached_refresh_cancelled &&
-        !g_r67_attached_refresh_fail_closed &&
-        !pseudotcp_graceful_stop_started &&
+    return !pseudotcp_graceful_stop_started &&
         v4_listener_ready &&
         v4_registered &&
         v4_ctpp_channel_id != 0 &&
@@ -125,11 +130,73 @@ r67_attached_refresh_preconditions_ok(void)
         (unsigned)r42_media_channel_id == g_r35_session.channel_id;
 }
 
+static gboolean
+r67_attached_refresh_preconditions_ok(void)
+{
+    return r67_attached_refresh_session_preconditions_ok() &&
+        !g_r67_attached_refresh_cancelled &&
+        !g_r67_attached_refresh_fail_closed;
+}
+
+static gboolean
+r67_attached_refresh_current_session_matches(void)
+{
+    return g_r67_attached_refresh_generation == g_r35_session.call_generation &&
+        g_r67_attached_refresh_channel_generation ==
+            g_r35_session.channel_generation;
+}
+
+static void
+r67_remove_attached_refresh_timer(const char *reason)
+{
+    guint source_id = g_r67_attached_refresh_timer_source_id;
+
+    if (source_id != 0u) {
+        g_r67_attached_refresh_timer_source_id = 0u;
+        g_r67_attached_refresh_timer_armed = 0u;
+        (void)g_source_remove(source_id);
+        printf("R67_ATTACHED_REFRESH_TIMER_REMOVED=true\n");
+        printf("R67_ATTACHED_REFRESH_TIMER_REMOVE_REASON=%s\n",
+            reason ? reason : "unknown");
+        printf("R67_ATTACHED_REFRESH_TIMER_SOURCE_ID=%u\n", source_id);
+    } else {
+        g_r67_attached_refresh_timer_armed = 0u;
+    }
+}
+
+static void
+r67_reset_attached_refresh_session(const char *reason)
+{
+    r67_remove_attached_refresh_timer(reason);
+    g_r67_attached_refresh_outstanding = 0u;
+    g_r67_attached_refresh_fail_closed = 0u;
+    g_r67_attached_refresh_cancelled = 0u;
+    g_r67_attached_refresh_queued_count = 0u;
+    g_r67_attached_refresh_sent_count = 0u;
+    g_r67_attached_refresh_first_elapsed_seconds = 0u;
+    g_r67_attached_refresh_last_elapsed_seconds = 0u;
+    g_r67_attached_refresh_tick_count = 0u;
+    g_r67_attached_refresh_generation = g_r35_session.call_generation;
+    g_r67_attached_refresh_channel_generation =
+        g_r35_session.channel_generation;
+    g_r67_attached_refresh_sequence_before = 0u;
+    g_r67_attached_refresh_sequence_after = 0u;
+    g_r67_attached_refresh_last_result = R67_REFRESH_RESULT_NONE;
+    g_r67_attached_refresh_last_error = "NONE";
+    printf("R67_ATTACHED_REFRESH_SESSION_RESET=true\n");
+    printf("R67_ATTACHED_REFRESH_SESSION_RESET_REASON=%s\n",
+        reason ? reason : "new-session");
+    printf("R67_ATTACHED_REFRESH_CALL_GENERATION=%u\n",
+        g_r67_attached_refresh_generation);
+    printf("R67_ATTACHED_REFRESH_CHANNEL_GENERATION=%u\n",
+        g_r67_attached_refresh_channel_generation);
+}
+
 static void
 r67_cancel_attached_refresh(const char *reason)
 {
     g_r67_attached_refresh_cancelled = 1u;
-    g_r67_attached_refresh_timer_armed = 0u;
+    r67_remove_attached_refresh_timer(reason);
     g_r67_attached_refresh_outstanding = 0u;
     g_r67_attached_refresh_last_result = R67_REFRESH_RESULT_CANCELLED;
     g_r67_attached_refresh_last_error = reason ? reason : "cancelled";
@@ -142,13 +209,15 @@ r67_cancel_attached_refresh(const char *reason)
 static gboolean
 r67_start_attached_refresh_loop(const char *reason)
 {
+    if (!r67_attached_refresh_session_preconditions_ok())
+        return FALSE;
+    if (!r67_attached_refresh_current_session_matches())
+        r67_reset_attached_refresh_session(reason);
     if (!r67_attached_refresh_preconditions_ok())
         return FALSE;
     if (g_r67_attached_refresh_timer_armed ||
         g_r67_attached_refresh_outstanding)
         return TRUE;
-    g_r67_attached_refresh_cancelled = 0u;
-    g_r67_attached_refresh_fail_closed = 0u;
     g_r67_attached_refresh_last_error = "NONE";
     return r67_schedule_next_attached_refresh(reason);
 }
@@ -165,7 +234,7 @@ r67_queue_attached_refresh(void)
     if (!r67_attached_refresh_preconditions_ok()) {
         g_r67_attached_refresh_last_result = R67_REFRESH_RESULT_STOPPED;
         g_r67_attached_refresh_last_error = "precondition";
-        g_r67_attached_refresh_timer_armed = 0u;
+        r67_remove_attached_refresh_timer("precondition");
         r67_print_attached_refresh_diagnostics();
         return FALSE;
     }
@@ -213,6 +282,8 @@ r67_queue_attached_refresh(void)
     }
 
     g_r67_attached_refresh_generation = g_r35_session.call_generation;
+    g_r67_attached_refresh_channel_generation =
+        g_r35_session.channel_generation;
     g_r67_attached_refresh_sequence_before = g_r35_session.call_sequence & 0xffu;
     g_r67_attached_refresh_sequence_after =
         (g_r67_attached_refresh_sequence_before + 1u) & 0xffu;
@@ -232,7 +303,7 @@ r67_queue_attached_refresh(void)
     }
 
     g_r67_attached_refresh_outstanding = 1u;
-    g_r67_attached_refresh_sent_count += 1u;
+    g_r67_attached_refresh_queued_count += 1u;
     g_r67_attached_refresh_last_elapsed_seconds =
         g_r67_attached_refresh_tick_count * R67_ATTACHED_REFRESH_CADENCE_SECONDS;
     if (g_r67_attached_refresh_first_elapsed_seconds == 0u)
@@ -245,6 +316,8 @@ r67_queue_attached_refresh(void)
     printf("R67_ATTACHED_REFRESH_FRAME=MEDIAREQ26_OPEN\n");
     printf("R67_ATTACHED_REFRESH_CALL_GENERATION=%u\n",
         g_r67_attached_refresh_generation);
+    printf("R67_ATTACHED_REFRESH_CHANNEL_GENERATION=%u\n",
+        g_r67_attached_refresh_channel_generation);
     printf("R67_ATTACHED_REFRESH_SEQUENCE_BEFORE=%u\n",
         g_r67_attached_refresh_sequence_before);
     r67_print_attached_refresh_diagnostics();
@@ -264,9 +337,21 @@ r67_attached_refresh_tx_completed(void)
 {
     gboolean sequence_committed = FALSE;
 
-    if (!g_r67_attached_refresh_outstanding)
+    if (!g_r67_attached_refresh_outstanding) {
+        if (g_r67_attached_refresh_cancelled) {
+            printf("R67_ATTACHED_REFRESH_CANCELLED_COMPLETION_IGNORED=true\n");
+            r67_print_attached_refresh_diagnostics();
+            return TRUE;
+        }
+        g_r67_attached_refresh_fail_closed = 1u;
+        g_r67_attached_refresh_last_result = R67_REFRESH_RESULT_FAIL_CLOSED;
+        g_r67_attached_refresh_last_error = "no-outstanding";
+        r67_print_attached_refresh_diagnostics();
         return FALSE;
+    }
     if (g_r35_session.call_generation == g_r67_attached_refresh_generation &&
+        g_r35_session.channel_generation ==
+            g_r67_attached_refresh_channel_generation &&
         r35_call_ready(&g_r35_session) &&
         (g_r35_session.call_sequence & 0xffu) ==
             g_r67_attached_refresh_sequence_before) {
@@ -281,6 +366,8 @@ r67_attached_refresh_tx_completed(void)
     }
 
     g_r67_attached_refresh_outstanding = 0u;
+    if (sequence_committed)
+        g_r67_attached_refresh_sent_count += 1u;
     printf("R67_ATTACHED_REFRESH_SENT=true\n");
     printf("R67_ATTACHED_REFRESH_SEQUENCE_COMMITTED=%s\n",
         sequence_committed ? "true" : "false");
@@ -295,13 +382,20 @@ r67_attached_refresh_tx_completed(void)
 static gboolean
 r67_attached_refresh_delay_cb(gpointer data)
 {
-    (void)data;
-    if (g_r67_attached_refresh_cancelled ||
-        pseudotcp_graceful_stop_started) {
-        g_r67_attached_refresh_timer_armed = 0u;
+    guint timer_generation = GPOINTER_TO_UINT(data);
+
+    if (g_r67_attached_refresh_timer_source_id != 0u)
+        g_r67_attached_refresh_timer_source_id = 0u;
+    g_r67_attached_refresh_timer_armed = 0u;
+    if (timer_generation != g_r67_attached_refresh_generation ||
+        !r67_attached_refresh_current_session_matches()) {
+        printf("R67_ATTACHED_REFRESH_STALE_TIMER_IGNORED=true\n");
         return G_SOURCE_REMOVE;
     }
-    g_r67_attached_refresh_timer_armed = 0u;
+    if (g_r67_attached_refresh_cancelled ||
+        pseudotcp_graceful_stop_started) {
+        return G_SOURCE_REMOVE;
+    }
     (void)r67_queue_attached_refresh();
     return G_SOURCE_REMOVE;
 }
@@ -309,6 +403,8 @@ r67_attached_refresh_delay_cb(gpointer data)
 static gboolean
 r67_schedule_next_attached_refresh(const char *reason)
 {
+    guint source_id;
+
     (void)reason;
     if (!r67_attached_refresh_preconditions_ok())
         return FALSE;
@@ -317,18 +413,22 @@ r67_schedule_next_attached_refresh(const char *reason)
         g_r67_attached_refresh_outstanding ||
         g_r67_attached_refresh_timer_armed)
         return FALSE;
-    if (g_timeout_add_seconds(
+    source_id = g_timeout_add_seconds(
             R67_ATTACHED_REFRESH_CADENCE_SECONDS,
             r67_attached_refresh_delay_cb,
-            NULL) == 0) {
+            GUINT_TO_POINTER(g_r67_attached_refresh_generation));
+    if (source_id == 0u) {
         g_r67_attached_refresh_fail_closed = 1u;
         g_r67_attached_refresh_last_result = R67_REFRESH_RESULT_FAIL_CLOSED;
         g_r67_attached_refresh_last_error = "timer";
         r67_print_attached_refresh_diagnostics();
         return FALSE;
     }
+    g_r67_attached_refresh_timer_source_id = source_id;
     g_r67_attached_refresh_timer_armed = 1u;
     printf("R67_ATTACHED_REFRESH_TIMER_ARMED=true\n");
+    printf("R67_ATTACHED_REFRESH_TIMER_SOURCE_ID=%u\n",
+        g_r67_attached_refresh_timer_source_id);
     r67_print_attached_refresh_diagnostics();
     return TRUE;
 }
@@ -442,12 +542,22 @@ def transform(source: str) -> str:
         BEGIN,
         END,
         "R67_ATTACHED_REFRESH_CADENCE_SECONDS 15u",
+        "R67_ATTACHED_REFRESH_QUEUED_COUNT=%u",
         "R67_ATTACHED_REFRESH_OPCODE=0x0011",
         "R67_ATTACHED_REFRESH_FRAME=MEDIAREQ26_OPEN",
+        "R67_ATTACHED_REFRESH_SESSION_RESET=true",
+        "R67_ATTACHED_REFRESH_SESSION_RESET_REASON=%s",
+        "R67_ATTACHED_REFRESH_TIMER_SOURCE_ID=%u",
+        "R67_ATTACHED_REFRESH_TIMER_REMOVED=true",
+        "R67_ATTACHED_REFRESH_TIMER_REMOVE_REASON=%s",
+        "R67_ATTACHED_REFRESH_CANCELLED_COMPLETION_IGNORED=true",
+        "R67_ATTACHED_REFRESH_STALE_TIMER_IGNORED=true",
+        "R67_ATTACHED_REFRESH_CHANNEL_GENERATION=%u",
         "P12_TX_R67_ATTACHED_REFRESH",
         "r35_serialize_mediareq26_open(body, &src)",
         "r35_build_call_bound_packet(",
         "g_timeout_add_seconds(",
+        "g_source_remove(source_id)",
         "r67_cancel_attached_refresh(\"attached-media-stop\")",
         "r67_cancel_attached_refresh(\"call-teardown\")",
     ):
@@ -471,6 +581,8 @@ def transform(source: str) -> str:
             raise RuntimeError(f"R67_FORBIDDEN_GATE=FAIL forbidden={forbidden}")
     if region.count("g_timeout_add_seconds(") != 1:
         raise RuntimeError("R67_SINGLE_TIMER_SITE_GATE=FAIL")
+    if region.count("g_source_remove(source_id)") != 1:
+        raise RuntimeError("R67_SINGLE_TIMER_REMOVE_SITE_GATE=FAIL")
     if region.count("p12_queue_vip_frame(") != 1:
         raise RuntimeError("R67_SINGLE_EXISTING_WRITER_GATE=FAIL")
     return candidate
