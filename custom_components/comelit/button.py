@@ -158,6 +158,11 @@ class ComelitEntranceDoorButton(ButtonEntity):
                 self._media_transport,
             )
         except RuntimeError as exc:
+            if str(exc) == "lifecycle_busy":
+                raise HomeAssistantError(
+                    "Comelit Door is temporarily unavailable because the "
+                    "Comelit connection lifecycle is busy"
+                ) from exc
             if str(exc) == "listener_not_ready":
                 raise HomeAssistantError(
                     "Comelit Door is unavailable because the persistent "
@@ -264,6 +269,11 @@ class ComelitGateDoorButton(ButtonEntity):
         try:
             result = await self._supervisor.async_open_gate_door()
         except RuntimeError as exc:
+            if str(exc) == "lifecycle_busy":
+                raise HomeAssistantError(
+                    "Comelit Gate is temporarily unavailable because the "
+                    "Comelit connection lifecycle is busy"
+                ) from exc
             if str(exc) == "listener_not_ready":
                 raise HomeAssistantError(
                     "Comelit Gate is unavailable because the persistent "
