@@ -208,6 +208,30 @@ class _Capture(logging.Handler):
 
 
 class DoorLifecycleBusyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._modules_before = dict(sys.modules)
+        self._logger_names = [
+            "custom_components.comelit.supervisor",
+            "custom_components.comelit.button",
+        ]
+        self._logger_levels = {
+            name: logging.getLogger(name).level for name in self._logger_names
+        }
+        self._logger_disabled = {
+            name: logging.getLogger(name).disabled for name in self._logger_names
+        }
+
+    def tearDown(self) -> None:
+        for name in list(sys.modules):
+            if name not in self._modules_before:
+                sys.modules.pop(name, None)
+        for name, module in self._modules_before.items():
+            sys.modules[name] = module
+        for name, level in self._logger_levels.items():
+            logger = logging.getLogger(name)
+            logger.setLevel(level)
+            logger.disabled = self._logger_disabled[name]
+
     def _make(self) -> tuple[types.ModuleType, object, _Runtime]:
         module = _load_supervisor()
         module.DOOR_LIFECYCLE_LOCK_TIMEOUT_SECONDS = 0.01
