@@ -31,6 +31,9 @@ def _install_package() -> None:
 
 
 def _install_ha() -> type[Exception]:
+    for name in list(sys.modules):
+        if name == "homeassistant" or name.startswith("homeassistant."):
+            sys.modules.pop(name, None)
     sys.modules["homeassistant"] = types.ModuleType("homeassistant")
     config_entries = types.ModuleType("homeassistant.config_entries")
     config_entries.ConfigEntry = object
