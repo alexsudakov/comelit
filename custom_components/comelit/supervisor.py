@@ -18,6 +18,7 @@ RECONNECT_INITIAL_DELAY_SECONDS = 5
 RECONNECT_MAX_DELAY_SECONDS = 300
 RECONNECT_NORMAL_DELAY_SECONDS = 1
 POLL_INTERVAL_SECONDS = 1
+DOOR_LIFECYCLE_LOCK_TIMEOUT_SECONDS = 0.5
 
 LISTENER_STATE_STARTING = "starting"
 LISTENER_STATE_READY = "ready"
@@ -190,6 +191,21 @@ class ComelitRuntimeSupervisor:
         self._set_state(LISTENER_STATE_ERROR)
         raise RuntimeError(ATTACHED_STOP_RECOVERY_ERROR)
 
+    async def _async_acquire_door_lifecycle_lock(self, door: str) -> None:
+        """Acquire the shared connection-owner lock or fail the one-shot request."""
+        try:
+            await asyncio.wait_for(
+                self._lifecycle_lock.acquire(),
+                timeout=DOOR_LIFECYCLE_LOCK_TIMEOUT_SECONDS,
+            )
+        except TimeoutError as exc:
+            _LOGGER.warning(
+                "DOOR_DISPATCH_REJECT_REASON=LIFECYCLE_BUSY door=%s",
+                door,
+            )
+            raise RuntimeError("lifecycle_busy") from exc
+        _LOGGER.warning("DOOR_LIFECYCLE_LOCK_ACQUIRED door=%s", door)
+
     async def async_start(self) -> None:
         async with self._lifecycle_lock:
             if self.running or self._media_paused:
@@ -248,8 +264,8 @@ class ComelitRuntimeSupervisor:
     ) -> dict[str, object]:
         """Open Entrance through the current exclusive connection owner."""
         _LOGGER.warning("DOOR_DISPATCH_REQUESTED door=%s", DOOR_ENTRANCE)
-        async with self._lifecycle_lock:
-            _LOGGER.warning("DOOR_LIFECYCLE_LOCK_ACQUIRED door=%s", DOOR_ENTRANCE)
+        await self._async_acquire_door_lifecycle_lock(DOOR_ENTRANCE)
+        try:
             if self._attached_stop_recovery_required:
                 _LOGGER.warning(
                     "DOOR_DISPATCH_REJECT_REASON=RECOVERY_BLOCKED door=%s",
@@ -276,6 +292,8 @@ class ComelitRuntimeSupervisor:
                 raise RuntimeError("listener_not_ready")
             _LOGGER.warning("DOOR_DISPATCH_OWNER=LISTENER door=%s", DOOR_ENTRANCE)
             return await self._runtime.async_open_door(DOOR_ENTRANCE, event_id=event_id)
+        finally:
+            self._lifecycle_lock.release()
 
     async def async_open_gate_door(
         self,
@@ -284,8 +302,8 @@ class ComelitRuntimeSupervisor:
     ) -> dict[str, object]:
         """Open Gate only when the persistent listener owns the connection."""
         _LOGGER.warning("DOOR_DISPATCH_REQUESTED door=%s", DOOR_GATE)
-        async with self._lifecycle_lock:
-            _LOGGER.warning("DOOR_LIFECYCLE_LOCK_ACQUIRED door=%s", DOOR_GATE)
+        await self._async_acquire_door_lifecycle_lock(DOOR_GATE)
+        try:
             if self._attached_stop_recovery_required:
                 _LOGGER.warning(
                     "DOOR_DISPATCH_REJECT_REASON=RECOVERY_BLOCKED door=%s",
@@ -306,6 +324,8 @@ class ComelitRuntimeSupervisor:
                 raise RuntimeError("listener_not_ready")
             _LOGGER.warning("DOOR_DISPATCH_OWNER=LISTENER door=%s", DOOR_GATE)
             return await self._runtime.async_open_door(DOOR_GATE, event_id=event_id)
+        finally:
+            self._lifecycle_lock.release()
 
     async def async_recover_attached_media_stop_failure(self) -> None:
         """Recycle the listener after attached media stop was not confirmed."""
