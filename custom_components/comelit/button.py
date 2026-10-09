@@ -83,7 +83,7 @@ class ComelitEntranceDoorButton(ButtonEntity):
         return resolve_door_capability(
             DOOR_ENTRANCE,
             media_paused=False,
-        ).available
+        ).available and self._supervisor.listener_dispatch_ready
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -111,6 +111,7 @@ class ComelitEntranceDoorButton(ButtonEntity):
                 if media_door_available
                 else "LISTENER"
             ),
+            "listener_dispatch_ready": self._supervisor.listener_dispatch_ready,
             "one_shot_operation_required": True,
             "automatic_retry_allowed": False,
             "physical_effect_asserted": False,
@@ -157,6 +158,16 @@ class ComelitEntranceDoorButton(ButtonEntity):
                 self._media_transport,
             )
         except RuntimeError as exc:
+            if str(exc) == "lifecycle_busy":
+                raise HomeAssistantError(
+                    "Comelit Door is temporarily unavailable because the "
+                    "Comelit connection lifecycle is busy"
+                ) from exc
+            if str(exc) == "listener_not_ready":
+                raise HomeAssistantError(
+                    "Comelit Door is unavailable because the persistent "
+                    "listener is not ready"
+                ) from exc
             raise HomeAssistantError(
                 "Comelit Door is unavailable because the on-demand media "
                 "session is not active"
@@ -206,7 +217,7 @@ class ComelitGateDoorButton(ButtonEntity):
         return resolve_door_capability(
             DOOR_GATE,
             media_paused=self._supervisor.media_paused,
-        ).available
+        ).available and self._supervisor.listener_dispatch_ready
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -219,6 +230,7 @@ class ComelitGateDoorButton(ButtonEntity):
             "door": DOOR_GATE,
             "standard_press_allowed": capability.press_allowed,
             "blocked_by_media_session": self._supervisor.media_paused,
+            "listener_dispatch_ready": self._supervisor.listener_dispatch_ready,
             "one_shot_operation_required": True,
             "automatic_retry_allowed": False,
             "physical_effect_asserted": False,
@@ -257,6 +269,16 @@ class ComelitGateDoorButton(ButtonEntity):
         try:
             result = await self._supervisor.async_open_gate_door()
         except RuntimeError as exc:
+            if str(exc) == "lifecycle_busy":
+                raise HomeAssistantError(
+                    "Comelit Gate is temporarily unavailable because the "
+                    "Comelit connection lifecycle is busy"
+                ) from exc
+            if str(exc) == "listener_not_ready":
+                raise HomeAssistantError(
+                    "Comelit Gate is unavailable because the persistent "
+                    "listener is not ready"
+                ) from exc
             raise HomeAssistantError(
                 "Comelit Gate is temporarily unavailable while the intercom "
                 "media session owns the exclusive Comelit connection"
