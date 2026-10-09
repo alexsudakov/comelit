@@ -726,7 +726,8 @@ static gboolean g_source_remove(guint source_id);
         self.assertRegex(
             supervisor,
             re.compile(
-                r"async def async_open_entrance_door\(.*?async with self\._lifecycle_lock:.*?"
+                r"async def async_open_entrance_door\(.*?"
+                r"await self\._async_acquire_door_lifecycle_lock\(DOOR_ENTRANCE\).*?"
                 r"return await self\._runtime\.async_open_door\(",
                 re.S,
             ),
