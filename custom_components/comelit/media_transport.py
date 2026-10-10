@@ -85,6 +85,7 @@ _MEDIA_NATIVE_MARKER_SAFE_VALUE_RE = re.compile(
     r"SIGNAL_STAGE|MEDIA_FORWARDING|RTPC_STAGE|PSEUDOTCP|GRACEFUL_STOP|CTPP|"
     r"TX_PENDING|REFRESH_OUTSTANDING|REFRESH_FAIL_CLOSED|INITIAL_001A|"
     r"DOOR_INFLIGHT|DOOR_ALREADY_SENT|"
+    r"CALL_INIT|DEVICE_TO_CLIENT|ABSENT|AMBIGUOUS|STRUCTURAL_ACK|STATE_SCOPED_STRUCTURAL|"
     r"FATAL|NONE|[0-9]{1,20}|[0-9]{1,3}(?:,[0-9]{1,3}){0,127})$"
 )
 _P122_DOOR_REJECT_GATES = {
@@ -108,10 +109,12 @@ _MEDIA_NATIVE_MARKER_PREFIXES = (
     "CONVERSATION_",
     "SELECTED_PAIR_",
     "V4_",
+    "V4_RING_",
     "P12_",
     "CTPP_",
     "ENTRANCE_",
     "SELF_ACTIVATION_",
+    "SECOND_001A_",
     "CLIENT_VIDEO_",
     "DEVICE_VIDEO_",
     "P78_",
@@ -147,6 +150,7 @@ _MEDIA_NATIVE_PROTOCOL_MARKER_PREFIXES = (
     "CONVERSATION_",
     "CTPP_",
     "V4_CTPP_",
+    "V4_RING_",
     "P78_RTPC_",
     "P80_PREACTIVE_",
     "P80_DEVICE_",
@@ -159,6 +163,7 @@ _MEDIA_NATIVE_PROTOCOL_MARKER_PREFIXES = (
     "R65_",
     "P122_",
     "REFRESH_",
+    "SECOND_001A_",
 )
 _NATIVE_BINARY_IDENTITY_CACHE: tuple[tuple[int, int] | str, dict[str, object]] | None = (
     None
@@ -1028,9 +1033,10 @@ class ComelitEntranceMediaTransport:
                 ):
                     _LOGGER.error(
                         "Comelit entrance media transport stopped: %s; "
-                        "safe_native_markers=%s",
+                        "safe_native_markers=%s protocol_native_markers=%s",
                         exc,
                         self._last_native_failure_markers,
+                        list(dict.fromkeys(self._native_protocol_markers)),
                     )
                 else:
                     _LOGGER.error("Comelit entrance media transport stopped: %s", exc)
