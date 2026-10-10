@@ -159,6 +159,8 @@ _MEDIA_NATIVE_PROTOCOL_MARKER_PREFIXES = (
     "P80_AUDIO_RTP_PORT",
     "P80_VIDEO_RTP_FORWARDING",
     "P80_AUDIO_RTP_FORWARDING",
+    "ENTRANCE_",
+    "SELF_ACTIVATION_",
     "R27_",
     "R65_",
     "P122_",
@@ -449,6 +451,8 @@ class ComelitEntranceMediaTransport:
         self._last_error: str | None = None
         self._native_marker_tail: list[str] = []
         self._native_protocol_markers: list[str] = []
+        self._native_protocol_markers_seen_total: int = 0
+        self._native_protocol_markers_evicted: int = 0
         self._native_refresh_diagnostics: dict[str, int | bool | None] = {}
         self._native_ack_diagnostics: dict[str, bool] = {}
         self._last_native_exit_code: int | None = None
@@ -792,11 +796,18 @@ class ComelitEntranceMediaTransport:
         if len(self._native_marker_tail) > _MEDIA_NATIVE_MARKER_TAIL_LIMIT:
             del self._native_marker_tail[:-_MEDIA_NATIVE_MARKER_TAIL_LIMIT]
         if key.startswith(_MEDIA_NATIVE_PROTOCOL_MARKER_PREFIXES):
+            self._native_protocol_markers_seen_total += 1
             self._native_protocol_markers.append(marker)
-            if len(self._native_protocol_markers) > _MEDIA_NATIVE_PROTOCOL_MARKER_LIMIT:
+            overflow = (
+                len(self._native_protocol_markers)
+                - _MEDIA_NATIVE_PROTOCOL_MARKER_LIMIT
+            )
+            if overflow > 0:
                 del self._native_protocol_markers[
                     :-_MEDIA_NATIVE_PROTOCOL_MARKER_LIMIT
                 ]
+                # Invariant: seen_total == len(_native_protocol_markers) + evicted.
+                self._native_protocol_markers_evicted += overflow
 
     def _observe_latency_marker(self, line: str) -> None:
         timeline = self._latency_timeline
@@ -828,6 +839,20 @@ class ComelitEntranceMediaTransport:
         self._last_native_exit_code = returncode
         self._last_native_failure_markers = list(self._native_marker_tail)
 
+    def _native_protocol_marker_retention_evidence(self) -> str:
+        first = "none"
+        last = "none"
+        if self._native_protocol_markers:
+            first = self._native_protocol_markers[0].split("=", 1)[0]
+            last = self._native_protocol_markers[-1].split("=", 1)[0]
+        return (
+            f"PROTOCOL_MARKERS_SEEN_TOTAL={self._native_protocol_markers_seen_total} "
+            f"PROTOCOL_MARKERS_PRESERVED={len(self._native_protocol_markers)} "
+            f"PROTOCOL_MARKERS_EVICTED={self._native_protocol_markers_evicted} "
+            f"PROTOCOL_MARKER_FIRST_PRESERVED={first} "
+            f"PROTOCOL_MARKER_LAST_PRESERVED={last}"
+        )
+
     def _emit_native_success_summary(self) -> None:
         protocol_markers = list(dict.fromkeys(self._native_protocol_markers))
         p116_markers = list(
@@ -840,9 +865,12 @@ class ComelitEntranceMediaTransport:
         _LOGGER.info(
             "Comelit entrance media transport completed: "
             "protocol_native_markers=%s p116_native_markers=%s "
+            "safe_native_markers=%s protocol_marker_retention=%s "
             "refresh_diagnostics=%s ack_diagnostics=%s",
             protocol_markers,
             p116_markers,
+            list(dict.fromkeys(self._native_marker_tail)),
+            self._native_protocol_marker_retention_evidence(),
             self.native_refresh_diagnostics(),
             dict(self._native_ack_diagnostics),
         )
@@ -859,6 +887,8 @@ class ComelitEntranceMediaTransport:
         self._last_error = None
         self._native_marker_tail.clear()
         self._native_protocol_markers.clear()
+        self._native_protocol_markers_seen_total = 0
+        self._native_protocol_markers_evicted = 0
         self._native_refresh_diagnostics.clear()
         self._native_ack_diagnostics.clear()
         self._last_native_exit_code = None
@@ -1033,10 +1063,12 @@ class ComelitEntranceMediaTransport:
                 ):
                     _LOGGER.error(
                         "Comelit entrance media transport stopped: %s; "
-                        "safe_native_markers=%s protocol_native_markers=%s",
+                        "safe_native_markers=%s protocol_native_markers=%s "
+                        "protocol_marker_retention=%s",
                         exc,
                         self._last_native_failure_markers,
                         list(dict.fromkeys(self._native_protocol_markers)),
+                        self._native_protocol_marker_retention_evidence(),
                     )
                 else:
                     _LOGGER.error("Comelit entrance media transport stopped: %s", exc)
