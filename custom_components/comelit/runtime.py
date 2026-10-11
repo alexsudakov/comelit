@@ -98,6 +98,8 @@ _RING_KEYS = {
     "V4_RING_DOOR",
     "V4_RING_SOURCE",
 }
+_RING_SHA_MARKER_KEYS = {"V4_RING_FRAME_SHA256", "V4_RING_RETRANSMIT_SHA256"}
+_RING_SHA_MARKER_VALUE_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _HEX32_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
 _NATIVE_MARKER_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
 _NATIVE_MARKER_SAFE_VALUE_RE = re.compile(
@@ -887,6 +889,12 @@ class ComelitRingRuntime:
         vocabulary = _P116_MARKER_VOCABULARIES.get(key)
         if vocabulary is not None:
             safe_value = value if value in vocabulary else "<redacted>"
+        elif (
+            key in _RING_SHA_MARKER_KEYS
+            and _RING_SHA_MARKER_VALUE_RE.fullmatch(value)
+        ):
+            _LOGGER.info("Comelit ring fingerprint marker; %s=%s", key, value)
+            safe_value = "<redacted>"
         else:
             safe_value = (
                 value
