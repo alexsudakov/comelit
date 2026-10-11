@@ -6,6 +6,19 @@ from datetime import UTC, datetime, timedelta
 import math
 from typing import Any, Protocol
 
+try:
+    from .ring_shadow import RingShadowController, RingShadowHook, SHADOW_OWNER_MEDIA
+except ImportError:
+    RingShadowController = object
+    SHADOW_OWNER_MEDIA = "on_demand_media"
+
+    class RingShadowHook:
+        def __init__(self, controller: object | None, owner: str) -> None:
+            self._latched = True
+
+        def note_state(self, state: str) -> None:
+            return None
+
 # Literal boundary keys duplicated from latency_timeline.py rather than
 # imported: this module is loaded standalone (no package context) by some
 # existing tests, and it previously had zero intra-package imports. A
@@ -89,6 +102,7 @@ class ComelitMediaSessionManager:
             MEDIA_TRANSPORT_WATCH_INTERVAL_SECONDS
         ),
         task_factory: TaskFactory | None = None,
+        ring_shadow: RingShadowController | None = None,
     ) -> None:
         if hard_limit_seconds <= 0:
             raise ValueError("hard_limit_seconds must be positive")
@@ -112,6 +126,7 @@ class ComelitMediaSessionManager:
         self._last_error: str | None = None
         self._status_listeners: set[Callable[[], None]] = set()
         self._latency_timeline: Any | None = None
+        self._shadow_hook = RingShadowHook(ring_shadow, SHADOW_OWNER_MEDIA)
 
     @property
     def phase(self) -> str:
@@ -181,6 +196,7 @@ class ComelitMediaSessionManager:
         self._notify_status()
 
     async def async_acquire(self, *, panel: str, reason: str) -> dict[str, object]:
+        self._shadow_hook.note_state("media_session_start")
         if panel != "entrance":
             raise ComelitMediaSessionError("unsupported_media_panel")
         if not reason or len(reason) > 64:
@@ -246,6 +262,7 @@ class ComelitMediaSessionManager:
             return self.status()
 
     async def async_release(self, *, reason: str) -> dict[str, object]:
+        self._shadow_hook.note_state("media_session_stop")
         async with self._lock:
             count = self._leases.get(reason, 0)
             if count <= 1:
