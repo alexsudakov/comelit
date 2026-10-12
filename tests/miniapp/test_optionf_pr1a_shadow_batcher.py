@@ -402,20 +402,24 @@ def test_listener_restart_changes_owner_generation_and_replay_branch():
 
     decision = controller.snapshot()["decisions"][-1]
     assert decision["generation"] == 2
-    assert decision["decision"] == ring_shadow.SHADOW_DECISION_SUPPRESS
-    assert decision["reason"] == ring_shadow.SHADOW_REASON_LIVE_CALL_REPLAY
+    assert decision["decision"] == ring_shadow.SHADOW_DECISION_OPEN_UNRESOLVED
+    assert decision["reason"] == ring_shadow.SHADOW_REASON_LIVE_STATE_RESET
 
 
 def test_listener_generation_change_resets_controller_interaction_latch():
     controller = ring_shadow.RingShadowController()
     controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_start")
+    for line in _lines("01_listener_ring_call1.golden.txt"):
+        controller.observe_native_line(ring_shadow.SHADOW_OWNER_LISTENER, line)
     controller.observe_native_line(
         ring_shadow.SHADOW_OWNER_LISTENER,
         "R37_REMOTE_RELEASE_OBSERVED=true",
     )
     controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_start")
 
-    assert controller.snapshot()["guard"]["live"] == ()
+    live = controller.snapshot()["guard"]["live"]
+    assert live[0]["reset_reason"] == "owner_lifecycle_reset"
+    assert live[0]["interaction_seen"] is True
 
 
 def test_interaction_seen_live_call_generation_change_is_high_a2():
@@ -427,11 +431,12 @@ def test_interaction_seen_live_call_generation_change_is_high_a2():
         ring_shadow.SHADOW_OWNER_LISTENER,
         "R37_REMOTE_RELEASE_OBSERVED=true",
     )
-    controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_start")
+    controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_stop")
+    controller.note_state(ring_shadow.SHADOW_OWNER_MEDIA, "media_transport_start")
     for line in _lines("01_listener_ring_call1.golden.txt"):
-        controller.observe_native_line(ring_shadow.SHADOW_OWNER_LISTENER, line)
+        controller.observe_native_line(ring_shadow.SHADOW_OWNER_MEDIA, line)
 
     decision = controller.snapshot()["decisions"][-1]
-    assert decision["generation"] == 2
+    assert decision["generation"] == 1
     assert decision["decision"] == ring_shadow.SHADOW_DECISION_OPEN_UNRESOLVED
     assert decision["reason"] == ring_shadow.SHADOW_REASON_HIGH_A2

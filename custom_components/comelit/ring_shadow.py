@@ -440,8 +440,13 @@ class RingEmitGuard:
             return None
         return self._live[-1]
 
-    def observe_interaction(self) -> None:
-        live = self._last_live()
+    def observe_interaction(self, owner: str) -> None:
+        live = None
+        for candidate in self._live:
+            if candidate.current_owner_kind == owner:
+                live = candidate
+        if live is None:
+            live = self._last_live()
         if live is not None:
             live.interaction_seen = True
 
@@ -450,10 +455,9 @@ class RingEmitGuard:
             if live.current_owner_kind == owner:
                 live.watchdog_boundary_crossed = True
 
-    def reset_owner_lifecycle(self, owner: str) -> None:
-        kept: Deque[_ShadowLive] = deque(maxlen=4)
+    def reset_owner_lifecycle(self, owner: str, stale_owners: set[str]) -> None:
         for live in self._live:
-            if live.current_owner_kind == owner:
+            if live.current_owner_kind in stale_owners:
                 live.reset_reason = "owner_lifecycle_reset"
                 live.reset_is_new_call_proof = False
                 self._reset_count += 1
@@ -468,9 +472,6 @@ class RingEmitGuard:
                     handoff_token=live.handoff_token,
                     new_call_proven=False,
                 ))
-                continue
-            kept.append(live)
-        self._live = kept
 
     def note_owner_handoff(self, owner: str, owner_generation: tuple[str, int]) -> None:
         for live in self._live:
@@ -582,6 +583,34 @@ class RingEmitGuard:
         if watchdog_boundary_crossed:
             live.watchdog_boundary_crossed = True
 
+        if live.reset_reason is not None:
+            live.generations.clear()
+            live.generations.append(owner_generation)
+            live.active_event_id = None
+            live.origin_owner = owner
+            live.origin_generation = owner_generation[1]
+            live.origin_owner_generation = owner_generation
+            live.current_owner_kind = owner
+            live.current_owner_generation = owner_generation
+            live.previous_owner_kind = None
+            live.previous_owner_generation = None
+            live.handoff_epoch = 0
+            live.handoff_token = 0
+            live.owner_lifecycle_epoch += 1
+            live.interaction_seen = interaction_seen
+            live.watchdog_boundary_crossed = watchdog_boundary_crossed
+            live.reset_reason = None
+            live.reset_is_new_call_proof = False
+            live.recording_completed = False
+            live.reattached = False
+            return self._make_decision(
+                SHADOW_DECISION_OPEN_UNRESOLVED,
+                SHADOW_REASON_LIVE_STATE_RESET,
+                owner,
+                owner_generation,
+                retransmit=retransmit,
+            )
+
         if owner_generation == live.origin_owner_generation:
             if retransmit:
                 return self._make_decision(
@@ -612,6 +641,17 @@ class RingEmitGuard:
                     handoff_epoch=live.handoff_epoch,
                     handoff_token=live.handoff_token,
                 )
+
+        if owner_generation in live.generations:
+            return self._make_decision(
+                SHADOW_DECISION_SUPPRESS,
+                SHADOW_REASON_LIVE_CALL_REPLAY,
+                owner,
+                owner_generation,
+                handoff_epoch=live.handoff_epoch,
+                handoff_token=live.handoff_token,
+                retransmit=retransmit,
+            )
 
         live.generations.append(owner_generation)
         previous_owner = live.current_owner_kind
@@ -649,6 +689,7 @@ class RingEmitGuard:
                 handoff_token=live.handoff_token,
             )
         if live.watchdog_boundary_crossed:
+            live.watchdog_boundary_crossed = False
             return self._make_decision(
                 SHADOW_DECISION_OPEN_UNRESOLVED,
                 SHADOW_REASON_HIGH_3,
@@ -666,6 +707,10 @@ class RingEmitGuard:
                 handoff_epoch=live.handoff_epoch,
                 handoff_token=live.handoff_token,
             )
+        reattach = not live.reattached
+        record = not live.recording_completed
+        if reattach:
+            live.reattached = True
         return self._make_decision(
             SHADOW_DECISION_SUPPRESS,
             SHADOW_REASON_LIVE_CALL_REPLAY,
@@ -673,8 +718,8 @@ class RingEmitGuard:
             owner_generation,
             handoff_epoch=live.handoff_epoch,
             handoff_token=live.handoff_token,
-            reattach=True,
-            record=True,
+            reattach=reattach,
+            record=record,
             rearm_watchdog=True,
         )
 
@@ -725,6 +770,10 @@ class RingShadowController:
             SHADOW_OWNER_LISTENER: 0,
             SHADOW_OWNER_MEDIA: 0,
         }
+        self._owner_running = {
+            SHADOW_OWNER_LISTENER: False,
+            SHADOW_OWNER_MEDIA: False,
+        }
         self._last_stopped_owner: str | None = None
         self._malformed_batch_count = 0
 
@@ -734,7 +783,7 @@ class RingShadowController:
             return
         batches = batcher.observe(line)
         if line in SHADOW_REMOTE_RELEASE_LINES:
-            self._guard.observe_interaction()
+            self._guard.observe_interaction(owner)
         for batch in batches:
             owner_generation = (owner, self._owner_generation.get(owner, 0))
             if batch.malformed:
@@ -779,10 +828,20 @@ class RingShadowController:
             (owner == SHADOW_OWNER_LISTENER and state == "listener_start")
             or (owner == SHADOW_OWNER_MEDIA and state == "media_transport_start")
         ):
+            had_owner_generation = self._owner_generation.get(owner, 0) > 0
             self._owner_generation[owner] = self._owner_generation.get(owner, 0) + 1
             owner_generation = (owner, self._owner_generation[owner])
-            if self._last_stopped_owner == owner:
-                self._guard.reset_owner_lifecycle(owner)
+            self._owner_running[owner] = True
+            stale_owners = {
+                stale_owner
+                for stale_owner in (SHADOW_OWNER_LISTENER, SHADOW_OWNER_MEDIA)
+                if not self._owner_running[stale_owner]
+            }
+            stale_owners.add(owner)
+            if self._last_stopped_owner is None and had_owner_generation:
+                self._guard.reset_owner_lifecycle(owner, stale_owners)
+            elif self._last_stopped_owner == owner:
+                self._guard.reset_owner_lifecycle(owner, stale_owners)
             elif self._last_stopped_owner is not None:
                 self._guard.note_owner_handoff(owner, owner_generation)
             self._last_stopped_owner = None
@@ -792,9 +851,12 @@ class RingShadowController:
             or (owner == SHADOW_OWNER_MEDIA and state == "media_transport_stop")
             or state == "supervisor_stop"
         ):
+            self._owner_running[owner] = False
             self._last_stopped_owner = owner
             return
         if state == "integration_unload":
+            self._owner_running[SHADOW_OWNER_LISTENER] = False
+            self._owner_running[SHADOW_OWNER_MEDIA] = False
             self._guard = RingEmitGuard()
             self._decisions.clear()
             self._last_stopped_owner = None
@@ -810,6 +872,10 @@ class RingShadowController:
         self._owner_generation = {
             SHADOW_OWNER_LISTENER: 0,
             SHADOW_OWNER_MEDIA: 0,
+        }
+        self._owner_running = {
+            SHADOW_OWNER_LISTENER: False,
+            SHADOW_OWNER_MEDIA: False,
         }
         self._last_stopped_owner = None
         self._malformed_batch_count = 0
@@ -921,6 +987,10 @@ class RingShadowController:
             "owner_generation": {
                 SHADOW_OWNER_LISTENER: self._owner_generation[SHADOW_OWNER_LISTENER],
                 SHADOW_OWNER_MEDIA: self._owner_generation[SHADOW_OWNER_MEDIA],
+            },
+            "owner_running": {
+                SHADOW_OWNER_LISTENER: self._owner_running[SHADOW_OWNER_LISTENER],
+                SHADOW_OWNER_MEDIA: self._owner_running[SHADOW_OWNER_MEDIA],
             },
             "last_stopped_owner": self._last_stopped_owner,
             "malformed_batch_count": self._malformed_batch_count,

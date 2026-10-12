@@ -24,6 +24,17 @@ def _ring(controller, owner):
         controller.observe_native_line(owner, line)
 
 
+def _ring_key(controller, owner, door, source):
+    for line in (
+        "V4_RING_OBSERVED=true",
+        "V4_RING_DIRECTION=DEVICE_TO_CLIENT",
+        "V4_RING_KIND=CALL_INIT",
+        f"V4_RING_DOOR={door}",
+        f"V4_RING_SOURCE={source}",
+    ):
+        controller.observe_native_line(owner, line)
+
+
 def _decision_constants():
     return {
         value
@@ -85,7 +96,7 @@ def test_t5_t18_high_a2_canonical_open_unresolved():
         owner=ring_shadow.SHADOW_OWNER_LISTENER,
         owner_generation=(ring_shadow.SHADOW_OWNER_LISTENER, 1),
     )
-    guard.observe_interaction()
+    guard.observe_interaction(ring_shadow.SHADOW_OWNER_LISTENER)
     decision = guard.decide(
         door="entrance",
         source="00000643",
@@ -102,22 +113,17 @@ def test_t6_t7_owner_lifecycle_reset_clears_stale_state_without_new_call_proof()
     controller = ring_shadow.RingShadowController()
     controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_start")
     _ring(controller, ring_shadow.SHADOW_OWNER_LISTENER)
-    controller.observe_native_line(
-        ring_shadow.SHADOW_OWNER_LISTENER,
-        "R37_REMOTE_RELEASE_OBSERVED=true",
-    )
-    controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_stop")
     controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_start")
     snapshot = controller.snapshot()
 
-    assert snapshot["guard"]["live"] == ()
+    assert snapshot["guard"]["live"][0]["reset_reason"] == "owner_lifecycle_reset"
     assert snapshot["guard"]["decisions"][-1]["reason"] == ring_shadow.SHADOW_REASON_LIVE_STATE_RESET
     assert snapshot["guard"]["decisions"][-1]["new_call_proven"] is False
 
     _ring(controller, ring_shadow.SHADOW_OWNER_LISTENER)
     decision = controller.snapshot()["decisions"][-1]
-    assert decision["reason"] == ring_shadow.SHADOW_REASON_NO_LIVE_CALL
-    assert decision["decision"] == ring_shadow.SHADOW_DECISION_SHADOW
+    assert decision["reason"] == ring_shadow.SHADOW_REASON_LIVE_STATE_RESET
+    assert decision["decision"] == ring_shadow.SHADOW_DECISION_OPEN_UNRESOLVED
 
 
 def test_t8_known_retransmit_can_never_emit_new_event():
@@ -213,13 +219,170 @@ def test_t14_t19_watchdog_boundary_replay_open_unresolved():
     controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_start")
     _ring(controller, ring_shadow.SHADOW_OWNER_LISTENER)
     controller.note_watchdog_boundary_crossed(ring_shadow.SHADOW_OWNER_LISTENER)
-    controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_start")
-    _ring(controller, ring_shadow.SHADOW_OWNER_LISTENER)
+    controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_stop")
+    controller.note_state(ring_shadow.SHADOW_OWNER_MEDIA, "media_transport_start")
+    _ring(controller, ring_shadow.SHADOW_OWNER_MEDIA)
     decision = controller.snapshot()["decisions"][-1]
 
     assert decision["decision"] == ring_shadow.SHADOW_DECISION_OPEN_UNRESOLVED
     assert decision["reason"] == ring_shadow.SHADOW_REASON_HIGH_3
     assert decision["new_call_proven"] is False
+
+    _ring(controller, ring_shadow.SHADOW_OWNER_MEDIA)
+    repeat = controller.snapshot()["decisions"][-1]
+    assert repeat["decision"] == ring_shadow.SHADOW_DECISION_SUPPRESS
+    assert repeat["reason"] == ring_shadow.SHADOW_REASON_LIVE_CALL_REPLAY
+
+
+def test_cycle_restart_without_stop_tombstones_and_first_observation_is_unresolved():
+    controller = ring_shadow.RingShadowController()
+    controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_start")
+    _ring(controller, ring_shadow.SHADOW_OWNER_LISTENER)
+
+    controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_start")
+    live = controller.snapshot()["guard"]["live"]
+    assert live[0]["reset_reason"] == "owner_lifecycle_reset"
+
+    _ring(controller, ring_shadow.SHADOW_OWNER_LISTENER)
+    decision = controller.snapshot()["decisions"][-1]
+    assert decision["decision"] == ring_shadow.SHADOW_DECISION_OPEN_UNRESOLVED
+    assert decision["reason"] == ring_shadow.SHADOW_REASON_LIVE_STATE_RESET
+    assert decision["new_call_proven"] is False
+
+    _ring(controller, ring_shadow.SHADOW_OWNER_LISTENER)
+    repeat = controller.snapshot()["decisions"][-1]
+    assert repeat["decision"] == ring_shadow.SHADOW_DECISION_SHADOW
+    assert repeat["reason"] == ring_shadow.SHADOW_REASON_SAME_PROCESS_LISTENER
+
+
+def test_listener_media_listener_real_handoffs_preserve_state_for_replay():
+    controller = ring_shadow.RingShadowController()
+    controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_start")
+    _ring(controller, ring_shadow.SHADOW_OWNER_LISTENER)
+
+    controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_stop")
+    controller.note_state(ring_shadow.SHADOW_OWNER_MEDIA, "media_transport_start")
+    _ring(controller, ring_shadow.SHADOW_OWNER_MEDIA)
+    media_decision = controller.snapshot()["decisions"][-1]
+    assert media_decision["decision"] == ring_shadow.SHADOW_DECISION_HANDOFF_REPLAY
+    assert media_decision["reason"] == ring_shadow.SHADOW_REASON_HANDOFF_REPLAY
+
+    controller.note_state(ring_shadow.SHADOW_OWNER_MEDIA, "media_transport_stop")
+    controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "supervisor_resume")
+    controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_start")
+    _ring(controller, ring_shadow.SHADOW_OWNER_LISTENER)
+    listener_decision = controller.snapshot()["decisions"][-1]
+    assert listener_decision["decision"] == ring_shadow.SHADOW_DECISION_HANDOFF_REPLAY
+    assert listener_decision["reason"] == ring_shadow.SHADOW_REASON_HANDOFF_REPLAY
+
+
+def test_cycle_restart_after_media_listener_handoff_stales_inactive_media_record():
+    controller = ring_shadow.RingShadowController()
+    controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_start")
+    _ring(controller, ring_shadow.SHADOW_OWNER_LISTENER)
+    controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_stop")
+    controller.note_state(ring_shadow.SHADOW_OWNER_MEDIA, "media_transport_start")
+    _ring(controller, ring_shadow.SHADOW_OWNER_MEDIA)
+    _ring_key(controller, ring_shadow.SHADOW_OWNER_MEDIA, "gate", "00000610")
+
+    controller.note_state(ring_shadow.SHADOW_OWNER_MEDIA, "media_transport_stop")
+    controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "supervisor_resume")
+    controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_start")
+    _ring(controller, ring_shadow.SHADOW_OWNER_LISTENER)
+    handoff = controller.snapshot()["decisions"][-1]
+    assert handoff["decision"] == ring_shadow.SHADOW_DECISION_HANDOFF_REPLAY
+
+    controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_start")
+    live = controller.snapshot()["guard"]["live"]
+    assert {entry["reset_reason"] for entry in live} == {"owner_lifecycle_reset"}
+    assert {
+        entry["current_owner_kind"] for entry in live
+    } == {ring_shadow.SHADOW_OWNER_LISTENER, ring_shadow.SHADOW_OWNER_MEDIA}
+
+
+def test_seen_owner_generation_replay_does_not_bump_handoff_token_again():
+    guard = ring_shadow.RingEmitGuard()
+    guard.decide(
+        door="entrance",
+        source="00000643",
+        owner=ring_shadow.SHADOW_OWNER_LISTENER,
+        owner_generation=(ring_shadow.SHADOW_OWNER_LISTENER, 1),
+    )
+    first_media = guard.decide(
+        door="entrance",
+        source="00000643",
+        owner=ring_shadow.SHADOW_OWNER_MEDIA,
+        owner_generation=(ring_shadow.SHADOW_OWNER_MEDIA, 1),
+    )
+    repeat_media = guard.decide(
+        door="entrance",
+        source="00000643",
+        owner=ring_shadow.SHADOW_OWNER_MEDIA,
+        owner_generation=(ring_shadow.SHADOW_OWNER_MEDIA, 1),
+    )
+
+    assert first_media.decision == ring_shadow.SHADOW_DECISION_HANDOFF_REPLAY
+    assert repeat_media.decision == ring_shadow.SHADOW_DECISION_SUPPRESS
+    assert repeat_media.reason == ring_shadow.SHADOW_REASON_LIVE_CALL_REPLAY
+    assert repeat_media.handoff_token == first_media.handoff_token
+
+
+def test_reattach_is_once_and_record_tracks_recording_completed():
+    guard = ring_shadow.RingEmitGuard()
+    guard.decide(
+        door="entrance",
+        source="00000643",
+        owner=ring_shadow.SHADOW_OWNER_LISTENER,
+        owner_generation=(ring_shadow.SHADOW_OWNER_LISTENER, 1),
+    )
+    first = guard.decide(
+        door="entrance",
+        source="00000643",
+        owner=ring_shadow.SHADOW_OWNER_LISTENER,
+        owner_generation=(ring_shadow.SHADOW_OWNER_LISTENER, 2),
+    )
+    second = guard.decide(
+        door="entrance",
+        source="00000643",
+        owner=ring_shadow.SHADOW_OWNER_LISTENER,
+        owner_generation=(ring_shadow.SHADOW_OWNER_LISTENER, 3),
+    )
+
+    assert first.reattach is True
+    assert first.record is True
+    assert second.reattach is False
+    assert second.record is True
+
+
+def test_controller_high_a2_real_release_handoff_open_unresolved():
+    controller = ring_shadow.RingShadowController()
+    controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_start")
+    _ring(controller, ring_shadow.SHADOW_OWNER_LISTENER)
+    controller.observe_native_line(
+        ring_shadow.SHADOW_OWNER_LISTENER,
+        "R37_REMOTE_RELEASE_OBSERVED=true",
+    )
+    controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_stop")
+    controller.note_state(ring_shadow.SHADOW_OWNER_MEDIA, "media_transport_start")
+    _ring(controller, ring_shadow.SHADOW_OWNER_MEDIA)
+    decision = controller.snapshot()["decisions"][-1]
+
+    assert decision["decision"] == ring_shadow.SHADOW_DECISION_OPEN_UNRESOLVED
+    assert decision["reason"] == ring_shadow.SHADOW_REASON_HIGH_A2
+
+
+def test_controller_high_3_real_watchdog_boundary_open_unresolved():
+    controller = ring_shadow.RingShadowController()
+    controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_start")
+    _ring(controller, ring_shadow.SHADOW_OWNER_LISTENER)
+    controller.note_watchdog_boundary_crossed(ring_shadow.SHADOW_OWNER_LISTENER)
+    controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_stop")
+    controller.note_state(ring_shadow.SHADOW_OWNER_MEDIA, "media_transport_start")
+    _ring(controller, ring_shadow.SHADOW_OWNER_MEDIA)
+    decision = controller.snapshot()["decisions"][-1]
+
+    assert decision["decision"] == ring_shadow.SHADOW_DECISION_OPEN_UNRESOLVED
+    assert decision["reason"] == ring_shadow.SHADOW_REASON_HIGH_3
 
 
 def test_t15_snapshot_view_is_bounded_and_sanitized():
@@ -327,7 +490,7 @@ def test_reason_and_decision_vocabulary_fully_reachable():
         owner=ring_shadow.SHADOW_OWNER_LISTENER,
         owner_generation=(ring_shadow.SHADOW_OWNER_LISTENER, 1),
     )
-    high_a2.observe_interaction()
+    high_a2.observe_interaction(ring_shadow.SHADOW_OWNER_LISTENER)
     high_a2_decision = high_a2.decide(
         door="entrance",
         source="00000643",
@@ -365,8 +528,8 @@ def test_reason_and_decision_vocabulary_fully_reachable():
         controller.observe_native_line(ring_shadow.SHADOW_OWNER_LISTENER, line)
     controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_start")
     _ring(controller, ring_shadow.SHADOW_OWNER_LISTENER)
-    controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_stop")
     controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_start")
+    _ring(controller, ring_shadow.SHADOW_OWNER_LISTENER)
     snapshot = controller.snapshot()
     for decision in snapshot["decisions"]:
         decisions.add(decision["decision"])
