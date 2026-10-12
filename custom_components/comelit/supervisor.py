@@ -10,6 +10,7 @@ from homeassistant.core import HomeAssistant
 
 from .const import DOOR_ENTRANCE, DOOR_GATE, LISTENER_CYCLE_SECONDS
 from .media_transport import ComelitEntranceMediaTransport
+from .ring_shadow import RingShadowController, RingShadowHook, SHADOW_OWNER_LISTENER
 from .runtime import ComelitRingRuntime
 
 _LOGGER = logging.getLogger(__name__)
@@ -68,6 +69,7 @@ class ComelitRuntimeSupervisor:
         runtime: ComelitRingRuntime,
         *,
         entry: ConfigEntry,
+        ring_shadow: RingShadowController | None = None,
     ) -> None:
         self._hass = hass
         self._entry = entry
@@ -86,6 +88,7 @@ class ComelitRuntimeSupervisor:
         self._attached_stop_recovery_required = False
         self._last_attached_stop_recovery_error: str | None = None
         self._last_attached_stop_failure_stage: str | None = None
+        self._shadow_hook = RingShadowHook(ring_shadow, SHADOW_OWNER_LISTENER)
 
     @property
     def running(self) -> bool:
@@ -220,6 +223,7 @@ class ComelitRuntimeSupervisor:
 
         self._stopping = False
         self._set_state(LISTENER_STATE_STARTING)
+        self._shadow_hook.note_state("supervisor_spawn")
         await self._runtime.async_start()
         self._task = self._entry.async_create_background_task(
             self._hass,
@@ -243,6 +247,7 @@ class ComelitRuntimeSupervisor:
             if self._media_paused:
                 return
 
+            self._shadow_hook.note_state("supervisor_pause")
             self._media_paused = True
             try:
                 await self._async_stop_locked(LISTENER_STATE_PAUSED_MEDIA)
@@ -400,10 +405,12 @@ class ComelitRuntimeSupervisor:
                 self._set_state(LISTENER_STATE_STOPPED)
                 return
 
+            self._shadow_hook.note_state("supervisor_resume")
             await self._async_start_locked()
 
     async def _async_stop_locked(self, final_state: str) -> None:
         self._stopping = True
+        self._shadow_hook.note_state("supervisor_stop")
 
         task = self._task
         if task is not None and not task.done():

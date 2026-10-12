@@ -32,6 +32,7 @@ from .door_outcome import door_one_shot_sequence_sent
 from .media_diagnostics import MediaCallDiagnostics
 from .oauth import ComelitOAuthError, ComelitOAuthManager
 from .ring_event import RingObservationError, parse_v4_safe_ring
+from .ring_shadow import RingShadowController, RingShadowHook, SHADOW_OWNER_LISTENER
 from .sdp import ComelitSdpError, transform_offer
 from .ring_media import RingMediaCoordinator
 
@@ -567,6 +568,7 @@ class ComelitRingRuntime:
         device_uuid: str,
         vip_token: str,
         oauth: ComelitOAuthManager,
+        ring_shadow: RingShadowController | None = None,
     ) -> None:
         self._hass = hass
         self._entry = entry
@@ -608,6 +610,7 @@ class ComelitRingRuntime:
         self._status_listeners: set[Callable[[], None]] = set()
         self._call_state = ComelitCallStateTracker()
         self._call_state_timeout_task: asyncio.Task[None] | None = None
+        self._shadow_hook = RingShadowHook(ring_shadow, SHADOW_OWNER_LISTENER)
 
     @property
     def running(self) -> bool:
@@ -1232,6 +1235,7 @@ class ComelitRingRuntime:
         self._cancel_call_state_timeout()
         self._call_state_tracker().reset()
         self._notify_status()
+        self._shadow_hook.note_state("listener_start")
         self._task = self._entry.async_create_background_task(
             self._hass,
             self._async_run_once(),
@@ -1348,6 +1352,7 @@ class ComelitRingRuntime:
 
     async def async_stop(self) -> None:
         self._stopping = True
+        self._shadow_hook.note_state("listener_stop")
         self._cancel_call_state_timeout()
         process = self._process
         if process is not None and process.returncode is None:
@@ -1755,11 +1760,18 @@ class ComelitRingRuntime:
         if process.stdout is None:
             raise ComelitRingRuntimeError("native_stdout_missing")
 
+        if not hasattr(self, "_shadow_hook"):
+            self._shadow_hook = RingShadowHook(None, SHADOW_OWNER_LISTENER)
+        shadow_previous_line: str | None = None
         while True:
             raw = await process.stdout.readline()
             if not raw:
+                self._shadow_hook.observe_line(shadow_previous_line)
                 return
             line = raw.decode("utf-8", errors="replace").strip()
+            if shadow_previous_line is not None:
+                self._shadow_hook.observe_line(shadow_previous_line)
+            shadow_previous_line = line
             self._remember_native_marker(line)
             self._media_diagnostics.observe_line(line)
             self._observe_canary_log_marker(line)

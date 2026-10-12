@@ -51,6 +51,7 @@ from .latency_timeline import (
 )
 from .media_diagnostics import MediaProgressDiagnostics
 from .oauth import ComelitOAuthError, ComelitOAuthManager
+from .ring_shadow import RingShadowController, RingShadowHook, SHADOW_OWNER_MEDIA
 from .sdp import ComelitSdpError, transform_offer
 
 _LOGGER = logging.getLogger(__name__)
@@ -434,6 +435,7 @@ class ComelitEntranceMediaTransport:
         device_uuid: str,
         vip_token: str,
         oauth: ComelitOAuthManager,
+        ring_shadow: RingShadowController | None = None,
     ) -> None:
         self._hass = hass
         self._entry = entry
@@ -468,6 +470,7 @@ class ComelitEntranceMediaTransport:
         self._door_lock = asyncio.Lock()
         self._door_result_future: asyncio.Future[str] | None = None
         self._door_diagnostics: dict[str, object] = {}
+        self._shadow_hook = RingShadowHook(ring_shadow, SHADOW_OWNER_MEDIA)
 
     @property
     def active(self) -> bool:
@@ -916,6 +919,7 @@ class ComelitEntranceMediaTransport:
             timeline.mark(
                 T04_TRANSPORT_START_BEGIN, asyncio.get_running_loop().time()
             )
+        self._shadow_hook.note_state("media_transport_start")
         self._task = self._entry.async_create_background_task(
             self._hass,
             self._async_run_once(),
@@ -977,6 +981,7 @@ class ComelitEntranceMediaTransport:
 
     async def async_stop(self) -> None:
         self._stopping = True
+        self._shadow_hook.note_state("media_transport_stop")
         process = self._process
         if process is not None and process.returncode is None:
             try:
@@ -1259,11 +1264,18 @@ class ComelitEntranceMediaTransport:
         if process.stdout is None:
             raise ComelitMediaTransportError("media_native_stdout_missing")
 
+        if not hasattr(self, "_shadow_hook"):
+            self._shadow_hook = RingShadowHook(None, SHADOW_OWNER_MEDIA)
+        shadow_previous_line: str | None = None
         while True:
             raw = await process.stdout.readline()
             if not raw:
+                self._shadow_hook.observe_line(shadow_previous_line)
                 return
             line = raw.decode("utf-8", errors="replace").strip()
+            if shadow_previous_line is not None:
+                self._shadow_hook.observe_line(shadow_previous_line)
+            shadow_previous_line = line
             self._remember_native_marker(line)
             self._observe_latency_marker(line)
             self._observe_native_stage_marker(line)

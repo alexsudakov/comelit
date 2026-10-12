@@ -13,6 +13,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
 
+from . import ring_shadow
 from .attached_media import (
     ComelitAttachedRingMediaSession,
     ComelitAttachedRingMediaTransport,
@@ -225,6 +226,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         oauth = ComelitOAuthManager(hass, session, entry)
         device_uuid = str(entry.data[CONF_DEVICE_UUID])
         vip_token = str(entry.data[CONF_VIP_TOKEN])
+        shadow_controller = None
+        try:
+            shadow_controller = ring_shadow.RingShadowController()
+        except Exception:
+            shadow_controller = None
+        shadow_controllers = domain_data.setdefault("ring_shadow_controllers", {})
+        shadow_controllers[entry.entry_id] = shadow_controller
 
         runtime = ComelitRingRuntime(
             hass,
@@ -233,6 +241,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             device_uuid=device_uuid,
             vip_token=vip_token,
             oauth=oauth,
+            ring_shadow=shadow_controller,
         )
         runtimes = domain_data.setdefault(DATA_RUNTIMES, {})
         runtimes[entry.entry_id] = runtime
@@ -241,6 +250,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass,
             runtime,
             entry=entry,
+            ring_shadow=shadow_controller,
         )
         supervisors = domain_data.setdefault(DATA_SUPERVISORS, {})
         supervisors[entry.entry_id] = supervisor
@@ -252,6 +262,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             device_uuid=device_uuid,
             vip_token=vip_token,
             oauth=oauth,
+            ring_shadow=shadow_controller,
         )
         media_transports = domain_data.setdefault(DATA_MEDIA_TRANSPORTS, {})
         media_transports[entry.entry_id] = media_transport
@@ -262,6 +273,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             task_factory=lambda coro, name: entry.async_create_background_task(
                 hass, coro, name
             ),
+            ring_shadow=shadow_controller,
         )
         media_sessions = domain_data.setdefault(DATA_MEDIA_SESSIONS, {})
         media_sessions[entry.entry_id] = media_manager
@@ -350,6 +362,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     attached_transports = domain_data.get(DATA_ATTACHED_MEDIA_TRANSPORTS, {})
     ring_media_lifecycles = domain_data.get(DATA_RING_MEDIA, {})
     synthetic_lifecycles = domain_data.get(DATA_SYNTHETIC_RING_MEDIA, {})
+    shadow_controllers = domain_data.get("ring_shadow_controllers", {})
 
     runtime = runtimes.get(entry.entry_id)
     supervisor = supervisors.get(entry.entry_id)
@@ -361,9 +374,18 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     miniapp_attached_provider = miniapp_attached_providers.get(entry.entry_id)
     ring_media = ring_media_lifecycles.get(entry.entry_id)
     synthetic_ring_media = synthetic_lifecycles.get(entry.entry_id)
+    shadow_controller = shadow_controllers.get(entry.entry_id)
 
     if runtime is None:
         return True
+
+    try:
+        if shadow_controller is not None:
+            shadow_controller.note_state(
+                ring_shadow.SHADOW_OWNER_LISTENER, "integration_unload"
+            )
+    except Exception:
+        pass
 
     unloaded = True
 
@@ -435,6 +457,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     attached_transports.pop(entry.entry_id, None)
     ring_media_lifecycles.pop(entry.entry_id, None)
     synthetic_lifecycles.pop(entry.entry_id, None)
+    shadow_controllers.pop(entry.entry_id, None)
     domain_data.pop(entry.entry_id, None)
 
     if not runtimes:
@@ -459,4 +482,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         domain_data.pop(DATA_RING_MEDIA, None)
     if not synthetic_lifecycles:
         domain_data.pop(DATA_SYNTHETIC_RING_MEDIA, None)
+    if not shadow_controllers:
+        domain_data.pop("ring_shadow_controllers", None)
     return True
