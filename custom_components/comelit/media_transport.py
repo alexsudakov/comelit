@@ -80,6 +80,14 @@ _HEX32_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
 _NATIVE_ENV_PASSTHROUGH = frozenset({"HOME", "LANG", "LC_ALL", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR"})
 _SUPPORTED_NATIVE_ARCHITECTURES = frozenset({"x86_64", "amd64"})
 _MEDIA_NATIVE_MARKER_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,79}$")
+_RING_PROBE_MARKER_KEYS = frozenset(
+    {
+        "V4_RING_PHASE",
+        "V4_RING_PEER_CONNECTION",
+        "V4_RING_BODY_32_35",
+        "V4_RING_PARSE_STATUS",
+    }
+)
 _RING_SHA_MARKER_KEYS = {"V4_RING_FRAME_SHA256", "V4_RING_RETRANSMIT_SHA256"}
 _RING_SHA_MARKER_VALUE_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _MEDIA_NATIVE_MARKER_SAFE_VALUE_RE = re.compile(
@@ -771,6 +779,8 @@ class ComelitEntranceMediaTransport:
         ):
             _LOGGER.info("Comelit ring fingerprint marker; %s=%s", key, value)
             safe_value = "<redacted>"
+        elif key in _RING_PROBE_MARKER_KEYS:
+            safe_value = "<redacted>"
         else:
             safe_value = (
                 value
@@ -804,6 +814,8 @@ class ComelitEntranceMediaTransport:
             return
         key, marker = safe_marker
         self._observe_native_scalar_marker(key, marker)
+        if key in _RING_PROBE_MARKER_KEYS:
+            return
         self._native_marker_tail.append(marker)
         if len(self._native_marker_tail) > _MEDIA_NATIVE_MARKER_TAIL_LIMIT:
             del self._native_marker_tail[:-_MEDIA_NATIVE_MARKER_TAIL_LIMIT]

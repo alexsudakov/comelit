@@ -111,7 +111,8 @@ for marker in \
     'P12_TX_R67_ATTACHED_REFRESH' \
     'V4_RING_BODY_32_35' \
     'V4_RING_PEER_CONNECTION' \
-    'V4_RING_PHASE'
+    'V4_RING_PHASE' \
+    'V4_RING_PARSE_STATUS'
 do
     grep -Fq "$marker" "$SOURCE_A"
 done
@@ -264,10 +265,16 @@ for marker in \
     'V4_DOOR_PATH=CALL_TIME_SINGLE' \
     'V4_RING_BODY_32_35' \
     'V4_RING_PEER_CONNECTION' \
-    'V4_RING_PHASE'
+    'V4_RING_PHASE' \
+    'V4_RING_PARSE_STATUS'
 do
     grep -Fq "$marker" "$STRINGS_A"
 done
+if grep -Fq 'P12_TX_ENTRANCE_SELF_ACTIVATION' "$STRINGS_A"; then
+    echo 'R68_BINARY_FORBIDDEN_NAME_GATE=FAIL marker=P12_TX_ENTRANCE_SELF_ACTIVATION'
+    exit 1
+fi
+echo 'R68_BINARY_FORBIDDEN_NAME_GATE=PASS'
 echo 'R68_BINARY_MARKER_GATE=PASS'
 
 BYTES_A="$(stat -c '%s' "$BUILD_A")"

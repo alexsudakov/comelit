@@ -55,6 +55,8 @@ SUPERSEDED_P122_ACTIVE_SOURCE_SHA256 = "fa5f3fef61b6673718d677e150770c2af6fe2c75
 SUPERSEDED_P122_ON_DEMAND_SOURCE_SHA256 = "fd375a37e427e680db60984f6d74807e56892a1a042a168032a6dfa42411eff5"
 SUPERSEDED_P123_BINARY_SHA256 = "04bb610e02562fb4a301813001616308dd22dbabe5507b397a5abdc7194075b2"
 SUPERSEDED_P123_SOURCE_SHA256 = "ec39399ade72cb4800131d5a0995e0053a3f9af22560fd40894af057994d6d47"
+SUPERSEDED_P124_BINARY_SHA256 = "83b29ef07be224ffb703a21f50050b1ed5e7eec3e24f185cbfde4c79c111515a"
+SUPERSEDED_P124_SOURCE_SHA256 = "92e12f5a27dd728231e073076429863cdc059825819f4f600d5d3dd50138ca26"
 FROZEN_P117_BUILD_META = MEDIA_DIR / "p117_settle1000_production_media_build_meta.txt"
 FROZEN_R65_BUILD_META = MEDIA_DIR / "p116_r65_production_media_build_meta.txt"
 PRE_R65_BUILD_META = MEDIA_DIR / "p116_media_telemetry_build_meta.txt"
@@ -248,12 +250,12 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         self.assertEqual(meta["observability_only"], "true")
         self.assertEqual(meta["BODY_32_35_SEMANTICS_PROVEN"], "false")
         self.assertEqual(meta["GENERATED_SOURCE_SHA256"], PACKAGED_NATIVE_SOURCE_SHA256)
-        verified_promoted_r68_artifact_sha = meta["NATIVE_BINARY_SHA256"]
-        self.assertRegex(verified_promoted_r68_artifact_sha, r"^[0-9a-f]{64}$")
-        self.assertEqual(actual, verified_promoted_r68_artifact_sha)
-        self.assertEqual(verified_promoted_r68_artifact_sha, EXPECTED_MUSL_SHA256)
-        self.assertEqual(meta["build_a_sha256"], verified_promoted_r68_artifact_sha)
-        self.assertEqual(meta["build_b_sha256"], verified_promoted_r68_artifact_sha)
+        verified_promoted_p125_artifact_sha = meta["NATIVE_BINARY_SHA256"]
+        self.assertRegex(verified_promoted_p125_artifact_sha, r"^[0-9a-f]{64}$")
+        self.assertEqual(actual, verified_promoted_p125_artifact_sha)
+        self.assertEqual(verified_promoted_p125_artifact_sha, EXPECTED_MUSL_SHA256)
+        self.assertEqual(meta["build_a_sha256"], verified_promoted_p125_artifact_sha)
+        self.assertEqual(meta["build_b_sha256"], verified_promoted_p125_artifact_sha)
         self.assertEqual(meta["reproducible_binary_cmp_gate"], "PASS")
         self.assertEqual(meta["CONTROL_BUILD_REPRODUCES_CURRENT_BINARY"], "true")
         self.assertEqual(frozen_p119_meta["NATIVE_BINARY_SHA256"], SUPERSEDED_P119_BINARY_SHA256)
@@ -262,11 +264,15 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         )
         self.assertEqual(meta["NATIVE_BINARY_SHA256"], EXPECTED_MUSL_SHA256)
         self.assertEqual(
-            meta["superseded_native_binary_sha256"], frozen_p124_meta["NATIVE_BINARY_SHA256"]
+            meta["superseded_native_binary_sha256"], SUPERSEDED_P124_BINARY_SHA256
         )
         self.assertEqual(
             meta["superseded_generated_source_sha256"],
-            frozen_p124_meta["GENERATED_SOURCE_SHA256"],
+            SUPERSEDED_P124_SOURCE_SHA256,
+        )
+        self.assertEqual(frozen_p124_meta["NATIVE_BINARY_SHA256"], SUPERSEDED_P124_BINARY_SHA256)
+        self.assertEqual(
+            frozen_p124_meta["GENERATED_SOURCE_SHA256"], SUPERSEDED_P124_SOURCE_SHA256
         )
         self.assertEqual(
             frozen_p123_meta["NATIVE_BINARY_SHA256"], SUPERSEDED_P123_BINARY_SHA256
@@ -384,11 +390,6 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         from entrance_p122_on_demand_media_door_transform import transform
         import entrance_p125_ringid_probe_media_transform as p125
 
-        # Deterministic command:
-        # PYTHONPATH=safety-poc/research/media/v1 python3 -c
-        # 'from pathlib import Path; import hashlib; from
-        # entrance_p121_gather_initial_timeout_transform import transform;
-        # print(hashlib.sha256(transform(Path("safety-poc/research/door/v1_5_7/comelit-v4-persistent-ctpp-door.c").read_text(encoding="utf-8"), include_p116=True).encode("utf-8")).hexdigest())'
         candidate = transform(
             SOURCE.read_text(encoding="utf-8")
         ).encode("utf-8")
@@ -412,13 +413,17 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         # identity while leaving the non-overlay HEAD P116/P122 identity distinct.
         self.assertEqual(
             meta["superseded_generated_source_sha256"],
-            frozen_p124_meta["GENERATED_SOURCE_SHA256"],
+            SUPERSEDED_P124_SOURCE_SHA256,
         )
         self.assertEqual(
             frozen_p122_on_demand_meta["NATIVE_BINARY_SHA256"],
             SUPERSEDED_P122_ON_DEMAND_BINARY_SHA256,
         )
-        self.assertEqual(meta["superseded_native_binary_sha256"], frozen_p124_meta["NATIVE_BINARY_SHA256"])
+        self.assertEqual(frozen_p124_meta["NATIVE_BINARY_SHA256"], SUPERSEDED_P124_BINARY_SHA256)
+        self.assertEqual(
+            frozen_p124_meta["GENERATED_SOURCE_SHA256"], SUPERSEDED_P124_SOURCE_SHA256
+        )
+        self.assertEqual(meta["superseded_native_binary_sha256"], SUPERSEDED_P124_BINARY_SHA256)
         self.assertEqual(meta.get("binary_rebuild_pending_orchestrator", "false"), "false")
         self.assertNotEqual(head_sha, PACKAGED_NATIVE_SOURCE_SHA256)
         # The frozen P117 record must keep documenting exactly the source it
@@ -444,9 +449,9 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         self.assertNotEqual(corrupted_binary_sha, EXPECTED_MUSL_SHA256)
         with self.assertRaises(AssertionError):
             self.assertEqual(corrupted_binary_sha, EXPECTED_MUSL_SHA256)
-        verified_promoted_r68_artifact_sha = _metadata(BUILD_META)["NATIVE_BINARY_SHA256"]
+        verified_promoted_p125_artifact_sha = _metadata(BUILD_META)["NATIVE_BINARY_SHA256"]
         tampered_promoted_artifact_sha = "0" * 64
-        self.assertEqual(actual_binary_sha, verified_promoted_r68_artifact_sha)
+        self.assertEqual(actual_binary_sha, verified_promoted_p125_artifact_sha)
         self.assertNotEqual(actual_binary_sha, tampered_promoted_artifact_sha)
         with self.assertRaises(AssertionError):
             self.assertEqual(actual_binary_sha, tampered_promoted_artifact_sha)

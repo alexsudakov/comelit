@@ -99,6 +99,14 @@ _RING_KEYS = {
     "V4_RING_DOOR",
     "V4_RING_SOURCE",
 }
+_RING_PROBE_MARKER_KEYS = frozenset(
+    {
+        "V4_RING_PHASE",
+        "V4_RING_PEER_CONNECTION",
+        "V4_RING_BODY_32_35",
+        "V4_RING_PARSE_STATUS",
+    }
+)
 _RING_SHA_MARKER_KEYS = {"V4_RING_FRAME_SHA256", "V4_RING_RETRANSMIT_SHA256"}
 _RING_SHA_MARKER_VALUE_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _HEX32_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
@@ -892,6 +900,8 @@ class ComelitRingRuntime:
         vocabulary = _P116_MARKER_VOCABULARIES.get(key)
         if vocabulary is not None:
             safe_value = value if value in vocabulary else "<redacted>"
+        elif key in _RING_PROBE_MARKER_KEYS:
+            safe_value = "<redacted>"
         elif (
             key in _RING_SHA_MARKER_KEYS
             and _RING_SHA_MARKER_VALUE_RE.fullmatch(value)
@@ -904,6 +914,8 @@ class ComelitRingRuntime:
                 if _NATIVE_MARKER_SAFE_VALUE_RE.fullmatch(value)
                 else "<redacted>"
             )
+        if key in _RING_PROBE_MARKER_KEYS:
+            return
         self._native_marker_tail.append(f"{key}={safe_value}")
         if len(self._native_marker_tail) > _NATIVE_MARKER_TAIL_LIMIT:
             del self._native_marker_tail[:-_NATIVE_MARKER_TAIL_LIMIT]
