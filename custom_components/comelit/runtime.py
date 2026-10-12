@@ -32,6 +32,7 @@ from .door_outcome import door_one_shot_sequence_sent
 from .media_diagnostics import MediaCallDiagnostics
 from .oauth import ComelitOAuthError, ComelitOAuthManager
 from .ring_event import RingObservationError, parse_v4_safe_ring
+from .ring_probe_log import RING_PROBE_OWNER_LISTENER, RingProbeDisclosure
 from .ring_shadow import RingShadowController, RingShadowHook, SHADOW_OWNER_LISTENER
 from .sdp import ComelitSdpError, transform_offer
 from .ring_media import RingMediaCoordinator
@@ -619,6 +620,7 @@ class ComelitRingRuntime:
         self._call_state = ComelitCallStateTracker()
         self._call_state_timeout_task: asyncio.Task[None] | None = None
         self._shadow_hook = RingShadowHook(ring_shadow, SHADOW_OWNER_LISTENER)
+        self._ring_probe_disclosure = RingProbeDisclosure(RING_PROBE_OWNER_LISTENER)
 
     @property
     def running(self) -> bool:
@@ -901,6 +903,17 @@ class ComelitRingRuntime:
         if vocabulary is not None:
             safe_value = value if value in vocabulary else "<redacted>"
         elif key in _RING_PROBE_MARKER_KEYS:
+            # Owner-authorized bounded disclosure of the two probe scalars.
+            # The value itself still never reaches the marker tail, a summary
+            # line or a failure dump: ``safe_value`` stays <redacted> and the
+            # caller still returns before the tail append below.
+            disclosure = getattr(self, "_ring_probe_disclosure", None)
+            if disclosure is None:
+                disclosure = RingProbeDisclosure(RING_PROBE_OWNER_LISTENER)
+                self._ring_probe_disclosure = disclosure
+            probe_message = disclosure.observe(key, value)
+            if probe_message is not None:
+                _LOGGER.info("%s", probe_message)
             safe_value = "<redacted>"
         elif (
             key in _RING_SHA_MARKER_KEYS
