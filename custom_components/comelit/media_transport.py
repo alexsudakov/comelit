@@ -51,6 +51,7 @@ from .latency_timeline import (
 )
 from .media_diagnostics import MediaProgressDiagnostics
 from .oauth import ComelitOAuthError, ComelitOAuthManager
+from .ring_probe_log import RING_PROBE_OWNER_MEDIA, RingProbeDisclosure
 from .ring_shadow import RingShadowController, RingShadowHook, SHADOW_OWNER_MEDIA
 from .sdp import ComelitSdpError, transform_offer
 
@@ -479,6 +480,7 @@ class ComelitEntranceMediaTransport:
         self._door_result_future: asyncio.Future[str] | None = None
         self._door_diagnostics: dict[str, object] = {}
         self._shadow_hook = RingShadowHook(ring_shadow, SHADOW_OWNER_MEDIA)
+        self._ring_probe_disclosure = RingProbeDisclosure(RING_PROBE_OWNER_MEDIA)
 
     @property
     def active(self) -> bool:
@@ -780,6 +782,16 @@ class ComelitEntranceMediaTransport:
             _LOGGER.info("Comelit ring fingerprint marker; %s=%s", key, value)
             safe_value = "<redacted>"
         elif key in _RING_PROBE_MARKER_KEYS:
+            # Owner-authorized bounded disclosure of the two probe scalars.
+            # ``safe_value`` stays <redacted> so the value can never appear in
+            # the marker tail, the protocol marker list or a success summary.
+            disclosure = getattr(self, "_ring_probe_disclosure", None)
+            if disclosure is None:
+                disclosure = RingProbeDisclosure(RING_PROBE_OWNER_MEDIA)
+                self._ring_probe_disclosure = disclosure
+            probe_message = disclosure.observe(key, value)
+            if probe_message is not None:
+                _LOGGER.info("%s", probe_message)
             safe_value = "<redacted>"
         else:
             safe_value = (
