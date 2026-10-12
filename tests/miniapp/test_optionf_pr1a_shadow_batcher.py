@@ -53,7 +53,7 @@ def test_media_owner_ring_batch_produces_shadow_decision_only():
     assert enabled == disabled
     assert len(snapshots) == 1
     snapshot = snapshots[0]
-    completed = snapshot["batcher"]["completed"]
+    completed = snapshot["batchers"][ring_shadow.SHADOW_OWNER_MEDIA]["completed"]
     decisions = snapshot["decisions"]
     assert len(completed) == 1
     assert completed[0]["markers"] == (
@@ -96,11 +96,11 @@ def test_retransmit_batch_shadow_suppression_only():
     assert completed[1].retransmit is True
     assert completed[1].identity_source == "last_completed_batch"
     assert decisions[-1]["decision"] == ring_shadow.SHADOW_DECISION_SUPPRESS
-    assert decisions[-1]["reason"] == ring_shadow.SHADOW_REASON_SAME_PROCESS_MEDIA_RETRANSMIT
+    assert decisions[-1]["reason"] == ring_shadow.SHADOW_REASON_LIVE_CALL_REPLAY
     assert decisions[-1]["production_effect"] is False
     assert enabled == disabled
     assert len(live) == 1
-    assert live[0]["generations"] == (0,)
+    assert live[0]["generations"] == ((ring_shadow.SHADOW_OWNER_MEDIA, 0),)
 
 
 def test_retransmit_without_identity_is_fail_closed():
@@ -402,36 +402,41 @@ def test_listener_restart_changes_owner_generation_and_replay_branch():
 
     decision = controller.snapshot()["decisions"][-1]
     assert decision["generation"] == 2
-    assert decision["decision"] == ring_shadow.SHADOW_DECISION_SUPPRESS
-    assert decision["reason"] == ring_shadow.SHADOW_REASON_LIVE_CALL_REPLAY
+    assert decision["decision"] == ring_shadow.SHADOW_DECISION_OPEN_UNRESOLVED
+    assert decision["reason"] == ring_shadow.SHADOW_REASON_LIVE_STATE_RESET
 
 
 def test_listener_generation_change_resets_controller_interaction_latch():
     controller = ring_shadow.RingShadowController()
     controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_start")
+    for line in _lines("01_listener_ring_call1.golden.txt"):
+        controller.observe_native_line(ring_shadow.SHADOW_OWNER_LISTENER, line)
     controller.observe_native_line(
         ring_shadow.SHADOW_OWNER_LISTENER,
         "R37_REMOTE_RELEASE_OBSERVED=true",
     )
     controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_start")
 
-    assert controller.snapshot()["interaction_seen"] is False
+    live = controller.snapshot()["guard"]["live"]
+    assert live[0]["reset_reason"] == "owner_lifecycle_reset"
+    assert live[0]["interaction_seen"] is True
 
 
 def test_interaction_seen_live_call_generation_change_is_high_a2():
     controller = ring_shadow.RingShadowController()
     controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_start")
+    for line in _lines("01_listener_ring_call1.golden.txt"):
+        controller.observe_native_line(ring_shadow.SHADOW_OWNER_LISTENER, line)
     controller.observe_native_line(
         ring_shadow.SHADOW_OWNER_LISTENER,
         "R37_REMOTE_RELEASE_OBSERVED=true",
     )
+    controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_stop")
+    controller.note_state(ring_shadow.SHADOW_OWNER_MEDIA, "media_transport_start")
     for line in _lines("01_listener_ring_call1.golden.txt"):
-        controller.observe_native_line(ring_shadow.SHADOW_OWNER_LISTENER, line)
-    controller.note_state(ring_shadow.SHADOW_OWNER_LISTENER, "listener_start")
-    for line in _lines("01_listener_ring_call1.golden.txt"):
-        controller.observe_native_line(ring_shadow.SHADOW_OWNER_LISTENER, line)
+        controller.observe_native_line(ring_shadow.SHADOW_OWNER_MEDIA, line)
 
     decision = controller.snapshot()["decisions"][-1]
-    assert decision["generation"] == 2
+    assert decision["generation"] == 1
     assert decision["decision"] == ring_shadow.SHADOW_DECISION_OPEN_UNRESOLVED
     assert decision["reason"] == ring_shadow.SHADOW_REASON_HIGH_A2

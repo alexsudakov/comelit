@@ -20,6 +20,7 @@ ENTRYPOINTS = {
     "RingShadowHook._invoke",
     "RingShadowController.observe_native_line",
     "RingShadowController.note_state",
+    "RingShadowController.note_watchdog_boundary_crossed",
     "RingMarkerBatcher.observe",
     "RingEmitGuard.decide",
 }

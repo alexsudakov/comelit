@@ -485,3 +485,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not shadow_controllers:
         domain_data.pop("ring_shadow_controllers", None)
     return True
+
+
+def shadow_snapshot(hass, entry_id):
+    domain_data = hass.data.get(DOMAIN, {})
+    shadow_controllers = domain_data.get("ring_shadow_controllers", {})
+    shadow_controller = shadow_controllers.get(entry_id)
+    if shadow_controller is None:
+        return None
+    try:
+        return shadow_controller.snapshot_view()
+    except Exception:
+        return None

@@ -39,13 +39,13 @@ def test_full_frame_sha_not_used_for_cross_owner_identity():
         door="entrance",
         source="00000643",
         owner=ring_shadow.SHADOW_OWNER_LISTENER,
-        generation=1,
+        owner_generation=(ring_shadow.SHADOW_OWNER_LISTENER, 1),
     )
     second = guard.decide(
         door="entrance",
         source="00000643",
         owner=ring_shadow.SHADOW_OWNER_LISTENER,
-        generation=2,
+        owner_generation=(ring_shadow.SHADOW_OWNER_LISTENER, 2),
     )
     imports, calls = _import_roots_and_calls()
 
@@ -67,14 +67,14 @@ def test_high_a2_path_shadow_open_unresolved_no_production_event():
         door="entrance",
         source="00000643",
         owner=ring_shadow.SHADOW_OWNER_LISTENER,
-        generation=1,
+        owner_generation=(ring_shadow.SHADOW_OWNER_LISTENER, 1),
         interaction_seen=True,
     )
     decision = guard.decide(
         door="entrance",
         source="00000643",
         owner=ring_shadow.SHADOW_OWNER_LISTENER,
-        generation=2,
+        owner_generation=(ring_shadow.SHADOW_OWNER_LISTENER, 2),
         interaction_seen=True,
     )
     assert decision.decision == ring_shadow.SHADOW_DECISION_OPEN_UNRESOLVED
@@ -88,14 +88,14 @@ def test_high_3_path_shadow_open_unresolved_no_production_event():
         door="entrance",
         source="00000643",
         owner=ring_shadow.SHADOW_OWNER_LISTENER,
-        generation=1,
+        owner_generation=(ring_shadow.SHADOW_OWNER_LISTENER, 1),
     )
     decision = guard.decide(
         door="entrance",
         source="00000643",
         owner=ring_shadow.SHADOW_OWNER_LISTENER,
-        generation=2,
-        watchdog_expired_without_lifecycle_evidence=True,
+        owner_generation=(ring_shadow.SHADOW_OWNER_LISTENER, 2),
+        watchdog_boundary_crossed=True,
     )
     assert decision.decision == ring_shadow.SHADOW_DECISION_OPEN_UNRESOLVED
     assert decision.reason == ring_shadow.SHADOW_REASON_HIGH_3
@@ -108,13 +108,13 @@ def test_guard_key_is_door_source_tuple():
         door="entrance",
         source="00000643",
         owner=ring_shadow.SHADOW_OWNER_LISTENER,
-        generation=1,
+        owner_generation=(ring_shadow.SHADOW_OWNER_LISTENER, 1),
     )
     other_source = guard.decide(
         door="entrance",
         source="00000610",
         owner=ring_shadow.SHADOW_OWNER_LISTENER,
-        generation=1,
+        owner_generation=(ring_shadow.SHADOW_OWNER_LISTENER, 1),
     )
     assert first.reason == ring_shadow.SHADOW_REASON_NO_LIVE_CALL
     assert other_source.reason == ring_shadow.SHADOW_REASON_NO_LIVE_CALL
@@ -126,7 +126,7 @@ def test_production_emit_disabled_in_pr1a():
         door="entrance",
         source="00000643",
         owner=ring_shadow.SHADOW_OWNER_LISTENER,
-        generation=1,
+        owner_generation=(ring_shadow.SHADOW_OWNER_LISTENER, 1),
         production_emit_allowed=False,
     )
     assert decision.decision == ring_shadow.SHADOW_DECISION_SHADOW
@@ -139,7 +139,7 @@ def test_missing_source_is_fail_closed_shadow():
         door="entrance",
         source=None,
         owner=ring_shadow.SHADOW_OWNER_LISTENER,
-        generation=1,
+        owner_generation=(ring_shadow.SHADOW_OWNER_LISTENER, 1),
     )
     assert decision.decision == ring_shadow.SHADOW_DECISION_SHADOW
     assert decision.reason == ring_shadow.SHADOW_REASON_INCOMPLETE

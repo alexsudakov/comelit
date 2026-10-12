@@ -334,6 +334,33 @@ def test_shadow_unload_exception_unload_unaffected(monkeypatch):
     assert mod.DATA_RUNTIMES not in hass.data.get(mod.DOMAIN, {})
 
 
+def test_shadow_snapshot_accessor_returns_sanitized_view_or_none(monkeypatch):
+    mod = _load_integration_module()
+    _patch_integration_runtime(monkeypatch, mod)
+    hass, entry = _fake_hass_and_entry(mod)
+    assert asyncio.run(mod.async_setup_entry(hass, entry)) is True
+    controller = hass.data[mod.DOMAIN]["ring_shadow_controllers"][entry.entry_id]
+    assert controller is not None
+
+    controller.note_state(mod.ring_shadow.SHADOW_OWNER_LISTENER, "listener_start")
+    for line in (
+        "V4_RING_OBSERVED=true",
+        "V4_RING_DIRECTION=DEVICE_TO_CLIENT",
+        "V4_RING_KIND=CALL_INIT",
+        "V4_RING_DOOR=entrance",
+        "V4_RING_SOURCE=00000643",
+    ):
+        controller.observe_native_line(mod.ring_shadow.SHADOW_OWNER_LISTENER, line)
+
+    view = mod.shadow_snapshot(hass, entry.entry_id)
+    assert view is not None
+    rendered = repr(view)
+    assert "00000643" not in rendered
+    assert "V4_RING_SOURCE" not in rendered
+    assert view["live_state"]["door_kind"] == ("entrance",)
+    assert mod.shadow_snapshot(hass, "missing-entry") is None
+
+
 class _SupervisorRuntime:
     def __init__(self) -> None:
         self.running = False
