@@ -28,6 +28,7 @@ R63_BUILD_INFO = MEDIA_V1 / "P116_R63_BUILD_INFO.txt"
 R64_BUILD_INFO = MEDIA_V1 / "P116_R64_BUILD_INFO.txt"
 R66_BUILD_INFO = MEDIA_V1 / "P116_R66_BUILD_INFO.txt"
 R67_BUILD_INFO = MEDIA_V1 / "P116_R67_BUILD_INFO.txt"
+R68_BUILD_INFO = MEDIA_V1 / "P116_R68_BUILD_INFO.txt"
 
 
 class R60A2WindowDecompositionTests(unittest.TestCase):
@@ -124,7 +125,9 @@ class R60A3A5PseudoTcpForensicTests(unittest.TestCase):
         # The latest shipped build's repository metadata becomes the
         # current binary identity gate.
         current_build_info = (
-            R67_BUILD_INFO
+            R68_BUILD_INFO
+            if R68_BUILD_INFO.is_file()
+            else R67_BUILD_INFO
             if R67_BUILD_INFO.is_file()
             else R66_BUILD_INFO
             if R66_BUILD_INFO.is_file()
