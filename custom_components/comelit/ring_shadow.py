@@ -101,7 +101,6 @@ class ShadowDecision:
     retransmit: bool = False
     new_call_proven: bool = False
     reattach: bool = False
-    record: bool = False
     rearm_watchdog: bool = False
     terminal_retry: bool = False
     missing_identity: bool = False
@@ -119,7 +118,6 @@ class ShadowDecision:
             "retransmit": self.retransmit,
             "new_call_proven": self.new_call_proven,
             "reattach": self.reattach,
-            "record": self.record,
             "rearm_watchdog": self.rearm_watchdog,
             "terminal_retry": self.terminal_retry,
             "missing_identity": self.missing_identity,
@@ -131,7 +129,6 @@ class _ShadowLive:
     door: str
     source: str
     generations: Deque[tuple[str, int]]
-    active_event_id: str | None
     origin_owner: str
     origin_generation: int
     origin_owner_generation: tuple[str, int]
@@ -146,7 +143,6 @@ class _ShadowLive:
     watchdog_boundary_crossed: bool = False
     reset_reason: str | None = None
     reset_is_new_call_proof: bool = False
-    recording_completed: bool = False
     reattached: bool = False
 
 
@@ -164,20 +160,12 @@ def _ring_key_mask(key: str) -> int:
     return 0
 
 
-def _value_from(markers: tuple[str, ...], wanted: str) -> str | None:
-    prefix = wanted + "="
-    for marker in markers:
-        if marker.startswith(prefix):
-            value = marker.split("=", 1)[1].strip()
-            if value:
-                return value
-    return None
-
-
 class RingMarkerBatcher:
     def __init__(self) -> None:
         self._buffer: Deque[str] = deque(maxlen=16)
         self._completed: Deque[RingMarkerBatch] = deque(maxlen=16)
+        assert self._buffer.maxlen == SHADOW_MAX_LINES_PER_BATCH
+        assert self._completed.maxlen == SHADOW_MAX_COMPLETED_BATCHES
         self._present_mask = 0
         self._sequence = 0
         # diagnostic batch sequence, NOT a process generation
@@ -427,7 +415,17 @@ class RingEmitGuard:
     def __init__(self) -> None:
         self._live: Deque[_ShadowLive] = deque(maxlen=4)
         self._decisions: Deque[ShadowDecision] = deque(maxlen=16)
-        self._reset_count = 0
+        assert self._live.maxlen == SHADOW_MAX_LIVE_KEYS
+        assert self._decisions.maxlen == SHADOW_MAX_DECISIONS
+        self._last_decided: dict[str, str] = {
+            SHADOW_OWNER_LISTENER: "",
+            SHADOW_OWNER_MEDIA: "",
+        }
+        self._resets_total = 0
+
+    @staticmethod
+    def _entry_key(door: str, source: str) -> str:
+        return door + "\n" + source
 
     def _find_live(self, door: str, source: str) -> _ShadowLive | None:
         for live in self._live:
@@ -435,20 +433,17 @@ class RingEmitGuard:
                 return live
         return None
 
-    def _last_live(self) -> _ShadowLive | None:
-        if not self._live:
-            return None
-        return self._live[-1]
-
     def observe_interaction(self, owner: str) -> None:
-        live = None
+        key = self._last_decided.get(owner, "")
+        if not key:
+            return
         for candidate in self._live:
-            if candidate.current_owner_kind == owner:
-                live = candidate
-        if live is None:
-            live = self._last_live()
-        if live is not None:
-            live.interaction_seen = True
+            if (
+                candidate.reset_reason is None
+                and self._entry_key(candidate.door, candidate.source) == key
+            ):
+                candidate.interaction_seen = True
+                return
 
     def note_watchdog_boundary_crossed(self, owner: str) -> None:
         for live in self._live:
@@ -458,14 +453,16 @@ class RingEmitGuard:
     def reset_owner_lifecycle(self, owner: str, stale_owners: set[str]) -> None:
         for live in self._live:
             if live.current_owner_kind in stale_owners:
+                if live.reset_reason is not None:
+                    continue
                 live.reset_reason = "owner_lifecycle_reset"
                 live.reset_is_new_call_proof = False
-                self._reset_count += 1
+                self._resets_total += 1
                 self._remember_decision(ShadowDecision(
                     decision=SHADOW_DECISION_SHADOW,
                     reason=SHADOW_REASON_LIVE_STATE_RESET,
                     production_effect=False,
-                    owner=owner,
+                    owner=live.current_owner_kind,
                     generation=live.current_owner_generation[1],
                     owner_generation=live.current_owner_generation,
                     handoff_epoch=live.handoff_epoch,
@@ -497,7 +494,6 @@ class RingEmitGuard:
         handoff_token: int = 0,
         retransmit: bool = False,
         reattach: bool = False,
-        record: bool = False,
         rearm_watchdog: bool = False,
         missing_identity: bool = False,
     ) -> ShadowDecision:
@@ -513,7 +509,6 @@ class RingEmitGuard:
             retransmit=retransmit,
             new_call_proven=False,
             reattach=reattach,
-            record=record,
             rearm_watchdog=rearm_watchdog,
             terminal_retry=False,
             missing_identity=missing_identity,
@@ -542,15 +537,16 @@ class RingEmitGuard:
                 missing_identity=True,
             )
 
+        self._last_decided[owner] = self._entry_key(door, source)
         live = self._find_live(door, source)
         if live is None:
             generations: Deque[tuple[str, int]] = deque(maxlen=4)
+            assert generations.maxlen == SHADOW_MAX_GENERATIONS
             generations.append(owner_generation)
             self._live.append(_ShadowLive(
                 door=door,
                 source=source,
                 generations=generations,
-                active_event_id=None,
                 origin_owner=owner,
                 origin_generation=owner_generation[1],
                 origin_owner_generation=owner_generation,
@@ -586,7 +582,6 @@ class RingEmitGuard:
         if live.reset_reason is not None:
             live.generations.clear()
             live.generations.append(owner_generation)
-            live.active_event_id = None
             live.origin_owner = owner
             live.origin_generation = owner_generation[1]
             live.origin_owner_generation = owner_generation
@@ -601,7 +596,6 @@ class RingEmitGuard:
             live.watchdog_boundary_crossed = watchdog_boundary_crossed
             live.reset_reason = None
             live.reset_is_new_call_proof = False
-            live.recording_completed = False
             live.reattached = False
             return self._make_decision(
                 SHADOW_DECISION_OPEN_UNRESOLVED,
@@ -708,7 +702,6 @@ class RingEmitGuard:
                 handoff_token=live.handoff_token,
             )
         reattach = not live.reattached
-        record = not live.recording_completed
         if reattach:
             live.reattached = True
         return self._make_decision(
@@ -719,7 +712,6 @@ class RingEmitGuard:
             handoff_epoch=live.handoff_epoch,
             handoff_token=live.handoff_token,
             reattach=reattach,
-            record=record,
             rearm_watchdog=True,
         )
 
@@ -730,7 +722,6 @@ class RingEmitGuard:
                     "door": live.door,
                     "source": live.source,
                     "generations": tuple(live.generations),
-                    "active_event_id": live.active_event_id,
                     "origin_owner": live.origin_owner,
                     "origin_generation": live.origin_generation,
                     "origin_owner_generation": live.origin_owner_generation,
@@ -745,13 +736,13 @@ class RingEmitGuard:
                     "watchdog_boundary_crossed": live.watchdog_boundary_crossed,
                     "reset_reason": live.reset_reason,
                     "reset_is_new_call_proof": live.reset_is_new_call_proof,
-                    "recording_completed": live.recording_completed,
                     "reattached": live.reattached,
                 }
                 for live in self._live
             ),
             "decisions": tuple(decision.as_dict() for decision in self._decisions),
-            "reset_count": self._reset_count,
+            "reset_count": self._resets_total,
+            "resets_total": self._resets_total,
         }
 
 
@@ -766,6 +757,8 @@ class RingShadowController:
         self._guard = RingEmitGuard()
         self._decisions: Deque[ShadowDecision] = deque(maxlen=16)
         self._states: Deque[tuple[str, str]] = deque(maxlen=16)
+        assert self._decisions.maxlen == SHADOW_MAX_DECISIONS
+        assert self._states.maxlen == SHADOW_MAX_OWNER_GENERATIONS * 4
         self._owner_generation = {
             SHADOW_OWNER_LISTENER: 0,
             SHADOW_OWNER_MEDIA: 0,
@@ -774,7 +767,7 @@ class RingShadowController:
             SHADOW_OWNER_LISTENER: False,
             SHADOW_OWNER_MEDIA: False,
         }
-        self._last_stopped_owner: str | None = None
+        self._last_started_owner: str | None = None
         self._malformed_batch_count = 0
 
     def observe_native_line(self, owner: str, line: str) -> None:
@@ -828,23 +821,31 @@ class RingShadowController:
             (owner == SHADOW_OWNER_LISTENER and state == "listener_start")
             or (owner == SHADOW_OWNER_MEDIA and state == "media_transport_start")
         ):
-            had_owner_generation = self._owner_generation.get(owner, 0) > 0
             self._owner_generation[owner] = self._owner_generation.get(owner, 0) + 1
             owner_generation = (owner, self._owner_generation[owner])
             self._owner_running[owner] = True
+            other_owner = (
+                SHADOW_OWNER_MEDIA
+                if owner == SHADOW_OWNER_LISTENER
+                else SHADOW_OWNER_LISTENER
+            )
+            self._owner_running[other_owner] = False
             stale_owners = {
                 stale_owner
                 for stale_owner in (SHADOW_OWNER_LISTENER, SHADOW_OWNER_MEDIA)
                 if not self._owner_running[stale_owner]
             }
             stale_owners.add(owner)
-            if self._last_stopped_owner is None and had_owner_generation:
+            if self._last_started_owner is None:
+                pass
+            elif self._last_started_owner == owner:
                 self._guard.reset_owner_lifecycle(owner, stale_owners)
-            elif self._last_stopped_owner == owner:
-                self._guard.reset_owner_lifecycle(owner, stale_owners)
-            elif self._last_stopped_owner is not None:
+            else:
                 self._guard.note_owner_handoff(owner, owner_generation)
-            self._last_stopped_owner = None
+            self._last_started_owner = owner
+            return
+        if state == "supervisor_pause":
+            self._owner_running[SHADOW_OWNER_LISTENER] = False
             return
         if (
             (owner == SHADOW_OWNER_LISTENER and state == "listener_stop")
@@ -852,14 +853,13 @@ class RingShadowController:
             or state == "supervisor_stop"
         ):
             self._owner_running[owner] = False
-            self._last_stopped_owner = owner
             return
         if state == "integration_unload":
             self._owner_running[SHADOW_OWNER_LISTENER] = False
             self._owner_running[SHADOW_OWNER_MEDIA] = False
             self._guard = RingEmitGuard()
             self._decisions.clear()
-            self._last_stopped_owner = None
+            self._last_started_owner = None
 
     def reset(self) -> None:
         self._batchers = {
@@ -877,7 +877,7 @@ class RingShadowController:
             SHADOW_OWNER_LISTENER: False,
             SHADOW_OWNER_MEDIA: False,
         }
-        self._last_stopped_owner = None
+        self._last_started_owner = None
         self._malformed_batch_count = 0
 
     def note_watchdog_boundary_crossed(self, owner: str) -> None:
@@ -892,6 +892,7 @@ class RingShadowController:
     def snapshot_view(self) -> dict[str, object]:
         guard = self._guard.snapshot()
         live_entries = guard["live"]
+        batchers = self._batcher_snapshot()
         return {
             "owner_kind": {
                 SHADOW_OWNER_LISTENER: SHADOW_OWNER_LISTENER,
@@ -939,29 +940,19 @@ class RingShadowController:
             "batcher_state": {
                 SHADOW_OWNER_LISTENER: {
                     "completed_count": len(
-                        self._batchers[SHADOW_OWNER_LISTENER].snapshot()["completed"]
+                        batchers[SHADOW_OWNER_LISTENER]["completed"]
                     ),
-                    "pending": self._batchers[SHADOW_OWNER_LISTENER].snapshot()["pending"]
-                    is not None,
-                    "malformed_count": self._batchers[SHADOW_OWNER_LISTENER].snapshot()[
-                        "malformed_count"
-                    ],
-                    "eviction_count": self._batchers[SHADOW_OWNER_LISTENER].snapshot()[
-                        "eviction_count"
-                    ],
+                    "pending": batchers[SHADOW_OWNER_LISTENER]["pending"] is not None,
+                    "malformed_count": batchers[SHADOW_OWNER_LISTENER]["malformed_count"],
+                    "eviction_count": batchers[SHADOW_OWNER_LISTENER]["eviction_count"],
                 },
                 SHADOW_OWNER_MEDIA: {
                     "completed_count": len(
-                        self._batchers[SHADOW_OWNER_MEDIA].snapshot()["completed"]
+                        batchers[SHADOW_OWNER_MEDIA]["completed"]
                     ),
-                    "pending": self._batchers[SHADOW_OWNER_MEDIA].snapshot()["pending"]
-                    is not None,
-                    "malformed_count": self._batchers[SHADOW_OWNER_MEDIA].snapshot()[
-                        "malformed_count"
-                    ],
-                    "eviction_count": self._batchers[SHADOW_OWNER_MEDIA].snapshot()[
-                        "eviction_count"
-                    ],
+                    "pending": batchers[SHADOW_OWNER_MEDIA]["pending"] is not None,
+                    "malformed_count": batchers[SHADOW_OWNER_MEDIA]["malformed_count"],
+                    "eviction_count": batchers[SHADOW_OWNER_MEDIA]["eviction_count"],
                 },
             },
             "unresolved_reason": tuple(
@@ -974,6 +965,7 @@ class RingShadowController:
                 "state_count": len(self._states),
                 "malformed_batch_count": self._malformed_batch_count,
                 "reset_count": guard["reset_count"],
+                "resets_total": guard["resets_total"],
             },
         }
 
@@ -992,7 +984,7 @@ class RingShadowController:
                 SHADOW_OWNER_LISTENER: self._owner_running[SHADOW_OWNER_LISTENER],
                 SHADOW_OWNER_MEDIA: self._owner_running[SHADOW_OWNER_MEDIA],
             },
-            "last_stopped_owner": self._last_stopped_owner,
+            "last_started_owner": self._last_started_owner,
             "malformed_batch_count": self._malformed_batch_count,
         }
 
