@@ -430,3 +430,75 @@ def test_b8_runtime_tail_after_target_marker_does_not_contain_sha_value():
 
     assert instance._native_marker_tail == ["V4_RING_FRAME_SHA256=<redacted>"]
     assert HEX64 not in repr(instance._native_marker_tail)
+
+
+def test_c1_ring_probe_values_are_not_retained_in_runtime_or_media_tail(caplog):
+    decimal_value = "123456"
+    hex_value = "1234abcd"
+    lines = [
+        f"V4_RING_PHASE={decimal_value}",
+        f"V4_RING_PEER_CONNECTION={decimal_value}",
+        f"V4_RING_BODY_32_35={hex_value}",
+        f"V4_RING_PARSE_STATUS={hex_value}",
+    ]
+    runtime_instance = _runtime_instance()
+    media_instance = _media_instance()
+
+    with caplog.at_level(logging.INFO):
+        for line in lines:
+            runtime_instance._remember_native_marker(line)
+            media_instance._remember_native_marker(line)
+        media_instance._emit_native_success_summary()
+
+    assert runtime_instance._native_marker_tail == []
+    assert media_instance._native_marker_tail == []
+    assert media_instance._native_protocol_markers == []
+    rendered = "\n".join(
+        [
+            repr(runtime_instance._native_marker_tail),
+            repr(media_instance._native_marker_tail),
+            repr(media_instance._native_protocol_markers),
+            *(record.message for record in caplog.records),
+        ]
+    )
+    assert decimal_value not in rendered
+    assert hex_value not in rendered
+
+
+def test_c2_ring_probe_markers_do_not_displace_failure_tail_entries():
+    probe_lines = [
+        "V4_RING_PHASE=INITIAL",
+        "V4_RING_PEER_CONNECTION=000a",
+        "V4_RING_BODY_32_35=1234abcd",
+        "V4_RING_PARSE_STATUS=OK",
+        "V4_RING_PHASE=RETRANSMIT",
+        "V4_RING_PEER_CONNECTION=10",
+    ]
+
+    def runtime_tail(include_probes: bool) -> list[str]:
+        instance = _runtime_instance()
+        for index in range(runtime._NATIVE_MARKER_TAIL_LIMIT + 5):
+            instance._remember_native_marker(f"P116_NATIVE_FAILURE_CODE={index}")
+            if include_probes:
+                for line in probe_lines:
+                    instance._remember_native_marker(line)
+        return list(instance._native_marker_tail)
+
+    def media_tail(include_probes: bool) -> list[str]:
+        instance = _media_instance()
+        for index in range(media_transport._MEDIA_NATIVE_MARKER_TAIL_LIMIT + 5):
+            instance._remember_native_marker(f"P116_NATIVE_FAILURE_CODE={index}")
+            if include_probes:
+                for line in probe_lines:
+                    instance._remember_native_marker(line)
+        return list(instance._native_marker_tail)
+
+    runtime_with_probes = runtime_tail(include_probes=True)
+    media_with_probes = media_tail(include_probes=True)
+
+    assert runtime_with_probes == runtime_tail(include_probes=False)
+    assert media_with_probes == media_tail(include_probes=False)
+    assert all("V4_RING_PHASE" not in marker for marker in runtime_with_probes)
+    assert all("V4_RING_PEER_CONNECTION" not in marker for marker in media_with_probes)
+    assert all("V4_RING_BODY_32_35" not in marker for marker in runtime_with_probes)
+    assert all("V4_RING_PARSE_STATUS" not in marker for marker in media_with_probes)

@@ -28,6 +28,12 @@ R63_BUILD_INFO = MEDIA_V1 / "P116_R63_BUILD_INFO.txt"
 R64_BUILD_INFO = MEDIA_V1 / "P116_R64_BUILD_INFO.txt"
 R66_BUILD_INFO = MEDIA_V1 / "P116_R66_BUILD_INFO.txt"
 R67_BUILD_INFO = MEDIA_V1 / "P116_R67_BUILD_INFO.txt"
+R68_BUILD_INFO = MEDIA_V1 / "P116_R68_BUILD_INFO.txt"
+SUPERSEDED_R67_BINARY_SHA256 = "eabda869783f9b1efb578e3801b0b0e50c70fd52932960ba22c95003e28fbacb"
+R68_TRANSFORM = MEDIA_V1 / "entrance_p116_r68_ringid_probe_transform.py"
+R68_TRANSFORM_SHA256_AT_BUILD = "7961d506b5f9c93f0f916b004215322795532d56c0009ed4b2ebe018d155cf9a"
+R68_TRANSFORM_SHA256_CURRENT = "318e36d7ccddde0a3f8176456793cf2b4a5cfa548b4f27919de2473355da3d1e"
+R68_GENERATED_SOURCE_SHA256 = "bad39bdff787251e974c58ad71b90c67eeeb8a8bd4544ba552965c5d455e1a22"
 
 
 class R60A2WindowDecompositionTests(unittest.TestCase):
@@ -124,7 +130,9 @@ class R60A3A5PseudoTcpForensicTests(unittest.TestCase):
         # The latest shipped build's repository metadata becomes the
         # current binary identity gate.
         current_build_info = (
-            R67_BUILD_INFO
+            R68_BUILD_INFO
+            if R68_BUILD_INFO.is_file()
+            else R67_BUILD_INFO
             if R67_BUILD_INFO.is_file()
             else R66_BUILD_INFO
             if R66_BUILD_INFO.is_file()
@@ -148,6 +156,44 @@ class R60A3A5PseudoTcpForensicTests(unittest.TestCase):
             hashlib.sha256(NATIVE_BINARY.read_bytes()).hexdigest(),
             expected_current_sha,
         )
+        if R67_BUILD_INFO.is_file():
+            r67_values = dict(
+                line.split("=", 1)
+                for line in R67_BUILD_INFO.read_text(encoding="utf-8").splitlines()
+                if "=" in line
+            )
+            self.assertEqual(
+                r67_values["native_binary_sha256"], SUPERSEDED_R67_BINARY_SHA256
+            )
+        if R68_BUILD_INFO.is_file():
+            r68_values = dict(
+                line.split("=", 1)
+                for line in R68_BUILD_INFO.read_text(encoding="utf-8").splitlines()
+                if "=" in line
+            )
+            self.assertEqual(
+                r68_values["ringid_probe_transform_sha256_at_build"],
+                R68_TRANSFORM_SHA256_AT_BUILD,
+            )
+            self.assertEqual(
+                r68_values["ringid_probe_transform_sha256_current"],
+                R68_TRANSFORM_SHA256_CURRENT,
+            )
+            self.assertEqual(
+                hashlib.sha256(R68_TRANSFORM.read_bytes()).hexdigest(),
+                r68_values["ringid_probe_transform_sha256_current"],
+            )
+            self.assertEqual(
+                r68_values["generated_source_sha256"], R68_GENERATED_SOURCE_SHA256
+            )
+            self.assertIn(
+                f"generated_source_sha256 remained {R68_GENERATED_SOURCE_SHA256}",
+                r68_values["ringid_probe_transform_post_build_change"],
+            )
+            self.assertEqual(
+                r68_values["superseded_native_binary_sha256"],
+                SUPERSEDED_R67_BINARY_SHA256,
+            )
 
     def test_evidence_paths_are_ci_faithful_repo_local(self) -> None:
         self.assertTrue(model.evidence_paths_are_repo_local())
