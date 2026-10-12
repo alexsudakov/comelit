@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Deque
 
 SHADOW_OWNER_LISTENER = "listener"
@@ -66,6 +66,7 @@ class RingMarkerBatch:
     identity_source: str
     frame_sha_present: bool
     retransmit_sha_present: bool
+    # diagnostic batch sequence, NOT a process generation
     generation: int
     markers: tuple[str, ...]
 
@@ -152,14 +153,16 @@ def _value_from(markers: tuple[str, ...], wanted: str) -> str | None:
 
 class RingMarkerBatcher:
     def __init__(self) -> None:
-        self._buffer: Deque[str] = deque(maxlen=SHADOW_MAX_LINES_PER_BATCH)
-        self._completed: Deque[RingMarkerBatch] = deque(maxlen=SHADOW_MAX_COMPLETED_BATCHES)
+        self._buffer: Deque[str] = deque(maxlen=16)
+        self._completed: Deque[RingMarkerBatch] = deque(maxlen=16)
         self._present_mask = 0
         self._sequence = 0
+        # diagnostic batch sequence, NOT a process generation
         self._generation = 0
         self._malformed = False
         self._retransmit = False
         self._frame_sha_present = False
+        self._next_frame_sha_present = False
         self._retransmit_sha_present = False
         self._observed_value: str | None = None
         self._direction_value: str | None = None
@@ -173,12 +176,14 @@ class RingMarkerBatcher:
         self._unknown_marker_count = 0
         self._eviction_count = 0
 
-    def _reset_current(self) -> None:
+    def _reset_current(self, *, preserve_next_frame: bool = False) -> None:
         self._buffer.clear()
         self._present_mask = 0
         self._malformed = False
         self._retransmit = False
         self._frame_sha_present = False
+        if not preserve_next_frame:
+            self._next_frame_sha_present = False
         self._retransmit_sha_present = False
         self._observed_value = None
         self._direction_value = None
@@ -271,14 +276,13 @@ class RingMarkerBatcher:
     def _complete_retransmit(self) -> RingMarkerBatch:
         previous = self._completed[-1] if self._completed else None
         self._sequence += 1
-        if previous is None:
-            self._generation += 1
-            generation = self._generation
+        self._generation += 1
+        generation = self._generation
+        if previous is None or previous.malformed:
             door = None
             source = None
             identity_source = "none"
         else:
-            generation = previous.generation
             door = previous.door
             source = previous.source
             identity_source = "last_completed_batch"
@@ -299,6 +303,15 @@ class RingMarkerBatcher:
         self._reset_current()
         return batch
 
+    def _mark_retransmit_sha_on_last_batch(self) -> None:
+        if not self._completed:
+            return
+        previous = self._completed[-1]
+        if not previous.retransmit or previous.retransmit_sha_present:
+            return
+        self._completed.pop()
+        self._completed.append(replace(previous, retransmit_sha_present=True))
+
     def observe(self, line: str) -> tuple[RingMarkerBatch, ...]:
         if "=" not in line:
             self._no_separator_count += 1
@@ -308,7 +321,10 @@ class RingMarkerBatcher:
 
         if key == "V4_RING_OBSERVED":
             if value == "true":
-                self._reset_current()
+                frame_sha_present = self._next_frame_sha_present
+                self._reset_current(preserve_next_frame=True)
+                self._frame_sha_present = frame_sha_present
+                self._next_frame_sha_present = False
                 self._append_marker(line)
                 self._remember_batch_value(key, value)
                 self._present_mask |= _MASK_OBSERVED
@@ -329,9 +345,13 @@ class RingMarkerBatcher:
             self._present_mask |= _ring_key_mask(key)
         elif key in SHADOW_RING_SHA_KEYS:
             if key == "V4_RING_FRAME_SHA256":
-                self._frame_sha_present = True
+                if self._present_mask == 0 and not self._buffer:
+                    self._next_frame_sha_present = True
+                else:
+                    self._frame_sha_present = True
             else:
                 self._retransmit_sha_present = True
+                self._mark_retransmit_sha_on_last_batch()
             self._sha_marker_count += 1
         elif key in SHADOW_RING_RETRANSMIT_KEYS:
             if value == "true":
@@ -382,8 +402,8 @@ class RingMarkerBatcher:
 
 class RingEmitGuard:
     def __init__(self) -> None:
-        self._live: Deque[_ShadowLive] = deque(maxlen=SHADOW_MAX_LIVE_KEYS)
-        self._decisions: Deque[ShadowDecision] = deque(maxlen=SHADOW_MAX_DECISIONS)
+        self._live: Deque[_ShadowLive] = deque(maxlen=4)
+        self._decisions: Deque[ShadowDecision] = deque(maxlen=16)
 
     def _find_live(self, door: str, source: str) -> _ShadowLive | None:
         for live in self._live:
@@ -445,7 +465,7 @@ class RingEmitGuard:
 
         live = self._find_live(door, source)
         if live is None:
-            generations: Deque[int] = deque(maxlen=SHADOW_MAX_GENERATIONS)
+            generations: Deque[int] = deque(maxlen=4)
             generations.append(generation)
             self._live.append(_ShadowLive(
                 door=door,
@@ -543,8 +563,12 @@ class RingShadowController:
     def __init__(self) -> None:
         self._batcher = RingMarkerBatcher()
         self._guard = RingEmitGuard()
-        self._decisions: Deque[ShadowDecision] = deque(maxlen=SHADOW_MAX_DECISIONS)
-        self._states: Deque[tuple[str, str]] = deque(maxlen=SHADOW_MAX_DECISIONS)
+        self._decisions: Deque[ShadowDecision] = deque(maxlen=16)
+        self._states: Deque[tuple[str, str]] = deque(maxlen=16)
+        self._owner_generation = {
+            SHADOW_OWNER_LISTENER: 0,
+            SHADOW_OWNER_MEDIA: 0,
+        }
         self._interaction_seen = False
         self._malformed_batch_count = 0
 
@@ -553,6 +577,7 @@ class RingShadowController:
         if line in SHADOW_REMOTE_RELEASE_LINES:
             self._interaction_seen = True
         for batch in batches:
+            owner_generation = self._owner_generation.get(owner, 0)
             if batch.malformed:
                 self._malformed_batch_count += 1
                 self._decisions.append(ShadowDecision(
@@ -560,7 +585,7 @@ class RingShadowController:
                     reason=SHADOW_REASON_MALFORMED,
                     production_effect=False,
                     owner=owner,
-                    generation=batch.generation,
+                    generation=owner_generation,
                     missing_identity=(batch.door is None or batch.source is None),
                 ))
                 continue
@@ -570,7 +595,7 @@ class RingShadowController:
                     reason=SHADOW_REASON_INCOMPLETE,
                     production_effect=False,
                     owner=owner,
-                    generation=batch.generation,
+                    generation=owner_generation,
                     missing_identity=True,
                 ))
                 continue
@@ -578,7 +603,7 @@ class RingShadowController:
                 door=batch.door,
                 source=batch.source,
                 owner=owner,
-                generation=batch.generation,
+                generation=owner_generation,
                 production_emit_allowed=False,
                 interaction_seen=self._interaction_seen,
             )
@@ -586,12 +611,22 @@ class RingShadowController:
 
     def note_state(self, owner: str, state: str) -> None:
         self._states.append((owner, state))
+        if (
+            (owner == SHADOW_OWNER_LISTENER and state == "listener_start")
+            or (owner == SHADOW_OWNER_MEDIA and state == "media_transport_start")
+        ):
+            self._owner_generation[owner] = self._owner_generation.get(owner, 0) + 1
+            self._interaction_seen = False
 
     def reset(self) -> None:
         self._batcher = RingMarkerBatcher()
         self._guard = RingEmitGuard()
         self._decisions.clear()
         self._states.clear()
+        self._owner_generation = {
+            SHADOW_OWNER_LISTENER: 0,
+            SHADOW_OWNER_MEDIA: 0,
+        }
         self._interaction_seen = False
         self._malformed_batch_count = 0
 
@@ -601,6 +636,10 @@ class RingShadowController:
             "guard": self._guard.snapshot(),
             "decisions": tuple(decision.as_dict() for decision in self._decisions),
             "states": tuple(self._states),
+            "owner_generation": {
+                SHADOW_OWNER_LISTENER: self._owner_generation[SHADOW_OWNER_LISTENER],
+                SHADOW_OWNER_MEDIA: self._owner_generation[SHADOW_OWNER_MEDIA],
+            },
             "interaction_seen": self._interaction_seen,
             "malformed_batch_count": self._malformed_batch_count,
         }

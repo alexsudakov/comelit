@@ -3,10 +3,15 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = ROOT.parent
-SHADOW_MODULE = REPO_ROOT / "custom_components" / "comelit" / "ring_shadow.py"
+SHADOW_MODULE = (
+    Path(sys.argv[1])
+    if len(sys.argv) > 1
+    else REPO_ROOT / "custom_components" / "comelit" / "ring_shadow.py"
+)
 
 ALLOWED_IMPORTS = {"__future__", "collections", "dataclasses", "typing"}
 ENTRYPOINTS = {
@@ -61,6 +66,8 @@ def callable_name(node: ast.AST) -> str | None:
     if isinstance(node, ast.Attribute):
         parent = callable_name(node.value)
         return f"{parent}.{node.attr}" if parent else node.attr
+    if isinstance(node, ast.Subscript):
+        return callable_name(node.value)
     return None
 
 
@@ -84,6 +91,9 @@ tree = ast.parse(text)
 imports: set[str] = set()
 callables: dict[str, tuple[ast.AST, str | None]] = {}
 class_stack: list[str] = []
+deque_bound_names: set[str] = set()
+deque_bound_attrs: set[str] = set()
+deque_dataclass_attrs: set[str] = set()
 
 
 class DefinitionVisitor(ast.NodeVisitor):
@@ -104,6 +114,43 @@ class DefinitionVisitor(ast.NodeVisitor):
             callables[f"{class_stack[-1]}.{node.name}"] = (node, class_stack[-1])
         else:
             callables[node.name] = (node, None)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        annotation = callable_name(node.annotation)
+        if class_stack and annotation and annotation.endswith("Deque"):
+            if isinstance(node.target, ast.Name):
+                deque_dataclass_attrs.add(node.target.id)
+        if isinstance(node.value, ast.Call):
+            name = callable_name(node.value.func)
+            short_name = name.rsplit(".", 1)[-1] if name else ""
+            if short_name == "deque":
+                target = node.target
+                if isinstance(target, ast.Name):
+                    deque_bound_names.add(target.id)
+                elif (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "self"
+                ):
+                    deque_bound_attrs.add(target.attr)
+        self.generic_visit(node)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        if isinstance(node.value, ast.Call):
+            name = callable_name(node.value.func)
+            short_name = name.rsplit(".", 1)[-1] if name else ""
+            if short_name == "deque":
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        deque_bound_names.add(target.id)
+                    elif (
+                        isinstance(target, ast.Attribute)
+                        and isinstance(target.value, ast.Name)
+                        and target.value.id == "self"
+                    ):
+                        deque_bound_attrs.add(target.attr)
+        self.generic_visit(node)
 
 
 DefinitionVisitor().visit(tree)
@@ -111,8 +158,12 @@ DefinitionVisitor().visit(tree)
 if not imports <= ALLOWED_IMPORTS:
     fail(f"imports={sorted(imports - ALLOWED_IMPORTS)}")
 
+missing_entrypoints = sorted(name for name in ENTRYPOINTS if name not in callables)
+if missing_entrypoints:
+    fail(f"missing_entrypoints={missing_entrypoints}")
+
 closure: set[str] = set()
-pending = [name for name in ENTRYPOINTS if name in callables]
+pending = list(ENTRYPOINTS)
 while pending:
     name = pending.pop()
     if name in closure:
@@ -186,8 +237,25 @@ for root in critical_nodes:
                             and isinstance(value.value, int)
                             and value.value > 0
                         ):
-                            if not isinstance(value, ast.Name):
-                                unbounded_found = True
+                            unbounded_found = True
+            if (
+                short_name in {"append", "appendleft"}
+                and isinstance(node.func, ast.Attribute)
+            ):
+                target = node.func.value
+                allowed_append = False
+                if isinstance(target, ast.Name):
+                    allowed_append = target.id in deque_bound_names
+                elif (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "self"
+                ):
+                    allowed_append = target.attr in deque_bound_attrs
+                elif isinstance(target, ast.Attribute):
+                    allowed_append = target.attr in deque_dataclass_attrs
+                if not allowed_append:
+                    unbounded_found = True
             if short_name in {"list", "set", "dict", "Counter"}:
                 unbounded_found = True
         if isinstance(node, (ast.List, ast.Set, ast.Dict)):

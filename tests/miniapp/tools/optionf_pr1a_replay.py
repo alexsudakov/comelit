@@ -160,6 +160,12 @@ def _normalize_event(event: dict[str, object]) -> dict[str, object]:
 
 
 def _digest(instance, events: list[dict[str, object]], call_state: list[dict[str, object]]):
+    """Return the deterministic replay surface used by PR-1a tests.
+
+    warnings is intentionally an empty placeholder because the mini harness does
+    not attach a logging collector. call_state contains only the fake tracker
+    transitions exercised by the selected reader lines, not full HA entity state.
+    """
     return {
         "events": [_normalize_event(event) for event in events],
         "call_state": [_normalize_event(event) for event in call_state],
