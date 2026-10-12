@@ -4,9 +4,13 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
+import subprocess
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 MEDIA = ROOT / "research" / "media" / "v1"
@@ -63,6 +67,73 @@ class P125RingProbeMediaTransformTests(unittest.TestCase):
         self.assertEqual(
             p125.INPUT_SOURCE_SHA256,
             "92e12f5a27dd728231e073076429863cdc059825819f4f600d5d3dd50138ca26",
+        )
+
+    def test_builder_argv_include_p116_accepts_and_writes_expected_sha(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p125-builder-argv-") as tmp_name:
+            output = Path(tmp_name) / "generated.c"
+            run = subprocess.run(
+                [
+                    sys.executable,
+                    str(MEDIA / "entrance_p125_ringid_probe_media_transform.py"),
+                    "--source",
+                    str(SOURCE),
+                    "--output",
+                    str(output),
+                    "--include-p116",
+                ],
+                text=True,
+                capture_output=True,
+                env={
+                    **os.environ,
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "PYTHONPATH": str(MEDIA),
+                },
+            )
+            self.assertEqual(run.returncode, 0, run.stderr + run.stdout)
+            self.assertIn("P125_RINGID_PROBE_MEDIA_TRANSFORM=PASS", run.stdout)
+            self.assertEqual(
+                _sha256_text(output.read_text(encoding="utf-8")),
+                "a66bded0e618f3308204acb8514f33054036c9eac585daa5cc1e28316572b6ef",
+            )
+
+    def test_no_include_p116_fails_closed_with_clear_error(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p125-no-include-") as tmp_name:
+            run = subprocess.run(
+                [
+                    sys.executable,
+                    str(MEDIA / "entrance_p125_ringid_probe_media_transform.py"),
+                    "--source",
+                    str(SOURCE),
+                    "--output",
+                    str(Path(tmp_name) / "generated.c"),
+                    "--no-include-p116",
+                ],
+                text=True,
+                capture_output=True,
+                env={
+                    **os.environ,
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "PYTHONPATH": str(MEDIA),
+                },
+            )
+            self.assertNotEqual(run.returncode, 0)
+            self.assertIn("P125 requires --include-p116", run.stderr)
+            self.assertNotIn("Traceback", run.stderr + run.stdout)
+
+    def test_include_p116_flag_controls_p122_call(self) -> None:
+        with (
+            mock.patch.object(p125.p122, "transform", return_value="derived") as p122_transform,
+            mock.patch.object(p125, "_sha256_text", side_effect=[p125.BASE_SOURCE_SHA256, p125.INPUT_SOURCE_SHA256]),
+            mock.patch.object(p125.core, "apply_probe", return_value="generated"),
+        ):
+            self.assertEqual(p125.transform("source", include_p116=False), "generated")
+        p122_transform.assert_called_once_with("source", include_p116=False)
+
+    def test_media_include_result_matches_p122_then_probe(self) -> None:
+        self.assertEqual(
+            p125.transform(self.source, include_p116=True),
+            core.apply_probe(p122.transform(self.source, include_p116=True)),
         )
 
 

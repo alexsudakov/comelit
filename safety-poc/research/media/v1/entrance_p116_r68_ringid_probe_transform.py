@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""P116/R68 listener ring opaque body probe transform."""
+"""P116/R68 listener ring opaque body probe transform.
+
+The CLI accepts the shared --include-p116 contract for builder symmetry.
+For this listener chain, include_p116=True is a compatibility flag and does
+not alter the R67 transform call; --no-include-p116 is fail-closed because
+there is no supported no-P116 listener variant.
+"""
 
 from __future__ import annotations
 
@@ -18,7 +24,9 @@ def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def transform(source: str) -> str:
+def transform(source: str, *, include_p116: bool = True) -> str:
+    if not include_p116:
+        raise RuntimeError("R68 requires --include-p116; --no-include-p116 is fail-closed")
     base_sha = _sha256_text(source)
     if base_sha != BASE_SOURCE_SHA256:
         raise RuntimeError(f"R68_BASE_SOURCE_SHA_GATE=FAIL actual={base_sha}")
@@ -33,9 +41,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    p116 = parser.add_mutually_exclusive_group()
+    p116.add_argument("--include-p116", dest="include_p116", action="store_true")
+    p116.add_argument("--no-include-p116", dest="include_p116", action="store_false")
+    parser.set_defaults(include_p116=True)
     args = parser.parse_args(argv)
 
-    generated = transform(args.source.read_text(encoding="utf-8"))
+    if not args.include_p116:
+        parser.error("R68 requires --include-p116; --no-include-p116 is fail-closed")
+
+    generated = transform(
+        args.source.read_text(encoding="utf-8"),
+        include_p116=args.include_p116,
+    )
     args.output.write_text(generated, encoding="utf-8")
     print("R68_RINGID_PROBE_TRANSFORM=PASS")
     print("RINGID_PROBE_SOURCE_SHA256=" + _sha256_text(generated))

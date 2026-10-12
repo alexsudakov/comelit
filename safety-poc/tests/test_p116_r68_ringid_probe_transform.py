@@ -173,7 +173,7 @@ typedef unsigned short guint16;
     def test_n7_frozen_pin_invariance_and_no_tracked_pin_edits(self) -> None:
         self.assertEqual(_sha256_bytes(SOURCE), EXPECTED_FROZEN_SHA)
         status = subprocess.run(
-            ["git", "status", "--short", "--untracked-files=no"],
+            ["git", "status", "--short", "--untracked-files=no", "--", str(SOURCE.relative_to(REPO))],
             cwd=REPO,
             text=True,
             capture_output=True,
@@ -181,6 +181,55 @@ typedef unsigned short guint16;
         ).stdout.splitlines()
         changed_existing = [line for line in status if line[:2] != "??"]
         self.assertEqual(changed_existing, [])
+
+    def test_include_p116_and_default_listener_cli_outputs_match(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p116-r68-cli-") as tmp_name:
+            tmp = Path(tmp_name)
+            output_default = tmp / "default.c"
+            output_include = tmp / "include.c"
+            base_argv = [
+                sys.executable,
+                str(MEDIA / "entrance_p116_r68_ringid_probe_transform.py"),
+                "--source",
+                str(SOURCE),
+            ]
+            env = {"PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(MEDIA)}
+            default = subprocess.run(
+                [*base_argv, "--output", str(output_default)],
+                text=True,
+                capture_output=True,
+                env=env,
+            )
+            include = subprocess.run(
+                [*base_argv, "--output", str(output_include), "--include-p116"],
+                text=True,
+                capture_output=True,
+                env=env,
+            )
+            self.assertEqual(default.returncode, 0, default.stderr + default.stdout)
+            self.assertEqual(include.returncode, 0, include.stderr + include.stdout)
+            self.assertEqual(output_default.read_text(encoding="utf-8"), output_include.read_text(encoding="utf-8"))
+            self.assertEqual(_sha256_text(output_include.read_text(encoding="utf-8")), self.generated_sha)
+
+    def test_no_include_p116_listener_fails_closed_with_clear_error(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p116-r68-no-include-") as tmp_name:
+            run = subprocess.run(
+                [
+                    sys.executable,
+                    str(MEDIA / "entrance_p116_r68_ringid_probe_transform.py"),
+                    "--source",
+                    str(SOURCE),
+                    "--output",
+                    str(Path(tmp_name) / "generated.c"),
+                    "--no-include-p116",
+                ],
+                text=True,
+                capture_output=True,
+                env={"PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(MEDIA)},
+            )
+            self.assertNotEqual(run.returncode, 0)
+            self.assertIn("R68 requires --include-p116", run.stderr)
+            self.assertNotIn("Traceback", run.stderr + run.stdout)
 
 
 if __name__ == "__main__":

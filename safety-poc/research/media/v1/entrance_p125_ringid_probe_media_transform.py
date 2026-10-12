@@ -19,11 +19,11 @@ def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def transform(source: str) -> str:
+def transform(source: str, *, include_p116: bool = True) -> str:
     base_sha = _sha256_text(source)
     if base_sha != BASE_SOURCE_SHA256:
         raise RuntimeError(f"P125_BASE_SOURCE_SHA_GATE=FAIL actual={base_sha}")
-    input_source = p122.transform(source, include_p116=True)
+    input_source = p122.transform(source, include_p116=include_p116)
     input_sha = _sha256_text(input_source)
     if input_sha != INPUT_SOURCE_SHA256:
         raise RuntimeError(f"P125_INPUT_SOURCE_SHA_GATE=FAIL actual={input_sha}")
@@ -34,9 +34,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    p116 = parser.add_mutually_exclusive_group()
+    p116.add_argument("--include-p116", dest="include_p116", action="store_true")
+    p116.add_argument("--no-include-p116", dest="include_p116", action="store_false")
+    parser.set_defaults(include_p116=True)
     args = parser.parse_args(argv)
 
-    generated = transform(args.source.read_text(encoding="utf-8"))
+    if not args.include_p116:
+        parser.error("P125 requires --include-p116; --no-include-p116 is fail-closed")
+
+    generated = transform(
+        args.source.read_text(encoding="utf-8"),
+        include_p116=args.include_p116,
+    )
     args.output.write_text(generated, encoding="utf-8")
     print("P125_RINGID_PROBE_MEDIA_TRANSFORM=PASS")
     print("P125_P122_TRANSFORM=" + P122_TRANSFORM)
