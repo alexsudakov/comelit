@@ -23,6 +23,7 @@ class RingShadowHook:
 class RingShadowController:
     def observe_native_line(self, owner, line): return None
     def note_state(self, owner, state): return None
+    def note_watchdog_boundary_crossed(self, owner): return None
 
 class RingMarkerBatcher:
     def observe(self, line):
