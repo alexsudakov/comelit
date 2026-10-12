@@ -48,6 +48,27 @@ SHADOW_MAX_LIVE_KEYS = 4
 SHADOW_MAX_GENERATIONS = 4
 SHADOW_MAX_OWNER_GENERATIONS = 4
 SHADOW_FAILURE_LATCH_LIMIT = 3
+SHADOW_MAX_PROBE_RECORDS = 16
+SHADOW_MAX_PROBE_SHA_SLOTS = 4
+
+OWNER_GENERATION_IS_CALL_IDENTITY = False
+HANDOFF_EPOCH_IS_CALL_IDENTITY = False
+FULL_FRAME_SHA_USED_AS_CALL_IDENTITY = False
+V4_RING_BODY_32_35_SEMANTICS = "UNKNOWN"
+V4_RING_BODY_32_35_LIVE_VERIFIED = False
+
+SHADOW_PROBE_KEYS = frozenset({
+    "V4_RING_PHASE",
+    "V4_RING_PEER_CONNECTION",
+    "V4_RING_BODY_32_35",
+    "V4_RING_PARSE_STATUS",
+})
+SHADOW_PROBE_PHASES = frozenset({"INITIAL", "RETRANSMIT"})
+SHADOW_PROBE_PARSE_STATUSES = frozenset({"OK", "INSUFFICIENT_LENGTH"})
+SHADOW_PROBE_SHA_CHANGED = "CHANGED"
+SHADOW_PROBE_SHA_SAME = "SAME"
+SHADOW_PROBE_SHA_FIRST_IN_GENERATION = "FIRST_IN_GENERATION"
+SHADOW_PROBE_SHA_NOT_ADJACENT = "NOT_ADJACENT"
 
 _MASK_OBSERVED = 1
 _MASK_DIRECTION = 2
@@ -122,6 +143,43 @@ class ShadowDecision:
             "terminal_retry": self.terminal_retry,
             "missing_identity": self.missing_identity,
         }
+
+
+@dataclass(frozen=True)
+class RingProbeRecord:
+    sequence: int
+    owner_kind: str
+    owner_generation: tuple[str, int]
+    handoff_epoch: int
+    phase: str
+    parse_status: str
+    peer_connection_present: bool
+    body_32_35_present: bool
+    body_32_35_unavailable: bool
+    sha_changed_vs_prev_initial: str
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "sequence": self.sequence,
+            "owner_kind": self.owner_kind,
+            # Context only. OWNER_GENERATION_IS_CALL_IDENTITY=false.
+            "owner_generation": self.owner_generation,
+            # Context only. HANDOFF_EPOCH_IS_CALL_IDENTITY=false.
+            "handoff_epoch": self.handoff_epoch,
+            "phase": self.phase,
+            "parse_status": self.parse_status,
+            "peer_connection_present": self.peer_connection_present,
+            "body_32_35_present": self.body_32_35_present,
+            "body_32_35_unavailable": self.body_32_35_unavailable,
+            "sha_changed_vs_prev_initial": self.sha_changed_vs_prev_initial,
+        }
+
+
+@dataclass
+class _RingProbePending:
+    phase: str | None = None
+    peer_connection: str | None = None
+    body_32_35: str | None = None
 
 
 @dataclass
@@ -408,6 +466,187 @@ class RingMarkerBatcher:
             "sha_marker_count": self._sha_marker_count,
             "unknown_marker_count": self._unknown_marker_count,
             "eviction_count": self._eviction_count,
+        }
+
+
+def _is_lower_hex(value: str, width: int) -> bool:
+    if len(value) != width:
+        return False
+    return all(("0" <= char <= "9") or ("a" <= char <= "f") for char in value)
+
+
+class RingProbeParser:
+    """Key-specific shadow probe parser. It never owns call identity."""
+
+    def __init__(self) -> None:
+        self._pending: dict[str, _RingProbePending] = {
+            SHADOW_OWNER_LISTENER: _RingProbePending(),
+            SHADOW_OWNER_MEDIA: _RingProbePending(),
+        }
+        self._records: Deque[RingProbeRecord] = deque(maxlen=SHADOW_MAX_PROBE_RECORDS)
+        assert self._records.maxlen == SHADOW_MAX_PROBE_RECORDS
+        self._sequence = 0
+        self._malformed_count = 0
+        self._ignored_count = 0
+        self._eviction_count = 0
+        self._missing_status_count = 0
+        self._pending_frame_sha: dict[str, str] = {}
+        self._previous_initial_sha: Deque[tuple[tuple[str, int], str]] = deque(
+            maxlen=SHADOW_MAX_PROBE_SHA_SLOTS
+        )
+        assert self._previous_initial_sha.maxlen == SHADOW_MAX_PROBE_SHA_SLOTS
+
+    def _reset_pending(self, owner: str) -> None:
+        self._pending[owner] = _RingProbePending()
+
+    def _mark_malformed(self, owner: str) -> None:
+        self._malformed_count += 1
+        self._reset_pending(owner)
+        self._pending_frame_sha.pop(owner, None)
+
+    def _remember_previous_sha(self, owner_generation: tuple[str, int], digest: str) -> None:
+        for index, (key, _previous) in enumerate(tuple(self._previous_initial_sha)):
+            if key == owner_generation:
+                del self._previous_initial_sha[index]
+                break
+        self._previous_initial_sha.append((owner_generation, digest))
+
+    def _previous_sha(self, owner_generation: tuple[str, int]) -> str | None:
+        for key, digest in self._previous_initial_sha:
+            if key == owner_generation:
+                return digest
+        return None
+
+    def _sha_changed_state(
+        self,
+        owner: str,
+        owner_generation: tuple[str, int],
+        phase: str,
+    ) -> str:
+        if phase != "INITIAL":
+            self._pending_frame_sha.pop(owner, None)
+            return SHADOW_PROBE_SHA_NOT_ADJACENT
+        digest = self._pending_frame_sha.pop(owner, None)
+        if digest is None:
+            return SHADOW_PROBE_SHA_NOT_ADJACENT
+        previous = self._previous_sha(owner_generation)
+        self._remember_previous_sha(owner_generation, digest)
+        if previous is None:
+            return SHADOW_PROBE_SHA_FIRST_IN_GENERATION
+        if previous == digest:
+            return SHADOW_PROBE_SHA_SAME
+        return SHADOW_PROBE_SHA_CHANGED
+
+    def observe_sha(self, owner: str, line: str) -> None:
+        if "=" not in line:
+            return
+        key, value = line.split("=", 1)
+        value = value.strip()
+        if key != "V4_RING_FRAME_SHA256":
+            return
+        if _is_lower_hex(value, 64):
+            self._pending_frame_sha[owner] = value
+        else:
+            self._pending_frame_sha.pop(owner, None)
+
+    def observe(
+        self,
+        owner: str,
+        line: str,
+        *,
+        owner_generation: tuple[str, int],
+        handoff_epoch: int,
+    ) -> tuple[RingProbeRecord, ...]:
+        if owner not in self._pending:
+            self._ignored_count += 1
+            return ()
+        if "=" not in line:
+            if line in SHADOW_PROBE_KEYS:
+                self._mark_malformed(owner)
+            return ()
+        key, value = line.split("=", 1)
+        value = value.strip()
+        if key not in SHADOW_PROBE_KEYS:
+            self._ignored_count += 1
+            return ()
+
+        pending = self._pending[owner]
+        if key == "V4_RING_PHASE":
+            if value not in SHADOW_PROBE_PHASES:
+                self._mark_malformed(owner)
+                return ()
+            if pending.phase is not None:
+                self._missing_status_count += 1
+            self._pending[owner] = _RingProbePending(phase=value)
+            return ()
+        if key == "V4_RING_PEER_CONNECTION":
+            if not _is_lower_hex(value, 4):
+                self._mark_malformed(owner)
+                return ()
+            pending.peer_connection = value
+            return ()
+        if key == "V4_RING_BODY_32_35":
+            if value != "----" and not _is_lower_hex(value, 8):
+                self._mark_malformed(owner)
+                return ()
+            pending.body_32_35 = value
+            return ()
+
+        if value not in SHADOW_PROBE_PARSE_STATUSES:
+            self._mark_malformed(owner)
+            return ()
+        if pending.phase is None:
+            self._mark_malformed(owner)
+            return ()
+        if value == "OK" and (pending.peer_connection is None or pending.body_32_35 in (None, "----")):
+            self._mark_malformed(owner)
+            return ()
+
+        self._sequence += 1
+        if len(self._records) == SHADOW_MAX_PROBE_RECORDS:
+            self._eviction_count += 1
+        record = RingProbeRecord(
+            sequence=self._sequence,
+            owner_kind=owner,
+            owner_generation=owner_generation,
+            handoff_epoch=handoff_epoch,
+            phase=pending.phase,
+            parse_status=value,
+            peer_connection_present=pending.peer_connection is not None,
+            body_32_35_present=(
+                pending.body_32_35 is not None and pending.body_32_35 != "----"
+            ),
+            body_32_35_unavailable=pending.body_32_35 == "----",
+            sha_changed_vs_prev_initial=self._sha_changed_state(
+                owner,
+                owner_generation,
+                pending.phase,
+            ),
+        )
+        self._records.append(record)
+        self._reset_pending(owner)
+        return (record,)
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "records": tuple(record.as_dict() for record in self._records),
+            "pending": {
+                owner: {
+                    "phase_present": pending.phase is not None,
+                    "peer_connection_present": pending.peer_connection is not None,
+                    "body_32_35_present": (
+                        pending.body_32_35 is not None and pending.body_32_35 != "----"
+                    ),
+                    "body_32_35_unavailable": pending.body_32_35 == "----",
+                    "frame_sha_pending": owner in self._pending_frame_sha,
+                }
+                for owner, pending in self._pending.items()
+            },
+            "malformed_count": self._malformed_count,
+            "ignored_count": self._ignored_count,
+            "eviction_count": self._eviction_count,
+            "missing_status_count": self._missing_status_count,
+            "record_count": len(self._records),
         }
 
 
@@ -754,6 +993,7 @@ class RingShadowController:
             SHADOW_OWNER_LISTENER: RingMarkerBatcher(),
             SHADOW_OWNER_MEDIA: RingMarkerBatcher(),
         }
+        self._probe_parser = RingProbeParser()
         self._guard = RingEmitGuard()
         self._decisions: Deque[ShadowDecision] = deque(maxlen=16)
         self._states: Deque[tuple[str, str]] = deque(maxlen=16)
@@ -768,12 +1008,15 @@ class RingShadowController:
             SHADOW_OWNER_MEDIA: False,
         }
         self._last_started_owner: str | None = None
+        # Context only. HANDOFF_EPOCH_IS_CALL_IDENTITY=false.
+        self._handoff_context_epoch = 0
         self._malformed_batch_count = 0
 
     def observe_native_line(self, owner: str, line: str) -> None:
         batcher = self._batchers.get(owner)
         if batcher is None:
             return
+        self._observe_probe_line_guarded(owner, line)
         batches = batcher.observe(line)
         if line in SHADOW_REMOTE_RELEASE_LINES:
             self._guard.observe_interaction(owner)
@@ -815,6 +1058,18 @@ class RingShadowController:
             )
             self._decisions.append(decision)
 
+    def _observe_probe_line_guarded(self, owner: str, line: str) -> None:
+        try:
+            self._probe_parser.observe_sha(owner, line)
+            self._probe_parser.observe(
+                owner,
+                line,
+                owner_generation=(owner, self._owner_generation.get(owner, 0)),
+                handoff_epoch=self._handoff_context_epoch,
+            )
+        except Exception:
+            return
+
     def note_state(self, owner: str, state: str) -> None:
         self._states.append((owner, state))
         if (
@@ -841,6 +1096,7 @@ class RingShadowController:
             elif self._last_started_owner == owner:
                 self._guard.reset_owner_lifecycle(owner, stale_owners)
             else:
+                self._handoff_context_epoch += 1
                 self._guard.note_owner_handoff(owner, owner_generation)
             self._last_started_owner = owner
             return
@@ -858,14 +1114,17 @@ class RingShadowController:
             self._owner_running[SHADOW_OWNER_LISTENER] = False
             self._owner_running[SHADOW_OWNER_MEDIA] = False
             self._guard = RingEmitGuard()
+            self._probe_parser = RingProbeParser()
             self._decisions.clear()
             self._last_started_owner = None
+            self._handoff_context_epoch = 0
 
     def reset(self) -> None:
         self._batchers = {
             SHADOW_OWNER_LISTENER: RingMarkerBatcher(),
             SHADOW_OWNER_MEDIA: RingMarkerBatcher(),
         }
+        self._probe_parser = RingProbeParser()
         self._guard = RingEmitGuard()
         self._decisions.clear()
         self._states.clear()
@@ -878,6 +1137,7 @@ class RingShadowController:
             SHADOW_OWNER_MEDIA: False,
         }
         self._last_started_owner = None
+        self._handoff_context_epoch = 0
         self._malformed_batch_count = 0
 
     def note_watchdog_boundary_crossed(self, owner: str) -> None:
@@ -893,6 +1153,7 @@ class RingShadowController:
         guard = self._guard.snapshot()
         live_entries = guard["live"]
         batchers = self._batcher_snapshot()
+        probe = self._probe_parser.snapshot()
         return {
             "owner_kind": {
                 SHADOW_OWNER_LISTENER: SHADOW_OWNER_LISTENER,
@@ -955,6 +1216,18 @@ class RingShadowController:
                     "eviction_count": batchers[SHADOW_OWNER_MEDIA]["eviction_count"],
                 },
             },
+            "probe_state": {
+                "records": tuple(probe["records"]),
+                "pending": probe["pending"],
+                "malformed_count": probe["malformed_count"],
+                "eviction_count": probe["eviction_count"],
+                "missing_status_count": probe["missing_status_count"],
+                "record_count": probe["record_count"],
+                "records_maxlen": SHADOW_MAX_PROBE_RECORDS,
+                "owner_generation_is_call_identity": OWNER_GENERATION_IS_CALL_IDENTITY,
+                "handoff_epoch_is_call_identity": HANDOFF_EPOCH_IS_CALL_IDENTITY,
+                "full_frame_sha_used_as_call_identity": FULL_FRAME_SHA_USED_AS_CALL_IDENTITY,
+            },
             "unresolved_reason": tuple(
                 decision["reason"]
                 for decision in tuple(decision.as_dict() for decision in self._decisions)
@@ -966,6 +1239,8 @@ class RingShadowController:
                 "malformed_batch_count": self._malformed_batch_count,
                 "reset_count": guard["reset_count"],
                 "resets_total": guard["resets_total"],
+                "probe_record_count": probe["record_count"],
+                "probe_malformed_count": probe["malformed_count"],
             },
         }
 
@@ -973,6 +1248,7 @@ class RingShadowController:
         return {
             "batcher": self._batchers[SHADOW_OWNER_LISTENER].snapshot(),
             "batchers": self._batcher_snapshot(),
+            "probe": self._probe_parser.snapshot(),
             "guard": self._guard.snapshot(),
             "decisions": tuple(decision.as_dict() for decision in self._decisions),
             "states": tuple(self._states),
@@ -985,6 +1261,7 @@ class RingShadowController:
                 SHADOW_OWNER_MEDIA: self._owner_running[SHADOW_OWNER_MEDIA],
             },
             "last_started_owner": self._last_started_owner,
+            "handoff_context_epoch": self._handoff_context_epoch,
             "malformed_batch_count": self._malformed_batch_count,
         }
 
