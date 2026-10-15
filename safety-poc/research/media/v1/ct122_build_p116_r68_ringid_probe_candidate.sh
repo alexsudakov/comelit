@@ -20,7 +20,12 @@ SOURCE="$SAFETY_POC/research/door/v1_5_7/comelit-v4-persistent-ctpp-door.c"
 TRANSFORM="$MEDIA/entrance_p116_r68_ringid_probe_transform.py"
 
 EXPECTED_BASE_SOURCE_SHA=5827d9fd043b85fc0c59a31661a1a125c6b239771e2a70c3e5afdd95f1a03c73
-EXPECTED_GENERATED_SOURCE_SHA=bad39bdff787251e974c58ad71b90c67eeeb8a8bd4544ba552965c5d455e1a22
+# Re-pinned for the CORR-2 corrective round: the R57 native intentional-stop
+# predicate correction (g_p116_native_exit_intentional_stop && failure_count==0 &&
+# !failed_flag) changed the R67 stage output, hence this R68 generated listener
+# source.  CORR-1 output was 9318cfbfd656b10b092ec29a752439fd17d17eacc0f605bd0e5fb724a3144ec0;
+# the pre-CORR-1 output was b7a17ac370bff096d69ec9bab0058e332f67f6bb32b51271596890ac53b8d874.
+EXPECTED_GENERATED_SOURCE_SHA=566ff0e554f3f2b1c7b2c89bfc1b7b3cdbb0d40a0c1eeba79500ad6f20cba420
 
 APK_CLOSURE=${APK_CLOSURE:-/home/hermes/musl-apk-closure-p80}
 ALPINE_IMAGE=${ALPINE_IMAGE:-alpine:3.24.1}
@@ -112,7 +117,20 @@ for marker in \
     'V4_RING_BODY_32_35' \
     'V4_RING_PEER_CONNECTION' \
     'V4_RING_PHASE' \
-    'V4_RING_PARSE_STATUS'
+    'V4_RING_PARSE_STATUS' \
+    'VIDEO_PACKET_COUNT_AT_REPEAT=%llu' \
+    'AUDIO_PACKET_COUNT_AT_REPEAT=%llu' \
+    'LAST_VIDEO_RTP_MONOTONIC_MS=%llu' \
+    'LAST_AUDIO_RTP_MONOTONIC_MS=%llu' \
+    'RX_STALLED=true' \
+    'RTP_STALL_SECONDS=%llu' \
+    'CTPP_TRACE_DIRECTION=IN' \
+    'CTPP_TRACE_DIRECTION=OUT' \
+    'CTPP_TRACE_OPCODE=%u' \
+    'CTPP_TRACE_TYPE=%u' \
+    'CTPP_TRACE_CHANNEL=%u' \
+    'CTPP_TRACE_LENGTH=%u' \
+    'CTPP_TRACE_MONOTONIC_MS=%llu'
 do
     grep -Fq "$marker" "$SOURCE_A"
 done
@@ -266,7 +284,20 @@ for marker in \
     'V4_RING_BODY_32_35' \
     'V4_RING_PEER_CONNECTION' \
     'V4_RING_PHASE' \
-    'V4_RING_PARSE_STATUS'
+    'V4_RING_PARSE_STATUS' \
+    'VIDEO_PACKET_COUNT_AT_REPEAT=%llu' \
+    'AUDIO_PACKET_COUNT_AT_REPEAT=%llu' \
+    'LAST_VIDEO_RTP_MONOTONIC_MS=%llu' \
+    'LAST_AUDIO_RTP_MONOTONIC_MS=%llu' \
+    'RX_STALLED=true' \
+    'RTP_STALL_SECONDS=%llu' \
+    'CTPP_TRACE_DIRECTION=IN' \
+    'CTPP_TRACE_DIRECTION=OUT' \
+    'CTPP_TRACE_OPCODE=%u' \
+    'CTPP_TRACE_TYPE=%u' \
+    'CTPP_TRACE_CHANNEL=%u' \
+    'CTPP_TRACE_LENGTH=%u' \
+    'CTPP_TRACE_MONOTONIC_MS=%llu'
 do
     grep -Fq "$marker" "$STRINGS_A"
 done

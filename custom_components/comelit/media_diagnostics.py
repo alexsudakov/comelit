@@ -18,6 +18,16 @@ _GUINT64_MAX = (1 << 64) - 1
 _MEDIA_DIAGNOSTIC_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
 _MEDIA_DIAGNOSTIC_VALUE_RE = re.compile(r"^(?:true|false|PASS|FAIL|[0-9]{1,20})$")
 _MEDIA_DIAGNOSTIC_PREFIXES = ("R42_", "R54_", "P80_", "P116_")
+_OBSERVABILITY_MEDIA_KEYS = frozenset(
+    {
+        "VIDEO_PACKET_COUNT_AT_REPEAT",
+        "AUDIO_PACKET_COUNT_AT_REPEAT",
+        "LAST_VIDEO_RTP_MONOTONIC_MS",
+        "LAST_AUDIO_RTP_MONOTONIC_MS",
+        "RX_STALLED",
+        "RTP_STALL_SECONDS",
+    }
+)
 _H264_EVIDENCE_KEYS = (
     "P116_VIDEO_SPS_COUNT",
     "P116_VIDEO_PPS_COUNT",
@@ -80,6 +90,15 @@ CALL_ADOPTION_FIELDS = (
     "peer_data_ack_flushed",
     "peer_data_ack_sent",
     "call_adoption_failure_stage",
+)
+
+RTP_FRESHNESS_FIELDS = (
+    "video_packet_count_at_repeat",
+    "audio_packet_count_at_repeat",
+    "last_video_rtp_monotonic_ms",
+    "last_audio_rtp_monotonic_ms",
+    "rx_stalled",
+    "rtp_stall_seconds",
 )
 
 # R42_TRIGGER_REJECT_STAGE is a native-printed enum classifying exactly where
@@ -304,6 +323,12 @@ class MediaCallDiagnostics:
         self._peer_data_ack_flushed = False
         self._peer_data_ack_sent = False
         self._call_adoption_failure_stage: str | None = None
+        self._video_packet_count_at_repeat: int | None = None
+        self._audio_packet_count_at_repeat: int | None = None
+        self._last_video_rtp_monotonic_ms: int | None = None
+        self._last_audio_rtp_monotonic_ms: int | None = None
+        self._rx_stalled = False
+        self._rtp_stall_seconds: int | None = None
 
     def _arm_for_generation(self, generation: int) -> None:
         # A strictly newer generation always starts a fresh call; a
@@ -321,7 +346,7 @@ class MediaCallDiagnostics:
         key, raw_value = line.split("=", 1)
         if not _MEDIA_DIAGNOSTIC_KEY_RE.fullmatch(key):
             return False
-        if not key.startswith(_MEDIA_DIAGNOSTIC_PREFIXES):
+        if not key.startswith(_MEDIA_DIAGNOSTIC_PREFIXES) and key not in _OBSERVABILITY_MEDIA_KEYS:
             return False
 
         if key == "R42_CALL_GENERATION":
@@ -412,6 +437,18 @@ class MediaCallDiagnostics:
                 self._first_rtp_at = self._now()
         elif key == "P80_VIDEO_RTP_PACKETS":
             self._rtp_packet_count = self._safe_int(safe_value)
+        elif key == "VIDEO_PACKET_COUNT_AT_REPEAT":
+            self._video_packet_count_at_repeat = self._safe_int(safe_value)
+        elif key == "AUDIO_PACKET_COUNT_AT_REPEAT":
+            self._audio_packet_count_at_repeat = self._safe_int(safe_value)
+        elif key == "LAST_VIDEO_RTP_MONOTONIC_MS":
+            self._last_video_rtp_monotonic_ms = self._safe_int(safe_value)
+        elif key == "LAST_AUDIO_RTP_MONOTONIC_MS":
+            self._last_audio_rtp_monotonic_ms = self._safe_int(safe_value)
+        elif key == "RX_STALLED":
+            self._rx_stalled = self._rx_stalled or safe_value == "true"
+        elif key == "RTP_STALL_SECONDS":
+            self._rtp_stall_seconds = self._safe_int(safe_value)
         elif key in _H264_EVIDENCE_KEYS:
             count = self._safe_int(safe_value)
             if count is not None and count > 0:
@@ -567,6 +604,12 @@ class MediaCallDiagnostics:
             "peer_data_ack_flushed": self._peer_data_ack_flushed,
             "peer_data_ack_sent": self._peer_data_ack_sent,
             "call_adoption_failure_stage": self._call_adoption_failure_stage,
+            "video_packet_count_at_repeat": self._video_packet_count_at_repeat,
+            "audio_packet_count_at_repeat": self._audio_packet_count_at_repeat,
+            "last_video_rtp_monotonic_ms": self._last_video_rtp_monotonic_ms,
+            "last_audio_rtp_monotonic_ms": self._last_audio_rtp_monotonic_ms,
+            "rx_stalled": self._rx_stalled,
+            "rtp_stall_seconds": self._rtp_stall_seconds,
         }
 
 
@@ -579,6 +622,7 @@ _RECOGNIZED_MEDIA_DIAGNOSTIC_KEYS = frozenset(
         "R42_LISTENER_RTP_FORWARDING_ARMED",
         "P80_VIDEO_RTP_FORWARDING",
         "P80_VIDEO_RTP_PACKETS",
+        *_OBSERVABILITY_MEDIA_KEYS,
         "P116_VIDEO_PT_SET",
         "R42_CAPABILITIES_CANDIDATE_SEEN",
         "R42_CAPABILITIES_PARSE_OK",

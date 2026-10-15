@@ -58,14 +58,88 @@ static R54TxState g_r54_tx_state = R54_TX_STATE_IDLE;
 
 /* R57_GENERATED_REGION_INSERT_HERE */
 
+static void r57h_mark(const char *scenario, gboolean ok);
+
 static void r57h_reset(void)
 {
     g_p116_failure_id = P116_FAILURE_NONE;
     g_p116_failure_phase = P116_PHASE_STARTUP;
     g_p116_failure_count = 0u;
+    g_p116_native_exit_intentional_stop = FALSE;
     v4_listener_ready = TRUE;
     r42_media_stage = R42_MEDIA_IDLE;
     g_r54_tx_state = R54_TX_STATE_IDLE;
+}
+
+static void r57h_scenario_intentional_stop_is_non_sticky(void)
+{
+    gboolean ok;
+    r57h_reset();
+    g_p116_native_exit_intentional_stop = TRUE;
+    p116_emit_native_exit_summary(FALSE);
+    ok = g_p116_native_exit_intentional_stop == TRUE &&
+        g_p116_failure_id == P116_FAILURE_NONE &&
+        g_p116_failure_count == 0u &&
+        p116_native_exit_is_intentional_stop(FALSE) == TRUE;
+    p116_record_failure(P116_FAILURE_PSEUDOTCP_CLOSED, p116_infer_phase());
+    ok = ok && p116_native_exit_is_intentional_stop(TRUE) == FALSE;
+    p116_emit_native_exit_summary(TRUE);
+    r57h_mark("INTENTIONAL_STOP_IS_NON_STICKY", ok);
+}
+
+static void r57h_scenario_intentional_pause_without_failure(void)
+{
+    gboolean ok;
+    r57h_reset();
+    g_p116_native_exit_intentional_stop = TRUE;
+    p116_emit_native_exit_summary(FALSE);
+    ok = p116_native_exit_is_intentional_stop(FALSE) == TRUE &&
+        g_p116_failure_id == P116_FAILURE_NONE &&
+        g_p116_failure_count == 0u;
+    r57h_mark("INTENTIONAL_PAUSE_WITHOUT_FAILURE", ok);
+}
+
+static void r57h_scenario_real_failure_after_intentional_pause(void)
+{
+    gboolean ok;
+    r57h_reset();
+    g_p116_native_exit_intentional_stop = TRUE;
+    p116_emit_native_exit_summary(FALSE);
+    ok = p116_native_exit_is_intentional_stop(FALSE) == TRUE &&
+        g_p116_failure_id == P116_FAILURE_NONE &&
+        g_p116_failure_count == 0u;
+    p116_record_failure(P116_FAILURE_PSEUDOTCP_CLOSED, p116_infer_phase());
+    ok = ok &&
+        p116_native_exit_is_intentional_stop(TRUE) == FALSE &&
+        g_p116_failure_id == P116_FAILURE_PSEUDOTCP_CLOSED &&
+        g_p116_failure_count == 1u;
+    p116_emit_native_exit_summary(TRUE);
+    r57h_mark("INTENTIONAL_PAUSE_THEN_REAL_FAILURE", ok);
+}
+
+static void r57h_scenario_unattributed_failed_exit_during_stop(void)
+{
+    gboolean ok;
+    r57h_reset();
+    g_p116_native_exit_intentional_stop = TRUE;
+    p116_emit_native_exit_summary(TRUE);
+    ok = p116_native_exit_is_intentional_stop(TRUE) == FALSE &&
+        g_p116_failure_id == P116_FAILURE_NONE &&
+        g_p116_failure_count == 0u;
+    r57h_mark("UNATTRIBUTED_FAILED_EXIT_DURING_STOP", ok);
+}
+
+static void r57h_scenario_real_failure_not_masked_by_stop_flag(void)
+{
+    gboolean ok;
+    r57h_reset();
+    g_p116_native_exit_intentional_stop = TRUE;
+    p116_record_failure(P116_FAILURE_PSEUDOTCP_CLOSED, p116_infer_phase());
+    p116_emit_native_exit_summary(TRUE);
+    ok = p116_native_exit_is_intentional_stop(TRUE) == FALSE &&
+        g_p116_failure_id == P116_FAILURE_PSEUDOTCP_CLOSED &&
+        g_p116_failure_count == 1u;
+    r57h_mark("REAL_FAILURE_NOT_MASKED_BY_STOP_FLAG", ok);
 }
 
 static void r57h_mark(const char *scenario, gboolean ok)
@@ -237,5 +311,10 @@ int main(void)
     r57h_scenario_sdp_failure();
     r57h_scenario_door_setter();
     r57h_scenario_cascade_first_fail_wins();
+    r57h_scenario_intentional_stop_is_non_sticky();
+    r57h_scenario_intentional_pause_without_failure();
+    r57h_scenario_real_failure_after_intentional_pause();
+    r57h_scenario_unattributed_failed_exit_during_stop();
+    r57h_scenario_real_failure_not_masked_by_stop_flag();
     return 0;
 }

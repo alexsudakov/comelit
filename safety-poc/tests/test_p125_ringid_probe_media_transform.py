@@ -42,7 +42,7 @@ class P125RingProbeMediaTransformTests(unittest.TestCase):
     def test_n2_media_transform_once_and_deterministic(self) -> None:
         self.assertEqual(_sha256_text(self.p122_generated), p125.INPUT_SOURCE_SHA256)
         self.assertEqual(self.generated_a, self.generated_b)
-        self.assertEqual(_sha256_text(self.generated_a), "a66bded0e618f3308204acb8514f33054036c9eac585daa5cc1e28316572b6ef")
+        self.assertEqual(_sha256_text(self.generated_a), "4bfdf264fbd74c5796d2386d835f0beeea15d23f8c3b1ea460323b7930b741a7")
         self.assertEqual(self.generated_a.count(core.BEGIN), 1)
         self.assertEqual(self.generated_a.count("static void\nv4_ring_probe_emit"), 1)
         self.assertEqual(self.generated_a.count('v4_ring_probe_emit(body, body_len, "INITIAL");'), 1)
@@ -94,7 +94,7 @@ class P125RingProbeMediaTransformTests(unittest.TestCase):
             self.assertIn("P125_RINGID_PROBE_MEDIA_TRANSFORM=PASS", run.stdout)
             self.assertEqual(
                 _sha256_text(output.read_text(encoding="utf-8")),
-                "a66bded0e618f3308204acb8514f33054036c9eac585daa5cc1e28316572b6ef",
+                "4bfdf264fbd74c5796d2386d835f0beeea15d23f8c3b1ea460323b7930b741a7",
             )
 
     def test_no_include_p116_fails_closed_with_clear_error(self) -> None:

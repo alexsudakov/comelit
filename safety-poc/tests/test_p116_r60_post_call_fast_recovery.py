@@ -31,9 +31,13 @@ R67_BUILD_INFO = MEDIA_V1 / "P116_R67_BUILD_INFO.txt"
 R68_BUILD_INFO = MEDIA_V1 / "P116_R68_BUILD_INFO.txt"
 SUPERSEDED_R67_BINARY_SHA256 = "eabda869783f9b1efb578e3801b0b0e50c70fd52932960ba22c95003e28fbacb"
 R68_TRANSFORM = MEDIA_V1 / "entrance_p116_r68_ringid_probe_transform.py"
-R68_TRANSFORM_SHA256_AT_BUILD = "7961d506b5f9c93f0f916b004215322795532d56c0009ed4b2ebe018d155cf9a"
-R68_TRANSFORM_SHA256_CURRENT = "318e36d7ccddde0a3f8176456793cf2b4a5cfa548b4f27919de2473355da3d1e"
-R68_GENERATED_SOURCE_SHA256 = "bad39bdff787251e974c58ad71b90c67eeeb8a8bd4544ba552965c5d455e1a22"
+# The shipped R68 listener artifact was rebuilt in the CORR-2 round with the
+# current R68 transform (no post-build transform change this round); the R57
+# intentional-stop predicate correction changed the generated listener source
+# from 9318cfbf... to 566ff0e5..., so the shipped binary is 0f1798bf....
+R68_TRANSFORM_SHA256_AT_BUILD = "07e89b14a8aae4f5630b24f4bff29043e9d71b1659bfe786836258e64579fd84"
+R68_TRANSFORM_SHA256_CURRENT = "07e89b14a8aae4f5630b24f4bff29043e9d71b1659bfe786836258e64579fd84"
+R68_GENERATED_SOURCE_SHA256 = "566ff0e554f3f2b1c7b2c89bfc1b7b3cdbb0d40a0c1eeba79500ad6f20cba420"
 
 
 class R60A2WindowDecompositionTests(unittest.TestCase):

@@ -598,7 +598,7 @@ class P116R57CliCwdIndependenceTests(unittest.TestCase):
                 # the corrected value below; the CLI itself is unchanged.
                 self.assertEqual(
                     result.stdout.strip(),
-                    "fbd6137a5bb8b0f7258bfe69d72481c70272645aae0d4c0f0dff8c66d0b2237c",
+                    "cfa923829914199b40c769dbc16362da52babbc366713c2696beb9fec7fb5393",
                 )
 
 

@@ -51,8 +51,12 @@ MediaCallDiagnostics = MD.MediaCallDiagnostics
 MEDIA_DIAGNOSTICS_FIELDS = MD.MEDIA_DIAGNOSTICS_FIELDS
 CAPABILITIES_TRIGGER_FIELDS = MD.CAPABILITIES_TRIGGER_FIELDS
 CALL_ADOPTION_FIELDS = MD.CALL_ADOPTION_FIELDS
+RTP_FRESHNESS_FIELDS = MD.RTP_FRESHNESS_FIELDS
 ALL_DIAGNOSTICS_FIELDS = (
-    MEDIA_DIAGNOSTICS_FIELDS + CAPABILITIES_TRIGGER_FIELDS + CALL_ADOPTION_FIELDS
+    MEDIA_DIAGNOSTICS_FIELDS
+    + CAPABILITIES_TRIGGER_FIELDS
+    + CALL_ADOPTION_FIELDS
+    + RTP_FRESHNESS_FIELDS
 )
 
 
@@ -203,8 +207,10 @@ class MediaCallDiagnosticsUnitTests(unittest.TestCase):
         self.assertEqual(len(CAPABILITIES_TRIGGER_FIELDS), 7)
         # R54/R56 call-adoption observability adds 13 more fields, additively.
         self.assertEqual(len(CALL_ADOPTION_FIELDS), 13)
+        # Option-F upstream/media observability adds 6 RTP freshness fields.
+        self.assertEqual(len(RTP_FRESHNESS_FIELDS), 6)
         self.assertEqual(set(snapshot), set(ALL_DIAGNOSTICS_FIELDS))
-        self.assertEqual(len(ALL_DIAGNOSTICS_FIELDS), 36)
+        self.assertEqual(len(ALL_DIAGNOSTICS_FIELDS), 42)
         self.assertIsNone(snapshot["call_generation"])
         self.assertIsNone(snapshot["media_channel"])
         self.assertIsNone(snapshot["channel_source"])

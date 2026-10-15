@@ -111,7 +111,9 @@ typedef enum {
 static void p116_record_failure(P116NativeFailureId id, P116NativeFailurePhase phase);
 static P116NativeFailurePhase p116_infer_phase(void);
 static void p116_emit_timeout_observability(const char *kind);
+static gboolean p116_native_exit_is_intentional_stop(gboolean failed_flag);
 static void p116_emit_native_exit_summary(gboolean failed_flag);
+static gboolean g_p116_native_exit_intentional_stop = FALSE;
 /* R57_NATIVE_FAILURE_ATTRIBUTION_DECLS_END */'''
 
 _R57_DEFS = r'''/* R57_NATIVE_FAILURE_ATTRIBUTION_BEGIN */
@@ -247,9 +249,20 @@ p116_emit_timeout_observability(const char *kind)
     fflush(stdout);
 }
 
+static gboolean
+p116_native_exit_is_intentional_stop(gboolean failed_flag)
+{
+    return g_p116_native_exit_intentional_stop &&
+        g_p116_failure_count == 0u &&
+        !failed_flag;
+}
+
 static void
 p116_emit_native_exit_summary(gboolean failed_flag)
 {
+    gboolean intentional_stop = p116_native_exit_is_intentional_stop(failed_flag);
+    printf("P116_NATIVE_EXIT_INTENTIONAL_STOP=%s\n",
+        intentional_stop ? "true" : "false");
     printf("P116_NATIVE_EXIT_CODE=%d\n", failed_flag ? 6 : 0);
     printf("P116_NATIVE_FAILURE_ID=%s\n", p116_failure_id_name(g_p116_failure_id));
     printf("P116_NATIVE_FAILURE_PHASE=%s\n", p116_failure_phase_name(g_p116_failure_phase));
@@ -362,6 +375,7 @@ _EARLY_DECLARATION_NEEDLES = (
     "P116NativeFailurePhase phase);",
     "static P116NativeFailurePhase p116_infer_phase(void);",
     "static void p116_emit_timeout_observability(const char *kind);",
+    "static gboolean p116_native_exit_is_intentional_stop(gboolean failed_flag);",
     "static void p116_emit_native_exit_summary(gboolean failed_flag);",
 )
 
@@ -370,6 +384,20 @@ _TX_WAIT_TIMEOUT_CALL = '        p116_emit_timeout_observability("R54_TX_WAIT_TI
 
 _FINAL_RETURN_NEEDLE = "    return failed ? 6 : 0;"
 _FINAL_RETURN_CALL = "    p116_emit_native_exit_summary(failed);\n\n"
+_INTENTIONAL_STOP_NEEDLE = "    pseudotcp_graceful_stop_started = TRUE;\n"
+_INTENTIONAL_STOP_CALL = (
+    "    pseudotcp_graceful_stop_started = TRUE;\n"
+    "    g_p116_native_exit_intentional_stop = TRUE;\n"
+)
+_PSEUDOTCP_CLOSED_CALLBACK_NEEDLE = '''    printf(
+        "PSEUDOTCP_CLOSED_CALLBACK=true "
+        "ERROR=%u\\n",
+        error
+    );
+'''
+_PSEUDOTCP_CLOSED_CALLBACK_REPLACEMENT = '''    printf("PSEUDOTCP_CLOSED_CALLBACK=true\\n");
+    printf("PSEUDOTCP_CLOSED_CALLBACK_ERROR=%u\\n", error);
+'''
 
 
 def _inject_before_failed(text: str, needle: str, call_expr: str, label: str) -> str:
@@ -523,6 +551,20 @@ def transform(source: str) -> str:
     candidate = candidate.replace(
         _FINAL_RETURN_NEEDLE,
         _FINAL_RETURN_CALL + _FINAL_RETURN_NEEDLE,
+        1,
+    )
+    if candidate.count(_INTENTIONAL_STOP_NEEDLE) != 1:
+        raise RuntimeError("R57_INTENTIONAL_STOP_ANCHOR_GATE=FAIL")
+    candidate = candidate.replace(
+        _INTENTIONAL_STOP_NEEDLE,
+        _INTENTIONAL_STOP_CALL,
+        1,
+    )
+    if candidate.count(_PSEUDOTCP_CLOSED_CALLBACK_NEEDLE) != 1:
+        raise RuntimeError("R57_PSEUDOTCP_CLOSED_CALLBACK_ANCHOR_GATE=FAIL")
+    candidate = candidate.replace(
+        _PSEUDOTCP_CLOSED_CALLBACK_NEEDLE,
+        _PSEUDOTCP_CLOSED_CALLBACK_REPLACEMENT,
         1,
     )
 

@@ -70,7 +70,7 @@ _MEDIA_STARTUP_WINDOW_SECONDS = 45.0
 _MEDIA_LOCAL_SDP_READY_REASON = "local_sdp_ready_timeout"
 
 MEDIA_NATIVE_BINARY_SHA256 = (
-    "99ec3f5b044277bd6573fb95580f2198493399fee35c85122fbb2386c654cbc6"
+    "2a10b69e6c7e0565fa088b509904df1779478f0227fbbb8f6d4ba12034d8f045"
 )
 MEDIA_VIDEO_RTP_PORT = 17899
 MEDIA_VIDEO_HA_RTP_PORT = 17999
@@ -132,6 +132,11 @@ _MEDIA_NATIVE_MARKER_PREFIXES = (
     "P78_",
     "P80_",
     "P116_",
+    "VIDEO_",
+    "AUDIO_",
+    "LAST_",
+    "RX_",
+    "RTP_",
     "P122_",
     # R65 bounded same-session periodic refresh (research/media/v1
     # entrance_p116_r65_production_media_refresh_transform.py, composed on
@@ -141,6 +146,7 @@ _MEDIA_NATIVE_MARKER_PREFIXES = (
     "REFRESH_",
 )
 _MEDIA_NATIVE_MARKER_TAIL_LIMIT = 40
+_MEDIA_NATIVE_P116_MARKER_TAIL_LIMIT = 20
 _MEDIA_NATIVE_PROTOCOL_MARKER_LIMIT = 80
 _MEDIA_NATIVE_REFRESH_MARKERS = {
     "REFRESH_SENT_COUNT": ("refresh_sent_count", "int"),
@@ -249,6 +255,33 @@ m=audio {MEDIA_AUDIO_RTP_PORT} RTP/AVP 8\r
 a=rtpmap:8 PCMA/8000/1\r
 a=recvonly\r
 """
+
+
+def _bounded_chronological_markers(
+    markers: list[str],
+    limit: int,
+    is_protected: Callable[[str], bool],
+) -> list[str]:
+    """Bound a marker snapshot to ``limit`` entries in chronological order.
+
+    Markers whose key ``is_protected`` are kept in preference to other
+    markers (newest first within each group), so a full tail of fresher
+    markers cannot cut the retained protected copies; survivors keep their
+    original relative order.
+    """
+    if len(markers) <= limit:
+        return list(markers)
+    protected = [
+        index
+        for index, marker in enumerate(markers)
+        if is_protected(marker.partition("=")[0])
+    ]
+    keep = set(protected[-limit:]) if limit > 0 else set()
+    remaining = limit - len(keep)
+    if remaining > 0:
+        others = [index for index in range(len(markers)) if index not in keep]
+        keep.update(others[-remaining:])
+    return [markers[index] for index in sorted(keep)]
 
 
 class ComelitMediaTransportError(RuntimeError):
@@ -463,6 +496,7 @@ class ComelitEntranceMediaTransport:
         self._stopping = False
         self._last_error: str | None = None
         self._native_marker_tail: list[str] = []
+        self._native_p116_marker_tail: list[str] = []
         self._native_protocol_markers: list[str] = []
         self._native_protocol_markers_seen_total: int = 0
         self._native_protocol_markers_evicted: int = 0
@@ -700,7 +734,7 @@ class ComelitEntranceMediaTransport:
         diagnostics.update(self._native_refresh_diagnostics)
         return diagnostics
 
-    def native_marker_diagnostics(self) -> dict[str, int | bool | None]:
+    def native_marker_diagnostics(self) -> dict[str, int | float | bool | None]:
         diagnostics = self.native_refresh_diagnostics()
         diagnostics.update(self._native_ack_diagnostics)
         return diagnostics
@@ -715,7 +749,7 @@ class ComelitEntranceMediaTransport:
 
     @property
     def last_native_failure_markers(self) -> list[str]:
-        return list(self._last_native_failure_markers)
+        return list(self._last_native_failure_markers[-_MEDIA_NATIVE_MARKER_TAIL_LIMIT:])
 
     def set_latency_timeline(
         self, timeline: CameraRequestLatencyTimeline | None
@@ -831,6 +865,14 @@ class ComelitEntranceMediaTransport:
         self._native_marker_tail.append(marker)
         if len(self._native_marker_tail) > _MEDIA_NATIVE_MARKER_TAIL_LIMIT:
             del self._native_marker_tail[:-_MEDIA_NATIVE_MARKER_TAIL_LIMIT]
+        if key.startswith("P116_"):
+            p116_tail = getattr(self, "_native_p116_marker_tail", None)
+            if p116_tail is None:
+                p116_tail = []
+                self._native_p116_marker_tail = p116_tail
+            p116_tail.append(marker)
+            if len(p116_tail) > _MEDIA_NATIVE_P116_MARKER_TAIL_LIMIT:
+                del p116_tail[:-_MEDIA_NATIVE_P116_MARKER_TAIL_LIMIT]
         if key.startswith(_MEDIA_NATIVE_PROTOCOL_MARKER_PREFIXES):
             self._native_protocol_markers_seen_total += 1
             self._native_protocol_markers.append(marker)
@@ -873,7 +915,20 @@ class ComelitEntranceMediaTransport:
 
     def _capture_native_failure(self, returncode: int) -> None:
         self._last_native_exit_code = returncode
-        self._last_native_failure_markers = list(self._native_marker_tail)
+        tail_markers = list(self._native_marker_tail)
+        # P116 copies no longer in the shared tail were evicted from it, so
+        # they are older than every tail entry and go first.
+        markers = [
+            marker
+            for marker in getattr(self, "_native_p116_marker_tail", [])
+            if marker not in tail_markers
+        ]
+        markers.extend(tail_markers)
+        self._last_native_failure_markers = _bounded_chronological_markers(
+            markers,
+            _MEDIA_NATIVE_MARKER_TAIL_LIMIT,
+            lambda key: key.startswith("P116_"),
+        )
 
     def _native_protocol_marker_retention_evidence(self) -> str:
         first = "none"
@@ -891,13 +946,7 @@ class ComelitEntranceMediaTransport:
 
     def _emit_native_success_summary(self) -> None:
         protocol_markers = list(dict.fromkeys(self._native_protocol_markers))
-        p116_markers = list(
-            dict.fromkeys(
-                marker
-                for marker in self._native_marker_tail
-                if marker.startswith("P116_")
-            )
-        )
+        p116_markers = list(dict.fromkeys(getattr(self, "_native_p116_marker_tail", [])))
         _LOGGER.info(
             "Comelit entrance media transport completed: "
             "protocol_native_markers=%s p116_native_markers=%s "
@@ -922,6 +971,7 @@ class ComelitEntranceMediaTransport:
         self._stopping = False
         self._last_error = None
         self._native_marker_tail.clear()
+        self._native_p116_marker_tail.clear()
         self._native_protocol_markers.clear()
         self._native_protocol_markers_seen_total = 0
         self._native_protocol_markers_evicted = 0
