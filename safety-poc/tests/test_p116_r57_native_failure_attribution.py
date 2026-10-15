@@ -41,6 +41,11 @@ EXPECTED_SCENARIO_MARKERS = (
     "R57_SCENARIO_SDP_FAILURE=PASS",
     "R57_SCENARIO_DOOR_SETTER_OFFLINE_FAKE=PASS",
     "R57_SCENARIO_CASCADE_FIRST_FAIL_WINS=PASS",
+    "R57_SCENARIO_INTENTIONAL_STOP_IS_NON_STICKY=PASS",
+    "R57_SCENARIO_INTENTIONAL_PAUSE_WITHOUT_FAILURE=PASS",
+    "R57_SCENARIO_INTENTIONAL_PAUSE_THEN_REAL_FAILURE=PASS",
+    "R57_SCENARIO_UNATTRIBUTED_FAILED_EXIT_DURING_STOP=PASS",
+    "R57_SCENARIO_REAL_FAILURE_NOT_MASKED_BY_STOP_FLAG=PASS",
 )
 
 
@@ -199,6 +204,41 @@ class P116R57NativeFailureAttributionTests(unittest.TestCase):
         self.assertLess(exit_idx, return_idx)
         between = generated[exit_idx + len("p116_emit_native_exit_summary(failed);") : return_idx]
         self.assertNotIn("failed =", between)
+
+    def test_pseudotcp_closed_callback_error_is_bounded_numeric_marker(self) -> None:
+        generated = self.generated_a
+        self.assertIn('printf("PSEUDOTCP_CLOSED_CALLBACK=true\\n");', generated)
+        self.assertIn(
+            'printf("PSEUDOTCP_CLOSED_CALLBACK_ERROR=%u\\n", error);',
+            generated,
+        )
+        self.assertNotIn('"PSEUDOTCP_CLOSED_CALLBACK=true "\n        "ERROR=%u\\n"', generated)
+
+    def test_intentional_stop_is_marked_only_when_no_failure_recorded(self) -> None:
+        generated = self.generated_a
+        self.assertIn("g_p116_native_exit_intentional_stop = TRUE;", generated)
+        self.assertIn("P116_NATIVE_EXIT_INTENTIONAL_STOP=%s", generated)
+        summary = generated.split(
+            "p116_emit_native_exit_summary(gboolean failed_flag)", 1
+        )[1].split("/* R57_NATIVE_FAILURE_ATTRIBUTION_END */", 1)[0]
+        self.assertIn("p116_native_exit_is_intentional_stop(failed_flag)", summary)
+        self.assertIn("g_p116_failure_count == 0u", generated)
+        self.assertIn("!failed_flag", generated)
+
+    def test_intentional_stop_still_prints_base_exit_summary_fields(self) -> None:
+        generated = self.generated_a
+        summary = generated.split(
+            "p116_emit_native_exit_summary(gboolean failed_flag)", 1
+        )[1].split("/* R57_NATIVE_FAILURE_ATTRIBUTION_END */", 1)[0]
+        self.assertIn('printf("P116_NATIVE_EXIT_INTENTIONAL_STOP=%s\\n"', summary)
+        self.assertIn('printf("P116_NATIVE_EXIT_CODE=%d\\n"', summary)
+        self.assertIn('printf("P116_NATIVE_FAILURE_ID=%s\\n"', summary)
+        self.assertIn('printf("P116_NATIVE_FAILURE_PHASE=%s\\n"', summary)
+        self.assertIn('printf("P116_NATIVE_FAILURE_COUNT=%u\\n"', summary)
+        intentional_idx = summary.index("P116_NATIVE_EXIT_INTENTIONAL_STOP")
+        exit_code_idx = summary.index("P116_NATIVE_EXIT_CODE")
+        self.assertLess(intentional_idx, exit_code_idx)
+        self.assertNotIn("if (intentional_stop) {\n        fflush(stdout);\n        return;", summary)
 
     def test_timeout_observability_added_without_changing_tx_wait_semantics(self) -> None:
         generated = self.generated_a

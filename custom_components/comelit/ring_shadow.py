@@ -62,6 +62,7 @@ SHADOW_PROBE_KEYS = frozenset({
     "V4_RING_PEER_CONNECTION",
     "V4_RING_BODY_32_35",
     "V4_RING_PARSE_STATUS",
+    "V4_RING_MONOTONIC_MS",
 })
 SHADOW_PROBE_PHASES = frozenset({"INITIAL", "RETRANSMIT"})
 SHADOW_PROBE_PARSE_STATUSES = frozenset({"OK", "INSUFFICIENT_LENGTH"})
@@ -157,6 +158,7 @@ class RingProbeRecord:
     body_32_35_present: bool
     body_32_35_unavailable: bool
     sha_changed_vs_prev_initial: str
+    monotonic_ms: int | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -172,6 +174,7 @@ class RingProbeRecord:
             "body_32_35_present": self.body_32_35_present,
             "body_32_35_unavailable": self.body_32_35_unavailable,
             "sha_changed_vs_prev_initial": self.sha_changed_vs_prev_initial,
+            "monotonic_ms": self.monotonic_ms,
         }
 
 
@@ -180,6 +183,7 @@ class _RingProbePending:
     phase: str | None = None
     peer_connection: str | None = None
     body_32_35: str | None = None
+    monotonic_ms: int | None = None
 
 
 @dataclass
@@ -591,6 +595,12 @@ class RingProbeParser:
                 return ()
             pending.body_32_35 = value
             return ()
+        if key == "V4_RING_MONOTONIC_MS":
+            if not value.isdigit():
+                self._mark_malformed(owner)
+                return ()
+            pending.monotonic_ms = int(value)
+            return ()
 
         if value not in SHADOW_PROBE_PARSE_STATUSES:
             self._mark_malformed(owner)
@@ -622,6 +632,7 @@ class RingProbeParser:
                 owner_generation,
                 pending.phase,
             ),
+            monotonic_ms=pending.monotonic_ms,
         )
         self._records.append(record)
         self._reset_pending(owner)
@@ -638,6 +649,7 @@ class RingProbeParser:
                         pending.body_32_35 is not None and pending.body_32_35 != "----"
                     ),
                     "body_32_35_unavailable": pending.body_32_35 == "----",
+                    "monotonic_ms_present": pending.monotonic_ms is not None,
                     "frame_sha_pending": owner in self._pending_frame_sha,
                 }
                 for owner, pending in self._pending.items()

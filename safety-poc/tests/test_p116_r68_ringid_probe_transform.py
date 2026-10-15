@@ -114,11 +114,12 @@ class P116R68RingProbeTransformTests(unittest.TestCase):
 typedef unsigned char guint8;
 typedef unsigned int guint;
 typedef unsigned short guint16;
+static long long g_get_monotonic_time(void) { return 123000; }
 '''
 
     def test_n1_listener_transform_once_and_deterministic(self) -> None:
         self.assertEqual(self.generated_a, self.generated_b)
-        self.assertEqual(self.generated_sha, "bad39bdff787251e974c58ad71b90c67eeeb8a8bd4544ba552965c5d455e1a22")
+        self.assertEqual(self.generated_sha, "566ff0e554f3f2b1c7b2c89bfc1b7b3cdbb0d40a0c1eeba79500ad6f20cba420")
         self.assertEqual(self.generated_a.count(core.BEGIN), 1)
         self.assertEqual(self.generated_a.count("static void\nv4_ring_probe_emit"), 1)
         self.assertEqual(self.generated_a.count('v4_ring_probe_emit(body, body_len, "INITIAL");'), 1)
@@ -141,10 +142,17 @@ typedef unsigned short guint16;
             self.skipTest("no host C compiler available")
         self.assertEqual(self.compile_returncode, 0, self.compile_stderr[:4000])
         self.assertEqual(self.harness_returncode, 0, self.harness_stdout)
-        self.assertIn("CASE=SHORT3\nV4_RING_PHASE=INITIAL\nV4_RING_PARSE_STATUS=INSUFFICIENT_LENGTH\n", self.harness_stdout)
+        self.assertIn(
+            "CASE=SHORT3\n"
+            "V4_RING_PHASE=INITIAL\n"
+            "V4_RING_MONOTONIC_MS=123\n"
+            "V4_RING_PARSE_STATUS=INSUFFICIENT_LENGTH\n",
+            self.harness_stdout,
+        )
         self.assertIn(
             "CASE=SHORT20\n"
             "V4_RING_PHASE=RETRANSMIT\n"
+            "V4_RING_MONOTONIC_MS=123\n"
             "V4_RING_PEER_CONNECTION=1234\n"
             "V4_RING_BODY_32_35=----\n"
             "V4_RING_PARSE_STATUS=INSUFFICIENT_LENGTH\n",
@@ -153,6 +161,7 @@ typedef unsigned short guint16;
         self.assertIn(
             "CASE=FULL36\n"
             "V4_RING_PHASE=INITIAL\n"
+            "V4_RING_MONOTONIC_MS=123\n"
             "V4_RING_PEER_CONNECTION=abcd\n"
             "V4_RING_BODY_32_35=01234567\n"
             "V4_RING_PARSE_STATUS=OK\n",
@@ -164,11 +173,23 @@ typedef unsigned short guint16;
             "V4_RING_BODY_32_35",
             "V4_RING_PEER_CONNECTION",
             "V4_RING_PHASE",
+            "V4_RING_MONOTONIC_MS",
             "V4_RING_PARSE_STATUS=OK",
             "V4_RING_PARSE_STATUS=INSUFFICIENT_LENGTH",
+            "VIDEO_PACKET_COUNT_AT_REPEAT",
+            "AUDIO_PACKET_COUNT_AT_REPEAT",
+            "LAST_VIDEO_RTP_MONOTONIC_MS",
+            "LAST_AUDIO_RTP_MONOTONIC_MS",
+            "RX_STALLED=true",
+            "RTP_STALL_SECONDS=%llu",
+            "p80_video_stalled || p80_audio_stalled",
+            "CTPP_TRACE_DIRECTION=IN",
+            "CTPP_TRACE_DIRECTION=OUT",
         ):
             self.assertIn(marker, self.generated_a)
         self.assertNotIn(_forbidden_name(), self.generated_a)
+        self.assertNotIn("CTPP_TRACE_PAYLOAD", self.generated_a)
+        self.assertNotIn("CTPP_TRACE_HEX", self.generated_a)
 
     def test_n7_frozen_pin_invariance_and_no_tracked_pin_edits(self) -> None:
         self.assertEqual(_sha256_bytes(SOURCE), EXPECTED_FROZEN_SHA)

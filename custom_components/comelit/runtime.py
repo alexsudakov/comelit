@@ -133,8 +133,21 @@ _NATIVE_MARKER_PREFIXES = (
     "R64_",
     "R67_",
     "P116_",
+    "VIDEO_",
+    "AUDIO_",
+    "LAST_",
+    "RX_",
+    "RTP_",
+    "CTPP_TRACE_",
 )
 _NATIVE_MARKER_TAIL_LIMIT = 20
+_NATIVE_PUBLIC_FAILURE_MARKER_LIMIT = 20
+_NATIVE_MARKER_PROTECTED_LIMIT = 40
+_NATIVE_MARKER_HIGH_RATE_DIAGNOSTIC_LIMIT = 24
+_NATIVE_MARKER_CTPP_TRACE_LIMIT = 24
+_NATIVE_MARKER_PROTECTED_PER_KEY_LIMIT = 3
+_NATIVE_MARKER_CTPP_TRACE_FRAME_LIMIT = 4
+_OBSERVABILITY_CANARY_EVENT_LIMIT_PER_KEY = 16
 _R67_VALUE_AWARE_DEDUP_LIMIT_PER_GENERATION = 8
 
 # R57: bounded vocabularies for the native P116NativeFailureId /
@@ -254,6 +267,54 @@ _POST_CALL_TRANSPORT_STATES = frozenset(
 _R67_ATTACHED_REFRESH_RESULTS = frozenset(
     {"NONE", "SENT", "BUSY_DEFERRED", "FAIL_CLOSED", "CANCELLED", "STOPPED"}
 )
+_CTPP_TRACE_DIRECTIONS = frozenset({"IN", "OUT"})
+_RX_STALLED_STATES = frozenset({"true", "false"})
+_OBSERVABILITY_PROTECTED_MARKER_KEYS = frozenset(
+    {
+        "PSEUDOTCP_CLOSED_CALLBACK_ERROR",
+        "P116_NATIVE_EXIT_INTENTIONAL_STOP",
+        "VIDEO_PACKET_COUNT_AT_REPEAT",
+        "AUDIO_PACKET_COUNT_AT_REPEAT",
+        "LAST_VIDEO_RTP_MONOTONIC_MS",
+        "LAST_AUDIO_RTP_MONOTONIC_MS",
+        "RX_STALLED",
+        "RTP_STALL_SECONDS",
+        "CTPP_TRACE_DIRECTION",
+        "CTPP_TRACE_OPCODE",
+        "CTPP_TRACE_TYPE",
+        "CTPP_TRACE_CHANNEL",
+        "CTPP_TRACE_LENGTH",
+        "CTPP_TRACE_MONOTONIC_MS",
+        "V4_RING_MONOTONIC_MS",
+    }
+)
+_OBSERVABILITY_PROTECTED_LONG_NUMERIC_KEYS = frozenset(
+    {
+        "PSEUDOTCP_CLOSED_CALLBACK_ERROR",
+        "VIDEO_PACKET_COUNT_AT_REPEAT",
+        "AUDIO_PACKET_COUNT_AT_REPEAT",
+        "LAST_VIDEO_RTP_MONOTONIC_MS",
+        "LAST_AUDIO_RTP_MONOTONIC_MS",
+        "RTP_STALL_SECONDS",
+        "CTPP_TRACE_OPCODE",
+        "CTPP_TRACE_TYPE",
+        "CTPP_TRACE_CHANNEL",
+        "CTPP_TRACE_LENGTH",
+        "CTPP_TRACE_MONOTONIC_MS",
+        "V4_RING_MONOTONIC_MS",
+    }
+)
+_HIGH_RATE_DIAGNOSTIC_MARKER_KEYS = frozenset(
+    {
+        "VIDEO_PACKET_COUNT_AT_REPEAT",
+        "AUDIO_PACKET_COUNT_AT_REPEAT",
+        "LAST_VIDEO_RTP_MONOTONIC_MS",
+        "LAST_AUDIO_RTP_MONOTONIC_MS",
+        "RX_STALLED",
+        "RTP_STALL_SECONDS",
+        "V4_RING_MONOTONIC_MS",
+    }
+)
 _R67_ATTACHED_REFRESH_REASONS = frozenset(
     {
         "NONE",
@@ -337,6 +398,8 @@ _P116_MARKER_VOCABULARIES: dict[str, frozenset[str]] = {
     "R67_ATTACHED_REFRESH_FRAME": _R67_ATTACHED_REFRESH_FRAMES,
     "R67_ATTACHED_REFRESH_TIMER_REMOVE_REASON": _R67_ATTACHED_REFRESH_REASONS,
     "R67_ATTACHED_REFRESH_CANCEL_REASON": _R67_ATTACHED_REFRESH_REASONS,
+    "CTPP_TRACE_DIRECTION": _CTPP_TRACE_DIRECTIONS,
+    "RX_STALLED": _RX_STALLED_STATES,
 }
 _CALL_ADOPTION_FAILURE_STAGES = frozenset(
     {
@@ -383,6 +446,21 @@ _CANARY_OBSERVABILITY_MARKERS = {
     "P116_NATIVE_FAILURE_ID": "NATIVE_FAILURE_ID",
     "P116_NATIVE_FAILURE_PHASE": "NATIVE_FAILURE_PHASE",
     "P116_NATIVE_FAILURE_COUNT": "NATIVE_FAILURE_COUNT",
+    "P116_NATIVE_EXIT_INTENTIONAL_STOP": "NATIVE_EXIT_INTENTIONAL_STOP",
+    "PSEUDOTCP_CLOSED_CALLBACK_ERROR": "PSEUDOTCP_CLOSED_CALLBACK_ERROR",
+    "VIDEO_PACKET_COUNT_AT_REPEAT": "VIDEO_PACKET_COUNT_AT_REPEAT",
+    "AUDIO_PACKET_COUNT_AT_REPEAT": "AUDIO_PACKET_COUNT_AT_REPEAT",
+    "LAST_VIDEO_RTP_MONOTONIC_MS": "LAST_VIDEO_RTP_MONOTONIC_MS",
+    "LAST_AUDIO_RTP_MONOTONIC_MS": "LAST_AUDIO_RTP_MONOTONIC_MS",
+    "RX_STALLED": "RX_STALLED",
+    "RTP_STALL_SECONDS": "RTP_STALL_SECONDS",
+    "CTPP_TRACE_DIRECTION": "CTPP_TRACE_DIRECTION",
+    "CTPP_TRACE_OPCODE": "CTPP_TRACE_OPCODE",
+    "CTPP_TRACE_TYPE": "CTPP_TRACE_TYPE",
+    "CTPP_TRACE_CHANNEL": "CTPP_TRACE_CHANNEL",
+    "CTPP_TRACE_LENGTH": "CTPP_TRACE_LENGTH",
+    "CTPP_TRACE_MONOTONIC_MS": "CTPP_TRACE_MONOTONIC_MS",
+    "V4_RING_MONOTONIC_MS": "V4_RING_MONOTONIC_MS",
     "P116_TIMEOUT_KIND": "TIMEOUT_KIND",
     "P116_TIMEOUT_PHASE": "TIMEOUT_PHASE",
     "R37_REMOTE_RELEASE_OBSERVED": "REMOTE_RELEASE_OBSERVED",
@@ -444,6 +522,33 @@ _H264_CANARY_MARKERS = frozenset(
         "P116_VIDEO_FUA_COUNT",
     }
 )
+
+
+def _bounded_chronological_markers(
+    markers: list[str],
+    limit: int,
+    is_protected: Callable[[str], bool],
+) -> list[str]:
+    """Bound a marker snapshot to ``limit`` entries in chronological order.
+
+    Markers whose key ``is_protected`` are kept in preference to other
+    markers (newest first within each group), so a full tail of fresher
+    markers cannot cut the retained protected copies; survivors keep their
+    original relative order.
+    """
+    if len(markers) <= limit:
+        return list(markers)
+    protected = [
+        index
+        for index, marker in enumerate(markers)
+        if is_protected(marker.partition("=")[0])
+    ]
+    keep = set(protected[-limit:]) if limit > 0 else set()
+    remaining = limit - len(keep)
+    if remaining > 0:
+        others = [index for index in range(len(markers)) if index not in keep]
+        keep.update(others[-remaining:])
+    return [markers[index] for index in sorted(keep)]
 
 
 class ComelitRingRuntimeError(RuntimeError):
@@ -601,11 +706,16 @@ class ComelitRingRuntime:
         self._last_door_result: dict[str, object] | None = None
         self._door_diagnostic: dict[str, object] = {}
         self._native_marker_tail: list[str] = []
+        self._native_marker_protected_tail: list[str] = []
+        self._native_marker_high_rate_tail: list[str] = []
+        self._native_marker_ctpp_trace_tail: list[str] = []
+        self._native_marker_ctpp_trace_frames: list[list[str]] = []
         self._canary_log_generation: int | None = None
         self._canary_log_seen: set[str] = set()
         self._canary_log_value_emissions: dict[str, int] = {}
         self._post_call_transport_flags: dict[str, bool] = {}
         self._post_call_transport_emitted = False
+        self._post_call_transport_emitted_state: str | None = None
         self._r64_post_call_snapshot: dict[str, object] = {}
         self._r64_terminal_snapshot: dict[str, object] = {}
         self._r64_pseudotcp_closed_before_open = False
@@ -745,9 +855,7 @@ class ComelitRingRuntime:
             "timestamp": event.get("timestamp"),
             "last_error": self._last_error,
             "last_native_exit_code": self._last_native_exit_code,
-            "last_native_failure_markers": list(
-                self._last_native_failure_markers
-            ),
+            "last_native_failure_markers": self._public_native_failure_markers(),
             "last_attached_stop_failure_stage": (
                 getattr(self, "_last_attached_stop_failure_stage", None)
             ),
@@ -898,6 +1006,11 @@ class ComelitRingRuntime:
             return
         if key.startswith("R67_") and key not in _R67_ATTACHED_REFRESH_MARKERS:
             return
+        if (
+            key.startswith("CTPP_TRACE_")
+            and key not in _OBSERVABILITY_PROTECTED_MARKER_KEYS
+        ):
+            return
 
         vocabulary = _P116_MARKER_VOCABULARIES.get(key)
         if vocabulary is not None:
@@ -921,6 +1034,12 @@ class ComelitRingRuntime:
         ):
             _LOGGER.info("Comelit ring fingerprint marker; %s=%s", key, value)
             safe_value = "<redacted>"
+        elif key in _OBSERVABILITY_PROTECTED_LONG_NUMERIC_KEYS:
+            safe_value = (
+                value
+                if _DIAGNOSTIC_MARKER_SAFE_VALUE_RE.fullmatch(value)
+                else "<redacted>"
+            )
         else:
             safe_value = (
                 value
@@ -929,20 +1048,83 @@ class ComelitRingRuntime:
             )
         if key in _RING_PROBE_MARKER_KEYS:
             return
-        self._native_marker_tail.append(f"{key}={safe_value}")
+        marker = f"{key}={safe_value}"
+        if key in _OBSERVABILITY_PROTECTED_MARKER_KEYS and key.startswith("CTPP_TRACE_"):
+            self._remember_ctpp_trace_marker(key, marker)
+            return
+        if key in _HIGH_RATE_DIAGNOSTIC_MARKER_KEYS:
+            self._remember_high_rate_diagnostic_marker(marker)
+            return
+        self._native_marker_tail.append(marker)
         if len(self._native_marker_tail) > _NATIVE_MARKER_TAIL_LIMIT:
             del self._native_marker_tail[:-_NATIVE_MARKER_TAIL_LIMIT]
+        if key in _OBSERVABILITY_PROTECTED_MARKER_KEYS:
+            self._remember_protected_marker(key, marker)
         if key == "R58_STOP_FAILURE_STAGE":
             self._last_attached_stop_failure_stage = (
                 safe_value if safe_value in _R58_STOP_FAILURE_STAGES else None
             )
 
+    def _remember_high_rate_diagnostic_marker(self, marker: str) -> None:
+        high_rate_tail = getattr(self, "_native_marker_high_rate_tail", None)
+        if high_rate_tail is None:
+            high_rate_tail = []
+            self._native_marker_high_rate_tail = high_rate_tail
+        high_rate_tail.append(marker)
+        if len(high_rate_tail) > _NATIVE_MARKER_HIGH_RATE_DIAGNOSTIC_LIMIT:
+            del high_rate_tail[:-_NATIVE_MARKER_HIGH_RATE_DIAGNOSTIC_LIMIT]
+
+    def _remember_protected_marker(self, key: str, marker: str) -> None:
+        protected_tail = getattr(self, "_native_marker_protected_tail", None)
+        if protected_tail is None:
+            protected_tail = []
+            self._native_marker_protected_tail = protected_tail
+        protected_tail.append(marker)
+
+        same_key = [
+            index
+            for index, existing in enumerate(protected_tail)
+            if existing.split("=", 1)[0] == key
+        ]
+        overflow = len(same_key) - _NATIVE_MARKER_PROTECTED_PER_KEY_LIMIT
+        if overflow > 0:
+            remove_indexes = set(same_key[:overflow])
+            protected_tail[:] = [
+                existing
+                for index, existing in enumerate(protected_tail)
+                if index not in remove_indexes
+            ]
+        if len(protected_tail) > _NATIVE_MARKER_PROTECTED_LIMIT:
+            del protected_tail[:-_NATIVE_MARKER_PROTECTED_LIMIT]
+
+    def _remember_ctpp_trace_marker(self, key: str, marker: str) -> None:
+        frames = getattr(self, "_native_marker_ctpp_trace_frames", None)
+        if frames is None:
+            frames = []
+            self._native_marker_ctpp_trace_frames = frames
+        if key == "CTPP_TRACE_DIRECTION" or not frames:
+            frames.append([])
+        frames[-1].append(marker)
+        if len(frames) > _NATIVE_MARKER_CTPP_TRACE_FRAME_LIMIT:
+            del frames[:-_NATIVE_MARKER_CTPP_TRACE_FRAME_LIMIT]
+        flattened = [line for frame in frames for line in frame]
+        if len(flattened) > _NATIVE_MARKER_CTPP_TRACE_LIMIT:
+            flattened = flattened[-_NATIVE_MARKER_CTPP_TRACE_LIMIT:]
+        self._native_marker_ctpp_trace_tail = flattened
+
     def _safe_native_marker_value(self, key: str, value: str) -> str | None:
         if key.startswith("R67_") and key not in _R67_ATTACHED_REFRESH_MARKERS:
+            return None
+        if (
+            key.startswith("CTPP_TRACE_")
+            and key not in _OBSERVABILITY_PROTECTED_MARKER_KEYS
+        ):
             return None
         vocabulary = _P116_MARKER_VOCABULARIES.get(key)
         if vocabulary is not None:
             return value if value in vocabulary else None
+        if key in _OBSERVABILITY_PROTECTED_LONG_NUMERIC_KEYS:
+            return value if _DIAGNOSTIC_MARKER_SAFE_VALUE_RE.fullmatch(value) else None
         if _NATIVE_MARKER_SAFE_VALUE_RE.fullmatch(value):
             return value
         if _DIAGNOSTIC_MARKER_SAFE_VALUE_RE.fullmatch(value):
@@ -958,6 +1140,7 @@ class ComelitRingRuntime:
         self._canary_log_value_emissions = {}
         self._post_call_transport_flags = {}
         self._post_call_transport_emitted = False
+        self._post_call_transport_emitted_state = None
         self._r64_post_call_snapshot = {}
         self._r64_terminal_snapshot = {}
         self._r64_pseudotcp_closed_before_open = False
@@ -1027,6 +1210,20 @@ class ComelitRingRuntime:
         if value_emissions is None:
             value_emissions = {}
             self._canary_log_value_emissions = value_emissions
+        if key in _OBSERVABILITY_PROTECTED_MARKER_KEYS:
+            if (
+                value_emissions.get(key, 0)
+                >= _OBSERVABILITY_CANARY_EVENT_LIMIT_PER_KEY
+            ):
+                return
+            value_emissions[key] = value_emissions.get(key, 0) + 1
+            _LOGGER.info(
+                "Comelit canary evidence %s marker=%s value=%s",
+                criterion,
+                key,
+                safe_value,
+            )
+            return
         if key in _R67_VALUE_AWARE_DEDUP_KEYS:
             if (
                 value_emissions.get(key, 0)
@@ -1037,7 +1234,7 @@ class ComelitRingRuntime:
         else:
             dedup_key = (
                 f"{criterion}={safe_value}"
-                if key == "R58_STOP_PHASE"
+                if key in {"R58_STOP_PHASE", "POST_CALL_TRANSPORT_STATE"}
                 else criterion
             )
         if dedup_key in seen:
@@ -1166,16 +1363,22 @@ class ComelitRingRuntime:
         elif key in {
             "P116_NATIVE_FAILURE_ID",
         } and value == "PSEUDOTCP_CLOSED":
-            flags["transport_closed"] = True
+            if flags.get("intentional_stop") is not True:
+                flags["transport_closed"] = True
         elif key in {
             "PSEUDOTCP_CLOSED_BEFORE_OPEN",
             "PSEUDOTCP_CLOSED_AFTER_OPEN",
         } and value == "true":
-            flags["transport_closed"] = True
+            if flags.get("intentional_stop") is not True:
+                flags["transport_closed"] = True
         elif key == "R64_POST_CALL_REMOTE_RELEASE_OBSERVED":
             flags["remote_release"] = value == "true"
         elif key == "R64_POST_CALL_CAPABILITY_CLEARED_OBSERVED":
             flags["capability_cleared"] = value == "true"
+        elif key == "P116_NATIVE_EXIT_INTENTIONAL_STOP":
+            flags["intentional_stop"] = value == "true"
+            if value == "true":
+                flags.pop("transport_closed", None)
 
     def _derive_post_call_transport_state(self) -> str:
         """Derive only from HA-observed native markers.
@@ -1208,13 +1411,50 @@ class ComelitRingRuntime:
     def _emit_post_call_transport_state_once(self) -> None:
         if getattr(self, "_post_call_transport_emitted", False):
             return
-        self._post_call_transport_emitted = True
         state = self._derive_post_call_transport_state()
+        self._post_call_transport_emitted = True
+        self._post_call_transport_emitted_state = state
         self._observe_canary_log_marker(f"POST_CALL_TRANSPORT_STATE={state}")
 
     def _capture_native_failure(self, returncode: int) -> None:
         self._last_native_exit_code = returncode
-        self._last_native_failure_markers = list(self._native_marker_tail)
+        tail_markers = [
+            marker
+            for marker in getattr(self, "_native_marker_tail", [])
+            if not marker.startswith("CTPP_TRACE_")
+        ]
+        tail_keys = {marker.split("=", 1)[0] for marker in tail_markers}
+        markers = [
+            marker
+            for marker in getattr(self, "_native_marker_protected_tail", [])
+            if marker.split("=", 1)[0] not in tail_keys
+        ]
+        markers.extend(tail_markers)
+        for marker in getattr(self, "_native_marker_high_rate_tail", []):
+            markers.append(marker)
+        for marker in getattr(self, "_native_marker_ctpp_trace_tail", []):
+            markers.append(marker)
+        self._last_native_failure_markers = markers
+
+    def _public_native_failure_markers(self) -> list[str]:
+        public_source = list(getattr(self, "_last_native_failure_markers", []))
+        public_markers = []
+        for marker in public_source:
+            key, _separator, value = marker.partition("=")
+            if key == "P116_NATIVE_FAILURE_COUNT" and value == "0":
+                continue
+            if key.startswith("CTPP_TRACE_"):
+                continue
+            if "_MONOTONIC_MS=" in marker:
+                continue
+            if key in _HIGH_RATE_DIAGNOSTIC_MARKER_KEYS:
+                continue
+            public_markers.append(marker)
+        return _bounded_chronological_markers(
+            public_markers,
+            _NATIVE_PUBLIC_FAILURE_MARKER_LIMIT,
+            lambda key: key in _OBSERVABILITY_PROTECTED_MARKER_KEYS,
+        )
 
     async def _async_stop_native_process(
         self,
@@ -1245,10 +1485,15 @@ class ComelitRingRuntime:
         self._attached_media_closed.clear()
         self._ring_lines.clear()
         self._native_marker_tail.clear()
+        self._native_marker_protected_tail.clear()
+        self._native_marker_high_rate_tail.clear()
+        self._native_marker_ctpp_trace_tail.clear()
+        self._native_marker_ctpp_trace_frames.clear()
         self._canary_log_generation = None
         self._canary_log_seen = set()
         self._post_call_transport_flags = {}
         self._post_call_transport_emitted = False
+        self._post_call_transport_emitted_state = None
         self._r64_post_call_snapshot = {}
         self._r64_terminal_snapshot = {}
         self._r64_pseudotcp_closed_before_open = False
@@ -1388,9 +1633,14 @@ class ComelitRingRuntime:
 
         task = self._task
         if task is not None and not task.done():
-            task.cancel()
             try:
-                await task
+                await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+            except TimeoutError:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
             except asyncio.CancelledError:
                 pass
         self._task = None
@@ -1813,6 +2063,7 @@ class ComelitRingRuntime:
                     self._notify_status()
             if (
                 line == "R64_POST_CALL_SNAPSHOT=true"
+                or line == "P116_NATIVE_EXIT_INTENTIONAL_STOP=true"
                 or line.startswith("P116_NATIVE_FAILURE_COUNT=")
             ):
                 self._emit_post_call_transport_state_once()

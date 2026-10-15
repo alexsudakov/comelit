@@ -31,6 +31,8 @@ v4_ring_probe_emit(const guint8 *body, guint body_len, const char *phase)
     guint16 peer_connection;
 
     printf("V4_RING_PHASE=%s\n", phase ? phase : "UNKNOWN");
+    printf("V4_RING_MONOTONIC_MS=%llu\n",
+        (unsigned long long)(g_get_monotonic_time() / 1000));
 
     if (!body || body_len < 4u) {
         printf("V4_RING_PARSE_STATUS=INSUFFICIENT_LENGTH\n");
@@ -93,6 +95,7 @@ def apply_probe(text: str) -> str:
         BEGIN,
         END,
         "V4_RING_PHASE=%s",
+        "V4_RING_MONOTONIC_MS=%llu",
         'v4_ring_probe_emit(body, body_len, "INITIAL");',
         'v4_ring_probe_emit(body, body_len, "RETRANSMIT");',
         "V4_RING_PEER_CONNECTION=%04x",

@@ -16,6 +16,8 @@ P80_BUILD_EXPECTED_SOURCE_SHA=${P80_BUILD_EXPECTED_SOURCE_SHA:-}
 P80_BUILD_ALLOW_DETACHED=${P80_BUILD_ALLOW_DETACHED:-0}
 P80_BUILD_INCLUDE_P116=${P80_BUILD_INCLUDE_P116:-0}
 P80_BUILD_PROFILE=${P80_BUILD_PROFILE:-LEGACY}
+P80_BUILD_RECORD_OUTPUT=${P80_BUILD_RECORD_OUTPUT:-}
+P80_BUILD_RECORD_PHASE=${P80_BUILD_RECORD_PHASE:-P80_HAOS_MEDIA_BUILD}
 SOURCE_REL=safety-poc/research/door/v1_5_7/comelit-v4-persistent-ctpp-door.c
 # Canonical P80/P106 native media source generator. Override only for explicit
 # provenance experiments; gates below validate the source emitted by this path.
@@ -43,6 +45,13 @@ CANDIDATE="$BUILD/comelit-media"
 META="$BUILD/build-meta.txt"
 FAIL=0
 ROOTFS_MODE=UNSELECTED
+# Gate results emitted into the optional build record. Each is assigned only
+# where its gate actually runs; NOT_REACHED/NOT_REQUESTED otherwise.
+EXPECTED_SHA_GATE=NOT_REQUESTED
+EXPECTED_SOURCE_SHA_GATE=NOT_REQUESTED
+PROFILE_SOURCE_GATE=NOT_REACHED
+PROFILE_BINARY_GATE=NOT_REACHED
+P80_BINARY_MARKER_GATE=NOT_REACHED
 
 fail() {
     echo "$1" >&2
@@ -77,6 +86,7 @@ summary() {
     echo "P80_BUILD_TRANSFORM=$P80_BUILD_TRANSFORM"
     echo "P80_BUILD_INCLUDE_P116=$P80_BUILD_INCLUDE_P116"
     echo "P80_BUILD_PROFILE=$P80_BUILD_PROFILE"
+    echo "P80_BUILD_RECORD_OUTPUT=${P80_BUILD_RECORD_OUTPUT:-NOT_REQUESTED}"
     echo "P80_BUILD_EXPECTED_SOURCE_SHA=$P80_BUILD_EXPECTED_SOURCE_SHA"
     echo "P80_TRANSFORM_RC=${TRANSFORM_RC:-NOT_REACHED}"
     echo "P80_GENERATED_SOURCE_SHA256=${GENERATED_SOURCE_SHA256:-NOT_REACHED}"
@@ -120,7 +130,12 @@ done
 REPO_HEAD="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
 CURRENT_BRANCH="$(git -C "$REPO" branch --show-current 2>/dev/null || true)"
 if [ -n "$P80_BUILD_EXPECTED_SHA" ]; then
-    [ "$REPO_HEAD" = "$P80_BUILD_EXPECTED_SHA" ] || fail "P80_BUILD_EXPECTED_SHA_GATE=FAIL expected=$P80_BUILD_EXPECTED_SHA actual=$REPO_HEAD"
+    if [ "$REPO_HEAD" = "$P80_BUILD_EXPECTED_SHA" ]; then
+        EXPECTED_SHA_GATE=PASS
+    else
+        EXPECTED_SHA_GATE=FAIL
+        fail "P80_BUILD_EXPECTED_SHA_GATE=FAIL expected=$P80_BUILD_EXPECTED_SHA actual=$REPO_HEAD"
+    fi
 fi
 if [ "$P80_BUILD_ALLOW_DETACHED" = "1" ]; then
     [ -n "$P80_BUILD_EXPECTED_SHA" ] || fail 'P80_BUILD_EXPECTED_SHA_REQUIRED_FOR_DETACHED=FAIL'
@@ -175,14 +190,21 @@ if [ "$FAIL" -eq 0 ]; then
     echo "GENERATED_SOURCE_SHA256=$GENERATED_SOURCE_SHA256"
     if [ -n "$P80_BUILD_EXPECTED_SOURCE_SHA" ]; then
         if [ "$GENERATED_SOURCE_SHA256" = "$P80_BUILD_EXPECTED_SOURCE_SHA" ]; then
+            EXPECTED_SOURCE_SHA_GATE=PASS
             echo "P80_BUILD_EXPECTED_SOURCE_SHA_GATE=PASS $GENERATED_SOURCE_SHA256"
         else
+            EXPECTED_SOURCE_SHA_GATE=FAIL
             fail "P80_BUILD_EXPECTED_SOURCE_SHA_GATE=FAIL expected=$P80_BUILD_EXPECTED_SOURCE_SHA actual=$GENERATED_SOURCE_SHA256"
         fi
     fi
-    bash "$REPO/$P80_BUILD_PROFILE_GATE" \
+    if bash "$REPO/$P80_BUILD_PROFILE_GATE" \
       --profile "$P80_BUILD_PROFILE" \
-      --generated-source "$GENERATED" || fail "P80_PROFILE_SOURCE_GATE=FAIL profile=$P80_BUILD_PROFILE"
+      --generated-source "$GENERATED"; then
+        PROFILE_SOURCE_GATE=$P80_BUILD_PROFILE
+    else
+        PROFILE_SOURCE_GATE=FAIL
+        fail "P80_PROFILE_SOURCE_GATE=FAIL profile=$P80_BUILD_PROFILE"
+    fi
 fi
 [ "$FAIL" -eq 0 ] || exit 1
 
@@ -322,9 +344,16 @@ esac
 file "$CANDIDATE" | sed 's#^.*: #P80_BINARY_FILE=#'
 strings -a "$CANDIDATE" > "$BUILD/candidate.strings"
 
-bash "$REPO/$P80_BUILD_PROFILE_GATE" \
+if bash "$REPO/$P80_BUILD_PROFILE_GATE" \
   --profile "$P80_BUILD_PROFILE" \
-  --strings-file "$BUILD/candidate.strings" || fail "P80_BINARY_MARKER_GATE=FAIL profile=$P80_BUILD_PROFILE"
+  --strings-file "$BUILD/candidate.strings"; then
+    PROFILE_BINARY_GATE=$P80_BUILD_PROFILE
+    P80_BINARY_MARKER_GATE=PASS
+else
+    PROFILE_BINARY_GATE=FAIL
+    P80_BINARY_MARKER_GATE=FAIL
+    fail "P80_BINARY_MARKER_GATE=FAIL profile=$P80_BUILD_PROFILE"
+fi
 
 if grep -Fq '/run/comelit-p2p' "$BUILD/candidate.strings"; then
     fail 'P80_BINARY_LISTENER_RUN_DIR_LEAK=FAIL'
@@ -351,7 +380,7 @@ done
 
 [ "$FAIL" -eq 0 ] || exit 1
 
-echo 'P80_BINARY_MARKER_GATE=PASS'
+echo "P80_BINARY_MARKER_GATE=$P80_BINARY_MARKER_GATE"
 echo "P80_INTERPRETER_GATE=PASS $INTERPRETER"
 echo "NO_GLIBC_DEPENDENCY=$NO_GLIBC_DEPENDENCY"
 echo "NO_NEW_RUNTIME_DEPENDENCY=$NO_NEW_RUNTIME_DEPENDENCY"
@@ -366,3 +395,57 @@ FINAL_OUTPUT="$OUTPUT"
 
 echo "P80_FINAL_OUTPUT=$OUTPUT"
 echo "P80_FINAL_SHA256=$CANDIDATE_SHA"
+
+if [ -n "$P80_BUILD_RECORD_OUTPUT" ]; then
+    # Reached only after every gate above passed (each failure exits). Every
+    # gate field is the variable assigned where that gate executed.
+    record_tmp="$BUILD/reproducible-media-build-record.txt"
+    if [ "$FAIL" -eq 0 ] && [ -n "${FINAL_OUTPUT:-}" ]; then
+        P80_HAOS_MEDIA_BUILD=PASS
+    else
+        P80_HAOS_MEDIA_BUILD=FAIL
+    fi
+    {
+        echo "phase=$P80_BUILD_RECORD_PHASE"
+        echo "record_type=reproducible_ct120_media_build_record"
+        echo "record_status=BUILDER_EMITTED"
+        echo "record_generated_by=safety-poc/research/media/v1/ct120_build_p80_haos_media_helper.sh"
+        echo "builder=safety-poc/research/media/v1/ct120_build_p80_haos_media_helper.sh"
+        echo "transform=$P80_BUILD_TRANSFORM"
+        echo "base_source=$SOURCE_REL"
+        echo "build_repo_head=$REPO_HEAD"
+        echo "build_repo=$REPO"
+        echo "p80_run_root=$RUN_ROOT"
+        echo "p80_build_output=$OUTPUT"
+        echo "p80_rootfs=$ROOTFS"
+        echo "p80_rootfs_mode=$ROOTFS_MODE"
+        echo "P80_BUILD_PROFILE=$P80_BUILD_PROFILE"
+        echo "P80_BUILD_INCLUDE_P116=$P80_BUILD_INCLUDE_P116"
+        echo "P80_BUILD_EXPECTED_SHA=$P80_BUILD_EXPECTED_SHA"
+        echo "P80_BUILD_EXPECTED_SHA_GATE=$EXPECTED_SHA_GATE"
+        echo "P80_BUILD_EXPECTED_SOURCE_SHA=$P80_BUILD_EXPECTED_SOURCE_SHA"
+        echo "P80_BUILD_EXPECTED_SOURCE_SHA_GATE=$EXPECTED_SOURCE_SHA_GATE"
+        echo "generated_source_sha256=$GENERATED_SOURCE_SHA256"
+        echo "native_binary_sha256=$CANDIDATE_SHA"
+        echo "elf_build_id=$(sed -n 's/^elf_build_id=//p' "$META")"
+        echo "interpreter=$INTERPRETER"
+        echo "needed_sorted=$NEEDED"
+        echo "P80_HAOS_MEDIA_BUILD=$P80_HAOS_MEDIA_BUILD"
+        echo "PROFILE_SOURCE_GATE=$PROFILE_SOURCE_GATE"
+        echo "PROFILE_BINARY_GATE=$PROFILE_BINARY_GATE"
+        echo "P80_BINARY_MARKER_GATE=$P80_BINARY_MARKER_GATE"
+        echo "MUSL_INTERPRETER_GATE=$MUSL_INTERPRETER_GATE"
+        echo "NO_GLIBC_DEPENDENCY=$NO_GLIBC_DEPENDENCY"
+        echo "NO_NEW_RUNTIME_DEPENDENCY=$NO_NEW_RUNTIME_DEPENDENCY"
+        echo "LIB_IDENTICAL=$LIB_IDENTICAL"
+        echo "candidate_executed=false"
+        echo "production_deploy_performed=false"
+        echo "gate_results_source=builder_executed_gates"
+        echo "hardcoded_gate_results=false"
+    } > "$record_tmp"
+    install -m 0644 "$record_tmp" "$P80_BUILD_RECORD_OUTPUT" || {
+        fail 'P80_BUILD_RECORD_OUTPUT=FAIL'
+        exit 1
+    }
+    echo "P80_BUILD_RECORD_OUTPUT_WRITTEN=$P80_BUILD_RECORD_OUTPUT"
+fi
