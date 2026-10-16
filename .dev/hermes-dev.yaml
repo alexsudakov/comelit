@@ -1,0 +1,9 @@
+version: 1
+checks:
+  required:
+    - 'python3.12 -m pytest -q tests/miniapp'
+    - 'python3.12 -m compileall -q custom_components/comelit/miniapp tests/miniapp'
+    - 'node --check custom_components/comelit/frontend/miniapp/host.js'
+    - 'node --check custom_components/comelit/frontend/miniapp/webcodecs.js'
+    - 'node --check custom_components/comelit/frontend/miniapp/vendor/hls.min.js'
+    - 'node --check custom_components/comelit/frontend/comelit-card.js'
