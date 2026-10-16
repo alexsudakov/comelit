@@ -141,6 +141,9 @@ def _runtime_instance():
     instance._r64_pseudotcp_closed_after_open = False
     instance._last_native_failure_markers = []
     instance._last_attached_stop_failure_stage = None
+    instance._terminal_native_failure_observed = False
+    instance._cooperative_pause_requested = False
+    instance._cooperative_pause_preceded_failure = False
     return instance
 
 
@@ -219,21 +222,181 @@ class _StopProcess:
         return 0
 
 
-def test_real_failure_and_intentional_pause_are_distinguishable():
+def test_native_intentional_stop_and_transport_failure_verdicts_are_distinct():
     failed = _runtime_instance()
     failed._remember_native_marker("P116_NATIVE_EXIT_INTENTIONAL_STOP=false")
     failed._remember_native_marker("P116_NATIVE_FAILURE_ID=PSEUDOTCP_CLOSED")
     failed._capture_native_failure(6)
 
     paused = _runtime_instance()
-    paused._remember_native_marker("P116_NATIVE_EXIT_INTENTIONAL_STOP=true")
-    paused._capture_native_failure(6)
+    for marker in (
+        "P116_NATIVE_EXIT_INTENTIONAL_STOP=true",
+        "P116_NATIVE_EXIT_CODE=0",
+        "P116_NATIVE_FAILURE_ID=NONE",
+        "P116_NATIVE_FAILURE_COUNT=0",
+    ):
+        paused._remember_native_marker(marker)
+    paused._capture_native_failure(0)
 
     assert "P116_NATIVE_FAILURE_ID=PSEUDOTCP_CLOSED" in failed._last_native_failure_markers
     assert "P116_NATIVE_EXIT_INTENTIONAL_STOP=true" in paused._last_native_failure_markers
+    assert "P116_NATIVE_FAILURE_ID=NONE" in paused._last_native_failure_markers
+    assert "P116_NATIVE_FAILURE_COUNT=0" in paused._last_native_failure_markers
+
+
+def test_cooperative_pause_annotates_but_never_relabels_notify_packet_failure(
+    caplog,
+):
+    paused = _runtime_instance()
+    paused.note_cooperative_pause_requested()
+    for marker in (
+        "P116_NATIVE_EXIT_INTENTIONAL_STOP=false",
+        "P116_NATIVE_EXIT_CODE=6",
+        "P116_NATIVE_FAILURE_ID=PSEUDOTCP_NOTIFY_PACKET",
+        "P116_NATIVE_FAILURE_PHASE=LISTENER_READY",
+        "P116_NATIVE_FAILURE_COUNT=1",
+    ):
+        paused._remember_native_marker(marker)
+    with caplog.at_level(logging.INFO, logger=runtime.__name__):
+        paused._capture_native_failure(6)
+    assert "P116_NATIVE_EXIT_INTENTIONAL_STOP=false" in paused._last_native_failure_markers
+    assert "P116_NATIVE_FAILURE_ID=PSEUDOTCP_NOTIFY_PACKET" in paused._last_native_failure_markers
+    assert (
+        "R61_NATIVE_EXIT_CONTEXT=COOPERATIVE_PAUSE_REQUESTED"
+        in paused._last_native_failure_markers
+    )
+    assert (
+        "R61_NATIVE_EXIT_CONTEXT=COOPERATIVE_PAUSE_REQUESTED"
+        in paused._public_native_failure_markers()
+    )
+    assert "marker=R61_NATIVE_EXIT_CONTEXT value=COOPERATIVE_PAUSE_REQUESTED" in (
+        "\n".join(record.message for record in caplog.records)
+    )
+
+
+def test_spontaneous_notify_packet_failure_has_no_pause_context():
+    failed = _runtime_instance()
+    for marker in (
+        "P116_NATIVE_EXIT_INTENTIONAL_STOP=false",
+        "P116_NATIVE_EXIT_CODE=6",
+        "P116_NATIVE_FAILURE_ID=PSEUDOTCP_NOTIFY_PACKET",
+        "P116_NATIVE_FAILURE_PHASE=LISTENER_READY",
+        "P116_NATIVE_FAILURE_COUNT=1",
+    ):
+        failed._remember_native_marker(marker)
+    failed._capture_native_failure(6)
+
+    assert "P116_NATIVE_FAILURE_ID=PSEUDOTCP_NOTIFY_PACKET" in (
+        failed._last_native_failure_markers
+    )
     assert not any(
-        marker.startswith("P116_NATIVE_FAILURE_ID=")
-        for marker in paused._last_native_failure_markers
+        marker.startswith("R61_NATIVE_EXIT_CONTEXT=")
+        for marker in failed._last_native_failure_markers
+    )
+
+
+def test_failure_observed_before_pause_request_remains_a_failure():
+    failed = _runtime_instance()
+    for marker in (
+        "P116_NATIVE_EXIT_INTENTIONAL_STOP=false",
+        "P116_NATIVE_EXIT_CODE=6",
+        "P116_NATIVE_FAILURE_ID=PSEUDOTCP_CLOSED",
+        "P116_NATIVE_FAILURE_PHASE=LISTENER_READY",
+        "P116_NATIVE_FAILURE_COUNT=1",
+    ):
+        failed._remember_native_marker(marker)
+    failed.note_cooperative_pause_requested()
+    failed._capture_native_failure(6)
+
+    assert "P116_NATIVE_FAILURE_ID=PSEUDOTCP_CLOSED" in (
+        failed._last_native_failure_markers
+    )
+    assert "P116_NATIVE_EXIT_INTENTIONAL_STOP=false" in (
+        failed._last_native_failure_markers
+    )
+    assert not any(
+        marker.startswith("R61_NATIVE_EXIT_CONTEXT=")
+        for marker in failed._last_native_failure_markers
+    )
+
+
+def test_notify_packet_failure_during_stop_is_preserved_and_not_intentional():
+    failed = _runtime_instance()
+    failed.note_cooperative_pause_requested()
+    for marker in (
+        "P116_NATIVE_EXIT_INTENTIONAL_STOP=false",
+        "P116_NATIVE_EXIT_CODE=6",
+        "P116_NATIVE_FAILURE_ID=PSEUDOTCP_NOTIFY_PACKET",
+        "P116_NATIVE_FAILURE_PHASE=LISTENER_READY",
+        "P116_NATIVE_FAILURE_COUNT=1",
+    ):
+        failed._remember_native_marker(marker)
+    failed._capture_native_failure(6)
+    assert "P116_NATIVE_EXIT_INTENTIONAL_STOP=false" in failed._last_native_failure_markers
+    assert "P116_NATIVE_FAILURE_ID=PSEUDOTCP_NOTIFY_PACKET" in failed._last_native_failure_markers
+    assert (
+        "R61_NATIVE_EXIT_CONTEXT=COOPERATIVE_PAUSE_REQUESTED"
+        in failed._last_native_failure_markers
+    )
+
+
+def test_intentional_pause_state_is_reset_by_async_start_for_later_failure():
+    class _Entry:
+        @staticmethod
+        def async_create_background_task(_hass, coro, _name):
+            return asyncio.create_task(coro)
+
+    async def run():
+        instance = runtime.ComelitRingRuntime(
+            _FakeHass(),
+            object(),
+            entry=_Entry(),
+            device_uuid="device",
+            vip_token="0" * 32,
+            oauth=object(),
+        )
+        release = asyncio.Event()
+
+        async def hold_generation():
+            await release.wait()
+
+        instance._async_run_once = hold_generation
+        instance.note_cooperative_pause_requested()
+        for marker in (
+            "P116_NATIVE_EXIT_INTENTIONAL_STOP=true",
+            "P116_NATIVE_EXIT_CODE=0",
+            "P116_NATIVE_FAILURE_ID=NONE",
+            "P116_NATIVE_FAILURE_COUNT=0",
+        ):
+            instance._remember_native_marker(marker)
+        instance._capture_native_failure(0)
+        assert "P116_NATIVE_EXIT_INTENTIONAL_STOP=true" in (
+            instance._last_native_failure_markers
+        )
+
+        await instance.async_start()
+        assert instance._cooperative_pause_requested is False
+        assert instance._cooperative_pause_preceded_failure is False
+        instance._remember_native_marker("P116_NATIVE_EXIT_INTENTIONAL_STOP=false")
+        instance._remember_native_marker(
+            "P116_NATIVE_FAILURE_ID=PSEUDOTCP_NOTIFY_PACKET"
+        )
+        instance._remember_native_marker("P116_NATIVE_FAILURE_COUNT=1")
+        instance._capture_native_failure(6)
+        release.set()
+        await instance._task
+        return instance
+
+    instance = asyncio.run(run())
+    assert "P116_NATIVE_FAILURE_ID=PSEUDOTCP_NOTIFY_PACKET" in (
+        instance._last_native_failure_markers
+    )
+    assert "P116_NATIVE_EXIT_INTENTIONAL_STOP=true" not in (
+        instance._last_native_failure_markers
+    )
+    assert not any(
+        marker.startswith("R61_NATIVE_EXIT_CONTEXT=")
+        for marker in instance._last_native_failure_markers
     )
 
 
@@ -322,10 +485,42 @@ def test_media_rtp_freshness_markers_reach_snapshot():
     assert snapshot["last_audio_rtp_monotonic_ms"] == 123400
 
 
+def test_rx_stalled_is_current_state_and_resets_between_generations():
+    diag = media_diagnostics.MediaCallDiagnostics()
+    for line in (
+        "R42_CALL_GENERATION=7",
+        "VIDEO_PACKET_COUNT_AT_REPEAT=1200",
+        "AUDIO_PACKET_COUNT_AT_REPEAT=0",
+        "RX_STALLED=true",
+        "RTP_STALL_SECONDS=15",
+        "VIDEO_PACKET_COUNT_AT_REPEAT=1200",
+        "AUDIO_PACKET_COUNT_AT_REPEAT=0",
+        "RX_STALLED=true",
+        "RTP_STALL_SECONDS=15",
+    ):
+        assert diag.observe_line(line)
+    assert diag.snapshot()["rx_stalled"] is True
+
+    # A progressing video counter clears the current-state flag even though
+    # the producer again reports its audio/video OR as true (audio is absent).
+    assert diag.observe_line("VIDEO_PACKET_COUNT_AT_REPEAT=2700")
+    assert diag.observe_line("AUDIO_PACKET_COUNT_AT_REPEAT=0")
+    assert diag.observe_line("RX_STALLED=true")
+    assert diag.observe_line("RTP_STALL_SECONDS=15")
+    assert diag.snapshot()["rx_stalled"] is False
+    assert diag.snapshot()["rtp_stall_seconds"] == 0
+
+    assert diag.observe_line("R42_CALL_GENERATION=8")
+    assert diag.snapshot()["rx_stalled"] is False
+    assert diag.snapshot()["rtp_stall_seconds"] is None
+
+
 def test_rx_stalled_is_diagnostic_only_and_does_not_close_session():
     diag = media_diagnostics.MediaCallDiagnostics()
     for line in (
         "R42_CALL_GENERATION=9",
+        "VIDEO_PACKET_COUNT_AT_REPEAT=12",
+        "VIDEO_PACKET_COUNT_AT_REPEAT=12",
         "RX_STALLED=true",
         "RTP_STALL_SECONDS=8",
     ):
@@ -696,6 +891,55 @@ def test_observability_canary_repeated_events_are_bounded(caplog):
         if "marker=RX_STALLED value=true" in record.message
     ]
     assert len(records) == runtime._OBSERVABILITY_CANARY_EVENT_LIMIT_PER_KEY
+
+
+def test_600_second_canary_cannot_reach_ha_module_rate_limit(caplog):
+    caplog.set_level("INFO", logger=runtime.__name__)
+    instance = _runtime_instance()
+    instance._observe_canary_log_marker("R42_CALL_GENERATION=1")
+    per_tick = (
+        "VIDEO_PACKET_COUNT_AT_REPEAT=12",
+        "AUDIO_PACKET_COUNT_AT_REPEAT=4",
+        "LAST_VIDEO_RTP_MONOTONIC_MS=10000000000",
+        "LAST_AUDIO_RTP_MONOTONIC_MS=10000000001",
+        "RX_STALLED=true",
+        "RTP_STALL_SECONDS=15",
+        "CTPP_TRACE_DIRECTION=IN",
+        "CTPP_TRACE_OPCODE=17",
+        "CTPP_TRACE_TYPE=26",
+        "CTPP_TRACE_CHANNEL=7449",
+        "CTPP_TRACE_LENGTH=72",
+        "CTPP_TRACE_MONOTONIC_MS=10000000002",
+        "R67_ATTACHED_REFRESH_QUEUED=true",
+        "R67_ATTACHED_REFRESH_LAST_RESULT=SENT",
+    )
+    # 41 refreshes cover t=0 through t=600 at the producer's 15-second
+    # cadence. Include the real CTPP/R67 mix and changing refresh scalars,
+    # plus the bounded initial/retransmit identity and fingerprint records.
+    for tick in range(41):
+        for line in per_tick:
+            instance._observe_canary_log_marker(line)
+        instance._observe_canary_log_marker(
+            f"R67_ATTACHED_REFRESH_QUEUED_COUNT={tick + 1}"
+        )
+        instance._observe_canary_log_marker(
+            f"R67_ATTACHED_REFRESH_LAST_AGE_SECONDS={tick * 15}"
+        )
+    for phase in ("INITIAL", "RETRANSMIT"):
+        for line in (
+            f"V4_RING_PHASE={phase}",
+            "V4_RING_PEER_CONNECTION=1a2b",
+            "V4_RING_BODY_32_35=01020304",
+            "V4_RING_PARSE_STATUS=OK",
+            f"V4_RING_FRAME_SHA256={'a' * 64}",
+            f"V4_RING_RETRANSMIT_SHA256={'b' * 64}",
+        ):
+            instance._remember_native_marker(line)
+    instance._observe_canary_log_marker("P116_NATIVE_FAILURE_ID=PSEUDOTCP_CLOSED")
+
+    records = [r for r in caplog.records if r.name == runtime.__name__]
+    assert len(records) < 200
+    assert any("NATIVE_FAILURE_ID" in r.message for r in records)
 
 
 def test_media_transport_new_prefixes_are_retained_and_sanitized():

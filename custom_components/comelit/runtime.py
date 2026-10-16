@@ -147,7 +147,24 @@ _NATIVE_MARKER_HIGH_RATE_DIAGNOSTIC_LIMIT = 24
 _NATIVE_MARKER_CTPP_TRACE_LIMIT = 24
 _NATIVE_MARKER_PROTECTED_PER_KEY_LIMIT = 3
 _NATIVE_MARKER_CTPP_TRACE_FRAME_LIMIT = 4
-_OBSERVABILITY_CANARY_EVENT_LIMIT_PER_KEY = 16
+_OBSERVABILITY_CANARY_EVENT_LIMIT_PER_KEY = 4
+_OBSERVABILITY_CANARY_EVENT_LIMIT_PER_GENERATION = 96
+_OBSERVABILITY_TERMINAL_MARKER_KEYS = frozenset(
+    {
+        "P116_NATIVE_EXIT_CODE",
+        "P116_NATIVE_FAILURE_ID",
+        "P116_NATIVE_FAILURE_PHASE",
+        "P116_NATIVE_FAILURE_COUNT",
+        "P116_NATIVE_EXIT_INTENTIONAL_STOP",
+        "R58_STOP_CLOSED",
+        "R58_STOP_FAILED",
+        "R58_STOP_PHASE",
+        "R58_STOP_FAILURE_STAGE",
+        "R42_MEDIA_CHANNEL_CLOSED",
+        "POST_CALL_TRANSPORT_STATE",
+        "R61_NATIVE_EXIT_CONTEXT",
+    }
+)
 _R67_VALUE_AWARE_DEDUP_LIMIT_PER_GENERATION = 8
 
 # R57: bounded vocabularies for the native P116NativeFailureId /
@@ -264,6 +281,7 @@ _POST_CALL_TRANSPORT_STATES = frozenset(
         "UNKNOWN",
     }
 )
+_R61_NATIVE_EXIT_CONTEXTS = frozenset({"COOPERATIVE_PAUSE_REQUESTED"})
 _R67_ATTACHED_REFRESH_RESULTS = frozenset(
     {"NONE", "SENT", "BUSY_DEFERRED", "FAIL_CLOSED", "CANCELLED", "STOPPED"}
 )
@@ -286,6 +304,7 @@ _OBSERVABILITY_PROTECTED_MARKER_KEYS = frozenset(
         "CTPP_TRACE_LENGTH",
         "CTPP_TRACE_MONOTONIC_MS",
         "V4_RING_MONOTONIC_MS",
+        "R61_NATIVE_EXIT_CONTEXT",
     }
 )
 _OBSERVABILITY_PROTECTED_LONG_NUMERIC_KEYS = frozenset(
@@ -391,6 +410,7 @@ _P116_MARKER_VOCABULARIES: dict[str, frozenset[str]] = {
     "R58_STOP_FAILURE_STAGE": _R58_STOP_FAILURE_STAGES,
     "R58_CLOSED_BOUNDARY": _R58_CLOSED_BOUNDARIES,
     "POST_CALL_TRANSPORT_STATE": _POST_CALL_TRANSPORT_STATES,
+    "R61_NATIVE_EXIT_CONTEXT": _R61_NATIVE_EXIT_CONTEXTS,
     "R67_ATTACHED_REFRESH_SESSION_RESET_REASON": _R67_ATTACHED_REFRESH_REASONS,
     "R67_ATTACHED_REFRESH_LAST_RESULT": _R67_ATTACHED_REFRESH_RESULTS,
     "R67_ATTACHED_REFRESH_LAST_ERROR": _R67_ATTACHED_REFRESH_REASONS,
@@ -472,6 +492,7 @@ _CANARY_OBSERVABILITY_MARKERS = {
     "R42_MEDIA_CHANNEL_CLOSED": "CHANNEL_CLOSED",
     "R58_STOP_PHASE": "STOP_PHASE",
     "POST_CALL_TRANSPORT_STATE": "POST_CALL_TRANSPORT_STATE",
+    "R61_NATIVE_EXIT_CONTEXT": "NATIVE_EXIT_CONTEXT",
     "PSEUDOTCP_CLOSED_BEFORE_OPEN": "PSEUDOTCP_CLOSED_BEFORE_OPEN",
     "PSEUDOTCP_CLOSED_AFTER_OPEN": "PSEUDOTCP_CLOSED_AFTER_OPEN",
     "R64_POST_CALL_REMOTE_RELEASE_OBSERVED": "POST_CALL_REMOTE_RELEASE_OBSERVED",
@@ -723,6 +744,9 @@ class ComelitRingRuntime:
         self._last_native_exit_code: int | None = None
         self._last_native_failure_markers: list[str] = []
         self._last_attached_stop_failure_stage: str | None = None
+        self._terminal_native_failure_observed = False
+        self._cooperative_pause_requested = False
+        self._cooperative_pause_preceded_failure = False
         self._ring_media: RingMediaCoordinator | None = None
         self._synthetic_ring_media: RingMediaCoordinator | None = None
         self._media_diagnostics = MediaCallDiagnostics()
@@ -1046,6 +1070,12 @@ class ComelitRingRuntime:
                 if _NATIVE_MARKER_SAFE_VALUE_RE.fullmatch(value)
                 else "<redacted>"
             )
+        if (
+            (key == "P116_NATIVE_FAILURE_COUNT" and safe_value not in {"", "0"})
+            or (key == "P116_NATIVE_FAILURE_ID" and safe_value not in {"", "NONE"})
+            or (key == "P116_NATIVE_EXIT_CODE" and safe_value not in {"", "0"})
+        ):
+            self._terminal_native_failure_observed = True
         if key in _RING_PROBE_MARKER_KEYS:
             return
         marker = f"{key}={safe_value}"
@@ -1138,6 +1168,7 @@ class ComelitRingRuntime:
         self._canary_log_generation = generation
         self._canary_log_seen = set()
         self._canary_log_value_emissions = {}
+        self._canary_log_emissions = 0
         self._post_call_transport_flags = {}
         self._post_call_transport_emitted = False
         self._post_call_transport_emitted_state = None
@@ -1214,9 +1245,15 @@ class ComelitRingRuntime:
             if (
                 value_emissions.get(key, 0)
                 >= _OBSERVABILITY_CANARY_EVENT_LIMIT_PER_KEY
+                or (
+                    key not in _OBSERVABILITY_TERMINAL_MARKER_KEYS
+                    and getattr(self, "_canary_log_emissions", 0)
+                    >= _OBSERVABILITY_CANARY_EVENT_LIMIT_PER_GENERATION
+                )
             ):
                 return
             value_emissions[key] = value_emissions.get(key, 0) + 1
+            self._canary_log_emissions = getattr(self, "_canary_log_emissions", 0) + 1
             _LOGGER.info(
                 "Comelit canary evidence %s marker=%s value=%s",
                 criterion,
@@ -1434,7 +1471,32 @@ class ComelitRingRuntime:
             markers.append(marker)
         for marker in getattr(self, "_native_marker_ctpp_trace_tail", []):
             markers.append(marker)
+        # Preserve the native verdict verbatim.  The native intentional-stop
+        # predicate is fail-closed (failure_count == 0 and failed == false),
+        # whereas rewriting an exit-6 notify-packet failure merely because a
+        # Python pause was requested can hide a genuine concurrent failure.
+        # Add a separate HA attribution marker when the request preceded all
+        # observed terminal failure evidence.  This records ordering/context;
+        # it deliberately makes no claim that the pause caused the exit.
+        if getattr(self, "_cooperative_pause_preceded_failure", False):
+            context_marker = (
+                "R61_NATIVE_EXIT_CONTEXT=COOPERATIVE_PAUSE_REQUESTED"
+            )
+            markers = [
+                marker
+                for marker in markers
+                if not marker.startswith("R61_NATIVE_EXIT_CONTEXT=")
+            ]
+            markers.append(context_marker)
+            self._observe_canary_log_marker(context_marker)
         self._last_native_failure_markers = markers
+
+    def note_cooperative_pause_requested(self) -> None:
+        """Record that a cooperative pause preceded terminal native evidence."""
+        self._cooperative_pause_requested = True
+        self._cooperative_pause_preceded_failure = not getattr(
+            self, "_terminal_native_failure_observed", False
+        )
 
     def _public_native_failure_markers(self) -> list[str]:
         public_source = list(getattr(self, "_last_native_failure_markers", []))
@@ -1478,6 +1540,9 @@ class ComelitRingRuntime:
         if self.running:
             return
         self._stopping = False
+        self._cooperative_pause_requested = False
+        self._cooperative_pause_preceded_failure = False
+        self._terminal_native_failure_observed = False
         self._offer_ready.clear()
         self._listener_ready.clear()
         self._attached_media_busy.clear()
@@ -1630,6 +1695,11 @@ class ComelitRingRuntime:
             if not stopped:
                 self._last_native_failure_markers = list(self._native_marker_tail)
                 raise ComelitRingRuntimeError("runtime_stop_not_confirmed")
+            if process.returncode not in {None, 0}:
+                # The main run loop deliberately does not raise native_exit
+                # while stopping.  It must still reconcile and retain the
+                # terminal evidence for the cooperative-pause contract.
+                self._capture_native_failure(process.returncode)
 
         task = self._task
         if task is not None and not task.done():

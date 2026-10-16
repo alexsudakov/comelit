@@ -412,6 +412,13 @@ class ComelitRuntimeSupervisor:
         self._stopping = True
         self._shadow_hook.note_state("supervisor_stop")
 
+        if final_state == LISTENER_STATE_PAUSED_MEDIA:
+            note_pause = getattr(
+                self._runtime, "note_cooperative_pause_requested", None
+            )
+            if callable(note_pause):
+                note_pause()
+
         task = self._task
         if task is not None and not task.done():
             task.cancel()

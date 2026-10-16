@@ -4424,7 +4424,9 @@ def test_ring_media_remote_close_race_with_viewer_close_has_one_release(tmp_path
     assert manager.force_stop_calls == []
 
 
-def test_ring_media_hard_limit_reason_still_uses_existing_force_stop(tmp_path):
+def test_ring_media_hard_limit_reason_still_uses_existing_force_stop(
+    tmp_path, caplog
+):
     controller, hass = _controller()
     manager = _FakeRingManager()
     ticks = iter([0.0, 0.0, 2.0, 2.0, 2.0])
@@ -4451,10 +4453,16 @@ def test_ring_media_hard_limit_reason_still_uses_existing_force_stop(tmp_path):
         )
         await asyncio.wait_for(_wait_for(lambda: not coordinator.running), timeout=1)
 
-    asyncio.run(run())
+    with caplog.at_level(logging.INFO):
+        asyncio.run(run())
     assert coordinator.status()["ring_end_reason"] == "hard_limit"
     assert manager.release_calls == ["ring_media"]
     assert manager.force_stop_calls == ["ring_media_hard_limit"]
+    assert any(
+        "ring_media_stop_completed reason=hard_limit "
+        "viewer_count=UNPROVABLE elapsed_ms=0" in record.message
+        for record in caplog.records
+    )
 
 
 def _attached_camera_lifecycle(tmp_path, hass):
