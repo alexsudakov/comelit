@@ -2,19 +2,6 @@ name: miniapp
 
 on:
   pull_request:
-    paths:
-      - "custom_components/comelit/miniapp/**"
-      - "custom_components/comelit/frontend/miniapp/**"
-      - "custom_components/comelit/frontend/comelit-card.js"
-      - "custom_components/comelit/__init__.py"
-      - "custom_components/comelit/config_flow.py"
-      - "custom_components/comelit/const.py"
-      - "custom_components/comelit/strings.json"
-      - "custom_components/comelit/translations/en.json"
-      - "tests/miniapp/**"
-      - "docs/miniapp-architecture.md"
-      - "README.md"
-      - ".github/workflows/miniapp.yml"
   push:
     branches:
       - main
@@ -42,48 +29,96 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine Mini App scope
+        id: scope
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" != "pull_request" ]]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git cat-file -e "${HEAD_SHA}^{commit}"
+
+          relevant=false
+          while IFS= read -r path; do
+            case "$path" in
+              custom_components/comelit/miniapp/*|custom_components/comelit/frontend/miniapp/*|custom_components/comelit/frontend/comelit-card.js|custom_components/comelit/__init__.py|custom_components/comelit/config_flow.py|custom_components/comelit/const.py|custom_components/comelit/strings.json|custom_components/comelit/translations/en.json|tests/miniapp/*|docs/miniapp-architecture.md|README.md|.github/workflows/miniapp.yml)
+                relevant=true
+                break
+                ;;
+            esac
+          done < <(git diff --name-only --no-renames "$BASE_SHA" "$HEAD_SHA" --)
+
+          echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
+          if [[ "$relevant" == "false" ]]; then
+            echo "Mini App scope not changed; expensive Mini App checks intentionally skipped." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Set up Python
+        if: steps.scope.outputs.relevant == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install embedded Mini App test dependencies
+        if: steps.scope.outputs.relevant == 'true'
         run: python -m pip install pytest cryptography
 
       - name: Run embedded Mini App tests
+        if: steps.scope.outputs.relevant == 'true'
         run: pytest -q tests/miniapp
 
       - name: Compile embedded Mini App Python
+        if: steps.scope.outputs.relevant == 'true'
         run: python -m compileall -q custom_components/comelit/miniapp tests/miniapp
 
       - name: Parse Mini App host
+        if: steps.scope.outputs.relevant == 'true'
         run: node --check custom_components/comelit/frontend/miniapp/host.js
 
       - name: Parse Mini App WebCodecs viewer
+        if: steps.scope.outputs.relevant == 'true'
         run: node --check custom_components/comelit/frontend/miniapp/webcodecs.js
 
       - name: Parse bundled hls.js
+        if: steps.scope.outputs.relevant == 'true'
         run: node --check custom_components/comelit/frontend/miniapp/vendor/hls.min.js
 
       - name: Parse shared bundled Comelit card
+        if: steps.scope.outputs.relevant == 'true'
         run: node --check custom_components/comelit/frontend/comelit-card.js
 
       - name: Install browser regression dependencies
+        if: steps.scope.outputs.relevant == 'true'
         run: |
           npm install --no-save playwright@1.62.1
           npx playwright install --with-deps chromium
 
       - name: Verify viewer layout and stalled ICE fallback
+        if: steps.scope.outputs.relevant == 'true'
         run: node tests/miniapp/viewer.browser.cjs
 
       - name: Verify WebCodecs mock canary
+        if: steps.scope.outputs.relevant == 'true'
         run: node tests/miniapp/webcodecs.browser.cjs
 
       - name: Verify WebRTC and HLS diagnostics scenarios
+        if: steps.scope.outputs.relevant == 'true'
         run: node tests/miniapp/webrtc.scenarios.browser.cjs
 
       - name: Assert standalone gateway is gone
+        if: steps.scope.outputs.relevant == 'true'
         run: |
           test ! -e miniapp
           test ! -e custom_components/comelit/frontend/miniapp/comelit-card.js
