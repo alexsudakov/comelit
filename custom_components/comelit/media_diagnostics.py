@@ -438,7 +438,18 @@ class MediaCallDiagnostics:
         elif key == "P80_VIDEO_RTP_PACKETS":
             self._rtp_packet_count = self._safe_int(safe_value)
         elif key == "VIDEO_PACKET_COUNT_AT_REPEAT":
-            self._video_packet_count_at_repeat = self._safe_int(safe_value)
+            count = self._safe_int(safe_value)
+            previous_count = self._video_packet_count_at_repeat
+            self._video_packet_count_at_repeat = count
+            # VIDEO_PACKET_COUNT_AT_REPEAT is the first marker in every
+            # native refresh tick.  Derive current state from progress on the
+            # attached video receive channel; the later native RX_STALLED
+            # marker is an audio/video OR and therefore cannot represent this
+            # channel on its own.  The first sample establishes the baseline.
+            if count is not None and previous_count is not None:
+                self._rx_stalled = count <= previous_count
+                if not self._rx_stalled:
+                    self._rtp_stall_seconds = 0
         elif key == "AUDIO_PACKET_COUNT_AT_REPEAT":
             self._audio_packet_count_at_repeat = self._safe_int(safe_value)
         elif key == "LAST_VIDEO_RTP_MONOTONIC_MS":
@@ -446,9 +457,13 @@ class MediaCallDiagnostics:
         elif key == "LAST_AUDIO_RTP_MONOTONIC_MS":
             self._last_audio_rtp_monotonic_ms = self._safe_int(safe_value)
         elif key == "RX_STALLED":
-            self._rx_stalled = self._rx_stalled or safe_value == "true"
+            # The producer emits only true and combines audio and video.  It
+            # remains accepted as bounded source evidence, but attached-video
+            # state is derived at each VIDEO_PACKET_COUNT_AT_REPEAT boundary.
+            pass
         elif key == "RTP_STALL_SECONDS":
-            self._rtp_stall_seconds = self._safe_int(safe_value)
+            if self._rx_stalled:
+                self._rtp_stall_seconds = self._safe_int(safe_value)
         elif key in _H264_EVIDENCE_KEYS:
             count = self._safe_int(safe_value)
             if count is not None and count > 0:

@@ -778,7 +778,11 @@ class RingMediaCoordinator:
                 self._stop_requested_monotonic = None
             if self._ring_end_reason is not None:
                 _LOGGER.info(
-                    "Comelit ring_media_stop_completed reason=%s viewer_count=- elapsed_ms=%s",
+                    # This coordinator does not own the Mini App viewer
+                    # registry, so viewer_count is intentionally unprovable.
+                    # elapsed_ms measures only request-to-completion; a hard
+                    # limit has no explicit request and therefore reports 0.
+                    "Comelit ring_media_stop_completed reason=%s viewer_count=UNPROVABLE elapsed_ms=%s",
                     self._ring_end_reason,
                     stop_completed_elapsed_ms,
                 )
