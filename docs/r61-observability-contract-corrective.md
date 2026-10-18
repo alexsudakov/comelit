@@ -2,13 +2,18 @@
 
 Status: implementation contract. `HIGH_A2=OPEN`; `HIGH_3=REFRAMED`.
 
-## Cooperative-pause attribution
+## Post-stop attribution
 
-When HA requests the listener stop used for an attached-media pause before any
-terminal native failure evidence has been observed, the captured native-exit
-evidence includes the bounded marker
-`R61_NATIVE_EXIT_CONTEXT=COOPERATIVE_PAUSE_REQUESTED`. The native verdict is
-preserved verbatim: an exit 6 remains exit 6,
+Post-stop attribution requires positive native ordering evidence in the same
+bounded generation tail: `R58_STOP_CLOSED=true` and/or
+`R42_MEDIA_CHANNEL_CLOSED=true` must precede the first native failure marker.
+The close and failure must also occur within the bounded 10-second terminal
+evidence window; an old close left by a completed call while the listener is
+idle cannot classify a later process failure.
+Only then does the captured evidence include bounded `R61_NATIVE_EXIT_CONTEXT`
+and `R61_NATIVE_EXIT_CLASSIFICATION=POST_STOP_NATIVE_FAILURE` markers. A Python
+pause request alone is not evidence, and a failure observed before close is
+left unclassified. The native verdict is preserved verbatim: an exit 6 remains exit 6,
 `P116_NATIVE_EXIT_INTENTIONAL_STOP=false` remains false, and the native failure
 ID/count remain visible. The R61 marker records ordering and stop context only;
 it does not claim that the pause caused the exit or convert a concurrent
@@ -18,17 +23,18 @@ with the native generation and uses the same bounded terminal logging path.
 
 ## Receive freshness
 
-`RX_STALLED` is a current-state boolean for the current call generation's
+`VIDEO_RX_STALLED` / `video_rx_stalled` is a current-state boolean for the current call generation's
 attached **video** receive channel. Python derives it at each native refresh
 tick by comparing the new `VIDEO_PACKET_COUNT_AT_REPEAT` with the preceding
 tick. The first count establishes a baseline; an unchanged/decreasing count is
 stalled, and an advancing count clears the flag immediately. The native
-`RX_STALLED=true` line is not used for this state because its producer emits no
+native `RX_STALLED=true` line is retained only as `RX_STALLED_RAW` /
+`rx_stalled_raw` because its producer emits no
 false line and combines video and audio with OR; an absent audio stream must
 not mark progressing attached video as stalled. This is diagnostic only and
 does not change RTP or call lifecycle policy.
 
-`RTP_STALL_SECONDS` is the producer's integer sample, not wall time or a
+`RTP_STALL_SECONDS_RAW` / `rtp_stall_seconds_raw` is the producer's integer sample, not wall time or a
 cumulative per-call counter. At a refresh tick the producer subtracts its
 chosen stalled-since monotonic millisecond value (last stalled video/audio
 packet when available, otherwise the preceding refresh tick) from the current
@@ -36,7 +42,8 @@ refresh time and truncates to seconds. Python retains that sample only while
 the video-counter comparison says video is stalled; video progress clears it
 to zero. `LAST_*_RTP_MONOTONIC_MS` uses the same native monotonic clock. All
 values are bound to `R42_CALL_GENERATION` and published only in that
-generation's media diagnostics snapshot.
+generation's media diagnostics snapshot as `video_rtp_stall_seconds` only
+while the adjacent video-counter comparison proves a video stall.
 
 ## Logging and terminal evidence
 

@@ -9,6 +9,7 @@ from pathlib import Path
 import platform
 import re
 import signal
+from time import monotonic
 from uuid import uuid4
 
 from aiohttp import ClientSession
@@ -147,6 +148,7 @@ _NATIVE_MARKER_HIGH_RATE_DIAGNOSTIC_LIMIT = 24
 _NATIVE_MARKER_CTPP_TRACE_LIMIT = 24
 _NATIVE_MARKER_PROTECTED_PER_KEY_LIMIT = 3
 _NATIVE_MARKER_CTPP_TRACE_FRAME_LIMIT = 4
+_POST_STOP_NATIVE_EVIDENCE_WINDOW_SECONDS = 10.0
 _OBSERVABILITY_CANARY_EVENT_LIMIT_PER_KEY = 4
 _OBSERVABILITY_CANARY_EVENT_LIMIT_PER_GENERATION = 96
 _OBSERVABILITY_TERMINAL_MARKER_KEYS = frozenset(
@@ -163,6 +165,8 @@ _OBSERVABILITY_TERMINAL_MARKER_KEYS = frozenset(
         "R42_MEDIA_CHANNEL_CLOSED",
         "POST_CALL_TRANSPORT_STATE",
         "R61_NATIVE_EXIT_CONTEXT",
+        "R61_NATIVE_EXIT_POST_STOP_CONTEXT",
+        "R61_NATIVE_EXIT_CLASSIFICATION",
     }
 )
 _R67_VALUE_AWARE_DEDUP_LIMIT_PER_GENERATION = 8
@@ -281,7 +285,17 @@ _POST_CALL_TRANSPORT_STATES = frozenset(
         "UNKNOWN",
     }
 )
-_R61_NATIVE_EXIT_CONTEXTS = frozenset({"COOPERATIVE_PAUSE_REQUESTED"})
+_R61_NATIVE_EXIT_CONTEXTS = frozenset(
+    {"COOPERATIVE_PAUSE_REQUESTED"}
+)
+_R61_NATIVE_EXIT_POST_STOP_CONTEXTS = frozenset(
+    {
+        "POST_STOP_R58_CLOSED",
+        "POST_STOP_MEDIA_CHANNEL_CLOSED",
+        "POST_STOP_R58_AND_MEDIA_CLOSED",
+    }
+)
+_R61_NATIVE_EXIT_CLASSIFICATIONS = frozenset({"POST_STOP_NATIVE_FAILURE"})
 _R67_ATTACHED_REFRESH_RESULTS = frozenset(
     {"NONE", "SENT", "BUSY_DEFERRED", "FAIL_CLOSED", "CANCELLED", "STOPPED"}
 )
@@ -290,6 +304,9 @@ _RX_STALLED_STATES = frozenset({"true", "false"})
 _OBSERVABILITY_PROTECTED_MARKER_KEYS = frozenset(
     {
         "PSEUDOTCP_CLOSED_CALLBACK_ERROR",
+        "P116_NATIVE_EXIT_CODE",
+        "P116_NATIVE_FAILURE_ID",
+        "P116_NATIVE_FAILURE_COUNT",
         "P116_NATIVE_EXIT_INTENTIONAL_STOP",
         "VIDEO_PACKET_COUNT_AT_REPEAT",
         "AUDIO_PACKET_COUNT_AT_REPEAT",
@@ -297,6 +314,8 @@ _OBSERVABILITY_PROTECTED_MARKER_KEYS = frozenset(
         "LAST_AUDIO_RTP_MONOTONIC_MS",
         "RX_STALLED",
         "RTP_STALL_SECONDS",
+        "VIDEO_RX_STALLED",
+        "VIDEO_RTP_STALL_SECONDS",
         "CTPP_TRACE_DIRECTION",
         "CTPP_TRACE_OPCODE",
         "CTPP_TRACE_TYPE",
@@ -305,6 +324,8 @@ _OBSERVABILITY_PROTECTED_MARKER_KEYS = frozenset(
         "CTPP_TRACE_MONOTONIC_MS",
         "V4_RING_MONOTONIC_MS",
         "R61_NATIVE_EXIT_CONTEXT",
+        "R61_NATIVE_EXIT_POST_STOP_CONTEXT",
+        "R61_NATIVE_EXIT_CLASSIFICATION",
     }
 )
 _OBSERVABILITY_PROTECTED_LONG_NUMERIC_KEYS = frozenset(
@@ -315,6 +336,7 @@ _OBSERVABILITY_PROTECTED_LONG_NUMERIC_KEYS = frozenset(
         "LAST_VIDEO_RTP_MONOTONIC_MS",
         "LAST_AUDIO_RTP_MONOTONIC_MS",
         "RTP_STALL_SECONDS",
+        "VIDEO_RTP_STALL_SECONDS",
         "CTPP_TRACE_OPCODE",
         "CTPP_TRACE_TYPE",
         "CTPP_TRACE_CHANNEL",
@@ -331,6 +353,8 @@ _HIGH_RATE_DIAGNOSTIC_MARKER_KEYS = frozenset(
         "LAST_AUDIO_RTP_MONOTONIC_MS",
         "RX_STALLED",
         "RTP_STALL_SECONDS",
+        "VIDEO_RX_STALLED",
+        "VIDEO_RTP_STALL_SECONDS",
         "V4_RING_MONOTONIC_MS",
     }
 )
@@ -411,6 +435,8 @@ _P116_MARKER_VOCABULARIES: dict[str, frozenset[str]] = {
     "R58_CLOSED_BOUNDARY": _R58_CLOSED_BOUNDARIES,
     "POST_CALL_TRANSPORT_STATE": _POST_CALL_TRANSPORT_STATES,
     "R61_NATIVE_EXIT_CONTEXT": _R61_NATIVE_EXIT_CONTEXTS,
+    "R61_NATIVE_EXIT_POST_STOP_CONTEXT": _R61_NATIVE_EXIT_POST_STOP_CONTEXTS,
+    "R61_NATIVE_EXIT_CLASSIFICATION": _R61_NATIVE_EXIT_CLASSIFICATIONS,
     "R67_ATTACHED_REFRESH_SESSION_RESET_REASON": _R67_ATTACHED_REFRESH_REASONS,
     "R67_ATTACHED_REFRESH_LAST_RESULT": _R67_ATTACHED_REFRESH_RESULTS,
     "R67_ATTACHED_REFRESH_LAST_ERROR": _R67_ATTACHED_REFRESH_REASONS,
@@ -474,6 +500,8 @@ _CANARY_OBSERVABILITY_MARKERS = {
     "LAST_AUDIO_RTP_MONOTONIC_MS": "LAST_AUDIO_RTP_MONOTONIC_MS",
     "RX_STALLED": "RX_STALLED",
     "RTP_STALL_SECONDS": "RTP_STALL_SECONDS",
+    "VIDEO_RX_STALLED": "VIDEO_RX_STALLED",
+    "VIDEO_RTP_STALL_SECONDS": "VIDEO_RTP_STALL_SECONDS",
     "CTPP_TRACE_DIRECTION": "CTPP_TRACE_DIRECTION",
     "CTPP_TRACE_OPCODE": "CTPP_TRACE_OPCODE",
     "CTPP_TRACE_TYPE": "CTPP_TRACE_TYPE",
@@ -493,6 +521,8 @@ _CANARY_OBSERVABILITY_MARKERS = {
     "R58_STOP_PHASE": "STOP_PHASE",
     "POST_CALL_TRANSPORT_STATE": "POST_CALL_TRANSPORT_STATE",
     "R61_NATIVE_EXIT_CONTEXT": "NATIVE_EXIT_CONTEXT",
+    "R61_NATIVE_EXIT_POST_STOP_CONTEXT": "NATIVE_EXIT_POST_STOP_CONTEXT",
+    "R61_NATIVE_EXIT_CLASSIFICATION": "NATIVE_EXIT_CLASSIFICATION",
     "PSEUDOTCP_CLOSED_BEFORE_OPEN": "PSEUDOTCP_CLOSED_BEFORE_OPEN",
     "PSEUDOTCP_CLOSED_AFTER_OPEN": "PSEUDOTCP_CLOSED_AFTER_OPEN",
     "R64_POST_CALL_REMOTE_RELEASE_OBSERVED": "POST_CALL_REMOTE_RELEASE_OBSERVED",
@@ -731,9 +761,13 @@ class ComelitRingRuntime:
         self._native_marker_high_rate_tail: list[str] = []
         self._native_marker_ctpp_trace_tail: list[str] = []
         self._native_marker_ctpp_trace_frames: list[list[str]] = []
+        self._native_marker_call_generation: int | None = None
+        self._native_marker_generation_tail: list[tuple[str, float]] = []
         self._canary_log_generation: int | None = None
         self._canary_log_seen: set[str] = set()
         self._canary_log_value_emissions: dict[str, int] = {}
+        self._canary_video_packet_count: int | None = None
+        self._canary_video_rx_stalled = False
         self._post_call_transport_flags: dict[str, bool] = {}
         self._post_call_transport_emitted = False
         self._post_call_transport_emitted_state: str | None = None
@@ -864,6 +898,18 @@ class ComelitRingRuntime:
         r64_closed_after_open = getattr(
             self, "_r64_pseudotcp_closed_after_open", False
         )
+        native_exit_context = None
+        native_exit_post_stop_context = None
+        native_exit_classification = None
+        for marker in self._public_native_failure_markers():
+            if marker.startswith("R61_NATIVE_EXIT_CONTEXT="):
+                native_exit_context = marker.split("=", 1)[1]
+            elif marker.startswith("R61_NATIVE_EXIT_POST_STOP_CONTEXT="):
+                native_exit_post_stop_context = marker.split("=", 1)[1]
+            elif marker.startswith("R61_NATIVE_EXIT_CLASSIFICATION="):
+                native_exit_classification = marker.split("=", 1)[1]
+        if native_exit_classification is None and self._last_native_exit_code:
+            native_exit_classification = "NATIVE_FAILURE"
         return {
             "running": self.running,
             "listener_ready": self.listener_ready,
@@ -880,6 +926,9 @@ class ComelitRingRuntime:
             "last_error": self._last_error,
             "last_native_exit_code": self._last_native_exit_code,
             "last_native_failure_markers": self._public_native_failure_markers(),
+            "native_exit_context": native_exit_context,
+            "native_exit_post_stop_context": native_exit_post_stop_context,
+            "native_exit_classification": native_exit_classification,
             "last_attached_stop_failure_stage": (
                 getattr(self, "_last_attached_stop_failure_stage", None)
             ),
@@ -1085,6 +1134,28 @@ class ComelitRingRuntime:
         if key in _HIGH_RATE_DIAGNOSTIC_MARKER_KEYS:
             self._remember_high_rate_diagnostic_marker(marker)
             return
+        if key == "R42_CALL_GENERATION":
+            if safe_value.isdigit():
+                generation = int(safe_value)
+                if generation != getattr(
+                    self, "_native_marker_call_generation", None
+                ):
+                    self._native_marker_call_generation = generation
+                    self._native_marker_generation_tail = []
+            else:
+                # An invalid generation marker makes the call boundary
+                # ambiguous.  Invalidate the attribution tail rather than
+                # carrying close evidence from the previously proven call.
+                self._native_marker_call_generation = None
+                self._native_marker_generation_tail = []
+        generation_tail = getattr(self, "_native_marker_generation_tail", None)
+        if (
+            generation_tail is not None
+            and getattr(self, "_native_marker_call_generation", None) is not None
+        ):
+            generation_tail.append((marker, monotonic()))
+            if len(generation_tail) > _NATIVE_MARKER_TAIL_LIMIT:
+                del generation_tail[:-_NATIVE_MARKER_TAIL_LIMIT]
         self._native_marker_tail.append(marker)
         if len(self._native_marker_tail) > _NATIVE_MARKER_TAIL_LIMIT:
             del self._native_marker_tail[:-_NATIVE_MARKER_TAIL_LIMIT]
@@ -1169,6 +1240,8 @@ class ComelitRingRuntime:
         self._canary_log_seen = set()
         self._canary_log_value_emissions = {}
         self._canary_log_emissions = 0
+        self._canary_video_packet_count = None
+        self._canary_video_rx_stalled = False
         self._post_call_transport_flags = {}
         self._post_call_transport_emitted = False
         self._post_call_transport_emitted_state = None
@@ -1190,13 +1263,46 @@ class ComelitRingRuntime:
             return
 
         if key == "R42_CALL_GENERATION":
-            generation = int(safe_value)
+            try:
+                generation = int(safe_value)
+            except ValueError:
+                return
             if generation != getattr(self, "_canary_log_generation", None):
                 self._reset_canary_log_generation(generation)
         elif key == "R67_ATTACHED_REFRESH_CALL_GENERATION":
-            generation = int(safe_value)
+            try:
+                generation = int(safe_value)
+            except ValueError:
+                return
             if generation != getattr(self, "_canary_log_generation", None):
                 self._reset_canary_log_generation(generation)
+
+        if (
+            key in _HIGH_RATE_DIAGNOSTIC_MARKER_KEYS
+            and getattr(self, "_canary_log_generation", None) is None
+        ):
+            return
+
+        if key == "VIDEO_PACKET_COUNT_AT_REPEAT":
+            count = int(safe_value)
+            previous = getattr(self, "_canary_video_packet_count", None)
+            self._canary_video_packet_count = count
+            if previous is not None:
+                stalled = count <= previous
+                self._canary_video_rx_stalled = stalled
+                self._observe_canary_log_marker(
+                    f"VIDEO_RX_STALLED={'true' if stalled else 'false'}"
+                )
+                if not stalled:
+                    self._observe_canary_log_marker(
+                        "VIDEO_RTP_STALL_SECONDS=0"
+                    )
+        elif key == "RTP_STALL_SECONDS" and getattr(
+            self, "_canary_video_rx_stalled", False
+        ):
+            self._observe_canary_log_marker(
+                f"VIDEO_RTP_STALL_SECONDS={safe_value}"
+            )
 
         criterion = _CANARY_OBSERVABILITY_MARKERS.get(key)
         if key in _H264_CANARY_MARKERS:
@@ -1254,10 +1360,18 @@ class ComelitRingRuntime:
                 return
             value_emissions[key] = value_emissions.get(key, 0) + 1
             self._canary_log_emissions = getattr(self, "_canary_log_emissions", 0) + 1
+            displayed_key = {
+                "RX_STALLED": "RX_STALLED_RAW",
+                "RTP_STALL_SECONDS": "RTP_STALL_SECONDS_RAW",
+            }.get(key, key)
+            displayed_criterion = {
+                "RX_STALLED": "RX_STALLED_RAW",
+                "RTP_STALL_SECONDS": "RTP_STALL_SECONDS_RAW",
+            }.get(key, criterion)
             _LOGGER.info(
                 "Comelit canary evidence %s marker=%s value=%s",
-                criterion,
-                key,
+                displayed_criterion,
+                displayed_key,
                 safe_value,
             )
             return
@@ -1471,15 +1585,8 @@ class ComelitRingRuntime:
             markers.append(marker)
         for marker in getattr(self, "_native_marker_ctpp_trace_tail", []):
             markers.append(marker)
-        # Preserve the native verdict verbatim.  The native intentional-stop
-        # predicate is fail-closed (failure_count == 0 and failed == false),
-        # whereas rewriting an exit-6 notify-packet failure merely because a
-        # Python pause was requested can hide a genuine concurrent failure.
-        # Add a separate HA attribution marker when the request preceded all
-        # observed terminal failure evidence.  This records ordering/context;
-        # it deliberately makes no claim that the pause caused the exit.
         if getattr(self, "_cooperative_pause_preceded_failure", False):
-            context_marker = (
+            cooperative_marker = (
                 "R61_NATIVE_EXIT_CONTEXT=COOPERATIVE_PAUSE_REQUESTED"
             )
             markers = [
@@ -1487,12 +1594,72 @@ class ComelitRingRuntime:
                 for marker in markers
                 if not marker.startswith("R61_NATIVE_EXIT_CONTEXT=")
             ]
-            markers.append(context_marker)
-            self._observe_canary_log_marker(context_marker)
+            markers.append(cooperative_marker)
+            self._observe_canary_log_marker(cooperative_marker)
+        # Classify a failure as post-stop only from positive native ordering
+        # evidence in the same bounded call-generation tail and close enough
+        # to the first failure marker to be part of the same terminal
+        # sequence.  A Python pause request is intent, not proof.  Any failure
+        # evidence before the close markers, an absent call generation, or a
+        # stale close from an earlier completed call remains unclassified
+        # (fail closed).
+        generation_events = list(
+            getattr(self, "_native_marker_generation_tail", [])
+        )
+        failure_index = None
+        failure_time = None
+        close_times: dict[str, float] = {}
+        for index, (marker, observed_at) in enumerate(generation_events):
+            key, _separator, value = marker.partition("=")
+            is_failure = (
+                (key == "P116_NATIVE_EXIT_CODE" and value not in {"", "0"})
+                or (key == "P116_NATIVE_FAILURE_ID" and value not in {"", "NONE"})
+                or (key == "P116_NATIVE_FAILURE_COUNT" and value not in {"", "0"})
+            )
+            if is_failure and failure_index is None:
+                failure_index = index
+                failure_time = observed_at
+            if failure_index is None and value == "true" and key in {
+                "R58_STOP_CLOSED",
+                "R42_MEDIA_CHANNEL_CLOSED",
+            }:
+                close_times[key] = observed_at
+        close_keys = {
+            key
+            for key, close_time in close_times.items()
+            if failure_time is not None
+            and 0.0
+            <= failure_time - close_time
+            <= _POST_STOP_NATIVE_EVIDENCE_WINDOW_SECONDS
+        }
+        if returncode != 0 and failure_index is not None and close_keys:
+            if close_keys == {"R58_STOP_CLOSED", "R42_MEDIA_CHANNEL_CLOSED"}:
+                context = "POST_STOP_R58_AND_MEDIA_CLOSED"
+            elif "R58_STOP_CLOSED" in close_keys:
+                context = "POST_STOP_R58_CLOSED"
+            else:
+                context = "POST_STOP_MEDIA_CHANNEL_CLOSED"
+            attribution = (
+                f"R61_NATIVE_EXIT_POST_STOP_CONTEXT={context}",
+                "R61_NATIVE_EXIT_CLASSIFICATION=POST_STOP_NATIVE_FAILURE",
+            )
+            markers = [
+                marker
+                for marker in markers
+                if not marker.startswith(
+                    (
+                        "R61_NATIVE_EXIT_POST_STOP_CONTEXT=",
+                        "R61_NATIVE_EXIT_CLASSIFICATION=",
+                    )
+                )
+            ]
+            markers.extend(attribution)
+            for marker in attribution:
+                self._observe_canary_log_marker(marker)
         self._last_native_failure_markers = markers
 
     def note_cooperative_pause_requested(self) -> None:
-        """Record that a cooperative pause preceded terminal native evidence."""
+        """Record pause intent without treating it as native-exit evidence."""
         self._cooperative_pause_requested = True
         self._cooperative_pause_preceded_failure = not getattr(
             self, "_terminal_native_failure_observed", False
@@ -1554,6 +1721,8 @@ class ComelitRingRuntime:
         self._native_marker_high_rate_tail.clear()
         self._native_marker_ctpp_trace_tail.clear()
         self._native_marker_ctpp_trace_frames.clear()
+        self._native_marker_call_generation = None
+        self._native_marker_generation_tail.clear()
         self._canary_log_generation = None
         self._canary_log_seen = set()
         self._post_call_transport_flags = {}
@@ -1950,7 +2119,7 @@ class ComelitRingRuntime:
                 _LOGGER.error(
                     "Comelit ring listener stopped: %s; safe_native_markers=%s",
                     exc,
-                    self._last_native_failure_markers,
+                    self._public_native_failure_markers(),
                 )
             else:
                 _LOGGER.error("Comelit ring listener stopped: %s", exc)

@@ -749,7 +749,23 @@ class ComelitEntranceMediaTransport:
 
     @property
     def last_native_failure_markers(self) -> list[str]:
-        return list(self._last_native_failure_markers[-_MEDIA_NATIVE_MARKER_TAIL_LIMIT:])
+        return self._operator_native_markers(
+            self._last_native_failure_markers[-_MEDIA_NATIVE_MARKER_TAIL_LIMIT:]
+        )
+
+    @staticmethod
+    def _operator_native_markers(markers: list[str]) -> list[str]:
+        """Qualify producer-wide stall evidence in operator-facing output."""
+        projected = []
+        for marker in markers:
+            if marker.startswith("RX_STALLED="):
+                marker = marker.replace("RX_STALLED=", "RX_STALLED_RAW=", 1)
+            elif marker.startswith("RTP_STALL_SECONDS="):
+                marker = marker.replace(
+                    "RTP_STALL_SECONDS=", "RTP_STALL_SECONDS_RAW=", 1
+                )
+            projected.append(marker)
+        return projected
 
     def set_latency_timeline(
         self, timeline: CameraRequestLatencyTimeline | None
@@ -954,7 +970,9 @@ class ComelitEntranceMediaTransport:
             "refresh_diagnostics=%s ack_diagnostics=%s",
             protocol_markers,
             p116_markers,
-            list(dict.fromkeys(self._native_marker_tail)),
+            self._operator_native_markers(
+                list(dict.fromkeys(self._native_marker_tail))
+            ),
             self._native_protocol_marker_retention_evidence(),
             self.native_refresh_diagnostics(),
             dict(self._native_ack_diagnostics),
@@ -1154,7 +1172,7 @@ class ComelitEntranceMediaTransport:
                         "safe_native_markers=%s protocol_native_markers=%s "
                         "protocol_marker_retention=%s",
                         exc,
-                        self._last_native_failure_markers,
+                        self.last_native_failure_markers,
                         list(dict.fromkeys(self._native_protocol_markers)),
                         self._native_protocol_marker_retention_evidence(),
                     )

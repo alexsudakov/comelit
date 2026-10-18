@@ -129,6 +129,8 @@ def _runtime_instance():
     instance._native_marker_high_rate_tail = []
     instance._native_marker_ctpp_trace_tail = []
     instance._native_marker_ctpp_trace_frames = []
+    instance._native_marker_call_generation = None
+    instance._native_marker_generation_tail = []
     instance._canary_log_generation = None
     instance._canary_log_seen = set()
     instance._canary_log_value_emissions = {}
@@ -244,12 +246,15 @@ def test_native_intentional_stop_and_transport_failure_verdicts_are_distinct():
     assert "P116_NATIVE_FAILURE_COUNT=0" in paused._last_native_failure_markers
 
 
-def test_cooperative_pause_annotates_but_never_relabels_notify_packet_failure(
+def test_pause_and_proven_post_stop_emit_both_marker_families_without_relabelling(
     caplog,
 ):
     paused = _runtime_instance()
     paused.note_cooperative_pause_requested()
     for marker in (
+        "R42_CALL_GENERATION=1",
+        "R58_STOP_CLOSED=true",
+        "R42_MEDIA_CHANNEL_CLOSED=true",
         "P116_NATIVE_EXIT_INTENTIONAL_STOP=false",
         "P116_NATIVE_EXIT_CODE=6",
         "P116_NATIVE_FAILURE_ID=PSEUDOTCP_NOTIFY_PACKET",
@@ -260,23 +265,71 @@ def test_cooperative_pause_annotates_but_never_relabels_notify_packet_failure(
     with caplog.at_level(logging.INFO, logger=runtime.__name__):
         paused._capture_native_failure(6)
     assert "P116_NATIVE_EXIT_INTENTIONAL_STOP=false" in paused._last_native_failure_markers
+    assert "P116_NATIVE_EXIT_CODE=6" in paused._last_native_failure_markers
     assert "P116_NATIVE_FAILURE_ID=PSEUDOTCP_NOTIFY_PACKET" in paused._last_native_failure_markers
+    assert "P116_NATIVE_FAILURE_COUNT=1" in paused._last_native_failure_markers
     assert (
-        "R61_NATIVE_EXIT_CONTEXT=COOPERATIVE_PAUSE_REQUESTED"
+        "R61_NATIVE_EXIT_POST_STOP_CONTEXT=POST_STOP_R58_AND_MEDIA_CLOSED"
         in paused._last_native_failure_markers
     )
     assert (
-        "R61_NATIVE_EXIT_CONTEXT=COOPERATIVE_PAUSE_REQUESTED"
+        "R61_NATIVE_EXIT_POST_STOP_CONTEXT=POST_STOP_R58_AND_MEDIA_CLOSED"
         in paused._public_native_failure_markers()
     )
-    assert "marker=R61_NATIVE_EXIT_CONTEXT value=COOPERATIVE_PAUSE_REQUESTED" in (
+    assert "marker=R61_NATIVE_EXIT_POST_STOP_CONTEXT value=POST_STOP_R58_AND_MEDIA_CLOSED" in (
         "\n".join(record.message for record in caplog.records)
+    )
+    assert "R61_NATIVE_EXIT_CONTEXT=COOPERATIVE_PAUSE_REQUESTED" in (
+        paused._last_native_failure_markers
+    )
+    assert "R61_NATIVE_EXIT_CLASSIFICATION=POST_STOP_NATIVE_FAILURE" in (
+        paused._last_native_failure_markers
     )
 
 
-def test_spontaneous_notify_packet_failure_has_no_pause_context():
+def test_proven_post_stop_without_pause_has_only_post_stop_attribution():
     failed = _runtime_instance()
     for marker in (
+        "R42_CALL_GENERATION=1",
+        "R58_STOP_CLOSED=true",
+        "R42_MEDIA_CHANNEL_CLOSED=true",
+        "P116_NATIVE_EXIT_INTENTIONAL_STOP=false",
+        "P116_NATIVE_EXIT_CODE=6",
+        "P116_NATIVE_FAILURE_ID=PSEUDOTCP_NOTIFY_PACKET",
+        "P116_NATIVE_FAILURE_COUNT=1",
+    ):
+        failed._remember_native_marker(marker)
+    failed._capture_native_failure(6)
+
+    assert "R61_NATIVE_EXIT_CLASSIFICATION=POST_STOP_NATIVE_FAILURE" in (
+        failed._last_native_failure_markers
+    )
+    assert (
+        "R61_NATIVE_EXIT_POST_STOP_CONTEXT=POST_STOP_R58_AND_MEDIA_CLOSED"
+        in failed._last_native_failure_markers
+    )
+    assert not any(
+        marker.startswith("R61_NATIVE_EXIT_CONTEXT=")
+        for marker in failed._last_native_failure_markers
+    )
+    assert "P116_NATIVE_EXIT_INTENTIONAL_STOP=false" in (
+        failed._last_native_failure_markers
+    )
+    assert "P116_NATIVE_EXIT_CODE=6" in failed._last_native_failure_markers
+    assert "P116_NATIVE_FAILURE_ID=PSEUDOTCP_NOTIFY_PACKET" in (
+        failed._last_native_failure_markers
+    )
+    assert "P116_NATIVE_FAILURE_COUNT=1" in failed._last_native_failure_markers
+
+
+def test_stale_close_from_completed_call_does_not_classify_idle_failure(monkeypatch):
+    failed = _runtime_instance()
+    observed_at = iter((0.0, 1.0, 1.0, 30.0, 30.0, 30.0, 30.0, 30.0))
+    monkeypatch.setattr(runtime, "monotonic", lambda: next(observed_at))
+    for marker in (
+        "R42_CALL_GENERATION=1",
+        "R58_STOP_CLOSED=true",
+        "R42_MEDIA_CHANNEL_CLOSED=true",
         "P116_NATIVE_EXIT_INTENTIONAL_STOP=false",
         "P116_NATIVE_EXIT_CODE=6",
         "P116_NATIVE_FAILURE_ID=PSEUDOTCP_NOTIFY_PACKET",
@@ -289,6 +342,76 @@ def test_spontaneous_notify_packet_failure_has_no_pause_context():
     assert "P116_NATIVE_FAILURE_ID=PSEUDOTCP_NOTIFY_PACKET" in (
         failed._last_native_failure_markers
     )
+    assert not any(
+        marker.startswith("R61_NATIVE_EXIT_")
+        for marker in failed._last_native_failure_markers
+    )
+
+
+def test_close_from_previous_call_generation_does_not_classify_failure():
+    failed = _runtime_instance()
+    for marker in (
+        "R42_CALL_GENERATION=1",
+        "R58_STOP_CLOSED=true",
+        "R42_MEDIA_CHANNEL_CLOSED=true",
+        "R42_CALL_GENERATION=2",
+        "P116_NATIVE_EXIT_INTENTIONAL_STOP=false",
+        "P116_NATIVE_EXIT_CODE=6",
+        "P116_NATIVE_FAILURE_ID=PSEUDOTCP_NOTIFY_PACKET",
+        "P116_NATIVE_FAILURE_PHASE=LISTENER_READY",
+        "P116_NATIVE_FAILURE_COUNT=1",
+    ):
+        failed._remember_native_marker(marker)
+    failed._capture_native_failure(6)
+
+    assert not any(
+        marker.startswith("R61_NATIVE_EXIT_")
+        for marker in failed._last_native_failure_markers
+    )
+
+
+def test_ambiguous_call_generation_invalidates_post_stop_evidence():
+    failed = _runtime_instance()
+    for marker in (
+        "R42_CALL_GENERATION=1",
+        "R58_STOP_CLOSED=true",
+        "R42_MEDIA_CHANNEL_CLOSED=true",
+        "R42_CALL_GENERATION=broken",
+        "P116_NATIVE_EXIT_INTENTIONAL_STOP=false",
+        "P116_NATIVE_EXIT_CODE=6",
+        "P116_NATIVE_FAILURE_ID=PSEUDOTCP_NOTIFY_PACKET",
+        "P116_NATIVE_FAILURE_PHASE=LISTENER_READY",
+        "P116_NATIVE_FAILURE_COUNT=1",
+    ):
+        failed._remember_native_marker(marker)
+    failed._capture_native_failure(6)
+
+    assert not any(
+        marker.startswith("R61_NATIVE_EXIT_")
+        for marker in failed._last_native_failure_markers
+    )
+
+
+def test_spontaneous_pseudotcp_failure_has_no_pause_context():
+    failed = _runtime_instance()
+    for marker in (
+        "P116_NATIVE_EXIT_INTENTIONAL_STOP=false",
+        "P116_NATIVE_EXIT_CODE=6",
+        "P116_NATIVE_FAILURE_ID=PSEUDOTCP_CLOSED",
+        "P116_NATIVE_FAILURE_PHASE=LISTENER_READY",
+        "P116_NATIVE_FAILURE_COUNT=1",
+    ):
+        failed._remember_native_marker(marker)
+    failed._capture_native_failure(6)
+
+    assert "P116_NATIVE_FAILURE_ID=PSEUDOTCP_CLOSED" in (
+        failed._last_native_failure_markers
+    )
+    assert "P116_NATIVE_EXIT_INTENTIONAL_STOP=false" in (
+        failed._last_native_failure_markers
+    )
+    assert "P116_NATIVE_EXIT_CODE=6" in failed._last_native_failure_markers
+    assert "P116_NATIVE_FAILURE_COUNT=1" in failed._last_native_failure_markers
     assert not any(
         marker.startswith("R61_NATIVE_EXIT_CONTEXT=")
         for marker in failed._last_native_failure_markers
@@ -306,6 +429,10 @@ def test_failure_observed_before_pause_request_remains_a_failure():
     ):
         failed._remember_native_marker(marker)
     failed.note_cooperative_pause_requested()
+    # A later close cannot retroactively classify the already-observed
+    # failure; this also covers concurrent failure/stop evidence.
+    failed._remember_native_marker("R58_STOP_CLOSED=true")
+    failed._remember_native_marker("P116_NATIVE_FAILURE_COUNT=2")
     failed._capture_native_failure(6)
 
     assert "P116_NATIVE_FAILURE_ID=PSEUDOTCP_CLOSED" in (
@@ -320,7 +447,7 @@ def test_failure_observed_before_pause_request_remains_a_failure():
     )
 
 
-def test_notify_packet_failure_during_stop_is_preserved_and_not_intentional():
+def test_pause_intent_without_native_close_is_not_post_stop_evidence():
     failed = _runtime_instance()
     failed.note_cooperative_pause_requested()
     for marker in (
@@ -334,9 +461,12 @@ def test_notify_packet_failure_during_stop_is_preserved_and_not_intentional():
     failed._capture_native_failure(6)
     assert "P116_NATIVE_EXIT_INTENTIONAL_STOP=false" in failed._last_native_failure_markers
     assert "P116_NATIVE_FAILURE_ID=PSEUDOTCP_NOTIFY_PACKET" in failed._last_native_failure_markers
-    assert (
-        "R61_NATIVE_EXIT_CONTEXT=COOPERATIVE_PAUSE_REQUESTED"
-        in failed._last_native_failure_markers
+    assert "R61_NATIVE_EXIT_CONTEXT=COOPERATIVE_PAUSE_REQUESTED" in (
+        failed._last_native_failure_markers
+    )
+    assert not any(
+        marker.startswith("R61_NATIVE_EXIT_POST_STOP_CONTEXT=")
+        for marker in failed._last_native_failure_markers
     )
 
 
@@ -821,6 +951,7 @@ def test_public_failure_marker_whitelist_removed():
 def test_new_observability_fields_are_canary_log_reachable(caplog):
     caplog.set_level("INFO", logger=runtime.__name__)
     instance = _runtime_instance()
+    instance._observe_canary_log_marker("R42_CALL_GENERATION=1")
     for line in (
         "PSEUDOTCP_CLOSED_CALLBACK_ERROR=104",
         "P116_NATIVE_EXIT_INTENTIONAL_STOP=true",
@@ -848,8 +979,8 @@ def test_new_observability_fields_are_canary_log_reachable(caplog):
         "AUDIO_PACKET_COUNT_AT_REPEAT",
         "LAST_VIDEO_RTP_MONOTONIC_MS",
         "LAST_AUDIO_RTP_MONOTONIC_MS",
-        "RX_STALLED",
-        "RTP_STALL_SECONDS",
+        "RX_STALLED_RAW",
+        "RTP_STALL_SECONDS_RAW",
         "CTPP_TRACE_DIRECTION",
         "CTPP_TRACE_OPCODE",
         "CTPP_TRACE_TYPE",
@@ -864,33 +995,102 @@ def test_new_observability_fields_are_canary_log_reachable(caplog):
 def test_observability_canary_repeated_identical_events_keep_ordered_lines(caplog):
     caplog.set_level("INFO", logger=runtime.__name__)
     instance = _runtime_instance()
+    instance._observe_canary_log_marker("R42_CALL_GENERATION=1")
     for _index in range(3):
         instance._observe_canary_log_marker("RX_STALLED=true")
 
     records = [
         record.message
         for record in caplog.records
-        if "marker=RX_STALLED value=true" in record.message
+        if "marker=RX_STALLED_RAW value=true" in record.message
     ]
     assert records == [
-        "Comelit canary evidence RX_STALLED marker=RX_STALLED value=true",
-        "Comelit canary evidence RX_STALLED marker=RX_STALLED value=true",
-        "Comelit canary evidence RX_STALLED marker=RX_STALLED value=true",
+        "Comelit canary evidence RX_STALLED_RAW marker=RX_STALLED_RAW value=true",
+        "Comelit canary evidence RX_STALLED_RAW marker=RX_STALLED_RAW value=true",
+        "Comelit canary evidence RX_STALLED_RAW marker=RX_STALLED_RAW value=true",
     ]
 
 
 def test_observability_canary_repeated_events_are_bounded(caplog):
     caplog.set_level("INFO", logger=runtime.__name__)
     instance = _runtime_instance()
+    instance._observe_canary_log_marker("R42_CALL_GENERATION=1")
     for _index in range(runtime._OBSERVABILITY_CANARY_EVENT_LIMIT_PER_KEY + 5):
         instance._observe_canary_log_marker("RX_STALLED=true")
 
     records = [
         record.message
         for record in caplog.records
-        if "marker=RX_STALLED value=true" in record.message
+        if "marker=RX_STALLED_RAW value=true" in record.message
     ]
     assert len(records) == runtime._OBSERVABILITY_CANARY_EVENT_LIMIT_PER_KEY
+
+
+def test_canary_separates_raw_audio_or_stall_from_progressing_video(caplog):
+    caplog.set_level("INFO", logger=runtime.__name__)
+    instance = _runtime_instance()
+    for line in (
+        "R42_CALL_GENERATION=7",
+        "VIDEO_PACKET_COUNT_AT_REPEAT=1200",
+        "AUDIO_PACKET_COUNT_AT_REPEAT=0",
+        "RX_STALLED=true",
+        "RTP_STALL_SECONDS=15",
+        "VIDEO_PACKET_COUNT_AT_REPEAT=2700",
+        "AUDIO_PACKET_COUNT_AT_REPEAT=0",
+        "RX_STALLED=true",
+        "RTP_STALL_SECONDS=15",
+    ):
+        instance._observe_canary_log_marker(line)
+
+    rendered = "\n".join(record.message for record in caplog.records)
+    assert "marker=RX_STALLED_RAW value=true" in rendered
+    assert "marker=RTP_STALL_SECONDS_RAW value=15" in rendered
+    assert "marker=VIDEO_RX_STALLED value=false" in rendered
+    assert "marker=VIDEO_RTP_STALL_SECONDS value=0" in rendered
+    assert "marker=RX_STALLED value=true" not in rendered
+
+
+def test_canary_video_stall_resume_and_generation_reset(caplog):
+    caplog.set_level("INFO", logger=runtime.__name__)
+    instance = _runtime_instance()
+    for line in (
+        "R42_CALL_GENERATION=8",
+        "VIDEO_PACKET_COUNT_AT_REPEAT=42",
+        "VIDEO_PACKET_COUNT_AT_REPEAT=42",
+        "RTP_STALL_SECONDS=8",
+        "VIDEO_PACKET_COUNT_AT_REPEAT=43",
+        "R42_CALL_GENERATION=9",
+        "VIDEO_PACKET_COUNT_AT_REPEAT=43",
+    ):
+        instance._observe_canary_log_marker(line)
+
+    rendered = "\n".join(record.message for record in caplog.records)
+    assert "marker=VIDEO_RX_STALLED value=true" in rendered
+    assert "marker=VIDEO_RTP_STALL_SECONDS value=8" in rendered
+    assert "marker=VIDEO_RX_STALLED value=false" in rendered
+    # First counter in generation 9 is a baseline, not a cross-generation stall.
+    messages = [record.message for record in caplog.records]
+    generation_nine_index = next(
+        index
+        for index, message in enumerate(messages)
+        if "marker=R42_CALL_GENERATION value=9" in message
+    )
+    assert not any(
+        "marker=VIDEO_RX_STALLED" in message
+        for message in messages[generation_nine_index + 1 :]
+    )
+
+
+def test_canary_rejects_orphan_and_malformed_freshness_inputs(caplog):
+    caplog.set_level("INFO", logger=runtime.__name__)
+    instance = _runtime_instance()
+    instance._observe_canary_log_marker("RX_STALLED=true")
+    instance._observe_canary_log_marker("R42_CALL_GENERATION=broken")
+    instance._observe_canary_log_marker("VIDEO_PACKET_COUNT_AT_REPEAT=secret")
+
+    rendered = "\n".join(record.message for record in caplog.records)
+    assert "RX_STALLED" not in rendered
+    assert "secret" not in rendered
 
 
 def test_600_second_canary_cannot_reach_ha_module_rate_limit(caplog):
@@ -964,6 +1164,13 @@ def test_media_transport_new_prefixes_are_retained_and_sanitized():
     assert "RTP_STALL_SECONDS=8" in rendered
     assert "VIDEO_PACKET_COUNT_AT_REPEAT=<redacted>" in rendered
     assert "secret" not in rendered
+
+    instance._capture_native_failure(6)
+    public = instance.last_native_failure_markers
+    assert "RX_STALLED_RAW=true" in public
+    assert "RTP_STALL_SECONDS_RAW=8" in public
+    assert "RX_STALLED=true" not in public
+    assert "RTP_STALL_SECONDS=8" not in public
 
 
 def test_media_transport_p116_markers_survive_widened_prefix_tail_pressure(caplog):
