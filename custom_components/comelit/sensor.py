@@ -80,6 +80,11 @@ class ComelitListenerStatusSensor(SensorEntity):
             "last_native_failure_markers": status[
                 "last_native_failure_markers"
             ],
+            "native_exit_context": status.get("native_exit_context"),
+            "native_exit_classification": status.get(
+                "native_exit_classification"
+            ),
+            "media_diagnostics": status.get("media_diagnostics"),
             "last_attached_stop_failure_stage": status.get(
                 "last_attached_stop_failure_stage"
             ),

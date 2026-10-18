@@ -148,6 +148,11 @@ class ComelitRuntimeSupervisor:
             "last_native_failure_markers": runtime_status.get(
                 "last_native_failure_markers"
             ),
+            "native_exit_context": runtime_status.get("native_exit_context"),
+            "native_exit_classification": runtime_status.get(
+                "native_exit_classification"
+            ),
+            "media_diagnostics": runtime_status.get("media_diagnostics"),
             "last_attached_stop_failure_stage": last_attached_stop_failure_stage,
             "attached_stop_recovery_required": (
                 self._attached_stop_recovery_required

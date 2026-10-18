@@ -458,8 +458,9 @@ class MediaCallDiagnostics:
             self._last_audio_rtp_monotonic_ms = self._safe_int(safe_value)
         elif key == "RX_STALLED":
             # The producer emits only true and combines audio and video.  It
-            # remains accepted as bounded source evidence, but attached-video
-            # state is derived at each VIDEO_PACKET_COUNT_AT_REPEAT boundary.
+            # remains accepted for the separate bounded canary path, but the
+            # pinned snapshot state is derived at each adjacent video counter
+            # boundary and must not be overwritten by this raw OR value.
             pass
         elif key == "RTP_STALL_SECONDS":
             if self._rx_stalled:
