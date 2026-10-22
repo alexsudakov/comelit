@@ -861,6 +861,11 @@ class ComelitRingRuntime:
             snapshot = self._call_state_tracker().snapshot()
             if snapshot.event_id != event_id:
                 return
+            # Feed the actual 120-second boundary to the bounded shadow model.
+            # This has no production effect: the shadow emit gate is hard-off.
+            shadow_hook = getattr(self, "_shadow_hook", None)
+            if shadow_hook is not None:
+                shadow_hook.note_watchdog_boundary_crossed()
             if self._call_state_tracker().fail_active("call_state_timeout"):
                 _LOGGER.warning(
                     "Comelit call-state watchdog expired after %ss; "
