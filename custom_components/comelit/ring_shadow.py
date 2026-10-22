@@ -56,6 +56,9 @@ HANDOFF_EPOCH_IS_CALL_IDENTITY = False
 FULL_FRAME_SHA_USED_AS_CALL_IDENTITY = False
 V4_RING_BODY_32_35_SEMANTICS = "UNKNOWN"
 V4_RING_BODY_32_35_LIVE_VERIFIED = False
+INDEPENDENT_NATIVE_CALL_IDENTITY_PROVEN = False
+PRODUCTION_EMIT_GATE_PROVEN = False
+P0_FUNCTIONAL_ACCEPTANCE = "BLOCKED_NOT_FIXED"
 
 SHADOW_PROBE_KEYS = frozenset({
     "V4_RING_PHASE",
@@ -1240,6 +1243,19 @@ class RingShadowController:
                 "handoff_epoch_is_call_identity": HANDOFF_EPOCH_IS_CALL_IDENTITY,
                 "full_frame_sha_used_as_call_identity": FULL_FRAME_SHA_USED_AS_CALL_IDENTITY,
             },
+            "qualification": {
+                # These are static fail-closed qualification facts.  They are
+                # deliberately not inferred from process generations, handoff
+                # epochs, frame digests, or the opaque body_32_35 candidate.
+                "independent_native_call_identity_proven": (
+                    INDEPENDENT_NATIVE_CALL_IDENTITY_PROVEN
+                ),
+                "production_emit_gate_proven": PRODUCTION_EMIT_GATE_PROVEN,
+                "production_effect_enabled": False,
+                "functional_acceptance": P0_FUNCTIONAL_ACCEPTANCE,
+                "body_32_35_semantics": V4_RING_BODY_32_35_SEMANTICS,
+                "body_32_35_live_verified": V4_RING_BODY_32_35_LIVE_VERIFIED,
+            },
             "unresolved_reason": tuple(
                 decision["reason"]
                 for decision in tuple(decision.as_dict() for decision in self._decisions)
@@ -1310,6 +1326,10 @@ class RingShadowHook:
 
     def note_state(self, state: str) -> None:
         self._invoke("note_state", state)
+
+    def note_watchdog_boundary_crossed(self) -> None:
+        """Record the real call-state watchdog boundary diagnostically only."""
+        self._invoke("note_watchdog_boundary_crossed")
 
     @property
     def latched(self) -> bool:
