@@ -9,9 +9,24 @@ class DevV2VerifyParity(unittest.TestCase):
     def test_manifest_is_strict_subset_and_seven_checks(self):
         text = (ROOT / ".dev/hermes-dev.yaml").read_text(encoding="utf-8")
         lines = [s for s in text.splitlines() if s.strip() and not s.strip().startswith("#")]
-        self.assertEqual(lines[:3], ["version: 1", "checks:", "  required:"])
-        self.assertEqual(len(lines), 10)  # header 3 + 7 single-line checks
-        for line in lines[3:]:
+        self.assertEqual(lines[0], "version: 1")
+
+        # Independent-review contract: a strict, single-line path list.
+        checks_at = lines.index("checks:")
+        critic = lines[1:checks_at]
+        self.assertEqual(critic[:2], ["critic:", "  required_paths:"])
+        self.assertEqual(critic[2:], [
+            "    - 'safety-poc/**'",
+            "    - 'custom_components/comelit/**'",
+            "    - '.github/workflows/**'",
+            "    - '.dev/**'",
+        ])
+
+        checks = lines[checks_at:]
+        self.assertEqual(checks[:2], ["checks:", "  required:"])
+        check_lines = checks[2:]
+        self.assertEqual(len(check_lines), 7)  # 7 single-line checks
+        for line in critic[2:] + check_lines:
             self.assertTrue(line.startswith("    - '") and line.endswith("'"), line)
             self.assertNotIn("\t", line)
             self.assertNotIn("|", line)
