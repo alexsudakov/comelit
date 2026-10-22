@@ -1,4 +1,13 @@
 version: 1
+# Independent pre-merge safety review is mandatory for safety-sensitive paths.
+# DEV v2 derives critic_required_by_policy from this base-owned file only, so a
+# workflow contract that requests Critic can never silently disagree with policy.
+critic:
+  required_paths:
+    - 'safety-poc/**'
+    - 'custom_components/comelit/**'
+    - '.github/workflows/**'
+    - '.dev/**'
 checks:
   required:
     - 'python3.12 -m pytest -q tests/miniapp'
