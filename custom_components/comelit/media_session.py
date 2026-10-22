@@ -4,7 +4,8 @@ import asyncio
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime, timedelta
 import math
-from typing import Any, Protocol
+import re
+from typing import Any, NamedTuple, Protocol
 
 try:
     from .ring_shadow import RingShadowController, RingShadowHook, SHADOW_OWNER_MEDIA
@@ -41,6 +42,86 @@ MEDIA_PHASES = (
     MEDIA_PHASE_STOPPING,
     MEDIA_PHASE_ERROR,
 )
+
+_MEDIA_START_STAGE_LISTENER_PAUSE = "listener_pause"
+_MEDIA_START_STAGE_TRANSPORT_START = "transport_start"
+_SAFE_FAILURE_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+_SAFE_NATIVE_EXIT_ERROR_RE = re.compile(
+    r"^media_native_(?:exit|exited_before_(?:offer|active)):-?[0-9]{1,10}$"
+)
+_SAFE_TYPED_TRANSPORT_ERROR_RE = re.compile(
+    r"^(?:unexpected|media_native_reader_failed):[A-Za-z][A-Za-z0-9_]{0,63}$"
+)
+_SAFE_TRANSPORT_LAST_ERRORS = frozenset(
+    {
+        "media_active_timeout",
+        "media_door_not_ready",
+        "media_door_signal_failed",
+        "media_local_sdp_not_ready",
+        "media_native_binary_chmod_failed",
+        "media_native_binary_missing",
+        "media_native_binary_not_executable",
+        "media_native_binary_sha256_mismatch",
+        "media_native_binary_sha256_unreadable",
+        "media_native_reader_missing",
+        "media_native_reader_stopped",
+        "media_native_reader_stuck_after_exit",
+        "media_native_stdout_missing",
+        "media_offer_timeout",
+        "media_signaling_timeout",
+        "local_sdp_ready_timeout",
+        "media_transport_ended_before_active",
+        "media_transport_ended_before_local_sdp",
+        "media_transport_start_in_progress",
+        "native_library_dir_missing",
+        "oauth_reauth_required",
+        "p80_rtp_forward_send=fail",
+        "p80_rtp_forward_socket=fail",
+        "p80_wrapper_profile_mismatch=true",
+        "unsupported_media_panel",
+        "unsupported_native_architecture",
+        "video_recovery_shim_bind_failed",
+        "vip_token_shape_invalid",
+    }
+)
+
+
+class _MediaStartFailure(NamedTuple):
+    """Bounded, privacy-safe evidence from the most recent failed start."""
+
+    reason: str
+    stage: str
+    at: str
+    transport_last_error: str | None
+    transport_native_exit_code: int | None
+
+
+def _safe_start_failure_reason(exc: Exception) -> str:
+    failure_type = type(exc).__name__
+    if _SAFE_FAILURE_TYPE_RE.fullmatch(failure_type) is None:
+        failure_type = "Exception"
+    return f"start_failed:{failure_type}"
+
+
+def _sanitize_transport_last_error(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return "<redacted>"
+    if value in _SAFE_TRANSPORT_LAST_ERRORS:
+        return value
+    if len(value) <= 96 and (
+        _SAFE_NATIVE_EXIT_ERROR_RE.fullmatch(value)
+        or _SAFE_TYPED_TRANSPORT_ERROR_RE.fullmatch(value)
+    ):
+        return value
+    return "<redacted>"
+
+
+def _sanitize_transport_native_exit_code(value: object) -> int | None:
+    if type(value) is not int or not -(2**31) <= value < 2**31:
+        return None
+    return value
 
 
 class ComelitMediaSessionError(RuntimeError):
@@ -124,6 +205,7 @@ class ComelitMediaSessionManager:
         self._expiry_task: asyncio.Task[None] | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
         self._last_error: str | None = None
+        self._last_start_failure: _MediaStartFailure | None = None
         self._status_listeners: set[Callable[[], None]] = set()
         self._latency_timeline: Any | None = None
         self._shadow_hook = RingShadowHook(ring_shadow, SHADOW_OWNER_MEDIA)
@@ -143,6 +225,13 @@ class ComelitMediaSessionManager:
     @property
     def last_error(self) -> str | None:
         return self._last_error
+
+    @property
+    def last_start_failure(self) -> dict[str, object] | None:
+        """Return a defensive copy of the most recent failed-start record."""
+        if self._last_start_failure is None:
+            return None
+        return self._last_start_failure._asdict()
 
     @property
     def hard_limit_seconds(self) -> float:
@@ -166,6 +255,7 @@ class ComelitMediaSessionManager:
             "remaining_seconds": self.remaining_seconds,
             "leases": dict(self._leases),
             "last_error": self._last_error,
+            "last_start_failure": self.last_start_failure,
             "listener_paused": self._listener.media_paused,
         }
 
@@ -222,6 +312,7 @@ class ComelitMediaSessionManager:
             self._set_phase(MEDIA_PHASE_STARTING)
 
             timeline = self._latency_timeline
+            start_stage = _MEDIA_START_STAGE_LISTENER_PAUSE
             try:
                 if timeline is not None:
                     timeline.mark(
@@ -237,10 +328,22 @@ class ComelitMediaSessionManager:
                         asyncio.get_running_loop().time(),
                     )
 
+                start_stage = _MEDIA_START_STAGE_TRANSPORT_START
                 await self._transport.async_start(panel)
                 if not self._transport.active:
                     raise ComelitMediaSessionError("media_start_not_confirmed")
             except Exception as exc:
+                self._last_start_failure = _MediaStartFailure(
+                    reason=_safe_start_failure_reason(exc),
+                    stage=start_stage,
+                    at=datetime.now(UTC).isoformat(),
+                    transport_last_error=_sanitize_transport_last_error(
+                        getattr(self._transport, "last_error", None)
+                    ),
+                    transport_native_exit_code=_sanitize_transport_native_exit_code(
+                        getattr(self._transport, "last_native_exit_code", None)
+                    ),
+                )
                 await self._recover_failed_start(exc)
                 raise ComelitMediaSessionError(self._last_error or "media_start_failed") from exc
 
