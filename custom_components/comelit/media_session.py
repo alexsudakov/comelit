@@ -193,6 +193,7 @@ class ComelitMediaSessionManager:
         ),
         task_factory: TaskFactory | None = None,
         ring_shadow: RingShadowController | None = None,
+        diagnostic_status_notify: Callable[[], None] | None = None,
     ) -> None:
         if hard_limit_seconds <= 0:
             raise ValueError("hard_limit_seconds must be positive")
@@ -218,6 +219,7 @@ class ComelitMediaSessionManager:
         self._status_listeners: set[Callable[[], None]] = set()
         self._latency_timeline: Any | None = None
         self._shadow_hook = RingShadowHook(ring_shadow, SHADOW_OWNER_MEDIA)
+        self._diagnostic_status_notify = diagnostic_status_notify
 
     @property
     def phase(self) -> str:
@@ -287,6 +289,16 @@ class ComelitMediaSessionManager:
     def _notify_status(self) -> None:
         for callback in tuple(self._status_listeners):
             callback()
+
+    def _notify_diagnostic_terminal(self) -> None:
+        """Publish only terminal ledger changes, contained from lifecycle."""
+        callback = self._diagnostic_status_notify
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception:
+            return
 
     def _set_phase(self, phase: str) -> None:
         if phase == self._phase:
@@ -475,11 +487,13 @@ class ComelitMediaSessionManager:
             self._shadow_hook.note_listener_resume(False)
             self._last_error = f"listener_restore_failed:{type(resume_exc).__name__}"
             self._set_phase(MEDIA_PHASE_ERROR)
+            self._notify_diagnostic_terminal()
             return
 
         self._shadow_hook.note_listener_resume(True)
 
         self._reset_inactive()
+        self._notify_diagnostic_terminal()
 
     async def _cancel_background_task(
         self,
@@ -503,8 +517,10 @@ class ComelitMediaSessionManager:
                     await self._listener.async_resume_after_media()
                 except Exception:
                     self._shadow_hook.note_listener_resume(False)
+                    self._notify_diagnostic_terminal()
                     raise
                 self._shadow_hook.note_listener_resume(True)
+                self._notify_diagnostic_terminal()
             return
 
         self._set_phase(MEDIA_PHASE_STOPPING)
@@ -537,11 +553,13 @@ class ComelitMediaSessionManager:
             self._shadow_hook.note_listener_resume(False)
             self._last_error = f"listener_restore_failed:{type(exc).__name__}"
             self._set_phase(MEDIA_PHASE_ERROR)
+            self._notify_diagnostic_terminal()
             return
 
         self._shadow_hook.note_listener_resume(True)
 
         self._reset_inactive()
+        self._notify_diagnostic_terminal()
 
     def _reset_inactive(self) -> None:
         self._panel = None

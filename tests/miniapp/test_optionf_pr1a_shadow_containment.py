@@ -20,7 +20,9 @@ class _BrokenController:
     def __init__(self) -> None:
         self.calls = 0
 
-    def observe_native_line(self, owner: str, line: str) -> None:
+    def observe_native_line(
+        self, owner: str, line: str, generation: int | None = None
+    ) -> None:
         self.calls += 1
         raise RuntimeError("shadow failure")
 
@@ -368,6 +370,9 @@ class _SupervisorRuntime:
         self.attached_media_busy = False
         self.start_calls = 0
         self.stop_calls = 0
+
+    async def async_wait_ready(self, *, timeout: float) -> bool:
+        return self.listener_ready
 
     async def async_start(self) -> None:
         self.start_calls += 1

@@ -21,7 +21,7 @@ class RingShadowHook:
     def _invoke(self, method, *args): return None
 
 class RingShadowController:
-    def observe_native_line(self, owner, line): return None
+    def observe_native_line(self, owner, line, generation=None): return None
     def note_state(self, owner, state): return None
     def note_watchdog_boundary_crossed(self, owner): return None
 

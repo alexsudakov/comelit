@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from pathlib import Path
+import importlib.util
 import sys
+import types
+from uuid import uuid4
 
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tests" / "miniapp" / "tools"))
-from optionf_pr1a_replay import load_plain_module
+from optionf_pr1a_replay import _load_component_module, load_plain_module
 
 
 ring_episode = load_plain_module(
@@ -14,6 +19,11 @@ ring_episode = load_plain_module(
 )
 ring_shadow = load_plain_module(
     str(ROOT), "custom_components/comelit/ring_shadow.py", "ring_shadow_episode_containment"
+)
+media_diagnostics = load_plain_module(
+    str(ROOT),
+    "custom_components/comelit/media_diagnostics.py",
+    "ring_episode_media_diagnostics",
 )
 
 MEDIA = ring_shadow.SHADOW_OWNER_MEDIA
@@ -30,6 +40,63 @@ class Clock:
 def _ledger(**kwargs):
     clock = kwargs.pop("clock", None) or Clock()
     return ring_episode.RingEpisodeLedger(clock=clock, **kwargs), clock
+
+
+def _load_sensor_module(supervisor_module):
+    """Load the real sensor entity with only HA framework types stubbed."""
+    package_name = supervisor_module.__package__
+    module_names = (
+        "homeassistant.components.sensor",
+        "homeassistant.config_entries",
+        "homeassistant.core",
+        "homeassistant.helpers.entity",
+        "homeassistant.helpers.entity_platform",
+        f"{package_name}.call_state",
+        f"{package_name}.runtime",
+    )
+    restored = {name: sys.modules.get(name) for name in module_names}
+
+    class SensorEntity:
+        pass
+
+    def install(name, **attrs):
+        module = types.ModuleType(name)
+        for key, value in attrs.items():
+            setattr(module, key, value)
+        sys.modules[name] = module
+
+    install(
+        "homeassistant.components.sensor",
+        SensorDeviceClass=types.SimpleNamespace(ENUM="enum"),
+        SensorEntity=SensorEntity,
+    )
+    install("homeassistant.config_entries", ConfigEntry=object)
+    install("homeassistant.core", HomeAssistant=object)
+    install(
+        "homeassistant.helpers.entity",
+        EntityCategory=types.SimpleNamespace(DIAGNOSTIC="diagnostic"),
+    )
+    install(
+        "homeassistant.helpers.entity_platform", AddEntitiesCallback=object
+    )
+    install(f"{package_name}.call_state", CALL_STATES=("idle",))
+    install(f"{package_name}.runtime", ComelitRingRuntime=object)
+    spec = importlib.util.spec_from_file_location(
+        f"{package_name}.sensor_readback_{uuid4().hex}",
+        ROOT / "custom_components/comelit/sensor.py",
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        for name, previous in restored.items():
+            if previous is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous
 
 
 def test_ordered_episode_records_ring_ack_rtp_exit_and_lifecycle() -> None:
@@ -203,7 +270,7 @@ def test_payload_is_redacted_and_bad_observation_is_contained() -> None:
 
 def test_hook_contains_diagnostic_exceptions_and_latches() -> None:
     class BrokenController:
-        def observe_native_line(self, owner, line):
+        def observe_native_line(self, owner, line, generation=None):
             raise RuntimeError("diagnostic failure")
 
     hook = ring_shadow.RingShadowHook(BrokenController(), MEDIA)
@@ -238,6 +305,194 @@ def test_real_hook_controller_ledger_wiring_end_to_end() -> None:
     assert episode["teardown_confirmed"] is True
     assert episode["listener_resumed"] is True
     assert episode["sealed"] is True
+
+
+def test_listener_sensor_reads_sealed_episode_via_supervisor_snapshot_view() -> None:
+    """Integrated HA readback: real controller/ledger -> supervisor -> sensor."""
+
+    class Runtime:
+        running = False
+        listener_ready = False
+        attached_media_busy = False
+
+        def status(self):
+            return {
+                "running": False,
+                "listener_ready": False,
+                "last_error": None,
+                "last_native_exit_code": None,
+                "last_native_failure_markers": (),
+                "media_diagnostics": (
+                    media_diagnostics.MediaCallDiagnostics().snapshot()
+                ),
+            }
+
+    class Entry:
+        def async_create_background_task(self, hass, coro, name):
+            raise AssertionError("background task is not part of readback")
+
+    class Listener:
+        media_paused = False
+        attached_media_busy = False
+        listener_ready = False
+
+        def __init__(self, supervisor):
+            self.supervisor = supervisor
+
+        async def async_pause_for_media(self):
+            self.media_paused = True
+            self.listener_ready = False
+
+        async def async_resume_after_media(self):
+            self.media_paused = False
+            self.listener_ready = True
+            # Exercise the real supervisor state entrypoint. READY is
+            # published before the media lifecycle records/seals resume.
+            self.supervisor._set_state(supervisor_module.LISTENER_STATE_READY)
+
+    class Transport:
+        def __init__(self, controller):
+            self.active = False
+            self.hook = ring_shadow.RingShadowHook(controller, MEDIA)
+
+        async def async_start(self, panel):
+            self.hook.note_state("media_transport_start")
+            self.active = True
+
+        async def async_stop(self):
+            self.hook.note_native_exit(0)
+            self.active = False
+
+    ledger, _ = _ledger()
+    controller = ring_shadow.RingShadowController()
+    controller.attach_ring_episode(ledger)
+    supervisor_module = _load_component_module(str(ROOT), "supervisor")
+    supervisor = supervisor_module.ComelitRuntimeSupervisor(
+        object(), Runtime(), entry=Entry(), ring_shadow=controller
+    )
+    media_session_module = _load_component_module(str(ROOT), "media_session")
+    listener = Listener(supervisor)
+    transport = Transport(controller)
+    manager = media_session_module.ComelitMediaSessionManager(
+        listener,
+        transport,
+        ring_shadow=controller,
+        diagnostic_status_notify=getattr(
+            supervisor, "notify_diagnostic_status", None
+        ),
+    )
+    publications = []
+
+    def capture_terminal_publication():
+        snapshot = ledger.snapshot()
+        publications.append(
+            (
+                manager.phase,
+                listener.listener_ready,
+                snapshot["episodes"][-1]["sealed"],
+            )
+        )
+
+    supervisor.async_add_status_listener(capture_terminal_publication)
+
+    async def exercise():
+        await manager.async_acquire(panel="entrance", reason="wiring_test")
+        for line in (
+            "V4_RING_PHASE=INITIAL",
+            "V4_RING_KIND=CALL_INIT",
+            "SECOND_001A_RESPONSE=STRUCTURAL_ACK",
+            "SECOND_001A_ACK_CLASSIFICATION=STATE_SCOPED_STRUCTURAL",
+            "REFRESH_FAIL_CLOSED=false",
+            "P80_VIDEO_RTP_PACKETS=0",
+            "P80_VIDEO_RTP_PACKETS=3",
+        ):
+            transport.hook.observe_line(line)
+        # A realistic call produces far more progress markers than the HA
+        # projection budget.  Its compact sealed evidence must retain the
+        # beginning of the Ring -> 001A -> RTP ordering.
+        for count in range(50, 2050, 50):
+            transport.hook.observe_line(f"P80_VIDEO_RTP_PACKETS={count}")
+        await manager.async_release(reason="wiring_test")
+
+    asyncio.run(exercise())
+    # READY is published before sealing; the dedicated terminal update then
+    # makes the sealed evidence readable. RTP progress emits no HA update.
+    assert publications == [
+        ("stopping", True, False),
+        ("inactive", True, True),
+    ]
+
+    # The legacy snapshot deliberately has no ledger.  This assertion makes
+    # the test fail if supervisor readback regresses from snapshot_view().
+    assert "ring_episode" not in controller.snapshot()
+    assert controller.snapshot_view()["ring_episode"]["episodes"]
+
+    sensor_module = _load_sensor_module(supervisor_module)
+    sensor = sensor_module.ComelitListenerStatusSensor(supervisor)
+    attributes = sensor.extra_state_attributes
+    projection = attributes["ring_episode"]
+    assert projection
+    assert len(projection["episodes"]) == 1
+    episode = projection["episodes"][0]
+    assert episode["sealed"] is True
+    assert episode["seal_reason"] == "listener_resumed"
+    assert episode["ring_observed_offset_ms"] is not None
+    assert episode["owner_kind"] == MEDIA
+    assert episode["ring_marker"] == "CALL_INIT"
+    assert isinstance(episode["last_event_seq"], int)
+    assert isinstance(episode["last_event_offset_ms"], int)
+    assert episode["second_001a_response"] == "STRUCTURAL_ACK"
+    assert episode["ack_classification"] == "STATE_SCOPED_STRUCTURAL"
+    assert episode["video_progress_after_ring"] is True
+    assert episode["native_exit_code"] == 0
+    assert episode["teardown_confirmed"] is True
+    assert episode["listener_resumed"] is True
+    event_kinds = [event["kind"] for event in projection["events"]]
+    assert event_kinds == [
+        "MEDIA_START",
+        "CALL_INIT",
+        "SECOND_001A_RESPONSE",
+        "SECOND_001A_ACK_CLASSIFICATION",
+        "REFRESH_FAIL_CLOSED",
+        "P80_VIDEO_RTP_PACKETS",
+        "P80_VIDEO_RTP_PACKETS",
+        "STOP_REASON",
+        "NATIVE_EXIT",
+        "TEARDOWN",
+        "LISTENER_RESUME",
+        "SEAL",
+    ]
+    assert [event["value"] for event in projection["events"][5:7]] == [0, 2000]
+
+    # A newer open media generation must not replace or mutate TEST B's last
+    # sealed evidence in HA readback.
+    sealed_evidence = json.dumps(
+        {"episodes": projection["episodes"], "events": projection["events"]},
+        sort_keys=True,
+        default=list,
+    )
+    transport.hook.note_state("media_transport_start")
+    for count in range(0, 2050, 50):
+        transport.hook.observe_line(f"P80_VIDEO_RTP_PACKETS={count}")
+    after_new_generation = sensor.extra_state_attributes["ring_episode"]
+    assert json.dumps(
+        {
+            "episodes": after_new_generation["episodes"],
+            "events": after_new_generation["events"],
+        },
+        sort_keys=True,
+        default=list,
+    ) == sealed_evidence
+    rendered = repr(attributes)
+    for forbidden in (
+        "V4_RING_BODY_32_35",
+        "V4_RING_FRAME_SHA256",
+        "VIP_TOKEN",
+        "top-secret",
+    ):
+        assert forbidden not in rendered
+    assert attributes["media_diagnostics"] is not None
+    assert len(json.dumps(attributes, default=list).encode("utf-8")) < 8192
 
 
 def test_wiring_call_sites_are_present_and_lifecycle_never_consults_ledger() -> None:
