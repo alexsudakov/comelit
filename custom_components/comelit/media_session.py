@@ -23,7 +23,12 @@ except ImportError:
         def note_stop_reason(self, reason: str) -> None:
             return None
 
-        def note_teardown(self, confirmed: bool) -> None:
+        def note_teardown(self, confirmed: bool) -> tuple[int, int] | None:
+            return None
+
+        def seal_episode(
+            self, reason: str, handle: tuple[int, int] | None
+        ) -> None:
             return None
 
         def note_listener_resume(self, resumed: bool) -> None:
@@ -426,8 +431,12 @@ class ComelitMediaSessionManager:
                 await self._transport.async_stop()
             except Exception as exc:
                 self._last_error = f"shutdown_teardown_failed:{type(exc).__name__}"
-                self._shadow_hook.note_teardown(False)
+                teardown_handle = self._shadow_hook.note_teardown(False)
                 self._set_phase(MEDIA_PHASE_ERROR)
+                self._shadow_hook.seal_episode(
+                    "teardown_failed", teardown_handle
+                )
+                self._notify_diagnostic_terminal()
                 raise
             self._shadow_hook.note_teardown(True)
             self._reset_inactive()
@@ -473,9 +482,13 @@ class ComelitMediaSessionManager:
             try:
                 await self._transport.async_stop()
             except Exception as stop_exc:
-                self._shadow_hook.note_teardown(False)
+                teardown_handle = self._shadow_hook.note_teardown(False)
                 self._last_error = f"start_cleanup_failed:{type(stop_exc).__name__}"
                 self._set_phase(MEDIA_PHASE_ERROR)
+                self._shadow_hook.seal_episode(
+                    "teardown_failed", teardown_handle
+                )
+                self._notify_diagnostic_terminal()
                 return
             self._shadow_hook.note_teardown(True)
         else:
@@ -541,8 +554,10 @@ class ComelitMediaSessionManager:
             # restart the persistent listener and create two concurrent Comelit
             # sessions. Manual recovery can inspect the error state instead.
             self._last_error = f"teardown_failed:{type(exc).__name__}"
-            self._shadow_hook.note_teardown(False)
+            teardown_handle = self._shadow_hook.note_teardown(False)
             self._set_phase(MEDIA_PHASE_ERROR)
+            self._shadow_hook.seal_episode("teardown_failed", teardown_handle)
+            self._notify_diagnostic_terminal()
             return
 
         self._shadow_hook.note_teardown(True)

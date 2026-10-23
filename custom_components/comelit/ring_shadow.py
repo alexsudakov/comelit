@@ -1219,11 +1219,29 @@ class RingShadowController:
                 reason, self._owner_generation.get(owner, 0)
             )
 
-    def note_teardown(self, owner: str, confirmed: bool) -> None:
+    def note_teardown(
+        self, owner: str, confirmed: bool
+    ) -> tuple[int, int] | None:
         if owner == SHADOW_OWNER_MEDIA and self._ring_episode is not None:
-            self._ring_episode.note_teardown(
+            return self._ring_episode.note_teardown(
                 confirmed, self._owner_generation.get(owner, 0)
             )
+        return None
+
+    def seal_episode(
+        self,
+        owner: str,
+        reason: str,
+        handle: tuple[int, int] | None,
+    ) -> None:
+        if (
+            owner != SHADOW_OWNER_MEDIA
+            or self._ring_episode is None
+            or handle is None
+        ):
+            return
+        generation, episode_id = handle
+        self._ring_episode.seal_episode(reason, generation, episode_id)
 
     def note_listener_resume(self, owner: str, resumed: bool) -> None:
         if owner == SHADOW_OWNER_MEDIA and self._ring_episode is not None:
@@ -1434,19 +1452,20 @@ class RingShadowHook:
         self._failures = 0
         self._latched = controller is None
 
-    def _invoke(self, method: str, *args: str) -> None:
+    def _invoke(self, method: str, *args: object) -> object | None:
         if self._latched:
-            return
+            return None
         controller = self._controller
         if controller is None:
             self._latched = True
-            return
+            return None
         try:
-            getattr(controller, method)(self._owner, *args)
+            return getattr(controller, method)(self._owner, *args)
         except Exception:
             self._failures += 1
             if self._failures >= SHADOW_FAILURE_LATCH_LIMIT:
                 self._latched = True
+            return None
 
     def observe_line(self, line: str | None) -> None:
         if line is None:
@@ -1466,8 +1485,21 @@ class RingShadowHook:
     def note_stop_reason(self, reason: str) -> None:
         self._invoke("note_stop_reason", reason)
 
-    def note_teardown(self, confirmed: bool) -> None:
-        self._invoke("note_teardown", confirmed)
+    def note_teardown(self, confirmed: bool) -> tuple[int, int] | None:
+        handle = self._invoke("note_teardown", confirmed)
+        if (
+            isinstance(handle, tuple)
+            and len(handle) == 2
+            and type(handle[0]) is int
+            and type(handle[1]) is int
+        ):
+            return handle
+        return None
+
+    def seal_episode(
+        self, reason: str, handle: tuple[int, int] | None
+    ) -> None:
+        self._invoke("seal_episode", reason, handle)
 
     def note_listener_resume(self, resumed: bool) -> None:
         self._invoke("note_listener_resume", resumed)
