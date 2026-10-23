@@ -2,6 +2,11 @@
 
 Status: `P0_FUNCTIONAL_ACCEPTANCE=BLOCKED_NOT_FIXED`.
 
+ROUND 2 сохраняет этот verdict и отдельно фиксирует
+`P0-A=NOT_FIXED/NOT_PROVEN`, `P0-B=NOT_FIXED/NOT_PROVEN`; трехстороннее
+сравнение и точный недостающий invariant находятся в
+`ISSUE_319_ROUND2_ARCHITECT_ANALYSIS.md`.
+
 Scope is offline only. No listener control, protocol write, camera open, physical
 Ring, Door/Gate action, deploy, restart, or firmware action was performed.
 

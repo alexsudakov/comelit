@@ -53,6 +53,7 @@ from .media_diagnostics import MediaProgressDiagnostics
 from .oauth import ComelitOAuthError, ComelitOAuthManager
 from .ring_probe_log import RING_PROBE_OWNER_MEDIA, RingProbeDisclosure
 from .ring_shadow import RingShadowController, RingShadowHook, SHADOW_OWNER_MEDIA
+from .ring_episode import RingEpisodeLedger
 from .sdp import ComelitSdpError, transform_offer
 
 _LOGGER = logging.getLogger(__name__)
@@ -514,6 +515,10 @@ class ComelitEntranceMediaTransport:
         self._door_result_future: asyncio.Future[str] | None = None
         self._door_diagnostics: dict[str, object] = {}
         self._shadow_hook = RingShadowHook(ring_shadow, SHADOW_OWNER_MEDIA)
+        self._ring_episode = RingEpisodeLedger()
+        attach = getattr(ring_shadow, "attach_ring_episode", None)
+        if callable(attach):
+            attach(self._ring_episode)
         self._ring_probe_disclosure = RingProbeDisclosure(RING_PROBE_OWNER_MEDIA)
 
     @property
@@ -931,6 +936,9 @@ class ComelitEntranceMediaTransport:
 
     def _capture_native_failure(self, returncode: int) -> None:
         self._last_native_exit_code = returncode
+        hook = getattr(self, "_shadow_hook", None)
+        if hook is not None:
+            hook.note_native_exit(returncode)
         tail_markers = list(self._native_marker_tail)
         # P116 copies no longer in the shared tail were evicted from it, so
         # they are older than every tail entry and go first.
@@ -1086,6 +1094,10 @@ class ComelitEntranceMediaTransport:
                 except TimeoutError:
                     process.kill()
                     await process.wait()
+        if process is not None and process.returncode is not None:
+            hook = getattr(self, "_shadow_hook", None)
+            if hook is not None:
+                hook.note_native_exit(process.returncode)
 
         task = self._task
         if task is not None and not task.done():

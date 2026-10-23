@@ -59,6 +59,14 @@ V4_RING_BODY_32_35_LIVE_VERIFIED = False
 INDEPENDENT_NATIVE_CALL_IDENTITY_PROVEN = False
 PRODUCTION_EMIT_GATE_PROVEN = False
 P0_FUNCTIONAL_ACCEPTANCE = "BLOCKED_NOT_FIXED"
+P0_A_STATUS = "NOT_FIXED"
+P0_A_PROOF = "NOT_PROVEN"
+P0_B_STATUS = "NOT_FIXED"
+P0_B_PROOF = "NOT_PROVEN"
+MISSING_PROTOCOL_INVARIANT = (
+    "ACTIVE_SELF_ACTIVATION_CALL_INIT_PRESERVES_RTP_WITHOUT_ADOPTION_TX_"
+    "AND_HAS_STABLE_CROSS_OWNER_CALL_IDENTITY"
+)
 
 SHADOW_PROBE_KEYS = frozenset({
     "V4_RING_PHASE",
@@ -1026,11 +1034,32 @@ class RingShadowController:
         # Context only. HANDOFF_EPOCH_IS_CALL_IDENTITY=false.
         self._handoff_context_epoch = 0
         self._malformed_batch_count = 0
+        # Bounded, read-only continuity evidence. These scalars only correlate
+        # existing native diagnostics and can never enable Ring dispatch or TX.
+        self._media_active = False
+        self._media_video_packets = 0
+        self._media_call_init_count = 0
+        self._media_active_call_init_count = 0
+        self._video_packets_at_last_media_call_init: int | None = None
+        self._video_progress_after_last_media_call_init = False
+        # Injected by the media transport; this module must stay dependency-free
+        # for the static shadow critical-path contract.
+        self._ring_episode = None
+
+    def attach_ring_episode(self, ledger: object) -> None:
+        """Attach an externally created diagnostics ledger (read-only sink)."""
+        self._ring_episode = ledger
 
     def observe_native_line(self, owner: str, line: str) -> None:
         batcher = self._batchers.get(owner)
         if batcher is None:
             return
+        if owner == SHADOW_OWNER_MEDIA:
+            self._observe_media_continuity_line(line)
+            if self._ring_episode is not None:
+                self._ring_episode.observe_native_line(
+                    line, self._owner_generation.get(owner, 0)
+                )
         self._observe_probe_line_guarded(owner, line)
         batches = batcher.observe(line)
         if line in SHADOW_REMOTE_RELEASE_LINES:
@@ -1072,6 +1101,33 @@ class RingShadowController:
                 production_emit_allowed=False,
             )
             self._decisions.append(decision)
+            if owner == SHADOW_OWNER_MEDIA and not batch.retransmit:
+                self._media_call_init_count += 1
+                if self._media_active and self._media_video_packets > 0:
+                    self._media_active_call_init_count += 1
+                    self._video_packets_at_last_media_call_init = (
+                        self._media_video_packets
+                    )
+                    self._video_progress_after_last_media_call_init = False
+
+    def _observe_media_continuity_line(self, line: str) -> None:
+        """Correlate safe scalar markers around media-owner CALL_INIT."""
+        if line == "P80_MEDIA_ACTIVE=true":
+            self._media_active = True
+            return
+        prefix = "P80_VIDEO_RTP_PACKETS="
+        if not line.startswith(prefix):
+            return
+        raw_count = line[len(prefix):]
+        if not raw_count.isascii() or not raw_count.isdigit():
+            return
+        count = int(raw_count)
+        if count < self._media_video_packets:
+            return
+        self._media_video_packets = count
+        baseline = self._video_packets_at_last_media_call_init
+        if baseline is not None and count > baseline:
+            self._video_progress_after_last_media_call_init = True
 
     def _observe_probe_line_guarded(self, owner: str, line: str) -> None:
         try:
@@ -1091,8 +1147,15 @@ class RingShadowController:
             (owner == SHADOW_OWNER_LISTENER and state == "listener_start")
             or (owner == SHADOW_OWNER_MEDIA and state == "media_transport_start")
         ):
+            if owner == SHADOW_OWNER_MEDIA:
+                self._media_active = False
+                self._media_video_packets = 0
+                self._video_packets_at_last_media_call_init = None
+                self._video_progress_after_last_media_call_init = False
             self._owner_generation[owner] = self._owner_generation.get(owner, 0) + 1
             owner_generation = (owner, self._owner_generation[owner])
+            if owner == SHADOW_OWNER_MEDIA and self._ring_episode is not None:
+                self._ring_episode.note_media_start(self._owner_generation[owner])
             self._owner_running[owner] = True
             other_owner = (
                 SHADOW_OWNER_MEDIA
@@ -1124,6 +1187,8 @@ class RingShadowController:
             or state == "supervisor_stop"
         ):
             self._owner_running[owner] = False
+            if owner == SHADOW_OWNER_MEDIA:
+                self._media_active = False
             return
         if state == "integration_unload":
             self._owner_running[SHADOW_OWNER_LISTENER] = False
@@ -1133,6 +1198,38 @@ class RingShadowController:
             self._decisions.clear()
             self._last_started_owner = None
             self._handoff_context_epoch = 0
+            self._media_active = False
+            self._media_video_packets = 0
+            self._media_call_init_count = 0
+            self._media_active_call_init_count = 0
+            self._video_packets_at_last_media_call_init = None
+            self._video_progress_after_last_media_call_init = False
+            if self._ring_episode is not None:
+                self._ring_episode.reset()
+
+    def note_native_exit(self, owner: str, returncode: int) -> None:
+        if owner == SHADOW_OWNER_MEDIA and self._ring_episode is not None:
+            self._ring_episode.note_native_exit(
+                returncode, self._owner_generation.get(owner, 0)
+            )
+
+    def note_stop_reason(self, owner: str, reason: str) -> None:
+        if owner == SHADOW_OWNER_MEDIA and self._ring_episode is not None:
+            self._ring_episode.note_stop_reason(
+                reason, self._owner_generation.get(owner, 0)
+            )
+
+    def note_teardown(self, owner: str, confirmed: bool) -> None:
+        if owner == SHADOW_OWNER_MEDIA and self._ring_episode is not None:
+            self._ring_episode.note_teardown(
+                confirmed, self._owner_generation.get(owner, 0)
+            )
+
+    def note_listener_resume(self, owner: str, resumed: bool) -> None:
+        if owner == SHADOW_OWNER_MEDIA and self._ring_episode is not None:
+            self._ring_episode.note_listener_resume(
+                resumed, self._owner_generation.get(owner, 0)
+            )
 
     def reset(self) -> None:
         self._batchers = {
@@ -1154,6 +1251,14 @@ class RingShadowController:
         self._last_started_owner = None
         self._handoff_context_epoch = 0
         self._malformed_batch_count = 0
+        self._media_active = False
+        self._media_video_packets = 0
+        self._media_call_init_count = 0
+        self._media_active_call_init_count = 0
+        self._video_packets_at_last_media_call_init = None
+        self._video_progress_after_last_media_call_init = False
+        if self._ring_episode is not None:
+            self._ring_episode.reset()
 
     def note_watchdog_boundary_crossed(self, owner: str) -> None:
         self._guard.note_watchdog_boundary_crossed(owner)
@@ -1255,7 +1360,31 @@ class RingShadowController:
                 "functional_acceptance": P0_FUNCTIONAL_ACCEPTANCE,
                 "body_32_35_semantics": V4_RING_BODY_32_35_SEMANTICS,
                 "body_32_35_live_verified": V4_RING_BODY_32_35_LIVE_VERIFIED,
+                "p0_a_status": P0_A_STATUS,
+                "p0_a_proof": P0_A_PROOF,
+                "p0_b_status": P0_B_STATUS,
+                "p0_b_proof": P0_B_PROOF,
+                "missing_protocol_invariant": MISSING_PROTOCOL_INVARIANT,
             },
+            "continuity_probe": {
+                "media_active": self._media_active,
+                "video_packet_count": self._media_video_packets,
+                "media_call_init_count": self._media_call_init_count,
+                "media_active_call_init_count": self._media_active_call_init_count,
+                "video_packets_at_last_media_call_init": (
+                    self._video_packets_at_last_media_call_init
+                ),
+                "video_progress_after_last_media_call_init": (
+                    self._video_progress_after_last_media_call_init
+                ),
+                "probe_protocol_write_performed": False,
+                "production_effect": False,
+            },
+            "ring_episode": (
+                self._ring_episode.snapshot()
+                if self._ring_episode is not None
+                else {"production_effect": False, "protocol_write_performed": False}
+            ),
             "unresolved_reason": tuple(
                 decision["reason"]
                 for decision in tuple(decision.as_dict() for decision in self._decisions)
@@ -1330,6 +1459,18 @@ class RingShadowHook:
     def note_watchdog_boundary_crossed(self) -> None:
         """Record the real call-state watchdog boundary diagnostically only."""
         self._invoke("note_watchdog_boundary_crossed")
+
+    def note_native_exit(self, returncode: int) -> None:
+        self._invoke("note_native_exit", returncode)
+
+    def note_stop_reason(self, reason: str) -> None:
+        self._invoke("note_stop_reason", reason)
+
+    def note_teardown(self, confirmed: bool) -> None:
+        self._invoke("note_teardown", confirmed)
+
+    def note_listener_resume(self, resumed: bool) -> None:
+        self._invoke("note_listener_resume", resumed)
 
     @property
     def latched(self) -> bool:

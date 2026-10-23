@@ -40,6 +40,14 @@ def test_issue319_qualification_is_explicitly_fail_closed() -> None:
         "functional_acceptance": "BLOCKED_NOT_FIXED",
         "body_32_35_semantics": "UNKNOWN",
         "body_32_35_live_verified": False,
+        "p0_a_status": "NOT_FIXED",
+        "p0_a_proof": "NOT_PROVEN",
+        "p0_b_status": "NOT_FIXED",
+        "p0_b_proof": "NOT_PROVEN",
+        "missing_protocol_invariant": (
+            "ACTIVE_SELF_ACTIVATION_CALL_INIT_PRESERVES_RTP_WITHOUT_ADOPTION_TX_"
+            "AND_HAS_STABLE_CROSS_OWNER_CALL_IDENTITY"
+        ),
     }
 
 
@@ -86,3 +94,45 @@ def test_issue319_runtime_timeout_wires_shadow_boundary_before_failure() -> None
     assert method.count(boundary) == 1
     assert method.count(failure) == 1
     assert method.index(boundary) < method.index(failure)
+
+
+def test_issue319_continuity_probe_is_bounded_and_production_inert() -> None:
+    controller = ring_shadow.RingShadowController()
+    controller.note_state(ring_shadow.SHADOW_OWNER_MEDIA, "media_transport_start")
+    controller.observe_native_line(
+        ring_shadow.SHADOW_OWNER_MEDIA, "P80_MEDIA_ACTIVE=true"
+    )
+    controller.observe_native_line(
+        ring_shadow.SHADOW_OWNER_MEDIA, "P80_VIDEO_RTP_PACKETS=41"
+    )
+    _ring(controller, ring_shadow.SHADOW_OWNER_MEDIA)
+
+    before = controller.snapshot_view()["continuity_probe"]
+    assert before == {
+        "media_active": True,
+        "video_packet_count": 41,
+        "media_call_init_count": 1,
+        "media_active_call_init_count": 1,
+        "video_packets_at_last_media_call_init": 41,
+        "video_progress_after_last_media_call_init": False,
+        "probe_protocol_write_performed": False,
+        "production_effect": False,
+    }
+
+    controller.observe_native_line(
+        ring_shadow.SHADOW_OWNER_MEDIA, "P80_VIDEO_RTP_PACKETS=42"
+    )
+    after = controller.snapshot_view()["continuity_probe"]
+    assert after["video_progress_after_last_media_call_init"] is True
+    assert controller.snapshot()["decisions"][-1]["production_effect"] is False
+
+
+def test_issue319_continuity_probe_does_not_promote_inactive_ring() -> None:
+    controller = ring_shadow.RingShadowController()
+    controller.note_state(ring_shadow.SHADOW_OWNER_MEDIA, "media_transport_start")
+    _ring(controller, ring_shadow.SHADOW_OWNER_MEDIA)
+
+    probe = controller.snapshot_view()["continuity_probe"]
+    assert probe["media_call_init_count"] == 1
+    assert probe["media_active_call_init_count"] == 0
+    assert probe["video_packets_at_last_media_call_init"] is None
