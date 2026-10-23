@@ -20,6 +20,15 @@ except ImportError:
         def note_state(self, state: str) -> None:
             return None
 
+        def note_stop_reason(self, reason: str) -> None:
+            return None
+
+        def note_teardown(self, confirmed: bool) -> None:
+            return None
+
+        def note_listener_resume(self, resumed: bool) -> None:
+            return None
+
 # Literal boundary keys duplicated from latency_timeline.py rather than
 # imported: this module is loaded standalone (no package context) by some
 # existing tests, and it previously had zero intra-package imports. A
@@ -389,6 +398,7 @@ class ComelitMediaSessionManager:
 
     async def async_shutdown(self) -> None:
         """Tear media down for config-entry unload without restarting listener."""
+        self._shadow_hook.note_stop_reason("shutdown")
         async with self._lock:
             self._leases.clear()
             expiry_task = self._expiry_task
@@ -404,8 +414,10 @@ class ComelitMediaSessionManager:
                 await self._transport.async_stop()
             except Exception as exc:
                 self._last_error = f"shutdown_teardown_failed:{type(exc).__name__}"
+                self._shadow_hook.note_teardown(False)
                 self._set_phase(MEDIA_PHASE_ERROR)
                 raise
+            self._shadow_hook.note_teardown(True)
             self._reset_inactive()
 
     async def _async_expire_after_deadline(self) -> None:
@@ -443,21 +455,29 @@ class ComelitMediaSessionManager:
 
     async def _recover_failed_start(self, exc: Exception) -> None:
         self._last_error = f"start_failed:{type(exc).__name__}"
+        self._shadow_hook.note_stop_reason("start_failed")
 
         if self._transport.active:
             try:
                 await self._transport.async_stop()
             except Exception as stop_exc:
+                self._shadow_hook.note_teardown(False)
                 self._last_error = f"start_cleanup_failed:{type(stop_exc).__name__}"
                 self._set_phase(MEDIA_PHASE_ERROR)
                 return
+            self._shadow_hook.note_teardown(True)
+        else:
+            self._shadow_hook.note_teardown(True)
 
         try:
             await self._listener.async_resume_after_media()
         except Exception as resume_exc:
+            self._shadow_hook.note_listener_resume(False)
             self._last_error = f"listener_restore_failed:{type(resume_exc).__name__}"
             self._set_phase(MEDIA_PHASE_ERROR)
             return
+
+        self._shadow_hook.note_listener_resume(True)
 
         self._reset_inactive()
 
@@ -475,9 +495,16 @@ class ComelitMediaSessionManager:
             pass
 
     async def _async_stop_locked(self, reason: str) -> None:
+        # Diagnostic sink only. No lifecycle branch consults ring-episode data.
+        self._shadow_hook.note_stop_reason(reason)
         if self._phase == MEDIA_PHASE_INACTIVE:
             if self._listener.media_paused:
-                await self._listener.async_resume_after_media()
+                try:
+                    await self._listener.async_resume_after_media()
+                except Exception:
+                    self._shadow_hook.note_listener_resume(False)
+                    raise
+                self._shadow_hook.note_listener_resume(True)
             return
 
         self._set_phase(MEDIA_PHASE_STOPPING)
@@ -498,15 +525,21 @@ class ComelitMediaSessionManager:
             # restart the persistent listener and create two concurrent Comelit
             # sessions. Manual recovery can inspect the error state instead.
             self._last_error = f"teardown_failed:{type(exc).__name__}"
+            self._shadow_hook.note_teardown(False)
             self._set_phase(MEDIA_PHASE_ERROR)
             return
+
+        self._shadow_hook.note_teardown(True)
 
         try:
             await self._listener.async_resume_after_media()
         except Exception as exc:
+            self._shadow_hook.note_listener_resume(False)
             self._last_error = f"listener_restore_failed:{type(exc).__name__}"
             self._set_phase(MEDIA_PHASE_ERROR)
             return
+
+        self._shadow_hook.note_listener_resume(True)
 
         self._reset_inactive()
 
