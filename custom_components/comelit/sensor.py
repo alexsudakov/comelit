@@ -95,6 +95,7 @@ class ComelitListenerStatusSensor(SensorEntity):
                 "last_attached_stop_recovery_error"
             ),
             "cycle_duration_seconds": status["cycle_duration_seconds"],
+            "ring_episode": status.get("ring_episode"),
         }
 
     async def async_added_to_hass(self) -> None:

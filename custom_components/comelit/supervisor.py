@@ -10,7 +10,12 @@ from homeassistant.core import HomeAssistant
 
 from .const import DOOR_ENTRANCE, DOOR_GATE, LISTENER_CYCLE_SECONDS
 from .media_transport import ComelitEntranceMediaTransport
-from .ring_shadow import RingShadowController, RingShadowHook, SHADOW_OWNER_LISTENER
+from .ring_shadow import (
+    RingShadowController,
+    RingShadowHook,
+    SHADOW_OWNER_LISTENER,
+    SHADOW_OWNER_MEDIA,
+)
 from .runtime import ComelitRingRuntime
 
 _LOGGER = logging.getLogger(__name__)
@@ -88,6 +93,8 @@ class ComelitRuntimeSupervisor:
         self._attached_stop_recovery_required = False
         self._last_attached_stop_recovery_error: str | None = None
         self._last_attached_stop_failure_stage: str | None = None
+        # Read-only diagnostics source.  Lifecycle code must never consult it.
+        self._ring_shadow = ring_shadow
         self._shadow_hook = RingShadowHook(ring_shadow, SHADOW_OWNER_LISTENER)
 
     @property
@@ -161,7 +168,122 @@ class ComelitRuntimeSupervisor:
                 self._last_attached_stop_recovery_error
             ),
             "cycle_duration_seconds": LISTENER_CYCLE_SECONDS,
+            "ring_episode": self._ring_episode_status(),
         }
+
+    def _ring_episode_status(self) -> dict[str, object] | None:
+        """Return a bounded allowlisted projection of the last sealed episode."""
+        controller = self._ring_shadow
+        if controller is None:
+            return None
+        try:
+            # ``snapshot()`` intentionally does not contain ring_episode.  The
+            # HA readback must use the sanitized public diagnostics view.
+            view = controller.snapshot_view()
+            source = view.get("ring_episode")
+            if not isinstance(source, dict):
+                return None
+            episodes = source.get("episodes")
+            latest = None
+            if isinstance(episodes, (list, tuple)):
+                latest = next(
+                    (
+                        episode
+                        for episode in reversed(episodes)
+                        if isinstance(episode, dict)
+                        and episode.get("sealed") is True
+                    ),
+                    None,
+                )
+            if not isinstance(latest, dict):
+                return None
+            episode_keys = (
+                "episode_id",
+                "generation",
+                "opened_offset_ms",
+                "sealed_offset_ms",
+                "seal_reason",
+                "ring_observed_offset_ms",
+                "second_001a_response",
+                "ack_classification",
+                "refresh_fail_closed",
+                "last_video_rtp_packets",
+                "video_progress_after_ring",
+                "native_exit_code",
+                "stop_reason",
+                "teardown_confirmed",
+                "listener_resumed",
+                "sealed",
+            )
+            accounting_source = source.get("accounting")
+            accounting_keys = (
+                "episodes_seen_total",
+                "episodes_evicted",
+                "events_seen_total",
+                "events_evicted",
+                "dropped_invalid",
+                "unattributed",
+            )
+            accounting = (
+                {
+                    key: accounting_source.get(key)
+                    for key in accounting_keys
+                    if key in accounting_source
+                }
+                if isinstance(accounting_source, dict)
+                else {}
+            )
+            events = source.get("latest_sealed_events")
+            episode_id = latest.get("episode_id")
+            event_keys = ("seq", "kind", "value", "offset_ms")
+            projected_events = tuple(
+                {
+                    key: event.get(key)
+                    for key in event_keys
+                    if key in event
+                }
+                for event in (
+                    events if isinstance(events, (list, tuple)) else ()
+                )
+                if isinstance(event, dict)
+                and event.get("episode_id") == episode_id
+            )
+            last_event = projected_events[-1] if projected_events else None
+            projected_episode = {
+                key: latest.get(key) for key in episode_keys
+            }
+            projected_episode.update(
+                {
+                    "owner_kind": SHADOW_OWNER_MEDIA,
+                    "ring_marker": (
+                        "CALL_INIT"
+                        if latest.get("ring_observed_offset_ms") is not None
+                        else None
+                    ),
+                    "last_event_seq": (
+                        last_event.get("seq")
+                        if isinstance(last_event, dict)
+                        else None
+                    ),
+                    "last_event_offset_ms": (
+                        last_event.get("offset_ms")
+                        if isinstance(last_event, dict)
+                        else None
+                    ),
+                }
+            )
+            return {
+                "episodes": (projected_episode,),
+                "events": projected_events,
+                "active_episode_id": source.get("active_episode_id"),
+                "active_generation": source.get("active_generation"),
+                "accounting": accounting,
+                "production_effect": False,
+                "protocol_write_performed": False,
+                "call_identity_claimed": False,
+            }
+        except Exception:
+            return None
 
     def async_add_status_listener(self, callback: Callable[[], None]) -> Callable[[], None]:
         """Register an in-process HA status listener and return its remover."""
@@ -175,6 +297,10 @@ class ComelitRuntimeSupervisor:
     def _notify_status(self) -> None:
         for callback in tuple(self._status_listeners):
             callback()
+
+    def notify_diagnostic_status(self) -> None:
+        """Publish a diagnostics-only change without changing listener state."""
+        self._notify_status()
 
     def _set_state(self, state: str) -> None:
         if state == LISTENER_STATE_READY:
@@ -399,7 +525,13 @@ class ComelitRuntimeSupervisor:
             self._notify_status()
 
     async def async_resume_after_media(self) -> None:
-        """Release media exclusivity and restore the persistent listener."""
+        """Release media exclusivity and restore a READY persistent listener.
+
+        Returning before readiness would let the media owner seal its diagnostic
+        episode as successfully resumed while the listener was still merely
+        starting.  Keep this readiness gate on the existing listener lifecycle;
+        the diagnostic ledger remains a write-only observer of the outcome.
+        """
         async with self._lifecycle_lock:
             self._raise_if_attached_stop_recovery_blocked()
             if not self._media_paused:
@@ -412,6 +544,18 @@ class ComelitRuntimeSupervisor:
 
             self._shadow_hook.note_state("supervisor_resume")
             await self._async_start_locked()
+            try:
+                ready = await self._runtime.async_wait_ready(timeout=30.0)
+            except Exception:
+                self._set_state(LISTENER_STATE_ERROR)
+                raise
+            if not ready:
+                # Keep ERROR terminal: otherwise the background supervisor can
+                # immediately overwrite it with STARTING while the media owner
+                # has already sealed the failed-resume episode.
+                await self._async_stop_locked(LISTENER_STATE_ERROR)
+                raise RuntimeError("listener_ready_not_confirmed")
+            self._set_state(LISTENER_STATE_READY)
 
     async def _async_stop_locked(self, final_state: str) -> None:
         self._stopping = True

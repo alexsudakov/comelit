@@ -98,7 +98,7 @@ def test_shadow_observation_runs_after_production_handling():
     order: list[str] = []
 
     class Controller:
-        def observe_native_line(self, owner, line):
+        def observe_native_line(self, owner, line, generation=None):
             order.append(f"shadow:{line}")
 
     instance, events, call_state = _listener_instance(runtime, shadow_enabled=False)

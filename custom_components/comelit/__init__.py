@@ -274,6 +274,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 hass, coro, name
             ),
             ring_shadow=shadow_controller,
+            diagnostic_status_notify=getattr(
+                supervisor, "notify_diagnostic_status", None
+            ),
         )
         media_sessions = domain_data.setdefault(DATA_MEDIA_SESSIONS, {})
         media_sessions[entry.entry_id] = media_manager
@@ -384,6 +387,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             shadow_controller.note_state(
                 ring_shadow.SHADOW_OWNER_LISTENER, "integration_unload"
             )
+            notify_diagnostic_status = getattr(
+                supervisor, "notify_diagnostic_status", None
+            )
+            if callable(notify_diagnostic_status):
+                notify_diagnostic_status()
     except Exception:
         pass
 

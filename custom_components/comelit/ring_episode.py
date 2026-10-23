@@ -23,6 +23,7 @@ from typing import Callable, Deque
 
 RING_EPISODE_MAX_EPISODES = 8
 RING_EPISODE_MAX_EVENTS = 32
+RING_EPISODE_MAX_SEALED_EVENTS = 16
 
 _ACK_VALUES = frozenset({"STRUCTURAL_ACK", "AMBIGUOUS", "ABSENT"})
 _ACK_CLASSIFICATION_VALUES = frozenset(
@@ -52,6 +53,9 @@ class RingEpisodeLedger:
         self._max_events = max_events
         self._episodes: Deque[dict[str, object]] = deque()
         self._events: Deque[dict[str, object]] = deque()
+        self._episode_events: list[dict[str, object]] = []
+        self._episode_events_id: object = None
+        self._latest_sealed_events: tuple[dict[str, object], ...] = ()
         self._sequence = 0
         self._next_episode_id = 1
         self._started_monotonic: float | None = None
@@ -70,19 +74,58 @@ class RingEpisodeLedger:
             self._started_monotonic = now
         return max(0, int((now - self._started_monotonic) * 1000))
 
-    def _event(self, kind: str, value: object) -> None:
+    def _event(
+        self,
+        kind: str,
+        value: object,
+        episode: dict[str, object] | None = None,
+    ) -> None:
+        if episode is None:
+            episode = self._current()
         self._events_seen_total += 1
         if len(self._events) >= self._max_events:
             self._events.popleft()
             self._events_evicted += 1
-        self._events.append(
-            {
-                "seq": self._sequence,
-                "kind": kind,
-                "value": value,
-                "offset_ms": self._offset_ms(),
-            }
-        )
+        event = {
+            "seq": self._sequence,
+            "kind": kind,
+            "value": value,
+            "offset_ms": self._offset_ms(),
+            "episode_id": (
+                episode.get("episode_id")
+                if isinstance(episode, dict)
+                else None
+            ),
+        }
+        self._events.append(event)
+        if event["episode_id"] == self._episode_events_id:
+            self._episode_events.append(event)
+            same_kind = [
+                index
+                for index, item in enumerate(self._episode_events)
+                if item["kind"] == kind
+            ]
+            if len(same_kind) > 2:
+                self._episode_events.pop(same_kind[1])
+            # Preserve at least one event of every observed kind while keeping
+            # the protected sealed readback within its strict count budget.
+            # Repeated observations retain their first and latest samples; in
+            # practice this coalesces high-frequency RTP progress without
+            # losing Ring/001A ordering.
+            while len(self._episode_events) > RING_EPISODE_MAX_SEALED_EVENTS:
+                kinds = [item["kind"] for item in self._episode_events]
+                duplicate = next(
+                    (
+                        index
+                        for index, item in enumerate(self._episode_events)
+                        if item["kind"] in kinds[index + 1 :]
+                    ),
+                    None,
+                )
+                if duplicate is None:
+                    self._episode_events.pop(0)
+                else:
+                    self._episode_events.pop(duplicate)
         self._sequence += 1
 
     def _current(self) -> dict[str, object] | None:
@@ -143,7 +186,9 @@ class RingEpisodeLedger:
             self._episodes_evicted += 1
         self._episodes.append(episode)
         self._active = episode
-        self._event("MEDIA_START", generation)
+        self._episode_events = []
+        self._episode_events_id = episode["episode_id"]
+        self._event("MEDIA_START", generation, episode)
 
     def _seal(self, episode: dict[str, object], reason: str) -> None:
         if episode.get("sealed"):
@@ -155,7 +200,11 @@ class RingEpisodeLedger:
         episode["seal_reason"] = reason
         if self._active is episode:
             self._active = None
-        self._event("SEAL", reason)
+        self._event("SEAL", reason, episode)
+        if episode.get("episode_id") == self._episode_events_id:
+            self._latest_sealed_events = tuple(
+                dict(event) for event in self._episode_events
+            )
 
     def seal_episode(self, reason: str = "reset") -> None:
         active = self._current()
@@ -264,6 +313,9 @@ class RingEpisodeLedger:
         self.seal_episode("reset")
         self._episodes.clear()
         self._events.clear()
+        self._episode_events.clear()
+        self._episode_events_id = None
+        self._latest_sealed_events = ()
         self._sequence = 0
         self._next_episode_id = 1
         self._started_monotonic = None
@@ -288,6 +340,9 @@ class RingEpisodeLedger:
         return {
             "episodes": tuple(dict(episode) for episode in self._episodes),
             "events": tuple(dict(event) for event in self._events),
+            "latest_sealed_events": tuple(
+                dict(event) for event in self._latest_sealed_events
+            ),
             "active_episode_id": None if active is None else active["episode_id"],
             "active_generation": None if active is None else active["generation"],
             "accounting": accounting,
