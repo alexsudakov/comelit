@@ -32,7 +32,14 @@ _ACK_CLASSIFICATION_VALUES = frozenset(
 _SAFE_REASON_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,63}$")
 _UINT_RE = re.compile(r"^[0-9]{1,20}$")
 _SEAL_REASONS = frozenset(
-    {"listener_resumed", "resume_failed", "replaced", "reset", "native_exit_terminal"}
+    {
+        "listener_resumed",
+        "resume_failed",
+        "replaced",
+        "reset",
+        "native_exit_terminal",
+        "teardown_failed",
+    }
 )
 
 
@@ -206,10 +213,46 @@ class RingEpisodeLedger:
                 dict(event) for event in self._episode_events
             )
 
-    def seal_episode(self, reason: str = "reset") -> None:
-        active = self._current()
-        if active is not None:
-            self._seal(active, reason)
+    def seal_episode(
+        self,
+        reason: str,
+        generation: int,
+        episode_id: int,
+    ) -> None:
+        """Seal only the explicitly identified episode.
+
+        The generation and episode id form an opaque handle captured while a
+        fact is recorded.  Looking the episode up by both values prevents a
+        delayed diagnostic callback from sealing a newer active generation.
+        Repeating a seal for the same handle is deliberately a no-op.
+        """
+        if (
+            reason not in _SEAL_REASONS
+            or type(generation) is not int
+            or generation < 0
+            or type(episode_id) is not int
+            or episode_id <= 0
+        ):
+            self._dropped_invalid += 1
+            return
+        episode = next(
+            (
+                candidate
+                for candidate in self._episodes
+                if candidate.get("generation") == generation
+                and candidate.get("episode_id") == episode_id
+            ),
+            None,
+        )
+        if episode is None:
+            self._unattributed += 1
+            return
+        if episode.get("sealed"):
+            return
+        if episode is not self._current():
+            self._unattributed += 1
+            return
+        self._seal(episode, reason)
 
     def observe_native_line(self, line: object, generation: int | None = None) -> None:
         """Accept only an allowlist of scalar native markers; payloads are dropped."""
@@ -285,15 +328,18 @@ class RingEpisodeLedger:
         episode["stop_reason"] = reason
         self._event("STOP_REASON", reason)
 
-    def note_teardown(self, confirmed: object, generation: int | None = None) -> None:
+    def note_teardown(
+        self, confirmed: object, generation: int | None = None
+    ) -> tuple[int, int] | None:
         episode = self._matching(generation)
         if episode is None:
-            return
+            return None
         if type(confirmed) is not bool:
             self._dropped_invalid += 1
-            return
+            return None
         episode["teardown_confirmed"] = confirmed
         self._event("TEARDOWN", confirmed)
+        return (int(episode["generation"]), int(episode["episode_id"]))
 
     def note_listener_resume(
         self, resumed: object, generation: int | None = None
@@ -310,7 +356,9 @@ class RingEpisodeLedger:
 
     def reset(self) -> None:
         """Seal the open episode and clear all bounded state symmetrically."""
-        self.seal_episode("reset")
+        active = self._current()
+        if active is not None:
+            self._seal(active, "reset")
         self._episodes.clear()
         self._events.clear()
         self._episode_events.clear()

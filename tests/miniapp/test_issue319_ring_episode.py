@@ -241,6 +241,47 @@ def test_double_callback_after_seal_is_rejected_not_mutating() -> None:
     assert ledger.snapshot()["unattributed"] == 2
 
 
+def test_teardown_failed_seal_is_handle_bound_and_idempotent() -> None:
+    ledger, _ = _ledger()
+    ledger.note_media_start(1)
+    handle = ledger.note_teardown(False, 1)
+    assert handle == (1, 1)
+    ledger.seal_episode("teardown_failed", *handle)
+    once = repr(ledger.snapshot())
+    ledger.seal_episode("teardown_failed", *handle)
+    assert repr(ledger.snapshot()) == once
+
+    episode = ledger.snapshot()["episodes"][0]
+    assert episode["teardown_confirmed"] is False
+    assert episode["listener_resumed"] is None
+    assert episode["native_exit_code"] is None
+    assert episode["second_001a_response"] is None
+    assert episode["seal_reason"] == "teardown_failed"
+    assert [event["kind"] for event in ledger.snapshot()["events"]][-2:] == [
+        "TEARDOWN",
+        "SEAL",
+    ]
+
+
+def test_late_teardown_failed_seal_cannot_touch_new_generation() -> None:
+    ledger, _ = _ledger()
+    ledger.note_media_start(1)
+    handle = ledger.note_teardown(False, 1)
+    assert handle is not None
+    ledger.note_media_start(2)
+    generation_b = repr(ledger.snapshot()["episodes"][1])
+    latest_sealed_events = repr(ledger.snapshot()["latest_sealed_events"])
+
+    ledger.seal_episode("teardown_failed", *handle)
+    ledger.seal_episode("teardown_failed", *handle)
+
+    snapshot = ledger.snapshot()
+    assert repr(snapshot["episodes"][1]) == generation_b
+    assert snapshot["active_generation"] == 2
+    assert snapshot["episodes"][0]["seal_reason"] == "replaced"
+    assert repr(snapshot["latest_sealed_events"]) == latest_sealed_events
+
+
 def test_zero_and_over_limit_counters_have_exact_accounting() -> None:
     ledger, _ = _ledger(max_episodes=1, max_events=1)
     ledger.note_media_start(1)
@@ -493,6 +534,319 @@ def test_listener_sensor_reads_sealed_episode_via_supervisor_snapshot_view() -> 
         assert forbidden not in rendered
     assert attributes["media_diagnostics"] is not None
     assert len(json.dumps(attributes, default=list).encode("utf-8")) < 8192
+
+
+def test_teardown_failures_publish_fail_closed_integrated_evidence() -> None:
+    """Both stop failures traverse the real diagnostic-to-HA readback path."""
+
+    supervisor_module = _load_component_module(str(ROOT), "supervisor")
+    media_session_module = _load_component_module(str(ROOT), "media_session")
+    sensor_module = _load_sensor_module(supervisor_module)
+
+    class Runtime:
+        running = False
+        listener_ready = False
+        attached_media_busy = False
+
+        def status(self):
+            return {
+                "running": False,
+                "listener_ready": False,
+                "last_error": None,
+                "last_native_exit_code": None,
+                "last_native_failure_markers": (),
+                "media_diagnostics": (
+                    media_diagnostics.MediaCallDiagnostics().snapshot()
+                ),
+            }
+
+    class Entry:
+        def async_create_background_task(self, hass, coro, name):
+            raise AssertionError("background task is not part of readback")
+
+    class Listener:
+        media_paused = False
+        attached_media_busy = False
+        listener_ready = False
+
+        def __init__(self):
+            self.pause_calls = 0
+            self.resume_calls = 0
+
+        async def async_pause_for_media(self):
+            self.pause_calls += 1
+            self.media_paused = True
+
+        async def async_resume_after_media(self):
+            self.resume_calls += 1
+            self.media_paused = False
+            self.listener_ready = True
+
+    class Transport:
+        def __init__(self, controller, failure):
+            self.active = False
+            self.failure = failure
+            self.start_calls = 0
+            self.stop_calls = 0
+            self.protocol_writes = 0
+            self.hook = ring_shadow.RingShadowHook(controller, MEDIA)
+
+        async def async_start(self, panel):
+            self.start_calls += 1
+            self.hook.note_state("media_transport_start")
+            self.active = True
+
+        async def async_stop(self):
+            self.stop_calls += 1
+            if self.failure == "raised":
+                raise RuntimeError("contained private teardown detail")
+            # The other failure mode deliberately leaves active=True.
+
+    async def exercise(failure):
+        ledger, _ = _ledger()
+        ledger.note_media_start(99)
+        ledger.observe_native_line("V4_RING_KIND=CALL_INIT", 99)
+        ledger.note_teardown(True, 99)
+        ledger.note_listener_resume(True, 99)
+        controller = ring_shadow.RingShadowController()
+        controller.attach_ring_episode(ledger)
+        supervisor = supervisor_module.ComelitRuntimeSupervisor(
+            object(), Runtime(), entry=Entry(), ring_shadow=controller
+        )
+        listener = Listener()
+        transport = Transport(controller, failure)
+        manager = media_session_module.ComelitMediaSessionManager(
+            listener,
+            transport,
+            ring_shadow=controller,
+            diagnostic_status_notify=supervisor.notify_diagnostic_status,
+        )
+        publications = []
+
+        def capture_publication():
+            episode = ledger.snapshot()["episodes"][-1]
+            publications.append(
+                (manager.phase, episode["sealed"], episode["seal_reason"])
+            )
+
+        supervisor.async_add_status_listener(capture_publication)
+        await manager.async_acquire(panel="entrance", reason="failure_test")
+        transport.hook.observe_line("V4_RING_KIND=CALL_INIT")
+        await manager.async_release(reason="failure_test")
+
+        assert manager.phase == "error"
+        assert listener.media_paused is True
+        assert listener.resume_calls == 0
+        assert transport.start_calls == 1
+        assert transport.stop_calls == 1
+        assert transport.protocol_writes == 0
+        assert sum(1 for item in publications if item[1] is True) == 1
+        assert publications[-1] == ("error", True, "teardown_failed")
+
+        sensor = sensor_module.ComelitListenerStatusSensor(supervisor)
+        attributes = sensor.extra_state_attributes
+        projection = attributes["ring_episode"]
+        assert len(projection["episodes"]) == 1
+        episode = projection["episodes"][0]
+        assert episode["teardown_confirmed"] is False
+        assert episode["listener_resumed"] is None
+        assert episode["seal_reason"] == "teardown_failed"
+        assert episode["native_exit_code"] is None
+        assert episode["ring_marker"] == "CALL_INIT"
+        assert episode["episode_id"] == 2
+        assert [event["kind"] for event in projection["events"]][-2:] == [
+            "TEARDOWN",
+            "SEAL",
+        ]
+        assert len(json.dumps(attributes, default=list).encode("utf-8")) < 8192
+
+    async def exercise_both():
+        await exercise("raised")
+        await exercise("active_after_stop")
+
+    asyncio.run(exercise_both())
+
+
+def test_failed_start_cleanup_seals_without_synthetic_ring_or_resume() -> None:
+    supervisor_module = _load_component_module(str(ROOT), "supervisor")
+    media_session_module = _load_component_module(str(ROOT), "media_session")
+    sensor_module = _load_sensor_module(supervisor_module)
+
+    class Runtime:
+        running = False
+        listener_ready = False
+        attached_media_busy = False
+
+        def status(self):
+            return {
+                "running": False,
+                "listener_ready": False,
+                "last_error": None,
+                "last_native_exit_code": None,
+                "last_native_failure_markers": (),
+                "media_diagnostics": None,
+            }
+
+    class Entry:
+        def async_create_background_task(self, hass, coro, name):
+            raise AssertionError("background task is not part of readback")
+
+    class Listener:
+        media_paused = False
+        attached_media_busy = False
+
+        def __init__(self):
+            self.resume_calls = 0
+
+        async def async_pause_for_media(self):
+            self.media_paused = True
+
+        async def async_resume_after_media(self):
+            self.resume_calls += 1
+            self.media_paused = False
+
+    class Transport:
+        active = False
+
+        def __init__(self, controller):
+            self.start_calls = 0
+            self.stop_calls = 0
+            self.protocol_writes = 0
+            self.hook = ring_shadow.RingShadowHook(controller, MEDIA)
+
+        async def async_start(self, panel):
+            self.start_calls += 1
+            self.hook.note_state("media_transport_start")
+            self.active = True
+            raise RuntimeError("contained start failure")
+
+        async def async_stop(self):
+            self.stop_calls += 1
+            raise RuntimeError("contained cleanup failure")
+
+    async def exercise():
+        ledger, _ = _ledger()
+        controller = ring_shadow.RingShadowController()
+        controller.attach_ring_episode(ledger)
+        supervisor = supervisor_module.ComelitRuntimeSupervisor(
+            object(), Runtime(), entry=Entry(), ring_shadow=controller
+        )
+        listener = Listener()
+        transport = Transport(controller)
+        manager = media_session_module.ComelitMediaSessionManager(
+            listener,
+            transport,
+            ring_shadow=controller,
+            diagnostic_status_notify=supervisor.notify_diagnostic_status,
+        )
+        publications = []
+        supervisor.async_add_status_listener(
+            lambda: publications.append(
+                (manager.phase, ledger.snapshot()["episodes"][-1]["sealed"])
+            )
+        )
+
+        try:
+            await manager.async_acquire(panel="entrance", reason="failure_test")
+        except media_session_module.ComelitMediaSessionError:
+            pass
+        else:
+            raise AssertionError("failed start must stay contained by public error")
+
+        assert manager.phase == "error"
+        assert listener.media_paused is True
+        assert listener.resume_calls == 0
+        assert transport.start_calls == 1
+        assert transport.stop_calls == 1
+        assert transport.protocol_writes == 0
+        assert sum(1 for _, sealed in publications if sealed) == 1
+
+        sensor = sensor_module.ComelitListenerStatusSensor(supervisor)
+        projection = sensor.extra_state_attributes["ring_episode"]
+        episode = projection["episodes"][0]
+        assert episode["ring_marker"] is None
+        assert episode["ring_observed_offset_ms"] is None
+        assert episode["teardown_confirmed"] is False
+        assert episode["listener_resumed"] is None
+        assert episode["seal_reason"] == "teardown_failed"
+        assert episode["native_exit_code"] is None
+        assert [event["kind"] for event in projection["events"]][-2:] == [
+            "TEARDOWN",
+            "SEAL",
+        ]
+
+    asyncio.run(exercise())
+
+
+def test_shutdown_failure_publishes_before_later_unload_reset() -> None:
+    """Shutdown exposes bounded evidence now; unload may still reset history."""
+
+    media_session_module = _load_component_module(str(ROOT), "media_session")
+
+    class Listener:
+        media_paused = False
+        attached_media_busy = False
+        resume_calls = 0
+
+        async def async_pause_for_media(self):
+            self.media_paused = True
+
+        async def async_resume_after_media(self):
+            self.resume_calls += 1
+            self.media_paused = False
+
+    class Transport:
+        active = False
+
+        def __init__(self, controller):
+            self.hook = ring_shadow.RingShadowHook(controller, MEDIA)
+
+        async def async_start(self, panel):
+            self.hook.note_state("media_transport_start")
+            self.active = True
+
+        async def async_stop(self):
+            raise RuntimeError("contained shutdown failure")
+
+    async def exercise():
+        ledger, _ = _ledger()
+        controller = ring_shadow.RingShadowController()
+        controller.attach_ring_episode(ledger)
+        listener = Listener()
+        transport = Transport(controller)
+        publications = []
+        manager = media_session_module.ComelitMediaSessionManager(
+            listener,
+            transport,
+            ring_shadow=controller,
+            diagnostic_status_notify=lambda: publications.append(
+                ledger.snapshot()["episodes"][-1]["sealed"]
+            ),
+        )
+        await manager.async_acquire(panel="entrance", reason="shutdown_test")
+
+        try:
+            await manager.async_shutdown()
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("shutdown teardown exception must propagate")
+
+        episode = ledger.snapshot()["episodes"][0]
+        assert manager.phase == "error"
+        assert listener.media_paused is True
+        assert listener.resume_calls == 0
+        assert episode["teardown_confirmed"] is False
+        assert episode["listener_resumed"] is None
+        assert episode["seal_reason"] == "teardown_failed"
+        assert publications == [True]
+
+        # Preserve the existing unload contract: integration_unload clears
+        # diagnostic history, so no Recorder persistence is promised here.
+        controller.note_state(MEDIA, "integration_unload")
+        assert ledger.snapshot()["episodes"] == ()
+
+    asyncio.run(exercise())
 
 
 def test_wiring_call_sites_are_present_and_lifecycle_never_consults_ledger() -> None:
