@@ -14,6 +14,24 @@ from __future__ import annotations
 
 import entrance_p116_r45_call_adoption_core as r45
 
+HELPER_CAP_AUDIO_DST = 0x01
+HELPER_CAP_AUDIO_SRC = 0x02
+HELPER_CAP_VIDEO_DST = 0x04
+HELPER_CAP_MSTREAM = 0x20
+HELPER_INTUNIT_CALL_TYPE = 0x49
+HELPER_ALERTING_ARGUMENT = 0x00
+
+
+def helper_runtime_fields() -> tuple[int, int, int]:
+    """Return the profile fields owned by the R53 contract."""
+    capability_word = (
+        HELPER_CAP_AUDIO_DST
+        | HELPER_CAP_AUDIO_SRC
+        | HELPER_CAP_VIDEO_DST
+        | HELPER_CAP_MSTREAM
+    )
+    return HELPER_INTUNIT_CALL_TYPE, capability_word, HELPER_ALERTING_ARGUMENT
+
 CORE_BEGIN_MARKER = "/* R53_CALL_ADOPTION_PROFILE_BEGIN */"
 CORE_END_MARKER = "/* R53_CALL_ADOPTION_PROFILE_END */"
 

@@ -20,6 +20,79 @@ from __future__ import annotations
 CORE_BEGIN_MARKER = "/* R45_CALL_ADOPTION_BEGIN */"
 CORE_END_MARKER = "/* R45_CALL_ADOPTION_END */"
 
+# Python-facing forms of the same dependency-free serializers are provided for
+# research models which cannot execute the assembled C host harness.  Keeping
+# them here makes R45 the single owner of these wire shapes.
+CTP_VERSION = 0x18
+CTP_FLAG_DATA = 0x40
+CTP_FLAG_EMPTY_ACK = 0x80
+CTP_LOGICAL_ADDRESS_LENGTH = 10
+
+
+def serialize_capabilities(call_type: int, capability_word: int) -> bytes:
+    if not 0 <= call_type <= 0xFF or not 0 <= capability_word <= 0xFFFFFFFF:
+        raise ValueError("R45 capabilities field out of range")
+    return bytes((0, 3, call_type, 0)) + capability_word.to_bytes(4, "little")
+
+
+def serialize_alerting(alerting_argument: int) -> bytes:
+    if not 0 <= alerting_argument <= 0xFF:
+        raise ValueError("R45 alerting argument out of range")
+    return bytes((0, 0x0A, alerting_argument))
+
+
+def build_packet(
+    *,
+    flags: int,
+    connection: int,
+    sequence: int,
+    acknowledgement: int,
+    body: bytes,
+    source_logical: bytes,
+    dest_logical: bytes,
+) -> bytes:
+    """Serialize the CTP envelope exactly as ``r45_build_packet`` does."""
+    if len(source_logical) != CTP_LOGICAL_ADDRESS_LENGTH:
+        raise ValueError("R45 source logical address must be 10 bytes")
+    if len(dest_logical) != CTP_LOGICAL_ADDRESS_LENGTH:
+        raise ValueError("R45 destination logical address must be 10 bytes")
+    if len(body) > 8:
+        raise ValueError("R45 body exceeds serializer maximum")
+    padded_length = (len(body) + 3) & ~3
+    header = bytes(
+        (
+            flags & 0xFF,
+            CTP_VERSION,
+            (connection >> 8) & 0xFF,
+            connection & 0xFF,
+            sequence & 0xFF,
+            acknowledgement & 0xFF,
+            (len(body) >> 8) & 0xFF,
+            len(body) & 0xFF,
+        )
+    )
+    padding = bytes(padded_length - len(body))
+    return header + body + padding + b"\xff\xff\xff\xff" + source_logical + dest_logical
+
+
+def build_empty_ack(
+    *,
+    connection: int,
+    local_sequence: int,
+    peer_sequence: int,
+    source_logical: bytes,
+    dest_logical: bytes,
+) -> bytes:
+    return build_packet(
+        flags=CTP_FLAG_EMPTY_ACK,
+        connection=connection,
+        sequence=local_sequence,
+        acknowledgement=(peer_sequence + 1) & 0xFF,
+        body=b"",
+        source_logical=source_logical,
+        dest_logical=dest_logical,
+    )
+
 CORE_REGION = r'''/* R45_CALL_ADOPTION_BEGIN */
 #define R45_CTP_FLAG_EMPTY_ACK        0x80u
 #define R45_OP_CAPABILITIES           0x0003u
