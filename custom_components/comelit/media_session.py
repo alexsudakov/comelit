@@ -318,6 +318,12 @@ class ComelitMediaSessionManager:
         if not reason or len(reason) > 64:
             raise ComelitMediaSessionError("invalid_media_reason")
 
+        cancel_recovery = getattr(
+            self._listener, "async_cancel_listener_recovery_for_media", None
+        )
+        if callable(cancel_recovery):
+            await cancel_recovery()
+
         async with self._lock:
             if getattr(self._listener, "attached_media_busy", False):
                 raise ComelitMediaSessionError("attached_inbound_media_busy")
@@ -416,6 +422,15 @@ class ComelitMediaSessionManager:
     async def async_shutdown(self) -> None:
         """Tear media down for config-entry unload without restarting listener."""
         self._shadow_hook.note_stop_reason("shutdown")
+        prepare_listener_shutdown = getattr(
+            self._listener, "async_prepare_for_shutdown", None
+        )
+        if callable(prepare_listener_shutdown):
+            # This must happen before taking the media lock.  A concurrent
+            # release may own that lock while awaiting bounded listener
+            # recovery; publishing shutdown first makes it stop admitting new
+            # cloud/listener attempts and lets the release complete promptly.
+            await prepare_listener_shutdown()
         async with self._lock:
             self._leases.clear()
             expiry_task = self._expiry_task
@@ -561,6 +576,17 @@ class ComelitMediaSessionManager:
             return
 
         self._shadow_hook.note_teardown(True)
+
+        confirm_release = getattr(
+            self._listener, "async_confirm_media_owner_released", None
+        )
+        if callable(confirm_release):
+            await confirm_release(
+                phase=self._phase,
+                transport_active=self._transport.active,
+                leases_empty=not self._leases,
+                teardown_confirmed=True,
+            )
 
         try:
             await self._listener.async_resume_after_media()
