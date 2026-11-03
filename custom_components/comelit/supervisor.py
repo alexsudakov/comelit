@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime
 import logging
+import time
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -25,6 +26,8 @@ RECONNECT_MAX_DELAY_SECONDS = 300
 RECONNECT_NORMAL_DELAY_SECONDS = 1
 POLL_INTERVAL_SECONDS = 1
 DOOR_LIFECYCLE_LOCK_TIMEOUT_SECONDS = 0.5
+MEDIA_RELEASE_RECOVERY_MAX_ATTEMPTS = 3
+MEDIA_RELEASE_RECOVERY_DEADLINE_SECONDS = 90
 
 LISTENER_STATE_STARTING = "starting"
 LISTENER_STATE_READY = "ready"
@@ -93,6 +96,11 @@ class ComelitRuntimeSupervisor:
         self._attached_stop_recovery_required = False
         self._last_attached_stop_recovery_error: str | None = None
         self._last_attached_stop_failure_stage: str | None = None
+        self._media_release_proven = False
+        self._recovery_task: asyncio.Task[object] | None = None
+        self._recovery_attempts = 0
+        self._recovery_deadline: float | None = None
+        self._recovery_last_reason: str | None = None
         # Read-only diagnostics source.  Lifecycle code must never consult it.
         self._ring_shadow = ring_shadow
         self._shadow_hook = RingShadowHook(ring_shadow, SHADOW_OWNER_LISTENER)
@@ -137,6 +145,18 @@ class ComelitRuntimeSupervisor:
             last_attached_stop_failure_stage = runtime_stop_failure_stage
         else:
             last_attached_stop_failure_stage = self._last_attached_stop_failure_stage
+        deadline = self._recovery_deadline
+        deadline_seconds = (
+            max(
+                0,
+                min(
+                    MEDIA_RELEASE_RECOVERY_DEADLINE_SECONDS,
+                    int(deadline - time.monotonic()),
+                ),
+            )
+            if deadline is not None
+            else 0
+        )
         return {
             "state": self._state,
             "supervisor_running": self.running,
@@ -167,6 +187,13 @@ class ComelitRuntimeSupervisor:
             "last_attached_stop_recovery_error": (
                 self._last_attached_stop_recovery_error
             ),
+            "recovery_pending": (
+                self._recovery_task is not None
+                and not self._recovery_task.done()
+            ),
+            "recovery_attempts": self._recovery_attempts,
+            "recovery_deadline_seconds": deadline_seconds,
+            "recovery_last_reason": self._recovery_last_reason,
             "cycle_duration_seconds": LISTENER_CYCLE_SECONDS,
             "ring_episode": self._ring_episode_status(),
         }
@@ -366,8 +393,27 @@ class ComelitRuntimeSupervisor:
         """Stop the listener for config-entry unload/shutdown."""
         async with self._lifecycle_lock:
             self._shutdown_requested = True
+            self._media_release_proven = False
+            self._recovery_deadline = None
+            self._recovery_last_reason = "shutdown"
             self._media_paused = False
             await self._async_stop_locked(LISTENER_STATE_STOPPED)
+
+    async def async_prepare_for_shutdown(self) -> None:
+        """Stop listener admission before another owner waits on its lock.
+
+        Config-entry unload tears the media manager down before its supervisor.
+        A media release can be awaiting listener recovery while it still owns
+        the media lock, so shutdown must become visible to that recovery before
+        the media manager attempts to acquire the lock.
+        """
+        async with self._lifecycle_lock:
+            self._shutdown_requested = True
+            self._media_release_proven = False
+            self._recovery_last_reason = "shutdown"
+            self._recovery_deadline = None
+            await self._async_stop_locked(LISTENER_STATE_STOPPED)
+            self._notify_status()
 
     async def async_pause_for_media(self) -> None:
         """Acquire the exclusive listener pause required by media bootstrap."""
@@ -377,6 +423,8 @@ class ComelitRuntimeSupervisor:
                 raise RuntimeError("listener_shutdown_in_progress")
             if self._media_paused:
                 return
+
+            self._media_release_proven = False
 
             self._shadow_hook.note_state("supervisor_pause")
             self._media_paused = True
@@ -524,6 +572,132 @@ class ComelitRuntimeSupervisor:
             self._set_state(LISTENER_STATE_READY)
             self._notify_status()
 
+    async def async_confirm_media_owner_released(
+        self,
+        *,
+        phase: str,
+        transport_active: bool,
+        leases_empty: bool,
+        teardown_confirmed: bool,
+    ) -> None:
+        """Accept a one-shot, local-only proof that media ownership ended."""
+        async with self._lifecycle_lock:
+            runtime_status = self._runtime.status()
+            self._media_release_proven = bool(
+                phase == "stopping"
+                and transport_active is False
+                and leases_empty is True
+                and teardown_confirmed is True
+                and self._media_paused
+                and not self._shutdown_requested
+                and not self._attached_stop_recovery_required
+                and not bool(runtime_status.get("running"))
+                and not bool(runtime_status.get("listener_ready"))
+                and not bool(runtime_status.get("attached_media_busy"))
+            )
+
+    async def async_cancel_listener_recovery_for_media(self) -> None:
+        """Give a new media acquire priority over a pending listener retry."""
+        async with self._lifecycle_lock:
+            task = self._recovery_task
+            if task is None or task.done():
+                return
+            self._media_release_proven = False
+            if not self._media_paused:
+                self._media_paused = True
+                await self._async_stop_locked(LISTENER_STATE_PAUSED_MEDIA)
+            self._recovery_last_reason = "media_acquire"
+            self._notify_status()
+
+    @staticmethod
+    def _transient_release_recovery_reason(value: object) -> str | None:
+        if value == "http_status:504":
+            return "http_status:504"
+        if value == "remote_sdp_missing":
+            return "remote_sdp_missing"
+        return None
+
+    async def _async_recover_released_listener(self, reason: str) -> None:
+        """Retry a listener bootstrap within a small, observable budget."""
+        self._recovery_task = asyncio.current_task()
+        self._recovery_attempts = 0
+        self._recovery_deadline = (
+            time.monotonic() + MEDIA_RELEASE_RECOVERY_DEADLINE_SECONDS
+        )
+        self._recovery_last_reason = reason
+        self._notify_status()
+        try:
+            while self._recovery_attempts < MEDIA_RELEASE_RECOVERY_MAX_ATTEMPTS:
+                if time.monotonic() >= self._recovery_deadline:
+                    break
+                delay = min(
+                    RECONNECT_INITIAL_DELAY_SECONDS
+                    * (2 ** self._recovery_attempts),
+                    RECONNECT_MAX_DELAY_SECONDS,
+                    max(0, self._recovery_deadline - time.monotonic()),
+                )
+                await asyncio.sleep(delay)
+                async with self._lifecycle_lock:
+                    if (
+                        self._shutdown_requested
+                        or self._media_paused
+                        or self._attached_stop_recovery_required
+                        or not self._media_release_proven
+                    ):
+                        self._set_state(
+                            LISTENER_STATE_STOPPED
+                            if self._shutdown_requested
+                            else LISTENER_STATE_PAUSED_MEDIA
+                            if self._media_paused
+                            else LISTENER_STATE_ERROR
+                        )
+                        return
+                    self._recovery_attempts += 1
+                    self._set_state(LISTENER_STATE_RECONNECTING)
+                    self._notify_status()
+                    await self._async_start_locked()
+
+                ready = await self._runtime.async_wait_ready(timeout=30.0)
+                if ready:
+                    if (
+                        self._media_paused
+                        or self._shutdown_requested
+                        or not self._media_release_proven
+                    ):
+                        return
+                    self._media_release_proven = False
+                    self._recovery_deadline = None
+                    self._set_state(LISTENER_STATE_READY)
+                    self._notify_status()
+                    return
+
+                if (
+                    self._media_paused
+                    or self._shutdown_requested
+                    or not self._media_release_proven
+                ):
+                    return
+                runtime_status = self._runtime.status()
+                next_reason = self._transient_release_recovery_reason(
+                    runtime_status.get("last_error")
+                )
+                async with self._lifecycle_lock:
+                    await self._async_stop_locked(LISTENER_STATE_ERROR)
+                if next_reason is None:
+                    self._recovery_last_reason = "non_transient"
+                    self._notify_status()
+                    return
+                self._recovery_last_reason = next_reason
+                self._notify_status()
+
+            self._recovery_last_reason = "budget_exhausted"
+            self._set_state(LISTENER_STATE_ERROR)
+            self._notify_status()
+        finally:
+            self._recovery_deadline = None
+            self._recovery_task = None
+            self._notify_status()
+
     async def async_resume_after_media(self) -> None:
         """Release media exclusivity and restore a READY persistent listener.
 
@@ -544,18 +718,49 @@ class ComelitRuntimeSupervisor:
 
             self._shadow_hook.note_state("supervisor_resume")
             await self._async_start_locked()
-            try:
-                ready = await self._runtime.async_wait_ready(timeout=30.0)
-            except Exception:
-                self._set_state(LISTENER_STATE_ERROR)
-                raise
-            if not ready:
-                # Keep ERROR terminal: otherwise the background supervisor can
-                # immediately overwrite it with STARTING while the media owner
-                # has already sealed the failed-resume episode.
+
+        try:
+            ready = await self._runtime.async_wait_ready(timeout=30.0)
+        except Exception:
+            self._media_release_proven = False
+            async with self._lifecycle_lock:
                 await self._async_stop_locked(LISTENER_STATE_ERROR)
-                raise RuntimeError("listener_ready_not_confirmed")
-            self._set_state(LISTENER_STATE_READY)
+            raise
+        if ready:
+            async with self._lifecycle_lock:
+                if self._shutdown_requested:
+                    self._media_release_proven = False
+                    await self._async_stop_locked(LISTENER_STATE_STOPPED)
+                    return
+                if self._media_paused:
+                    self._media_release_proven = False
+                    await self._async_stop_locked(LISTENER_STATE_PAUSED_MEDIA)
+                    raise RuntimeError("listener_recovery_cancelled")
+                self._media_release_proven = False
+                self._set_state(LISTENER_STATE_READY)
+                return
+
+        runtime_status = self._runtime.status()
+        reason = self._transient_release_recovery_reason(
+            runtime_status.get("last_error")
+        )
+        async with self._lifecycle_lock:
+            await self._async_stop_locked(LISTENER_STATE_ERROR)
+        if reason is None or not self._media_release_proven:
+            self._media_release_proven = False
+            self._recovery_last_reason = (
+                "release_not_proven" if reason is not None else "non_transient"
+            )
+            self._notify_status()
+            raise RuntimeError("listener_ready_not_confirmed")
+
+        existing = self._recovery_task
+        if existing is not None and existing is not asyncio.current_task():
+            await asyncio.shield(existing)
+            return
+        await self._async_recover_released_listener(reason)
+        if self._state != LISTENER_STATE_READY:
+            raise RuntimeError("listener_recovery_failed")
 
     async def _async_stop_locked(self, final_state: str) -> None:
         self._stopping = True
