@@ -1059,28 +1059,27 @@ class ComelitEntranceCamera(Camera):
 
     async def _async_probe_hls_http_boundary(self) -> None:
         result = self._new_hls_http_probe_result()
-        cancelled = False
         try:
             result.update(await self._async_build_hls_http_boundary_result())
         except asyncio.CancelledError:
-            cancelled = True
+            # Unload/stream replacement cancels this probe; do not publish a
+            # misleading completed snapshot or suppress task cancellation.
+            raise
         except Exception:
             result["hls_probe_mode"] = "unavailable"
-        finally:
-            if cancelled:
-                return
-            result["hls_probe_completed"] = True
-            result.update(self._camera_frontend_capability_diagnostics())
-            self._hls_http_probe_result = result
-            self._hls_http_probe_done = True
-            _LOGGER.info(
-                "Comelit HLS HTTP diagnostics: %s",
-                " ".join(
-                    f"{key}={_format_diagnostic_value(result.get(key))}"
-                    for key in _HLS_HTTP_DIAGNOSTIC_FIELDS
-                ),
-            )
-            self.async_write_ha_state()
+
+        result["hls_probe_completed"] = True
+        result.update(self._camera_frontend_capability_diagnostics())
+        self._hls_http_probe_result = result
+        self._hls_http_probe_done = True
+        _LOGGER.info(
+            "Comelit HLS HTTP diagnostics: %s",
+            " ".join(
+                f"{key}={_format_diagnostic_value(result.get(key))}"
+                for key in _HLS_HTTP_DIAGNOSTIC_FIELDS
+            ),
+        )
+        self.async_write_ha_state()
 
     async def _async_build_hls_http_boundary_result(self) -> dict[str, Any]:
         stream = self.stream

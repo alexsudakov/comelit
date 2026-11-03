@@ -815,6 +815,8 @@ class ComelitRuntimeSupervisor:
                     )
                 ):
                     reconnect_reason = "NATIVE_FAILURE_EXIT"
+                elif last_error == "remote_sdp_missing":
+                    reconnect_reason = "REMOTE_SDP_MISSING"
                 elif last_error:
                     reconnect_reason = "UNKNOWN"
                 else:

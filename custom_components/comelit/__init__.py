@@ -266,6 +266,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         media_transports = domain_data.setdefault(DATA_MEDIA_TRANSPORTS, {})
         media_transports[entry.entry_id] = media_transport
+        # Camera state attributes are calculated on the HA event loop.
+        # Perform file stat/hash for native identity in the executor first.
+        await media_transport.async_prepare_native_identity_diagnostics()
 
         media_manager = ComelitMediaSessionManager(
             supervisor,
