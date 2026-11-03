@@ -42,6 +42,8 @@ class FakeTransport:
         self.events = events
         self.fail_start = False
         self.fail_stop = False
+        self.fail_confirm = False
+        self.cleanup_gate: asyncio.Event | None = None
 
     @property
     def active(self) -> bool:
@@ -58,6 +60,13 @@ class FakeTransport:
         if self.fail_stop:
             raise RuntimeError("stop failed")
         self._active = False
+
+    async def async_confirm_stopped(self) -> int:
+        if self.cleanup_gate is not None:
+            await self.cleanup_gate.wait()
+        if self.fail_confirm or self._active:
+            raise RuntimeError("media_release_unconfirmed")
+        return 1
 
     def simulate_process_exit(self) -> None:
         self.events.append("media_process_exit")
@@ -179,7 +188,7 @@ class P80MediaSessionManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(listener.media_paused)
         self.assertFalse(transport.active)
         self.assertEqual(manager.phase, media.MEDIA_PHASE_INACTIVE)
-        self.assertEqual(events, ["listener_pause", "media_start:entrance", "listener_resume"])
+        self.assertEqual(events, ["listener_pause", "media_start:entrance", "media_stop", "listener_resume"])
 
     async def test_failed_teardown_keeps_listener_paused_fail_closed(self) -> None:
         manager, listener, transport, events = self.make_manager()
@@ -216,6 +225,49 @@ class P80MediaSessionManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(transport.active)
         self.assertIn("media_process_exit", events)
         self.assertEqual(events[-1], "listener_resume")
+
+    async def test_native_exit_waits_for_transport_cleanup_before_resume(self) -> None:
+        manager, listener, transport, events = self.make_manager(
+            watch_interval_seconds=0.005,
+        )
+        await manager.async_acquire(panel="entrance", reason="manual")
+        transport.cleanup_gate = asyncio.Event()
+        transport.simulate_process_exit()
+        await asyncio.sleep(0.025)
+        self.assertTrue(listener.media_paused)
+        self.assertNotIn("listener_resume", events)
+        transport.cleanup_gate.set()
+        await asyncio.sleep(0.025)
+        self.assertFalse(listener.media_paused)
+        self.assertEqual(manager.phase, media.MEDIA_PHASE_INACTIVE)
+
+    async def test_cleanup_proof_failure_does_not_resume_listener(self) -> None:
+        manager, listener, transport, events = self.make_manager()
+        await manager.async_acquire(panel="entrance", reason="manual")
+        transport.fail_confirm = True
+        result = await manager.async_force_stop(reason="manual_off")
+        self.assertEqual(result["phase"], media.MEDIA_PHASE_ERROR)
+        self.assertTrue(listener.media_paused)
+        self.assertNotIn("listener_resume", events)
+
+    async def test_reacquire_after_unconfirmed_release_is_denied(self) -> None:
+        manager, listener, transport, events = self.make_manager()
+        await manager.async_acquire(panel="entrance", reason="manual")
+        transport.fail_confirm = True
+        await manager.async_force_stop(reason="manual_off")
+        with self.assertRaisesRegex(media.ComelitMediaSessionError, "media_session_release_unconfirmed"):
+            await manager.async_acquire(panel="entrance", reason="another")
+        self.assertNotIn("listener_resume", events)
+
+    async def test_shutdown_unconfirmed_cleanup_fails_closed(self) -> None:
+        manager, listener, transport, events = self.make_manager()
+        await manager.async_acquire(panel="entrance", reason="manual")
+        transport.fail_confirm = True
+        with self.assertRaises(RuntimeError):
+            await manager.async_shutdown()
+        self.assertTrue(listener.media_paused)
+        self.assertEqual(manager.phase, media.MEDIA_PHASE_ERROR)
+        self.assertNotIn("listener_resume", events)
 
     async def test_unsupported_panel_fails_before_listener_pause(self) -> None:
         manager, listener, transport, events = self.make_manager()

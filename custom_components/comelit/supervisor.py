@@ -56,6 +56,12 @@ LISTENER_STATES = (
 )
 
 
+# Recovery is allowed only during a verified media-owner handoff.  The
+# ordinary listener reconnection policy remains unchanged.
+_RESUME_TRANSIENT_FAILURES = frozenset({"http_status:504", "remote_sdp_missing"})
+_RESUME_RECOVERY_MAX_ATTEMPTS = 3
+
+
 class ComelitRuntimeSupervisor:
     """Keep the direct Comelit listener alive inside Home Assistant.
 
@@ -83,6 +89,13 @@ class ComelitRuntimeSupervisor:
         self._stopping = False
         self._shutdown_requested = False
         self._media_paused = False
+        self._resume_recovery_pending = False
+        self._media_priority_waiters = 0
+        self._media_priority_event = asyncio.Event()
+        self._resume_deferred_for_media = False
+        self._deferred_resume_task: asyncio.Task[None] | None = None
+        self._resume_recovery_attempts = 0
+        self._resume_recovery_last_reason: str | None = None
         self._lifecycle_lock = asyncio.Lock()
         self._reconnect_count = 0
         self._consecutive_failures = 0
@@ -104,6 +117,11 @@ class ComelitRuntimeSupervisor:
     @property
     def media_paused(self) -> bool:
         return self._media_paused
+
+    @property
+    def resume_recovery_pending(self) -> bool:
+        """Read-only indication for a queued camera to request priority."""
+        return self._resume_recovery_pending
 
     @property
     def listener_dispatch_ready(self) -> bool:
@@ -146,6 +164,9 @@ class ComelitRuntimeSupervisor:
                 runtime_status.get("attached_media_busy")
             ),
             "media_paused": self._media_paused,
+            "recovery_pending": self._resume_recovery_pending,
+            "recovery_attempts": self._resume_recovery_attempts,
+            "recovery_last_reason": self._resume_recovery_last_reason,
             "reconnect_count": self._reconnect_count,
             "consecutive_failures": self._consecutive_failures,
             "reconnect_delay_seconds": self._reconnect_delay_seconds,
@@ -369,6 +390,78 @@ class ComelitRuntimeSupervisor:
             self._media_paused = False
             await self._async_stop_locked(LISTENER_STATE_STOPPED)
 
+    def request_media_priority(self) -> None:
+        """Signal a pending camera acquire without waiting for lifecycle_lock.
+
+        Only the media-session owner pairs this with release_media_priority;
+        this signal never starts a transport or confirms prior teardown.
+        """
+        self._media_priority_waiters += 1
+        self._media_priority_event.set()
+
+    def release_media_priority(self) -> None:
+        if self._media_priority_waiters <= 0:
+            raise RuntimeError("unbalanced_media_priority")
+        self._media_priority_waiters -= 1
+        if not self._media_priority_waiters:
+            self._media_priority_event.clear()
+            self._schedule_deferred_resume_if_idle()
+
+    def _schedule_deferred_resume_if_idle(self) -> None:
+        if (self._resume_deferred_for_media
+                and not self._media_priority_waiters
+                and not self._media_paused
+                and not self._shutdown_requested
+                and self._state == LISTENER_STATE_STOPPED
+                and not self._runtime.running
+                and not self._runtime.listener_ready
+                and (self._deferred_resume_task is None
+                     or self._deferred_resume_task.done())):
+            self._deferred_resume_task = self._entry.async_create_background_task(
+                self._hass, self._async_resume_deferred_if_idle(),
+                "comelit resume after canceled media acquire",
+            )
+
+    async def _async_resume_deferred_if_idle(self) -> None:
+        async with self._lifecycle_lock:
+            if (not self._resume_deferred_for_media
+                    or self._media_priority_waiters
+                    or self._media_paused
+                    or self._shutdown_requested
+                    or self._state != LISTENER_STATE_STOPPED
+                    or self._runtime.running
+                    or self._runtime.listener_ready):
+                return
+            self._resume_deferred_for_media = False
+            try:
+                # A canceled camera has not acquired ownership: complete the
+                # same bounded READY/retry contract as normal media teardown.
+                await self._async_resume_with_retries_locked()
+            except Exception:
+                self._set_state(LISTENER_STATE_ERROR)
+                _LOGGER.exception("Deferred Comelit listener recovery failed")
+
+    async def _async_wait_ready_or_media_priority(self) -> bool | None:
+        """None means an incoming camera acquire preempted readiness waiting."""
+        if self._media_priority_event.is_set():
+            return None
+        ready = asyncio.create_task(self._runtime.async_wait_ready(timeout=30.0))
+        priority = asyncio.create_task(self._media_priority_event.wait())
+        try:
+            completed, _ = await asyncio.wait(
+                {ready, priority}, return_when=asyncio.FIRST_COMPLETED,
+            )
+            # A brief request must not be lost if its caller is canceled and
+            # clears the event before this coroutine resumes.
+            if priority in completed:
+                return None
+            return await ready
+        finally:
+            for task in (ready, priority):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(ready, priority, return_exceptions=True)
+
     async def async_pause_for_media(self) -> None:
         """Acquire the exclusive listener pause required by media bootstrap."""
         async with self._lifecycle_lock:
@@ -384,13 +477,17 @@ class ComelitRuntimeSupervisor:
                 await self._async_stop_locked(LISTENER_STATE_PAUSED_MEDIA)
             except Exception:
                 self._media_paused = False
+                # A failed stop must never enable a queued background resume.
+                self._resume_deferred_for_media = False
                 self._set_state(LISTENER_STATE_ERROR)
                 raise
 
             if self._runtime.running or self._runtime.listener_ready:
                 self._media_paused = False
+                self._resume_deferred_for_media = False
                 self._set_state(LISTENER_STATE_ERROR)
                 raise RuntimeError("listener_pause_not_confirmed")
+            self._resume_deferred_for_media = False
 
     async def async_open_entrance_door(
         self,
@@ -524,38 +621,104 @@ class ComelitRuntimeSupervisor:
             self._set_state(LISTENER_STATE_READY)
             self._notify_status()
 
-    async def async_resume_after_media(self) -> None:
-        """Release media exclusivity and restore a READY persistent listener.
+    async def async_resume_after_media(self) -> bool | None:
+        """Restore READY only after the media owner has confirmed local teardown.
 
-        Returning before readiness would let the media owner seal its diagnostic
-        episode as successfully resumed while the listener was still merely
-        starting.  Keep this readiness gate on the existing listener lifecycle;
-        the diagnostic ledger remains a write-only observer of the outcome.
+        Return False solely when a queued camera acquire takes priority: the
+        supervisor stops the listener before handing ownership to that acquire.
+        A normal successful restoration returns True; legacy no-op returns None.
         """
         async with self._lifecycle_lock:
             self._raise_if_attached_stop_recovery_blocked()
             if not self._media_paused:
-                return
-
+                return None
             self._media_paused = False
             if self._shutdown_requested:
                 self._set_state(LISTENER_STATE_STOPPED)
-                return
-
+                return None
             self._shadow_hook.note_state("supervisor_resume")
-            await self._async_start_locked()
+            self._resume_deferred_for_media = False
+            return await self._async_resume_with_retries_locked()
+
+    async def _async_resume_with_retries_locked(self) -> bool:
+        """One bounded owner-safe recovery path for normal and deferred resume.
+
+        Caller holds lifecycle_lock, media owner has released its upstream,
+        and listener is not media-paused.  Never infer remote release here.
+        """
+        self._resume_recovery_pending = True
+        self._resume_recovery_attempts = 0
+        self._resume_recovery_last_reason = None
+        try:
+            for attempt in range(1, _RESUME_RECOVERY_MAX_ATTEMPTS + 1):
+                if self._media_priority_event.is_set():
+                    # Previous listener is already stopped during media.
+                    self._resume_deferred_for_media = True
+                    self._set_state(LISTENER_STATE_STOPPED)
+                    return False
+                self._resume_recovery_attempts = attempt
+                try:
+                    await self._async_start_locked()
+                    ready = await self._async_wait_ready_or_media_priority()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    try:
+                        await self._async_stop_locked(LISTENER_STATE_ERROR)
+                    except Exception:
+                        self._set_state(LISTENER_STATE_ERROR)
+                    raise
+
+                if ready is None:
+                    # Stop/reap the listener before the waiting camera
+                    # acquire can take lifecycle_lock and start native media.
+                    try:
+                        await self._async_stop_locked(LISTENER_STATE_STOPPED)
+                    except Exception:
+                        self._set_state(LISTENER_STATE_ERROR)
+                        raise
+                    self._resume_deferred_for_media = True
+                    return False
+                if (
+                    ready
+                    and self._runtime.running
+                    and self._runtime.listener_ready
+                ):
+                    self._set_state(LISTENER_STATE_READY)
+                    return True
+                error = self._runtime.status().get("last_error")
+                self._resume_recovery_last_reason = (
+                    error if error in _RESUME_TRANSIENT_FAILURES else "non_transient"
+                )
+                await self._async_stop_locked(LISTENER_STATE_ERROR)
+                if self._media_priority_event.is_set():
+                    self._resume_deferred_for_media = True
+                    self._set_state(LISTENER_STATE_STOPPED)
+                    return False
+                if error not in _RESUME_TRANSIENT_FAILURES:
+                    raise RuntimeError("listener_ready_not_confirmed")
+                if attempt == _RESUME_RECOVERY_MAX_ATTEMPTS:
+                    raise RuntimeError("listener_recovery_exhausted")
+                self._reconnect_delay_seconds = min(
+                    RECONNECT_INITIAL_DELAY_SECONDS * (2 ** (attempt - 1)),
+                    RECONNECT_MAX_DELAY_SECONDS,
+                )
+                try:
+                    await asyncio.wait_for(
+                        self._media_priority_event.wait(),
+                        timeout=self._reconnect_delay_seconds,
+                    )
+                except TimeoutError:
+                    pass
+        except asyncio.CancelledError:
             try:
-                ready = await self._runtime.async_wait_ready(timeout=30.0)
+                await self._async_stop_locked(LISTENER_STATE_ERROR)
             except Exception:
                 self._set_state(LISTENER_STATE_ERROR)
-                raise
-            if not ready:
-                # Keep ERROR terminal: otherwise the background supervisor can
-                # immediately overwrite it with STARTING while the media owner
-                # has already sealed the failed-resume episode.
-                await self._async_stop_locked(LISTENER_STATE_ERROR)
-                raise RuntimeError("listener_ready_not_confirmed")
-            self._set_state(LISTENER_STATE_READY)
+            raise
+        finally:
+            self._resume_recovery_pending = False
+            self._schedule_deferred_resume_if_idle()
 
     async def _async_stop_locked(self, final_state: str) -> None:
         self._stopping = True
@@ -596,7 +759,9 @@ class ComelitRuntimeSupervisor:
 
                 if self._stopping or self._media_paused:
                     return
-                if self._attached_stop_recovery_required:
+                if self._attached_stop_recovery_required or self._resume_recovery_pending:
+                    # Resume owns the only permitted retry while holding the
+                    # lifecycle lock; the background loop must not compete.
                     self._set_state(LISTENER_STATE_ERROR)
                     return
 

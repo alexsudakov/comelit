@@ -163,6 +163,8 @@ class MediaTransport(Protocol):
 
     async def async_stop(self) -> None: ...
 
+    async def async_confirm_stopped(self) -> int: ...
+
 
 TaskFactory = Callable[
     [Coroutine[Any, Any, None], str],
@@ -318,77 +320,113 @@ class ComelitMediaSessionManager:
         if not reason or len(reason) > 64:
             raise ComelitMediaSessionError("invalid_media_reason")
 
-        async with self._lock:
-            if getattr(self._listener, "attached_media_busy", False):
-                raise ComelitMediaSessionError("attached_inbound_media_busy")
+        # A new camera request may arrive while the previous release holds
+        # _lock waiting for supervisor READY.  Signal priority *before* this
+        # lock, otherwise the request cannot interrupt the bounded recovery.
+        # This optional priority hook does not authorize media ownership; that
+        # still requires exclusive pause + confirmed native teardown.
+        request_priority = getattr(self._listener, "request_media_priority", None)
+        release_priority = getattr(self._listener, "release_media_priority", None)
+        priority_active = (
+            (self._phase in {MEDIA_PHASE_STARTING, MEDIA_PHASE_STOPPING}
+             or getattr(self._listener, "resume_recovery_pending", False))
+            and callable(request_priority)
+            and callable(release_priority)
+            and not getattr(self._listener, "attached_media_busy", False)
+        )
+        if priority_active:
+            request_priority()
+        try:
+            async with self._lock:
+                if getattr(self._listener, "attached_media_busy", False):
+                    raise ComelitMediaSessionError("attached_inbound_media_busy")
 
-            if self._phase == MEDIA_PHASE_ACTIVE:
-                if self._panel != panel or not self._transport.active:
-                    raise ComelitMediaSessionError("media_session_state_mismatch")
-                self._leases[reason] = self._leases.get(reason, 0) + 1
-                self._notify_status()
-                return self.status()
+                if self._phase == MEDIA_PHASE_ACTIVE:
+                    if self._panel != panel or not self._transport.active:
+                        raise ComelitMediaSessionError("media_session_state_mismatch")
+                    self._leases[reason] = self._leases.get(reason, 0) + 1
+                    self._notify_status()
+                    return self.status()
 
-            if self._phase in {MEDIA_PHASE_STARTING, MEDIA_PHASE_STOPPING}:
-                raise ComelitMediaSessionError("media_session_transition_busy")
+                if self._phase == MEDIA_PHASE_ERROR:
+                    raise ComelitMediaSessionError("media_session_release_unconfirmed")
+                if self._phase in {MEDIA_PHASE_STARTING, MEDIA_PHASE_STOPPING}:
+                    raise ComelitMediaSessionError("media_session_transition_busy")
 
-            self._panel = panel
-            self._leases = {reason: 1}
-            self._last_error = None
-            self._set_phase(MEDIA_PHASE_STARTING)
+                self._panel = panel
+                self._leases = {reason: 1}
+                self._last_error = None
+                self._set_phase(MEDIA_PHASE_STARTING)
 
-            timeline = self._latency_timeline
-            start_stage = _MEDIA_START_STAGE_LISTENER_PAUSE
-            try:
-                if timeline is not None:
-                    timeline.mark(
-                        _T02_LISTENER_PAUSE_REQUESTED,
-                        asyncio.get_running_loop().time(),
+                timeline = self._latency_timeline
+                start_stage = _MEDIA_START_STAGE_LISTENER_PAUSE
+                try:
+                    if timeline is not None:
+                        timeline.mark(
+                            _T02_LISTENER_PAUSE_REQUESTED,
+                            asyncio.get_running_loop().time(),
+                        )
+                    await self._listener.async_pause_for_media()
+                    # The new owner now holds the exclusive pause, so a
+                    # preempted listener no longer needs deferred restoration.
+                    if priority_active:
+                        release_priority()
+                        priority_active = False
+                    if not self._listener.media_paused:
+                        raise ComelitMediaSessionError("listener_pause_not_confirmed")
+                    if timeline is not None:
+                        timeline.mark(
+                            _T03_LISTENER_PAUSED_CONFIRMED,
+                            asyncio.get_running_loop().time(),
+                        )
+
+                    start_stage = _MEDIA_START_STAGE_TRANSPORT_START
+                    await self._transport.async_start(panel)
+                    if not self._transport.active:
+                        raise ComelitMediaSessionError("media_start_not_confirmed")
+                except asyncio.CancelledError as exc:
+                    if priority_active:
+                        release_priority()
+                        priority_active = False
+                    await self._recover_failed_start(exc)
+                    raise
+                except Exception as exc:
+                    if priority_active:
+                        release_priority()
+                        priority_active = False
+                    self._last_start_failure = _MediaStartFailure(
+                        reason=_safe_start_failure_reason(exc),
+                        stage=start_stage,
+                        at=datetime.now(UTC).isoformat(),
+                        transport_last_error=_sanitize_transport_last_error(
+                            getattr(self._transport, "last_error", None)
+                        ),
+                        transport_native_exit_code=_sanitize_transport_native_exit_code(
+                            getattr(self._transport, "last_native_exit_code", None)
+                        ),
                     )
-                await self._listener.async_pause_for_media()
-                if not self._listener.media_paused:
-                    raise ComelitMediaSessionError("listener_pause_not_confirmed")
-                if timeline is not None:
-                    timeline.mark(
-                        _T03_LISTENER_PAUSED_CONFIRMED,
-                        asyncio.get_running_loop().time(),
-                    )
+                    await self._recover_failed_start(exc)
+                    raise ComelitMediaSessionError(self._last_error or "media_start_failed") from exc
 
-                start_stage = _MEDIA_START_STAGE_TRANSPORT_START
-                await self._transport.async_start(panel)
-                if not self._transport.active:
-                    raise ComelitMediaSessionError("media_start_not_confirmed")
-            except Exception as exc:
-                self._last_start_failure = _MediaStartFailure(
-                    reason=_safe_start_failure_reason(exc),
-                    stage=start_stage,
-                    at=datetime.now(UTC).isoformat(),
-                    transport_last_error=_sanitize_transport_last_error(
-                        getattr(self._transport, "last_error", None)
-                    ),
-                    transport_native_exit_code=_sanitize_transport_native_exit_code(
-                        getattr(self._transport, "last_native_exit_code", None)
-                    ),
+                now = datetime.now(UTC)
+                self._started_at = now
+                self._expires_at = now + timedelta(seconds=self._hard_limit_seconds)
+                self._deadline_monotonic = (
+                    asyncio.get_running_loop().time() + self._hard_limit_seconds
                 )
-                await self._recover_failed_start(exc)
-                raise ComelitMediaSessionError(self._last_error or "media_start_failed") from exc
-
-            now = datetime.now(UTC)
-            self._started_at = now
-            self._expires_at = now + timedelta(seconds=self._hard_limit_seconds)
-            self._deadline_monotonic = (
-                asyncio.get_running_loop().time() + self._hard_limit_seconds
-            )
-            self._set_phase(MEDIA_PHASE_ACTIVE)
-            self._expiry_task = self._task_factory(
-                self._async_expire_after_deadline(),
-                "comelit media hard timeout",
-            )
-            self._watchdog_task = self._task_factory(
-                self._async_watch_transport(),
-                "comelit media transport watchdog",
-            )
-            return self.status()
+                self._set_phase(MEDIA_PHASE_ACTIVE)
+                self._expiry_task = self._task_factory(
+                    self._async_expire_after_deadline(),
+                    "comelit media hard timeout",
+                )
+                self._watchdog_task = self._task_factory(
+                    self._async_watch_transport(),
+                    "comelit media transport watchdog",
+                )
+                return self.status()
+        finally:
+            if priority_active:
+                release_priority()
 
     async def async_release(self, *, reason: str) -> dict[str, object]:
         self._shadow_hook.note_state("media_session_stop")
@@ -429,6 +467,7 @@ class ComelitMediaSessionManager:
                 self._set_phase(MEDIA_PHASE_STOPPING)
             try:
                 await self._transport.async_stop()
+                await self._transport.async_confirm_stopped()
             except Exception as exc:
                 self._last_error = f"shutdown_teardown_failed:{type(exc).__name__}"
                 teardown_handle = self._shadow_hook.note_teardown(False)
@@ -477,25 +516,20 @@ class ComelitMediaSessionManager:
     async def _recover_failed_start(self, exc: Exception) -> None:
         self._last_error = f"start_failed:{type(exc).__name__}"
         self._shadow_hook.note_stop_reason("start_failed")
-
-        if self._transport.active:
-            try:
-                await self._transport.async_stop()
-            except Exception as stop_exc:
-                teardown_handle = self._shadow_hook.note_teardown(False)
-                self._last_error = f"start_cleanup_failed:{type(stop_exc).__name__}"
-                self._set_phase(MEDIA_PHASE_ERROR)
-                self._shadow_hook.seal_episode(
-                    "teardown_failed", teardown_handle
-                )
-                self._notify_diagnostic_terminal()
-                return
-            self._shadow_hook.note_teardown(True)
-        else:
-            self._shadow_hook.note_teardown(True)
+        try:
+            await self._transport.async_stop()
+            await self._transport.async_confirm_stopped()
+        except Exception as stop_exc:
+            teardown_handle = self._shadow_hook.note_teardown(False)
+            self._last_error = f"start_cleanup_failed:{type(stop_exc).__name__}"
+            self._set_phase(MEDIA_PHASE_ERROR)
+            self._shadow_hook.seal_episode("teardown_failed", teardown_handle)
+            self._notify_diagnostic_terminal()
+            return
+        self._shadow_hook.note_teardown(True)
 
         try:
-            await self._listener.async_resume_after_media()
+            resumed = await self._listener.async_resume_after_media()
         except Exception as resume_exc:
             self._shadow_hook.note_listener_resume(False)
             self._last_error = f"listener_restore_failed:{type(resume_exc).__name__}"
@@ -503,8 +537,7 @@ class ComelitMediaSessionManager:
             self._notify_diagnostic_terminal()
             return
 
-        self._shadow_hook.note_listener_resume(True)
-
+        self._shadow_hook.note_listener_resume(resumed is not False)
         self._reset_inactive()
         self._notify_diagnostic_terminal()
 
@@ -527,12 +560,12 @@ class ComelitMediaSessionManager:
         if self._phase == MEDIA_PHASE_INACTIVE:
             if self._listener.media_paused:
                 try:
-                    await self._listener.async_resume_after_media()
+                    resumed = await self._listener.async_resume_after_media()
                 except Exception:
                     self._shadow_hook.note_listener_resume(False)
                     self._notify_diagnostic_terminal()
                     raise
-                self._shadow_hook.note_listener_resume(True)
+                self._shadow_hook.note_listener_resume(resumed is not False)
                 self._notify_diagnostic_terminal()
             return
 
@@ -545,10 +578,8 @@ class ComelitMediaSessionManager:
         await self._cancel_background_task(watchdog_task)
 
         try:
-            if self._transport.active:
-                await self._transport.async_stop()
-            if self._transport.active:
-                raise ComelitMediaSessionError("media_stop_not_confirmed")
+            await self._transport.async_stop()
+            await self._transport.async_confirm_stopped()
         except Exception as exc:
             # Fail closed: if upstream media teardown is not confirmed, do not
             # restart the persistent listener and create two concurrent Comelit
@@ -563,7 +594,7 @@ class ComelitMediaSessionManager:
         self._shadow_hook.note_teardown(True)
 
         try:
-            await self._listener.async_resume_after_media()
+            resumed = await self._listener.async_resume_after_media()
         except Exception as exc:
             self._shadow_hook.note_listener_resume(False)
             self._last_error = f"listener_restore_failed:{type(exc).__name__}"
@@ -571,7 +602,7 @@ class ComelitMediaSessionManager:
             self._notify_diagnostic_terminal()
             return
 
-        self._shadow_hook.note_listener_resume(True)
+        self._shadow_hook.note_listener_resume(resumed is not False)
 
         self._reset_inactive()
         self._notify_diagnostic_terminal()

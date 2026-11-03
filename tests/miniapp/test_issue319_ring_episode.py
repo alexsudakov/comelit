@@ -404,6 +404,11 @@ def test_listener_sensor_reads_sealed_episode_via_supervisor_snapshot_view() -> 
             self.hook.note_native_exit(0)
             self.active = False
 
+        async def async_confirm_stopped(self):
+            if self.active:
+                raise RuntimeError("media_release_unconfirmed")
+            return 1
+
     ledger, _ = _ledger()
     controller = ring_shadow.RingShadowController()
     controller.attach_ring_episode(ledger)
@@ -859,7 +864,9 @@ def test_wiring_call_sites_are_present_and_lifecycle_never_consults_ledger() -> 
     assert "hook.note_native_exit(returncode)" in transport
     assert 'note_stop_reason("shutdown")' in session
     assert "note_teardown(True)" in session
-    assert "note_listener_resume(True)" in session
+    # A media-priority handoff is not listener READY and must not emit a
+    # misleading positive listener-resume receipt.
+    assert "note_listener_resume(resumed is not False)" in session
     assert "note_media_start(self._owner_generation[owner])" in shadow
     assert "line, self._owner_generation.get(owner, 0)" in shadow
 

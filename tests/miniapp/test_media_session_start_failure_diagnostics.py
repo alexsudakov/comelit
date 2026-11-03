@@ -55,6 +55,12 @@ class _Transport:
     async def async_stop(self) -> None:
         self.active = False
 
+    async def async_confirm_stopped(self) -> int:
+        """Test double: cleanup has completed when async_stop returns."""
+        if self.active:
+            raise RuntimeError("media_release_unconfirmed")
+        return 1
+
 
 def _manager(listener: _Listener, transport: _Transport):
     return media_session.ComelitMediaSessionManager(listener, transport)

@@ -489,6 +489,11 @@ class ComelitEntranceMediaTransport:
         self._task: asyncio.Task[None] | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._process: asyncio.subprocess.Process | None = None
+        # Only the transport may attest local teardown.  `active=False` is not
+        # evidence: it can become false before the async runner finishes cleanup.
+        self._generation = 0
+        self._cleanup_complete_generation = 0
+        self._native_reaped = True
         self._offer_ready = asyncio.Event()
         self._media_active = asyncio.Event()
         self._local_sdp_ready_event = asyncio.Event()
@@ -529,6 +534,35 @@ class ComelitEntranceMediaTransport:
             and process is not None
             and process.returncode is None
         )
+
+    async def async_confirm_stopped(self) -> int:
+        """Wait for local release of the *current* transport generation.
+
+        This is not a remote call-release / cloud-admission proof.  Failure to
+        finish any cleanup phase denies listener handoff; stale generations
+        cannot authorize a newly started transport.
+        """
+        generation = self._generation
+        task = self._task
+        if task is not None:
+            if task is asyncio.current_task():
+                raise ComelitMediaTransportError("media_release_reentrant")
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=10.0)
+            except TimeoutError as exc:
+                raise ComelitMediaTransportError("media_release_unconfirmed") from exc
+        if (
+            generation != self._generation
+            or self._cleanup_complete_generation != generation
+            or not self._native_reaped
+            or (task is not None and not task.done())
+            or self._process is not None
+            or self._reader_task is not None
+            or self._video_recovery_shim is not None
+            or self._media_active.is_set()
+        ):
+            raise ComelitMediaTransportError("media_release_unconfirmed")
+        return generation
 
     async def async_open_door(
         self,
@@ -993,8 +1027,12 @@ class ComelitEntranceMediaTransport:
             return
         if self._task is not None and not self._task.done():
             raise ComelitMediaTransportError("media_transport_start_in_progress")
+        if self._cleanup_complete_generation != self._generation:
+            raise ComelitMediaTransportError("media_release_unconfirmed")
 
         self._stopping = False
+        self._generation += 1
+        self._native_reaped = True  # No native process has been launched yet.
         self._last_error = None
         self._native_marker_tail.clear()
         self._native_p116_marker_tail.clear()
@@ -1201,6 +1239,8 @@ class ComelitEntranceMediaTransport:
             await self._async_stop_video_recovery_shim()
             await self._hass.async_add_executor_job(_remove_helper_secret)
             await self._hass.async_add_executor_job(_remove_local_sdp)
+            if self._native_reaped and self._reader_task is None:
+                self._cleanup_complete_generation = self._generation
 
     async def _async_run_cycle(self) -> None:
         await self._hass.async_add_executor_job(_native_gate)
@@ -1216,6 +1256,7 @@ class ComelitEntranceMediaTransport:
             env=child_env,
         )
         self._process = process
+        self._native_reaped = False
         self._reader_task = self._entry.async_create_background_task(
             self._hass,
             self._async_read_output(process),
@@ -1363,6 +1404,7 @@ class ComelitEntranceMediaTransport:
                 except asyncio.CancelledError:
                     pass
             self._reader_task = None
+            self._native_reaped = process.returncode is not None
 
     async def _async_read_output(self, process: asyncio.subprocess.Process) -> None:
         if process.stdout is None:
