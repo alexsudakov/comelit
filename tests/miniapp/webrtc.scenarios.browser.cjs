@@ -1159,13 +1159,22 @@ async function main() {
         "checking",
         false,
       );
-      await flush(page, 6000);
+      // Advance the mocked browser clock in interval-sized steps. A single
+      // runFor(6000) can coalesce asynchronous setInterval ticks on CI runners,
+      // bypassing the 5s media watchdog entirely in this synthetic scenario.
+      for (let second = 0; second < 7 && !event(posts, "fallback"); second++) {
+        await flush(page, 1000);
+      }
       assert.equal(event(posts, "rtp")?.state, "checking");
       assert.equal(event(posts, "rtp")?.counters.bytes_received, 0);
-      assert.equal(event(posts, "fallback")?.reason, "stats_deadline_checking");
+      assert.equal(
+        event(posts, "fallback")?.reason,
+        "stats_deadline_checking",
+        JSON.stringify(posts),
+      );
       assert.ok(
         event(posts, "fallback").elapsed_ms >= 5000 &&
-          event(posts, "fallback").elapsed_ms <= 6000,
+          event(posts, "fallback").elapsed_ms <= 7000,
         JSON.stringify(event(posts, "fallback")),
       );
       await finishScenario(posts);

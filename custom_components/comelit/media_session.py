@@ -493,21 +493,22 @@ class ComelitMediaSessionManager:
         self._last_error = f"start_failed:{type(exc).__name__}"
         self._shadow_hook.note_stop_reason("start_failed")
 
-        if self._transport.active:
-            try:
-                await self._transport.async_stop()
-            except Exception as stop_exc:
-                teardown_handle = self._shadow_hook.note_teardown(False)
-                self._last_error = f"start_cleanup_failed:{type(stop_exc).__name__}"
-                self._set_phase(MEDIA_PHASE_ERROR)
-                self._shadow_hook.seal_episode(
-                    "teardown_failed", teardown_handle
-                )
-                self._notify_diagnostic_terminal()
-                return
-            self._shadow_hook.note_teardown(True)
-        else:
-            self._shadow_hook.note_teardown(True)
+        # active=False only means native media is no longer producing RTP.
+        # The transport background task may still be reaping the child,
+        # stopping the recovery shim, and removing temporary SDP/credentials.
+        # async_stop() is idempotent and must finish even after native exit.
+        try:
+            await self._transport.async_stop()
+            if self._transport.active:
+                raise ComelitMediaSessionError("media_stop_not_confirmed")
+        except Exception as stop_exc:
+            teardown_handle = self._shadow_hook.note_teardown(False)
+            self._last_error = f"start_cleanup_failed:{type(stop_exc).__name__}"
+            self._set_phase(MEDIA_PHASE_ERROR)
+            self._shadow_hook.seal_episode("teardown_failed", teardown_handle)
+            self._notify_diagnostic_terminal()
+            return
+        self._shadow_hook.note_teardown(True)
 
         try:
             await self._listener.async_resume_after_media()
@@ -560,8 +561,10 @@ class ComelitMediaSessionManager:
         await self._cancel_background_task(watchdog_task)
 
         try:
-            if self._transport.active:
-                await self._transport.async_stop()
+            # A dead native child is not proof that its owner task and local
+            # cleanup finished. Always join the transport before allowing a
+            # listener resume, including on unexpected native exits.
+            await self._transport.async_stop()
             if self._transport.active:
                 raise ComelitMediaSessionError("media_stop_not_confirmed")
         except Exception as exc:

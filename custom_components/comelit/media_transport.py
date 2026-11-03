@@ -1127,6 +1127,15 @@ class ComelitEntranceMediaTransport:
         await self._hass.async_add_executor_job(_remove_helper_secret)
         await self._hass.async_add_executor_job(_remove_local_sdp)
         self._latency_timeline = None
+        if (
+            (process is not None and process.returncode is None)
+            or (task is not None and not task.done())
+            or self._task is not None
+            or self._process is not None
+            or self._reader_task is not None
+            or self._video_recovery_shim is not None
+        ):
+            raise ComelitMediaTransportError("media_teardown_not_confirmed")
 
     async def _async_start_video_recovery_shim(self) -> None:
         timeline = self._latency_timeline
