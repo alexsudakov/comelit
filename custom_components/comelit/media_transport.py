@@ -723,8 +723,20 @@ class ComelitEntranceMediaTransport:
             "video_recovery_last_error": diagnostics.last_error,
         }
 
+    async def async_prepare_native_identity_diagnostics(self) -> None:
+        """Refresh native identity outside HA's event loop during entry setup."""
+        await self._hass.async_add_executor_job(_native_binary_identity_diagnostics)
+
     def native_runtime_identity_diagnostics(self) -> dict[str, object]:
-        return _native_binary_identity_diagnostics()
+        """Return a cached snapshot: HA state attributes must not touch disk."""
+        cache = _NATIVE_BINARY_IDENTITY_CACHE
+        if cache is None:
+            return {
+                "native_binary_sha256": "not_checked",
+                "native_binary_expected_sha256": MEDIA_NATIVE_BINARY_SHA256,
+                "native_binary_sha256_match": False,
+            }
+        return dict(cache[1])
 
     def native_refresh_diagnostics(self) -> dict[str, int | bool | None]:
         diagnostics: dict[str, int | bool | None] = {

@@ -72,6 +72,9 @@ class _FakeMediaTransport:
         self.ring_shadow = kwargs.get("ring_shadow")
         self.stop_calls = 0
 
+    async def async_prepare_native_identity_diagnostics(self) -> None:
+        return None
+
     async def async_stop(self) -> None:
         self.stop_calls += 1
 
