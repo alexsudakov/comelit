@@ -1,0 +1,93 @@
+name: Package Comelit install candidate
+
+on:
+  pull_request:
+    paths:
+      - "custom_components/comelit/**"
+      - ".github/workflows/comelit-candidate-package.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and verify install archive
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          from hashlib import sha256
+          import json
+          import re
+          import zipfile
+
+          root = Path("custom_components/comelit")
+          version = json.loads((root / "manifest.json").read_text(encoding="utf-8"))["version"]
+          assert isinstance(version, str) and re.fullmatch(r"[0-9A-Za-z.]+", version)
+          source = (root / "media_transport.py").read_text(encoding="utf-8")
+          pin_match = re.search(
+              r'MEDIA_NATIVE_BINARY_SHA256\s*=\s*\(\s*"([0-9a-f]{64})"',
+              source,
+          )
+          assert pin_match, "media helper SHA pin missing"
+          assert sha256((root / "native/comelit-media").read_bytes()).hexdigest() == pin_match.group(1)
+          assert sha256((root / "native/comelit-v4").read_bytes()).hexdigest() == (
+              "0f1798bff9527b50fe6f72c2be7c10000cd1d1d08472da8ccb35aa08da3edbab"
+          )
+
+          included = sorted(
+              (p for p in root.rglob("*") if p.is_file()
+               and "__pycache__" not in p.parts
+               and p.suffix != ".pyc" and not p.name.startswith(".")),
+              key=lambda p: p.relative_to(root).as_posix(),
+          )
+          assert len(included) >= 70, "integration tree incomplete"
+          Path("dist").mkdir(exist_ok=True)
+          target = Path("dist") / f"comelit-{version}-HA-install.zip"
+          with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+              for file in included:
+                  relative = file.relative_to(root).as_posix()
+                  entry = zipfile.ZipInfo(
+                      f"custom_components/comelit/{relative}",
+                      date_time=(2026, 11, 3, 0, 0, 0),
+                  )
+                  entry.compress_type = zipfile.ZIP_DEFLATED
+                  entry.external_attr = (
+                      0o100755 if file.name in ("comelit-media", "comelit-v4")
+                      else 0o100644
+                  ) << 16
+                  archive.writestr(entry, file.read_bytes(), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+          with zipfile.ZipFile(target) as archive:
+              assert archive.testzip() is None
+              assert len(archive.namelist()) == len(included)
+              for file in included:
+                  assert archive.read(
+                      f"custom_components/comelit/{file.relative_to(root).as_posix()}"
+                  ) == file.read_bytes()
+          digest = sha256(target.read_bytes()).hexdigest()
+          Path("dist/SHA256SUMS.txt").write_text(
+              f"{digest}  {target.name}\n", encoding="utf-8"
+          )
+          print(f"PACKAGE={target}")
+          print(f"ARCHIVE_BYTES={target.stat().st_size}")
+          print(f"ARCHIVE_SHA256={digest}")
+          print(f"COMPONENT_FILES={len(included)}")
+          PY
+
+      - name: Upload HA installation archive and checksum to GitHub
+        uses: actions/upload-artifact@v4
+        with:
+          name: comelit-ha-install-candidate
+          path: |
+            dist/comelit-*-HA-install.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
