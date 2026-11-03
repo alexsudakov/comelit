@@ -179,7 +179,7 @@ class P80MediaSessionManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(listener.media_paused)
         self.assertFalse(transport.active)
         self.assertEqual(manager.phase, media.MEDIA_PHASE_INACTIVE)
-        self.assertEqual(events, ["listener_pause", "media_start:entrance", "listener_resume"])
+        self.assertEqual(events, ["listener_pause", "media_start:entrance", "media_stop", "listener_resume"])
 
     async def test_failed_teardown_keeps_listener_paused_fail_closed(self) -> None:
         manager, listener, transport, events = self.make_manager()
