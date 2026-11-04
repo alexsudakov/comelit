@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import re
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -68,8 +69,194 @@ R27_DECLARATION_BEFORE_USE = (
 sys.path.insert(0, str(MEDIA))
 
 import entrance_p116_r27_repeat_001a_transform as r27_transform
+import entrance_p126_refresh_defer_transform as p126_transform
 
 from entrance_p116_r27_repeat_001a_transform import transform
+
+
+def _c_function(candidate: str, name: str) -> str:
+    """Extract one complete generated-C function, preserving its real body."""
+    match = re.search(
+        rf"static gboolean\n{name}\([^\n]*\)\n\{{",
+        candidate,
+    )
+    if match is None:
+        raise AssertionError(f"generated function not found: {name}")
+    depth = 0
+    for index in range(match.end() - 1, len(candidate)):
+        if candidate[index] == "{":
+            depth += 1
+        elif candidate[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return candidate[match.start() : index + 1]
+    raise AssertionError(f"unterminated generated function: {name}")
+
+
+def _compile_and_run_p126_demux_harness(candidate: str, *, swallow: bool = False) -> str:
+    p99 = _c_function(candidate, "p99_state_scoped_structural_ack")
+    p122 = _c_function(candidate, "p122_note_control_frame")
+    handler = _c_function(candidate, "r27_handle_repeat_ack")
+    if swallow:
+        old = "    return FALSE;\n}"
+        if not handler.endswith(old):
+            raise AssertionError("P126 final non-consuming return anchor missing")
+        handler = handler[: -len(old)] + "    return TRUE;\n}"
+
+    harness = textwrap.dedent(
+        r'''
+        #include <stdint.h>
+        #include <stdio.h>
+        #include <string.h>
+
+        typedef int gboolean;
+        typedef unsigned int guint;
+        typedef uint8_t guint8;
+        typedef uint16_t guint16;
+        #define TRUE 1
+        #define FALSE 0
+
+        static guint16 v4_ctpp_channel_id = 7u;
+        static gboolean r27_repeat_outstanding;
+        static gboolean r27_repeat_ack_observed;
+        static guint r27_refresh_current_index;
+        static guint r27_refresh_last_accepted_index;
+        static guint r126_refresh_deferred_index;
+        static gboolean p122_door_waiting_ack;
+        static gboolean p122_door_ack_observed;
+        static gboolean p122_door_relay_event_observed;
+        static int consumed_count;
+        static int call_init_count;
+
+        static guint16 read_le16(const guint8 *p)
+        {
+            return (guint16)((guint16)p[0] | ((guint16)p[1] << 8));
+        }
+        static guint16 p122_read_le16(const guint8 *p)
+        {
+            return (guint16)((guint16)p[0] | ((guint16)p[1] << 8));
+        }
+        static gboolean r27_schedule_next_refresh(const char *reason)
+        {
+            (void)reason;
+            return TRUE;
+        }
+
+        __P99__
+        __P122__
+        __HANDLER__
+
+        static void dispatch(const guint8 *body, guint body_len)
+        {
+            guint16 prefix;
+            guint16 action;
+
+            /* Preserve the real P122-before-R27 priority from the composed TU. */
+            if (p122_door_waiting_ack) {
+                if (p122_note_control_frame(v4_ctpp_channel_id, body, body_len)) {
+                    consumed_count++;
+                    return;
+                }
+            } else if (r27_repeat_outstanding) {
+                if (r27_handle_repeat_ack(v4_ctpp_channel_id, body, body_len)) {
+                    consumed_count++;
+                    return;
+                }
+            }
+
+            if (!body || body_len < 8u)
+                return;
+            prefix = read_le16(body + 0u);
+            action = (guint16)((((guint16)body[6]) << 8) | (guint16)body[7]);
+            /* This is the real P12 CALL_INIT prefix/action condition. */
+            if (prefix == 0x18C0u && action == 0x0028u)
+                call_init_count++;
+        }
+
+        #define CHECK(expr) do { if (!(expr)) return __LINE__; } while (0)
+
+        int main(void)
+        {
+            guint8 ack[32] = {0};
+            guint8 call_init[72] = {0};
+            guint8 unknown[12] = {0};
+            guint8 release_body[12] = {0};
+            guint8 capabilities[12] = {0};
+            guint8 door_ack[8] = {0};
+
+            ack[0] = 0x00u; ack[1] = 0x18u;
+            ack[8] = ack[9] = ack[10] = ack[11] = 0xffu;
+            call_init[0] = 0xc0u; call_init[1] = 0x18u;
+            call_init[6] = 0x00u; call_init[7] = 0x28u;
+            unknown[0] = 0x40u; unknown[1] = 0x18u;
+            unknown[6] = 0x12u; unknown[7] = 0x34u;
+            release_body[0] = 0x60u; release_body[1] = 0x18u;
+            release_body[6] = 0x00u; release_body[7] = 0x01u;
+            capabilities[0] = 0x40u; capabilities[1] = 0x18u;
+            capabilities[6] = 0x00u; capabilities[7] = 0x09u;
+            door_ack[0] = 0x00u; door_ack[1] = 0x18u;
+
+            r27_refresh_current_index = 1u;
+            r27_repeat_outstanding = TRUE;
+            dispatch(call_init, sizeof(call_init));
+            CHECK(call_init_count == 1);
+            CHECK(consumed_count == 0);
+            CHECK(r27_repeat_outstanding == TRUE);
+            CHECK(r27_repeat_ack_observed == FALSE);
+            CHECK(r126_refresh_deferred_index == 1u);
+
+            dispatch(unknown, sizeof(unknown));
+            dispatch(release_body, sizeof(release_body));
+            dispatch(capabilities, sizeof(capabilities));
+            CHECK(consumed_count == 0);
+            CHECK(r27_repeat_outstanding == TRUE);
+            CHECK(r126_refresh_deferred_index == 1u);
+
+            dispatch(ack, sizeof(ack));
+            CHECK(consumed_count == 1);
+            CHECK(r27_repeat_outstanding == FALSE);
+            CHECK(r27_repeat_ack_observed == TRUE);
+            CHECK(r27_refresh_last_accepted_index == 1u);
+
+            r27_repeat_outstanding = TRUE;
+            r27_refresh_current_index = 2u;
+            p122_door_waiting_ack = TRUE;
+            dispatch(door_ack, sizeof(door_ack));
+            CHECK(p122_door_ack_observed == TRUE);
+            CHECK(consumed_count == 2);
+            CHECK(r27_repeat_outstanding == TRUE);
+            CHECK(r126_refresh_deferred_index == 1u);
+
+            puts("P126_DEMUX_HARNESS=PASS");
+            return 0;
+        }
+        '''
+    ).replace("__P99__", p99).replace("__P122__", p122).replace("__HANDLER__", handler)
+
+    with tempfile.TemporaryDirectory(prefix="p126-demux-") as tmp:
+        c_path = Path(tmp) / "p126_demux.c"
+        exe_path = Path(tmp) / "p126_demux"
+        c_path.write_text(harness, encoding="utf-8")
+        compiled = subprocess.run(
+            [
+                "/usr/bin/cc",
+                "-std=c99",
+                "-Wall",
+                "-Wextra",
+                "-pedantic",
+                str(c_path),
+                "-o",
+                str(exe_path),
+            ],
+            text=True,
+            capture_output=True,
+        )
+        if compiled.returncode != 0 or compiled.stderr:
+            raise AssertionError(compiled.stdout + compiled.stderr)
+        completed = subprocess.run([str(exe_path)], text=True, capture_output=True)
+        if completed.returncode != 0:
+            raise AssertionError(completed.stdout + completed.stderr)
+        return completed.stdout
 
 
 def _sha256_text(text: str) -> str:
@@ -1365,6 +1552,104 @@ sink_datagram_count "{count_file}"
 
     def test_behavioural_harness_video_rtp_last_seconds_uses_stream_last_packet(self) -> None:
         self.assertIn("HARNESS_PASS", _compile_and_run_harness(self.candidate))
+
+
+class P126RefreshDeferContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.source = SOURCE.read_text(encoding="utf-8")
+        cls.candidate_a = p126_transform.transform(cls.source)
+        cls.candidate_b = p126_transform.transform(cls.source)
+
+    def test_p126_applies_after_p125_with_owned_sha_gates(self) -> None:
+        self.assertEqual(
+            p126_transform.P125_TRANSFORM,
+            "entrance_p125_ringid_probe_media_transform.py",
+        )
+        self.assertEqual(
+            p126_transform.INPUT_SOURCE_SHA256,
+            "4bfdf264fbd74c5796d2386d835f0beeea15d23f8c3b1ea460323b7930b741a7",
+        )
+        self.assertEqual(self.candidate_a, self.candidate_b)
+        self.assertEqual(
+            _sha256_text(self.candidate_a),
+            "d6a8c50ffa318f617ad9bdeb9d1aca082c713f6c350a0b1ed60f4d486318062a",
+        )
+        self.assertEqual(self.candidate_a.count("static guint r126_refresh_deferred_index"), 1)
+        self.assertEqual(
+            self.candidate_a.count("SECOND_001A_ACK_CLASSIFICATION=DEFERRED"),
+            1,
+        )
+
+    def test_only_strict_p99_validator_accepts_refresh_ack(self) -> None:
+        handler = _c_function(self.candidate_a, "r27_handle_repeat_ack")
+        self.assertEqual(handler.count("p99_state_scoped_structural_ack("), 1)
+        self.assertIn("body_len != 32u", self.candidate_a)
+        self.assertIn("return FALSE;", handler)
+        self.assertNotIn("AMBIGUOUS", handler)
+        self.assertNotIn("r27_refresh_fail_closed = TRUE", handler)
+        self.assertNotIn("pseudotcp_begin_graceful_stop", handler)
+
+    def test_deferred_frame_falls_through_real_demux_and_door_keeps_priority(self) -> None:
+        self.assertIn(
+            "P126_DEMUX_HARNESS=PASS",
+            _compile_and_run_p126_demux_harness(self.candidate_a),
+        )
+        hook = self.candidate_a.split("} else if (p122_door_waiting_ack)", 1)[1]
+        self.assertLess(
+            hook.index("p122_note_control_frame"),
+            hook.index("r27_repeat_outstanding"),
+        )
+
+    def test_negative_swallow_control_fails_call_init_delivery(self) -> None:
+        with self.assertRaises(AssertionError):
+            _compile_and_run_p126_demux_harness(self.candidate_a, swallow=True)
+
+    def test_timeout_and_retransmit_suppression_are_unchanged(self) -> None:
+        p125_candidate = p126_transform.p125.transform(self.source)
+        timeout_start = "static gboolean\nr27_repeat_ack_timeout_cb(gpointer data)"
+        timeout_end = "static gboolean\nr27_handle_repeat_ack("
+        before = p125_candidate.split(timeout_start, 1)[1].split(timeout_end, 1)[0]
+        after = self.candidate_a.split(timeout_start, 1)[1].split(timeout_end, 1)[0]
+        self.assertEqual(before, after)
+        self.assertIn("#define R27_REPEAT_ACK_TIMEOUT_SECONDS 5u", self.candidate_a)
+        self.assertIn("SECOND_001A_RESPONSE=ABSENT", after)
+        self.assertIn("REFRESH_FAIL_CLOSED=true", after)
+        self.assertIn("v4_ring_is_retransmit(", self.candidate_a)
+
+    def test_no_adoption_or_new_tx_kind(self) -> None:
+        self.assertNotIn("R45_", self.candidate_a)
+        self.assertNotIn("R54_", self.candidate_a)
+        p125_candidate = p126_transform.p125.transform(self.source)
+        p125_tx_kinds = set(re.findall(r"\b(?:P12|P78|R27|P122)_TX_[A-Z0-9_]+", p125_candidate))
+        p126_tx_kinds = set(re.findall(r"\b(?:P12|P78|R27|P122)_TX_[A-Z0-9_]+", self.candidate_a))
+        self.assertEqual(p126_tx_kinds, p125_tx_kinds)
+
+    def test_whole_generated_translation_unit_compiles_without_warnings(self) -> None:
+        cc = shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
+        if not cc:
+            self.skipTest("no C compiler available")
+        stub_include = Path(__file__).resolve().parent / "native" / "whole_tu_stub_include"
+        with tempfile.TemporaryDirectory(prefix="p126-tu-") as tmp:
+            tu = Path(tmp) / "p126-whole-tu.c"
+            tu.write_text(self.candidate_a, encoding="utf-8")
+            result = subprocess.run(
+                [
+                    cc,
+                    "-std=c99",
+                    "-fsyntax-only",
+                    "-Wall",
+                    "-Wextra",
+                    "-pedantic",
+                    "-I",
+                    str(stub_include),
+                    str(tu),
+                ],
+                text=True,
+                capture_output=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr[:5000])
+        self.assertEqual(result.stderr, "")
 
 
 if __name__ == "__main__":

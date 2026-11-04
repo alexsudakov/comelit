@@ -169,6 +169,19 @@ def test_default_is_not_observed_not_absent() -> None:
     assert ledger.snapshot()["episodes"][0]["second_001a_response"] == "ABSENT"
 
 
+def test_deferred_refresh_ack_diagnostics_are_accepted() -> None:
+    ledger, _ = _ledger()
+    ledger.note_media_start(1)
+    ledger.observe_native_line("SECOND_001A_RESPONSE=DEFERRED", 1)
+    ledger.observe_native_line("SECOND_001A_ACK_CLASSIFICATION=DEFERRED", 1)
+
+    snapshot = ledger.snapshot()
+    episode = snapshot["episodes"][0]
+    assert episode["second_001a_response"] == "DEFERRED"
+    assert episode["ack_classification"] == "DEFERRED"
+    assert snapshot["dropped_invalid"] == 0
+
+
 def test_generation_isolation_rejects_stale_callbacks_after_new_episode() -> None:
     ledger, _ = _ledger()
     ledger.note_media_start(1)
