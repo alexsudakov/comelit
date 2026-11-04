@@ -6,6 +6,8 @@
 
 > **Owner observation, 2026-11-04, separate from this capture:** The owner retested the original Android application and confirmed that displayed video **does interrupt during an incoming call**. This supersedes the prior user-reported *uninterrupted-video assumption* in Issue #319. It is a direct UI observation, not synchronized new packet evidence. In this existing capture, media was already stopped 12.7 s before the later inbound INVITE; these two facts must not be conflated.
 
+> **Later evidence (2026-11-04):** A **new**, distinct capture demonstrates panel-initiated preview `RELEASE` immediately followed by incoming `INVITE` while the original-app preview had been actively receiving RTP. See [Ring interrupts active preview — packet-level analysis](issue-319-official-app-ring-interrupt-active-preview-2026-11-04.md). The older capture analyzed below remains valid for its **sequential** (non-overlapping) scenario only.
+
 ## 1. Source, integrity and privacy
 
 - Input: user-provided `PCAPdroid_04_нояб._12_06_55 (1).pcap` (filename is not a proof of capture start time).
