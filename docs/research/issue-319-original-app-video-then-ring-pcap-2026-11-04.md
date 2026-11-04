@@ -4,6 +4,8 @@
 **Status:** `OFFLINE_PCAP_PARSED / TARGET_OVERLAP_NOT_REPRODUCED / P0-A_NOT_FIXED / P0-B_NOT_FIXED`  
 **Scope:** owner-supplied original Android-app capture, independent offline packet inspection; no Hermes, no application instrumentation, no replay, no live HA operation, no production source change.
 
+> **Owner observation, 2026-11-04, separate from this capture:** The owner retested the original Android application and confirmed that displayed video **does interrupt during an incoming call**. This supersedes the prior user-reported *uninterrupted-video assumption* in Issue #319. It is a direct UI observation, not synchronized new packet evidence. In this existing capture, media was already stopped 12.7 s before the later inbound INVITE; these two facts must not be conflated.
+
 ## 1. Source, integrity and privacy
 
 - Input: user-provided `PCAPdroid_04_нояб._12_06_55 (1).pcap` (filename is not a proof of capture start time).
@@ -91,7 +93,7 @@ In the current Comelit `1.7.32b25` media-owner source, Ring signals are still ro
 
 ## 7. Proposed next evidence, no server intervention
 
-To test #319 exactly, restart one owner-controlled PCAPdroid capture **before** opening preview; open original-app video, and trigger the **one physical Ring while the video is visibly on-screen, well before ~60 s from preview start**. Capture the moment of Ring with an approximate wallclock note or screen recording. Record to at least 15–30 s after incoming INVITE and user-observed behaviour; terminate normally, no Door/Gate. Do not ask the server to open a second upstream or introduce any synthetic protocol TX.
+Only if the precise on-wire transition is still needed for a safe implementation, a new owner-controlled PCAPdroid capture may start **before** opening preview; open original-app video, and trigger the **one physical Ring while the video is visibly on-screen, well before ~60 s from preview start**. Capture the moment of Ring with an approximate wallclock note or screen recording. Record to at least 15–30 s after incoming INVITE and user-observed behaviour; terminate normally, no Door/Gate. Do not ask the server to open a second upstream or introduce any synthetic protocol TX.
 
 **Acceptance gate for capture C:**
 `ACTIVE_PREVIEW_RTP_AT_RING=true` must be supported by RTP timestamps bracketed around the device's new inbound INVITE, not assumed from the existence of a prior video stream. If the original app first closes or switches media before INVITE, report precise order and do not claim uninterrupted *same-channel* RTP. Separately examine whether client releases first CTP before new INVITE and whether the original app keeps a UI frame during the gap.
@@ -103,3 +105,16 @@ Until a suitable capture is available, **no proposed code modifications and no H
 This report contains only protocol classifications, counts and timing. The raw PCAP may include sensitive network routes, device IDs, authentication/camera data. Do not commit it to the public Comelit repository. The owner requested GitHub archival of raw captures; this remains **PENDING_PRIVATE_DESTINATION**. No new dedicated private evidence repo was found in the owner's connected repository list; do not deposit raw data into unrelated private source repositories. Preserve original raw SHA256 and use private restricted storage once a suitable destination is available.
 
 `RAW_PCAP_PUBLIC=false`, `CODE_CHANGED=false`, `HERMES_USED=false`, `PHYSICAL_ACTION_BY_ASSISTANT=false`, `P0_A_FIXED=false`, `P0_B_FIXED=false`.
+
+## 9. Owner correction and revised acceptance (2026-11-04)
+
+**Owner observation (not PCAP-proven):** The original Comelit app's user-visible video is interrupted during a call. This supersedes the 2026-10-23 report of uninterrupted viewing in the original app. It does **not** establish exactly why the panel/client stops media, or show a new overlapping `CALL_INIT` capture. Both reuploaded PCAPs are SHA256-identical to the two prior analyzed files; no new protocol trace was supplied.
+
+**Revised acceptance for Telegram Mini App:**
+
+- **P0-A still BLOCKED/NOT_FIXED:** Incoming Ring must be delivered while on-demand owns the single upstream; prevent same-call duplicates without suppressing a genuine second call. `frame_sha`, CTP connection ID, episode ID and owner generation alone do not prove unique physical call identity.
+- **P0-B reframe:** Continuous on-demand RTP through incoming Ring is **not mandatory** if the official app itself interrupts video. The target is a deliberate, comprehensible UI switch/stop and correct call handling; no unnecessary competing upstream, native crashes, spurious `camera_stream_unavailable`/`REFRESH_FAIL_CLOSED`, silent dropped Ring, leaked media lease, or failure to restore listener. Incoming-call video, if required, still needs proven call-scoped media ownership.
+- The older observation of our helper's RTP starvation with surviving control flow is still a real symptom. The updated reference-app observation does **not** retroactively prove that our stop/error handling was correct.
+- A new overlapping PCAP is **optional only if** an exact video→Ring protocol transition remains necessary. Do not force another physical trial merely to prove uninterrupted video, which is no longer a requirement. A narrower server read-only inquiry may follow only a specifically identified missing runtime fact.
+
+**Issue lifecycle note:** Issue #319 was accidentally marked CLOSED at the documentation PR #332 merge boundary even though source code did not fix either P0; it has been reopened to preserve the accurate engineering state.
