@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 
 from aiohttp import ClientError, ClientSession
 
 ENDPOINT = "https://api.comelitgroup.com/servicerest/p2p/start"
+
+_LOGGER = logging.getLogger(__name__)
+_SAFE_RESULT_ENUMS = frozenset({"SUCCESS", "TIMEOUT"})
 
 
 class ComelitCloudError(RuntimeError):
@@ -31,6 +35,50 @@ def _validate_remote_sdp(remote: str) -> None:
     has_candidate = any(line.startswith("a=candidate:") for line in lines)
     if not (has_ufrag and has_pwd and has_candidate):
         raise ComelitCloudError("remote_sdp_incomplete")
+
+
+def _json_type(value: object) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, (int, float)):
+        return "number"
+    return "unknown"
+
+
+def _log_response_diagnostics(raw: bytes, obj: object | None = None) -> None:
+    """Log only bounded response-shape metadata, never server values or keys."""
+    is_object = isinstance(obj, dict)
+    result_present = is_object and "result" in obj
+    result = obj.get("result") if is_object else None
+    data_present = is_object and "data" in obj
+    data = obj.get("data") if is_object else None
+
+    diagnostics = {
+        "response_bytes": len(raw),
+        "top_level_field_count": len(obj) if is_object else 0,
+        "result_present": result_present,
+        "result_type": _json_type(result) if result_present else "missing",
+        "result_enum": (
+            result
+            if isinstance(result, str) and result in _SAFE_RESULT_ENUMS
+            else "UNKNOWN"
+        ),
+        "data_present": data_present,
+        "data_type": _json_type(data) if data_present else "missing",
+        "sdp_present": isinstance(data, dict) and "sdp" in data,
+    }
+    _LOGGER.info(
+        "Comelit cloud P2P response diagnostics: %s",
+        json.dumps(diagnostics, separators=(",", ":"), sort_keys=True),
+    )
 
 
 async def async_negotiate_p2p(
@@ -82,12 +130,16 @@ async def async_negotiate_p2p(
     # not JSON so the runtime can perform exactly one OAuth refresh and retry
     # only this P2P bootstrap request.
     if not 200 <= status < 300:
+        _log_response_diagnostics(raw)
         raise ComelitCloudHttpError(status)
 
     try:
         obj = json.loads(raw.decode("utf-8", errors="replace"))
     except (UnicodeError, json.JSONDecodeError) as exc:
+        _log_response_diagnostics(raw)
         raise ComelitCloudError("response_not_json") from exc
+
+    _log_response_diagnostics(raw, obj)
 
     if not isinstance(obj, dict):
         raise ComelitCloudError("response_not_object")
