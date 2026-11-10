@@ -21,13 +21,22 @@
           "oauth_refresh_token": "OAuth refresh token",
           "oauth_scope": "OAuth scope"
         }
+      },
+      "reconfigure": {
+        "title": "Update Comelit ViP token",
+        "description": "Enter the replacement ViP token.",
+        "data": {
+          "vip_token": "ViP token"
+        }
       }
     },
     "error": {
       "invalid_config": "Check the Device UUID, ViP token and OAuth tokens"
     },
     "abort": {
-      "already_configured": "This Comelit device is already configured"
+      "already_configured": "This Comelit device is already configured",
+      "reconfigure_successful": "The ViP token was updated",
+      "vip_token_unchanged": "The ViP token is unchanged"
     }
   },
   "services": {
