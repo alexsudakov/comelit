@@ -179,6 +179,39 @@ class ComelitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ):
+        """Replace only the ViP token and reload the existing entry."""
+        errors: dict[str, str] = {}
+        entry = self._get_reconfigure_entry()
+
+        if user_input is not None:
+            try:
+                vip_token = _vip_token(user_input[CONF_VIP_TOKEN])
+            except (ValueError, KeyError):
+                errors["base"] = "invalid_config"
+            else:
+                if vip_token == entry.data.get(CONF_VIP_TOKEN):
+                    return self.async_abort(reason="vip_token_unchanged")
+                return self.async_update_reload_and_abort(
+                    entry,
+                    data_updates={CONF_VIP_TOKEN: vip_token},
+                )
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_VIP_TOKEN): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                )
+            }
+        )
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=schema,
+            errors=errors,
+        )
+
 
 class ComelitOptionsFlow(config_entries.OptionsFlow):
     """Configure optional Comelit product surfaces."""
