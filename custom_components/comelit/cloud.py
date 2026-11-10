@@ -10,6 +10,7 @@ ENDPOINT = "https://api.comelitgroup.com/servicerest/p2p/start"
 
 _LOGGER = logging.getLogger(__name__)
 _MISSING = object()
+_RESULT_ENUMS = frozenset({"SUCCESS", "TIMEOUT"})
 
 
 class ComelitCloudError(RuntimeError):
@@ -41,28 +42,66 @@ def _log_response_validation_failure(
     reason: str,
     *,
     status: int,
+    response_bytes: int,
     obj: object = _MISSING,
 ) -> None:
     """Log bounded structural evidence without response keys or values."""
     is_object = isinstance(obj, dict)
+    result = obj.get("result", _MISSING) if is_object else _MISSING
     data = obj.get("data", _MISSING) if is_object else _MISSING
+    result_present = result is not _MISSING
     data_present = data is not _MISSING
-    data_type = type(data).__name__ if data_present else "missing"
+    result_type = _json_type(result)
+    data_type = _json_type(data)
+    result_enum = (
+        result
+        if isinstance(result, str) and result in _RESULT_ENUMS
+        else "UNKNOWN"
+    )
+    sdp_present = isinstance(data, dict) and "sdp" in data
 
     _LOGGER.warning(
         "Comelit cloud P2P response validation failed: "
-        "reason=%s status=%d data_present=%s data_type=%s "
+        "reason=%s status=%d response_bytes=%d "
+        "result_present=%s result_type=%s result_enum=%s "
+        "data_present=%s data_type=%s sdp_present=%s "
         "top_level_field_count=%d data_field_present=%s "
         "error_field_present=%s code_field_present=%s",
         reason,
         status,
+        response_bytes,
+        result_present,
+        result_type,
+        result_enum,
         data_present,
         data_type,
+        sdp_present,
         len(obj) if is_object else 0,
         data_present,
         is_object and "error" in obj,
         is_object and "code" in obj,
     )
+
+
+def _json_type(value: object) -> str:
+    """Return a bounded JSON type label without rendering the value."""
+    if value is _MISSING:
+        return "missing"
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    # json.loads() cannot produce any other type. Keep the diagnostic label
+    # inside the closed vocabulary even if this helper is called directly.
+    return "missing"
 
 
 async def async_negotiate_p2p(
@@ -119,23 +158,32 @@ async def async_negotiate_p2p(
     try:
         obj = json.loads(raw.decode("utf-8", errors="replace"))
     except (UnicodeError, json.JSONDecodeError) as exc:
-        _log_response_validation_failure("response_not_json", status=status)
+        _log_response_validation_failure(
+            "response_not_json", status=status, response_bytes=len(raw)
+        )
         raise ComelitCloudError("response_not_json") from exc
 
     if not isinstance(obj, dict):
         _log_response_validation_failure(
-            "response_not_object", status=status, obj=obj
+            "response_not_object",
+            status=status,
+            response_bytes=len(raw),
+            obj=obj,
         )
         raise ComelitCloudError("response_not_object")
 
     data = obj.get("data")
     if not isinstance(data, dict):
-        _log_response_validation_failure("data_not_object", status=status, obj=obj)
+        _log_response_validation_failure(
+            "data_not_object", status=status, response_bytes=len(raw), obj=obj
+        )
         raise ComelitCloudError("data_not_object")
 
     encoded_remote = data.get("sdp")
     if not isinstance(encoded_remote, str) or not encoded_remote:
-        _log_response_validation_failure("remote_sdp_missing", status=status, obj=obj)
+        _log_response_validation_failure(
+            "remote_sdp_missing", status=status, response_bytes=len(raw), obj=obj
+        )
         raise ComelitCloudError("remote_sdp_missing")
 
     try:
@@ -143,7 +191,10 @@ async def async_negotiate_p2p(
         remote = remote_bytes.decode("utf-8")
     except (ValueError, UnicodeError) as exc:
         _log_response_validation_failure(
-            "remote_sdp_decode_failed", status=status, obj=obj
+            "remote_sdp_decode_failed",
+            status=status,
+            response_bytes=len(raw),
+            obj=obj,
         )
         raise ComelitCloudError("remote_sdp_decode_failed") from exc
 
@@ -151,7 +202,10 @@ async def async_negotiate_p2p(
         _validate_remote_sdp(remote)
     except ComelitCloudError:
         _log_response_validation_failure(
-            "remote_sdp_incomplete", status=status, obj=obj
+            "remote_sdp_incomplete",
+            status=status,
+            response_bytes=len(raw),
+            obj=obj,
         )
         raise
     return remote

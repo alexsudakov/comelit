@@ -44,7 +44,12 @@ SECRET_MARKERS = (
     "marker-device-uuid",
     "marker-entry-id",
     "marker-response-secret",
+    "unknown-secret-key",
+    "marker-code",
+    "hidden",
+    "123e4567-e89b-12d3-a456-426614174000",
     REMOTE_SDP,
+    base64.b64encode(REMOTE_SDP.encode()).decode(),
 )
 
 
@@ -98,11 +103,35 @@ def _warning_messages(caplog) -> list[str]:
     ]
 
 
+def _assert_safe_warning(caplog, **expected: object) -> str:
+    messages = _warning_messages(caplog)
+    assert len(messages) == 1
+    message = messages[0]
+    for field in (
+        "response_bytes",
+        "result_present",
+        "result_type",
+        "result_enum",
+        "data_present",
+        "data_type",
+        "sdp_present",
+        "top_level_field_count",
+    ):
+        assert f"{field}=" in message
+    for field, value in expected.items():
+        assert f"{field}={value}" in message
+    for marker in SECRET_MARKERS:
+        assert marker not in message
+    return message
+
+
 def test_success_returns_remote_sdp_without_diagnostic_warning(caplog) -> None:
     encoded = base64.b64encode(REMOTE_SDP.encode()).decode()
 
     with caplog.at_level(logging.WARNING, logger=cloud.__name__):
-        remote, session = _negotiate(200, {"data": {"sdp": encoded}})
+        remote, session = _negotiate(
+            200, {"result": "SUCCESS", "data": {"sdp": encoded}}
+        )
 
     assert remote == REMOTE_SDP
     assert session.post_calls == 1
@@ -110,57 +139,178 @@ def test_success_returns_remote_sdp_without_diagnostic_warning(caplog) -> None:
 
 
 @pytest.mark.parametrize(
-    ("payload", "expected_type", "expected_count", "expected_fields"),
+    (
+        "payload",
+        "result_type",
+        "result_enum",
+        "data_type",
+        "expected_count",
+        "existing_fields",
+    ),
     [
         (
-            {"data": None, "error": "marker-response-secret"},
-            "NoneType",
+            {"result": "TIMEOUT", "data": None},
+            "string",
+            "TIMEOUT",
+            "null",
             2,
-            ("True", "True", "False"),
+            {"error_field_present": False, "code_field_present": False},
+        ),
+        (
+            {
+                "result": "UNEXPECTED",
+                "error": "123e4567-e89b-12d3-a456-426614174000",
+            },
+            "string",
+            "UNKNOWN",
+            "missing",
+            2,
+            {"error_field_present": True, "code_field_present": False},
+        ),
+        (
+            {"result": "token-looking.marker-response-secret", "data": []},
+            "string",
+            "UNKNOWN",
+            "array",
+            2,
+            {"error_field_present": False, "code_field_present": False},
+        ),
+        (
+            {"data": "marker-response-secret"},
+            "missing",
+            "UNKNOWN",
+            "string",
+            1,
+            {"error_field_present": False, "code_field_present": False},
+        ),
+        (
+            {"data": None, "error": "marker-response-secret"},
+            "missing",
+            "UNKNOWN",
+            "null",
+            2,
+            {"error_field_present": True, "code_field_present": False},
         ),
         (
             {"error": "marker-response-secret", "code": "marker-code"},
             "missing",
+            "UNKNOWN",
+            "missing",
             2,
-            ("False", "True", "True"),
+            {"error_field_present": True, "code_field_present": True},
         ),
         (
             {"data": ["marker-response-secret"], "unknown-secret-key": "hidden"},
-            "list",
+            "missing",
+            "UNKNOWN",
+            "array",
             2,
-            ("True", "False", "False"),
-        ),
-        (
-            {"data": "marker-response-secret"},
-            "str",
-            1,
-            ("True", "False", "False"),
+            {"error_field_present": False, "code_field_present": False},
         ),
     ],
 )
-def test_data_not_object_logs_only_bounded_structure(
-    caplog, payload, expected_type, expected_count, expected_fields
+def test_result_and_invalid_data_log_only_bounded_structure(
+    caplog,
+    payload,
+    result_type,
+    result_enum,
+    data_type,
+    expected_count,
+    existing_fields,
 ) -> None:
     with caplog.at_level(logging.WARNING, logger=cloud.__name__):
         with pytest.raises(cloud.ComelitCloudError, match="^data_not_object$"):
             _negotiate(200, payload)
 
-    assert len(_warning_messages(caplog)) == 1
-    message = _warning_messages(caplog)[0]
-    data_present, error_present, code_present = expected_fields
-    assert message == (
-        "Comelit cloud P2P response validation failed: "
-        f"reason=data_not_object status=200 data_present={data_present} "
-        f"data_type={expected_type} top_level_field_count={expected_count} "
-        f"data_field_present={data_present} "
-        f"error_field_present={error_present} code_field_present={code_present}"
+    body = json.dumps(payload).encode()
+    _assert_safe_warning(
+        caplog,
+        reason="data_not_object",
+        status=200,
+        response_bytes=len(body),
+        result_present=str("result" in payload),
+        result_type=result_type,
+        result_enum=result_enum,
+        data_present=str("data" in payload),
+        data_type=data_type,
+        sdp_present=False,
+        top_level_field_count=expected_count,
+        **existing_fields,
     )
-    assert "unknown-secret-key" not in message
-    for marker in SECRET_MARKERS:
-        assert marker not in message
 
 
-@pytest.mark.parametrize("status", [401, 429, 500])
+@pytest.mark.parametrize(
+    ("body", "error", "reason", "expected"),
+    [
+        (
+            b'{"result":"SUCCESS",broken',
+            "response_not_json",
+            "response_not_json",
+            {"result_present": False, "result_type": "missing"},
+        ),
+        (
+            json.dumps(["marker-response-secret"]).encode(),
+            "response_not_object",
+            "response_not_object",
+            {"top_level_field_count": 0},
+        ),
+    ],
+)
+def test_malformed_or_non_object_response_logs_one_safe_warning(
+    caplog, body, error, reason, expected
+) -> None:
+    session = _Session(200, body)
+    with caplog.at_level(logging.WARNING, logger=cloud.__name__):
+        with pytest.raises(cloud.ComelitCloudError, match=f"^{error}$"):
+            asyncio.run(
+                cloud.async_negotiate_p2p(
+                    session,
+                    device_uuid="marker-device-uuid",
+                    vip_token="marker-vip-secret",
+                    oauth_access_token="marker-oauth-secret",
+                    offer_sdp="marker-offer-sdp",
+                )
+            )
+
+    _assert_safe_warning(
+        caplog,
+        reason=reason,
+        response_bytes=len(body),
+        result_enum="UNKNOWN",
+        data_present=False,
+        data_type="missing",
+        sdp_present=False,
+        **expected,
+    )
+
+
+def test_invalid_sdp_does_not_log_sdp_or_raw_body(caplog) -> None:
+    encoded = base64.b64encode(REMOTE_SDP.encode()).decode()[:-1] + "!"
+    payload = {
+        "result": "SUCCESS",
+        "data": {"sdp": encoded},
+        "unknown-secret-key": "marker-response-secret",
+    }
+
+    with caplog.at_level(logging.WARNING, logger=cloud.__name__):
+        with pytest.raises(cloud.ComelitCloudError, match="remote_sdp_decode_failed"):
+            _negotiate(200, payload)
+
+    _assert_safe_warning(
+        caplog,
+        reason="remote_sdp_decode_failed",
+        result_present=True,
+        result_type="string",
+        result_enum="SUCCESS",
+        data_present=True,
+        data_type="object",
+        sdp_present=True,
+        top_level_field_count=3,
+    )
+    assert json.dumps(payload) not in _warning_messages(caplog)[0]
+
+
+@pytest.mark.parametrize("status", [401, 403, 429, 500])
 def test_http_errors_precede_body_parsing_and_emit_no_validation_warning(
     caplog, status
 ) -> None:
