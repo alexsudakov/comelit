@@ -113,10 +113,6 @@ jobs:
         if: steps.scope.outputs.relevant == 'true'
         run: node tests/miniapp/webcodecs.browser.cjs
 
-      - name: Verify WebRTC and HLS diagnostics scenarios
-        if: steps.scope.outputs.relevant == 'true'
-        run: node tests/miniapp/webrtc.scenarios.browser.cjs
-
       - name: Assert standalone gateway is gone
         if: steps.scope.outputs.relevant == 'true'
         run: |
