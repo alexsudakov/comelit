@@ -339,7 +339,7 @@ class Issue319MediaOwnerCallAdapterTests(unittest.TestCase):
 
     def test_packaged_native_helpers_match_base_evidence(self):
         expected = {
-            "comelit-media": "2a10b69e6c7e0565fa088b509904df1779478f0227fbbb8f6d4ba12034d8f045",
+            "comelit-media": "b046e50bc9927c8947e9811cee20276d945c989389abe5ac37a6ee46a5416dab",
             "comelit-v4": "0f1798bff9527b50fe6f72c2be7c10000cd1d1d08472da8ccb35aa08da3edbab",
         }
         native = ROOT.parent / "custom_components" / "comelit" / "native"

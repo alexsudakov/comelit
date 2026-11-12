@@ -14,7 +14,7 @@ PINNED = ROOT / "custom_components" / "comelit" / "native" / "comelit-media"
 MEDIA_TRANSPORT = ROOT / "custom_components" / "comelit" / "media_transport.py"
 P116_BUILD_META = ROOT / "safety-poc" / "research" / "media" / "v1" / "p116_media_telemetry_build_meta.txt"
 R65_BUILD_META = ROOT / "safety-poc" / "research" / "media" / "v1" / "p116_r65_production_media_build_meta.txt"
-P125_BUILD_META = ROOT / "safety-poc" / "research" / "media" / "v1" / "p125_ringid_probe_media_build_meta.txt"
+P126_BUILD_META = ROOT / "safety-poc" / "research" / "media" / "v1" / "p126_refresh_defer_build_meta.txt"
 P114_BUILD_META = ROOT / "safety-poc" / "research" / "media" / "v1" / "p114_media_diagnostics_build_meta.txt"
 HISTORICAL_PINNED = ROOT / ".p116-evidence" / "bin" / "pinned-historical.bin"
 REBUILT = ROOT / ".p116-evidence" / "bin" / "rebuilt-historical-source.bin"
@@ -25,7 +25,7 @@ REBUILT = ROOT / ".p116-evidence" / "bin" / "rebuilt-historical-source.bin"
 # p116_r65_production_media_build_meta.txt (frozen record, left unmodified)
 # documents as the artifact it built; PRE_R65_PACKAGED_* are what
 # p116_media_telemetry_build_meta.txt (also a historical record) documents.
-PINNED_SHA256 = "2a10b69e6c7e0565fa088b509904df1779478f0227fbbb8f6d4ba12034d8f045"
+PINNED_SHA256 = "b046e50bc9927c8947e9811cee20276d945c989389abe5ac37a6ee46a5416dab"
 SUPERSEDED_R65_BINARY_SHA256 = "76218861c72e9a2b87283df6c5c7e0b03a4d7fb11bee4364f59be1513acd6129"
 R65_SOURCE_SHA256 = "4fc6188c6231b94682205973b6a6f628ca005e8b7c3a04efbd8056c5a608c58c"
 PRE_R65_PACKAGED_BINARY_SHA256 = "a336477aa3564f4c99983a71621fc630885c55bf7ff07909bc70838d851a49b8"
@@ -270,7 +270,7 @@ class P116ProvenanceBinaryAnalysisTests(unittest.TestCase):
         media_dir = ROOT / "safety-poc" / "research" / "media" / "v1"
         candidate_metas = [
             *sorted(media_dir.glob("p1*_production_media_build_meta.txt")),
-            P125_BUILD_META,
+            P126_BUILD_META,
         ]
         for candidate_meta in candidate_metas:
             data = _metadata(candidate_meta)

@@ -26,11 +26,10 @@ P80_BUILDER = MEDIA_DIR / "ct120_build_p80_haos_media_helper.sh"
 # p116_r65_production_media_build_meta.txt is the frozen record of the
 # superseded R65 pair.
 #
-# P125 ring-id probe has a completed observability-only native promotion. The
-# packaged binary is verified against the promoted artifact recorded here, not
-# against the current HEAD P116/P122 source identity.
-BUILD_META = MEDIA_DIR / "p125_ringid_probe_media_build_meta.txt"
-P125_REBUILD_RECORD = MEDIA_DIR / "p125_ringid_probe_media_rebuild_record.txt"
+# P126 refresh-ACK deferral has a completed operator-controlled reproducible
+# native promotion. Historical P125 provenance remains frozen.
+BUILD_META = MEDIA_DIR / "p126_refresh_defer_build_meta.txt"
+P126_REBUILD_RECORD = MEDIA_DIR / "p126_refresh_defer_rebuild_record.txt"
 FROZEN_P124_BUILD_META = MEDIA_DIR / "p124_ctpp_refresh15_production_media_build_meta.txt"
 FROZEN_P123_BUILD_META = (
     MEDIA_DIR / "p123_manual_p122_door_repeat_production_media_build_meta.txt"
@@ -62,13 +61,13 @@ SUPERSEDED_P124_SOURCE_SHA256 = "92e12f5a27dd728231e073076429863cdc059825819f4f6
 FROZEN_P117_BUILD_META = MEDIA_DIR / "p117_settle1000_production_media_build_meta.txt"
 FROZEN_R65_BUILD_META = MEDIA_DIR / "p116_r65_production_media_build_meta.txt"
 PRE_R65_BUILD_META = MEDIA_DIR / "p116_media_telemetry_build_meta.txt"
-EXPECTED_MUSL_SHA256 = "2a10b69e6c7e0565fa088b509904df1779478f0227fbbb8f6d4ba12034d8f045"
+EXPECTED_MUSL_SHA256 = "b046e50bc9927c8947e9811cee20276d945c989389abe5ac37a6ee46a5416dab"
 EXPECTED_RUN3_GLIBC_SHA256 = "94063498a35a886dc4cb735c3e629a5097b965224cb3354192723d30e70c16ac"
 # PACKAGED_NATIVE_SOURCE_SHA256 is the source identity actually baked into the
 # packaged EXPECTED_MUSL_SHA256 binary. HEAD_P116_SOURCE_SHA256 is what
 # regenerating HEAD's canonical P116/P122 candidate produces without the
 # observability overlay.
-PACKAGED_NATIVE_SOURCE_SHA256 = "4bfdf264fbd74c5796d2386d835f0beeea15d23f8c3b1ea460323b7930b741a7"
+PACKAGED_NATIVE_SOURCE_SHA256 = "d6a8c50ffa318f617ad9bdeb9d1aca082c713f6c350a0b1ed60f4d486318062a"
 HEAD_P116_SOURCE_SHA256 = "92e12f5a27dd728231e073076429863cdc059825819f4f600d5d3dd50138ca26"
 # The P117 pair is now a historical record: these must stay literal values so
 # they keep describing the artifact P117 actually built, not the current pins.
@@ -248,20 +247,19 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         frozen_p119_meta = _metadata(FROZEN_P119_BUILD_META)
         frozen_p122_active_meta = _metadata(FROZEN_P122_ACTIVE_BUILD_META)
         frozen_p122_on_demand_meta = _metadata(FROZEN_P122_ON_DEMAND_BUILD_META)
-        self.assertEqual(meta["phase"], "P125_RINGID_PROBE_MEDIA_OBSERVABILITY_ONLY")
-        self.assertEqual(meta["observability_only"], "true")
+        self.assertEqual(meta["phase"], "P126_REFRESH_ACK_CLASSIFICATION_DEFER")
+        self.assertEqual(meta["produced_by"], "operator_controlled_build_not_developer")
         self.assertEqual(
-            meta["reproducible_build_record"],
-            "safety-poc/research/media/v1/p125_ringid_probe_media_rebuild_record.txt",
+            meta["reproducible_build_record_a"],
+            "safety-poc/research/media/v1/p126_refresh_defer_rebuild_record.txt",
         )
-        self.assertTrue(P125_REBUILD_RECORD.is_file())
-        rebuild_record = _metadata(P125_REBUILD_RECORD)
+        self.assertTrue(P126_REBUILD_RECORD.is_file())
+        rebuild_record = _metadata(P126_REBUILD_RECORD)
         self.assertEqual(
             rebuild_record["record_type"],
             "reproducible_ct120_media_build_record",
         )
-        self._assert_p125_rebuild_record_is_honest(rebuild_record, meta)
-        self.assertEqual(meta["BODY_32_35_SEMANTICS_PROVEN"], "false")
+        self._assert_p126_rebuild_record_is_honest(rebuild_record, meta)
         self.assertEqual(meta["GENERATED_SOURCE_SHA256"], PACKAGED_NATIVE_SOURCE_SHA256)
         verified_promoted_p125_artifact_sha = meta["NATIVE_BINARY_SHA256"]
         self.assertRegex(verified_promoted_p125_artifact_sha, r"^[0-9a-f]{64}$")
@@ -270,31 +268,22 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         self.assertEqual(meta["build_a_sha256"], verified_promoted_p125_artifact_sha)
         self.assertEqual(meta["build_b_sha256"], verified_promoted_p125_artifact_sha)
         self.assertEqual(meta["reproducible_binary_cmp_gate"], "PASS")
-        self.assertEqual(meta["CONTROL_BUILD_REPRODUCES_CURRENT_BINARY"], "true")
+        self.assertNotIn("CONTROL_BUILD_REPRODUCES_CURRENT_BINARY", meta)
+        self.assertEqual(
+            meta["operator_ab_records_are_input_evidence_not_independent_verify"],
+            "true",
+        )
+        self.assertEqual(
+            meta["item_3j_authority"],
+            "owner_addendum_P126_OPTION_A_DEFERRED_present_AMBIGUOUS_absent",
+        )
         self.assertEqual(frozen_p119_meta["NATIVE_BINARY_SHA256"], SUPERSEDED_P119_BINARY_SHA256)
         self.assertEqual(
             frozen_p119_meta["GENERATED_SOURCE_SHA256"], SUPERSEDED_P119_SOURCE_SHA256
         )
         self.assertEqual(meta["NATIVE_BINARY_SHA256"], EXPECTED_MUSL_SHA256)
-        self.assertEqual(
-            meta["superseded_native_binary_sha256"], SUPERSEDED_P124_BINARY_SHA256
-        )
-        self.assertEqual(
-            meta["superseded_generated_source_sha256"],
-            SUPERSEDED_P124_SOURCE_SHA256,
-        )
-        self.assertEqual(
-            meta["replaced_native_binary_sha256"],
-            "99ec3f5b044277bd6573fb95580f2198493399fee35c85122fbb2386c654cbc6",
-        )
-        self.assertEqual(
-            meta["replaced_generated_source_sha256"],
-            "a66bded0e618f3308204acb8514f33054036c9eac585daa5cc1e28316572b6ef",
-        )
-        # The replaced_* lineage pins live in the meta file (asserted above);
-        # the build record carries only what the builder itself emits.
-        self.assertNotIn("replaced_native_binary_sha256", rebuild_record)
-        self.assertNotIn("replaced_generated_source_sha256", rebuild_record)
+        self.assertEqual(meta["marker_deferred_gate"], "PASS")
+        self.assertEqual(meta["marker_ambiguous_absence_expected"], "true")
         self.assertEqual(frozen_p124_meta["NATIVE_BINARY_SHA256"], SUPERSEDED_P124_BINARY_SHA256)
         self.assertEqual(
             frozen_p124_meta["GENERATED_SOURCE_SHA256"], SUPERSEDED_P124_SOURCE_SHA256
@@ -361,7 +350,7 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         self.assertNotEqual(actual, PRE_R30E_PACKAGED_BINARY_SHA256)
         self.assertNotEqual(actual, EXPECTED_RUN3_GLIBC_SHA256)
 
-    def _assert_p125_rebuild_record_is_honest(
+    def _assert_p126_rebuild_record_is_honest(
         self, record: dict[str, str], meta: dict[str, str]
     ) -> None:
         builder_path = "safety-poc/research/media/v1/ct120_build_p80_haos_media_helper.sh"
@@ -376,7 +365,7 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
             "LIB_IDENTICAL",
             "P80_BUILD_EXPECTED_SOURCE_SHA_GATE",
         )
-        self.assertEqual(record["phase"], meta["phase"])
+        self.assertEqual(record["phase"], "P126_REFRESH_ACK_DEFER_NATIVE_A")
         self.assertEqual(record["builder"], meta["builder"])
         self.assertEqual(record["transform"], meta["P80_BUILD_TRANSFORM"])
         self.assertEqual(record["P80_BUILD_PROFILE"], meta["P80_BUILD_PROFILE"])
@@ -437,12 +426,12 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         self.assertEqual(record["NO_NEW_RUNTIME_DEPENDENCY"], meta["NO_NEW_RUNTIME_DEPENDENCY"])
         self.assertEqual(record["LIB_IDENTICAL"], meta["LIB_IDENTICAL"])
 
-    def test_p125_rebuild_record_is_builder_emitted_not_a_placeholder(self) -> None:
+    def test_p126_rebuild_record_is_builder_emitted_not_a_placeholder(self) -> None:
         # The hand-written placeholder this guard used to reject has been
         # replaced by the real builder-emitted record. Assert the emitted state
         # directly instead of skipping, so the coverage is not silently dropped
         # and the suite's skip budget is not inflated by a now-obsolete guard.
-        record = _metadata(P125_REBUILD_RECORD)
+        record = _metadata(P126_REBUILD_RECORD)
         self.assertEqual(record["record_status"], "BUILDER_EMITTED")
         self.assertEqual(
             record["record_generated_by"],
@@ -450,7 +439,7 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         )
         self.assertEqual(record["gate_results_source"], "builder_executed_gates")
         self.assertEqual(record["hardcoded_gate_results"], "false")
-        record_text = P125_REBUILD_RECORD.read_text(encoding="utf-8")
+        record_text = P126_REBUILD_RECORD.read_text(encoding="utf-8")
         self.assertIn("gate_results_source=builder_executed_gates", record_text)
         self.assertNotIn("hand_written_placeholder_not_builder_output", record_text)
         self.assertNotIn("PENDING_BUILDER_REGENERATION", record_text)
@@ -556,7 +545,7 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
     def test_current_head_source_identity_matches_packaged_native_provenance(self) -> None:
         sys.path.insert(0, str(MEDIA_DIR))
         from entrance_p122_on_demand_media_door_transform import transform
-        import entrance_p125_ringid_probe_media_transform as p125
+        import entrance_p126_refresh_defer_transform as p126
 
         candidate = transform(
             SOURCE.read_text(encoding="utf-8")
@@ -574,14 +563,14 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         self.assertEqual(meta["GENERATED_SOURCE_SHA256"], PACKAGED_NATIVE_SOURCE_SHA256)
         self.assertNotEqual(meta["GENERATED_SOURCE_SHA256"], HEAD_P116_SOURCE_SHA256)
         self.assertEqual(
-            hashlib.sha256(p125.transform(SOURCE.read_text(encoding="utf-8")).encode("utf-8")).hexdigest(),
+            hashlib.sha256(p126.transform(SOURCE.read_text(encoding="utf-8")).encode("utf-8")).hexdigest(),
             PACKAGED_NATIVE_SOURCE_SHA256,
         )
-        # The observability overlay supersedes P124's active-media source
-        # identity while leaving the non-overlay HEAD P116/P122 identity distinct.
+        # The P126 overlay supersedes the P125 packaged source identity while
+        # leaving the non-overlay HEAD P116/P122 identity distinct.
         self.assertEqual(
             meta["superseded_generated_source_sha256"],
-            SUPERSEDED_P124_SOURCE_SHA256,
+            "4bfdf264fbd74c5796d2386d835f0beeea15d23f8c3b1ea460323b7930b741a7",
         )
         self.assertEqual(
             frozen_p122_on_demand_meta["NATIVE_BINARY_SHA256"],
@@ -591,7 +580,10 @@ class P107MuslPackageProvenanceTests(unittest.TestCase):
         self.assertEqual(
             frozen_p124_meta["GENERATED_SOURCE_SHA256"], SUPERSEDED_P124_SOURCE_SHA256
         )
-        self.assertEqual(meta["superseded_native_binary_sha256"], SUPERSEDED_P124_BINARY_SHA256)
+        self.assertEqual(
+            meta["superseded_native_binary_sha256"],
+            "2a10b69e6c7e0565fa088b509904df1779478f0227fbbb8f6d4ba12034d8f045",
+        )
         self.assertEqual(meta.get("binary_rebuild_pending_orchestrator", "false"), "false")
         self.assertNotEqual(head_sha, PACKAGED_NATIVE_SOURCE_SHA256)
         # The frozen P117 record must keep documenting exactly the source it
