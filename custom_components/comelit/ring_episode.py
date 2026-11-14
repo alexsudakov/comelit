@@ -17,6 +17,7 @@ which late facts are rejected.
 from __future__ import annotations
 
 from collections import deque
+from copy import deepcopy
 import re
 import time
 from typing import Callable, Deque
@@ -24,6 +25,7 @@ from typing import Callable, Deque
 RING_EPISODE_MAX_EPISODES = 8
 RING_EPISODE_MAX_EVENTS = 32
 RING_EPISODE_MAX_SEALED_EVENTS = 16
+RING_EPISODE_MAX_CTP_TRANSACTIONS = 8
 
 _ACK_VALUES = frozenset({"STRUCTURAL_ACK", "AMBIGUOUS", "ABSENT", "DEFERRED"})
 _ACK_CLASSIFICATION_VALUES = frozenset(
@@ -37,6 +39,11 @@ _ACK_CLASSIFICATION_VALUES = frozenset(
 )
 _SAFE_REASON_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,63}$")
 _UINT_RE = re.compile(r"^[0-9]{1,20}$")
+_P127_CTP_TRANSACTION_RE = re.compile(
+    r"^(?:channel=)?([0-9a-fA-F]{4})[:,]"
+    r"(?:connection=)?([0-9a-fA-F]{4})[:,]"
+    r"(?:classification=)?(UNKNOWN|RETRANSMIT_CANDIDATE)$"
+)
 _SEAL_REASONS = frozenset(
     {
         "listener_resumed",
@@ -190,6 +197,9 @@ class RingEpisodeLedger:
             "stop_reason": None,
             "teardown_confirmed": None,
             "listener_resumed": None,
+            # Diagnostic observations only.  A CTP pair (and its repetition)
+            # is deliberately not promoted to physical-call identity.
+            "ctp_transactions": [],
             "sealed": False,
         }
         self._next_episode_id += 1
@@ -313,6 +323,30 @@ class RingEpisodeLedger:
                     episode["video_progress_after_ring"] = True
                 self._event(key, count)
             return
+        if key in {"P127_CTP_TRANSACTION", "P127_RELEASE_TRANSACTION"}:
+            match = _P127_CTP_TRANSACTION_RE.fullmatch(value)
+            if match is None:
+                self._dropped_invalid += 1
+                return
+            channel, connection, classification = match.groups()
+            transactions = episode["ctp_transactions"]
+            if not isinstance(transactions, list):
+                self._dropped_invalid += 1
+                return
+            transaction = {
+                "channel": channel.lower(),
+                "connection": connection.lower(),
+                "classification": classification,
+                "call_identity": "UNKNOWN",
+            }
+            # Storage stays episode-local and bounded.  Observations are not
+            # consulted by lifecycle/arbitration code and never suppress a
+            # later physical call.
+            if len(transactions) >= RING_EPISODE_MAX_CTP_TRANSACTIONS:
+                transactions.pop(0)
+            transactions.append(transaction)
+            self._event("P127_CTP_TRANSACTION", deepcopy(transaction))
+            return
 
     def note_native_exit(self, returncode: object, generation: int | None = None) -> None:
         episode = self._matching(generation)
@@ -392,10 +426,12 @@ class RingEpisodeLedger:
             "unattributed": self._unattributed,
         }
         return {
-            "episodes": tuple(dict(episode) for episode in self._episodes),
-            "events": tuple(dict(event) for event in self._events),
+            # Values currently include the nested P127 transaction list.
+            # Deep copies keep callers from mutating retained diagnostics.
+            "episodes": tuple(deepcopy(episode) for episode in self._episodes),
+            "events": tuple(deepcopy(event) for event in self._events),
             "latest_sealed_events": tuple(
-                dict(event) for event in self._latest_sealed_events
+                deepcopy(event) for event in self._latest_sealed_events
             ),
             "active_episode_id": None if active is None else active["episode_id"],
             "active_generation": None if active is None else active["generation"],

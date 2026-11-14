@@ -322,6 +322,58 @@ def test_payload_is_redacted_and_bad_observation_is_contained() -> None:
     assert ledger.snapshot()["accounting"]["dropped_invalid"] == 1
 
 
+def test_p127_transactions_are_bounded_and_never_claim_call_identity() -> None:
+    ledger, _ = _ledger()
+    ledger.note_media_start(1)
+    ledger.observe_native_line("P127_CTP_TRANSACTION=000a:8123:UNKNOWN", 1)
+    for connection in range(0x8124, 0x812D):
+        ledger.observe_native_line(
+            f"P127_CTP_TRANSACTION=000a:{connection:04x}:RETRANSMIT_CANDIDATE",
+            1,
+        )
+    episode = ledger.snapshot()["episodes"][0]
+    assert len(episode["ctp_transactions"]) == 8
+    assert episode["ctp_transactions"][0]["connection"] == "8125"
+    assert all(
+        item["call_identity"] == "UNKNOWN"
+        for item in episode["ctp_transactions"]
+    )
+    assert ledger.snapshot()["call_identity_claimed"] is False
+
+
+def test_snapshot_nested_transaction_mutation_and_append_are_isolated() -> None:
+    ledger, _ = _ledger()
+    ledger.note_media_start(1)
+    ledger.observe_native_line(
+        "P127_CTP_TRANSACTION=000a:8123:RETRANSMIT_CANDIDATE", 1
+    )
+    snapshot = ledger.snapshot()
+    transactions = snapshot["episodes"][0]["ctp_transactions"]
+    transactions[0]["classification"] = "PROVEN"
+    transactions.append({"connection": "ffff"})
+
+    retained = ledger.snapshot()["episodes"][0]["ctp_transactions"]
+    assert retained == [
+        {
+            "channel": "000a",
+            "connection": "8123",
+            "classification": "RETRANSMIT_CANDIDATE",
+            "call_identity": "UNKNOWN",
+        }
+    ]
+
+
+def test_p127_allowlist_rejects_identity_claim_and_malformed_transaction() -> None:
+    ledger, _ = _ledger()
+    ledger.note_media_start(1)
+    ledger.observe_native_line("P127_CALL_IDENTITY=PROVEN", 1)
+    ledger.observe_native_line("P127_CTP_TRANSACTION=000a:8123:RETRANSMIT", 1)
+    snapshot = ledger.snapshot()
+    assert snapshot["episodes"][0]["ctp_transactions"] == []
+    assert snapshot["dropped_invalid"] == 1
+    assert snapshot["call_identity_claimed"] is False
+
+
 def test_hook_contains_diagnostic_exceptions_and_latches() -> None:
     class BrokenController:
         def observe_native_line(self, owner, line, generation=None):
