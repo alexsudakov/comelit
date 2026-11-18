@@ -102,16 +102,16 @@ jobs:
       - name: Install browser regression dependencies
         if: steps.scope.outputs.relevant == 'true'
         run: |
-          npm install --no-save playwright@1.62.1
+          npm ci
           npx playwright install --with-deps chromium
 
-      - name: Verify viewer layout and stalled ICE fallback
+      - name: Run browser regression suites
         if: steps.scope.outputs.relevant == 'true'
-        run: node tests/miniapp/viewer.browser.cjs
-
-      - name: Verify WebCodecs mock canary
-        if: steps.scope.outputs.relevant == 'true'
-        run: node tests/miniapp/webcodecs.browser.cjs
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.cache/ms-playwright
+        run: |
+          npx playwright install --with-deps chromium
+          npm run test:browser
 
       - name: Assert standalone gateway is gone
         if: steps.scope.outputs.relevant == 'true'
