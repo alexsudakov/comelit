@@ -149,6 +149,9 @@ _NATIVE_MARKER_CTPP_TRACE_LIMIT = 24
 _NATIVE_MARKER_PROTECTED_PER_KEY_LIMIT = 3
 _NATIVE_MARKER_CTPP_TRACE_FRAME_LIMIT = 4
 _POST_STOP_NATIVE_EVIDENCE_WINDOW_SECONDS = 10.0
+_NATIVE_STOP_FLUSH_SECONDS = 5.0
+_NATIVE_STOP_TERMINATE_SECONDS = 3.0
+_NATIVE_STOP_KILL_SECONDS = 5.0
 _OBSERVABILITY_CANARY_EVENT_LIMIT_PER_KEY = 4
 _OBSERVABILITY_CANARY_EVENT_LIMIT_PER_GENERATION = 96
 _OBSERVABILITY_TERMINAL_MARKER_KEYS = frozenset(
@@ -743,6 +746,10 @@ class ComelitRingRuntime:
         self._oauth = oauth
         self._task: asyncio.Task[None] | None = None
         self._process: asyncio.subprocess.Process | None = None
+        # True once a native stop could not be confirmed.  The process handle
+        # is then retained on purpose: it is the only proof of the still
+        # possible owner and prevents a second helper from being admitted.
+        self._stop_unconfirmed = False
         self._offer_ready = asyncio.Event()
         self._listener_ready = asyncio.Event()
         self._attached_media_busy = asyncio.Event()
@@ -1698,19 +1705,35 @@ class ComelitRingRuntime:
             return True
         await self._hass.async_add_executor_job(_touch_stop)
         try:
-            await asyncio.wait_for(process.wait(), timeout=5)
+            await asyncio.wait_for(
+                process.wait(), timeout=_NATIVE_STOP_FLUSH_SECONDS
+            )
         except TimeoutError:
             process.terminate()
             try:
-                await asyncio.wait_for(process.wait(), timeout=3)
+                await asyncio.wait_for(
+                    process.wait(), timeout=_NATIVE_STOP_TERMINATE_SECONDS
+                )
             except TimeoutError:
                 process.kill()
-                await process.wait()
+                try:
+                    await asyncio.wait_for(
+                        process.wait(), timeout=_NATIVE_STOP_KILL_SECONDS
+                    )
+                except TimeoutError:
+                    return False
         return process.returncode is not None
 
     async def async_start(self) -> None:
+        if self._stop_unconfirmed:
+            # The previous helper never proved its exit (bounded kill failed).
+            raise ComelitRingRuntimeError("runtime_previous_owner_unconfirmed")
         if self.running:
             return
+        if self._process is not None and self._process.returncode is None:
+            # Belt and braces: a live handle must never be joined by a second
+            # helper, even if the flag was not observed.
+            raise ComelitRingRuntimeError("runtime_previous_owner_unconfirmed")
         self._stopping = False
         self._cooperative_pause_requested = False
         self._cooperative_pause_preceded_failure = False
@@ -1868,6 +1891,9 @@ class ComelitRingRuntime:
             stopped = await self._async_stop_native_process(process)
             if not stopped:
                 self._last_native_failure_markers = list(self._native_marker_tail)
+                # The handle must survive this failure and admission must stay
+                # closed: a second helper here would be a second media owner.
+                self._stop_unconfirmed = True
                 raise ComelitRingRuntimeError("runtime_stop_not_confirmed")
             if process.returncode not in {None, 0}:
                 # The main run loop deliberately does not raise native_exit
@@ -1884,11 +1910,16 @@ class ComelitRingRuntime:
                 try:
                     await task
                 except asyncio.CancelledError:
-                    pass
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling():
+                        raise
             except asyncio.CancelledError:
-                pass
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
         self._task = None
         self._process = None
+        self._stop_unconfirmed = False
         self._listener_ready.clear()
         self._attached_media_busy.clear()
         self._attached_media_open.clear()
@@ -2141,7 +2172,8 @@ class ComelitRingRuntime:
                 and self._call_state_tracker().fail_active("listener_stopped_during_call")
             ):
                 self._notify_status()
-            self._process = None
+            if not self._stop_unconfirmed:
+                self._process = None
             self._listener_ready.clear()
             self._attached_media_busy.clear()
             self._attached_media_open.clear()
@@ -2165,6 +2197,7 @@ class ComelitRingRuntime:
             env=child_env,
         )
         self._process = process
+        self._stop_unconfirmed = False
         reader_task = self._entry.async_create_background_task(
             self._hass,
             self._async_read_output(process),
@@ -2267,6 +2300,9 @@ class ComelitRingRuntime:
                 stopped = await self._async_stop_native_process(process)
                 if not stopped:
                     self._last_native_failure_markers = list(self._native_marker_tail)
+                    # Keep the handle: the caller must not lose the identity of
+                    # a helper that may still be alive.
+                    self._stop_unconfirmed = True
                     raise ComelitRingRuntimeError("runtime_stop_not_confirmed")
             if not reader_task.done():
                 reader_task.cancel()
