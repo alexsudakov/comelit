@@ -7,6 +7,10 @@ python3.12 -m py_compile scripts/*.py
 python3.12 -m compileall -q ../custom_components/comelit
 node --check ../custom_components/comelit/frontend/comelit-card.js
 for script in scripts/*.sh deploy/*.sh; do bash -n "$script"; done
+# VERIFY-offline parity for the file-based HACS integration checks and the
+# embedded Mini App structure assertions (no network, no browser).
+python3.12 scripts/verify_hacs_structure.py
+sh scripts/verify_embedded_miniapp.sh
 PYTHONPATH="$PWD/src" PYTHONDONTWRITEBYTECODE=1 python3.12 -m unittest discover -s tests -v
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
