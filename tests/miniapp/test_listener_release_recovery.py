@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 import sys
+import time
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -249,6 +250,442 @@ def test_recovery_budget_exhaustion_is_explicit_and_never_overlaps() -> None:
     asyncio.run(run())
 
 
+def test_release_recovery_reason_classification_boundaries() -> None:
+    module = _module()
+    classify = module.ComelitRuntimeSupervisor._transient_release_recovery_reason
+
+    for status in range(500, 600):
+        reason = f"http_status:{status}"
+        assert classify(reason) == reason
+
+    assert classify("remote_sdp_missing") == "remote_sdp_missing"
+
+    for reason in (
+        "http_status:499",
+        "http_status:600",
+        "http_status:401",
+        "http_status:403",
+        "http_status:404",
+        "http_status:400",
+        "http_status:0500",
+        "http_status:000500",
+        "http_status:5000",
+        "http_status:5",
+        "http_status:",
+        "http_status:" + "5" * 5000,
+        "http_status:5o0",
+        "https_status:500",
+        "",
+        None,
+        500,
+        b"http_status:500",
+    ):
+        assert classify(reason) is None, reason
+
+
+def test_recovery_deadline_bounds_attempts_and_readiness_waits() -> None:
+    observed: list[tuple[float, float, float | None]] = []
+
+    async def run() -> None:
+        module = _module()
+        module.MEDIA_RELEASE_RECOVERY_DEADLINE_SECONDS = 0.2
+        module.RECONNECT_INITIAL_DELAY_SECONDS = 0.05
+        module.RECONNECT_MAX_DELAY_SECONDS = 0.05
+
+        class TimeoutAwareRuntime(_Runtime):
+            async def async_wait_ready(self, timeout: float) -> bool:
+                observed.append(
+                    (time.monotonic(), timeout, supervisor._recovery_deadline)
+                )
+                await asyncio.sleep(min(0.05, timeout))
+                self.last_error = "http_status:500"
+                self.running = False
+                self.listener_ready = False
+                self.concurrent = max(0, self.concurrent - 1)
+                return False
+
+        runtime = TimeoutAwareRuntime([])
+        supervisor = module.ComelitRuntimeSupervisor(
+            object(), runtime, entry=_Entry()
+        )
+        supervisor._media_paused = True
+        supervisor._state = module.LISTENER_STATE_PAUSED_MEDIA
+        await _confirm(supervisor)
+
+        started = time.monotonic()
+        try:
+            await supervisor.async_resume_after_media()
+        except RuntimeError:
+            pass
+        elapsed = time.monotonic() - started
+
+        status = supervisor.status()
+        # The first readiness wait belongs to the entry attempt, not the
+        # bounded recovery budget; every later wait must fit the deadline.
+        assert observed and observed[0][1] == 30.0, observed
+        recovery = observed[1:]
+        assert recovery, "recovery never attempted"
+        assert len(recovery) <= module.MEDIA_RELEASE_RECOVERY_MAX_ATTEMPTS
+        assert all(0 < timeout <= 0.2 for _, timeout, _ in recovery), recovery
+        assert all(
+            deadline is not None and at <= deadline + 0.02
+            for at, _, deadline in recovery
+        ), recovery
+        assert elapsed < 0.4
+        assert status["recovery_last_reason"] == "budget_exhausted"
+        assert status["recovery_pending"] is False
+
+    asyncio.run(run())
+
+
+def test_recovery_deadline_bounds_lifecycle_lock_wait() -> None:
+    async def run() -> None:
+        module = _module()
+        module.MEDIA_RELEASE_RECOVERY_DEADLINE_SECONDS = 0.15
+        module.RECONNECT_INITIAL_DELAY_SECONDS = 0
+        module.RECONNECT_MAX_DELAY_SECONDS = 0
+        runtime = _Runtime([])
+        supervisor = module.ComelitRuntimeSupervisor(
+            object(), runtime, entry=_Entry()
+        )
+        supervisor._media_release_proven = True
+        supervisor._media_paused = False
+        supervisor._shutdown_requested = False
+        supervisor._attached_stop_recovery_required = False
+        supervisor._state = module.LISTENER_STATE_RECONNECTING
+
+        await supervisor._lifecycle_lock.acquire()
+        started = time.monotonic()
+        try:
+            await asyncio.wait_for(
+                supervisor._async_recover_released_listener("http_status:500"),
+                timeout=1.0,
+            )
+        finally:
+            elapsed = time.monotonic() - started
+
+        status = supervisor.status()
+        assert elapsed < 0.5, elapsed
+        assert runtime.start_calls == 0
+        assert status["recovery_last_reason"] == "budget_exhausted"
+        # The recovery never owned this lock, so it must not release it.
+        assert supervisor._lifecycle_lock.locked() is True
+        supervisor._lifecycle_lock.release()
+
+    asyncio.run(run())
+
+
+def test_native_stop_after_kill_is_hard_bounded() -> None:
+    async def run() -> None:
+        module = _load_component_module(str(ROOT), "runtime")
+        module._NATIVE_STOP_FLUSH_SECONDS = 0.01
+        module._NATIVE_STOP_TERMINATE_SECONDS = 0.01
+        module._NATIVE_STOP_KILL_SECONDS = 0.05
+        module._touch_stop = lambda: None
+
+        class HungProcess:
+            pid = 424242
+            returncode = None
+
+            def __init__(self) -> None:
+                self.killed = False
+
+            def terminate(self) -> None:
+                return None
+
+            def kill(self) -> None:
+                self.killed = True
+
+            async def wait(self):
+                await asyncio.sleep(30)
+                return 0
+
+        class Hass:
+            async def async_add_executor_job(self, func, *args):
+                return func(*args)
+
+        class Stub:
+            _hass = Hass()
+
+        process = HungProcess()
+        started = time.monotonic()
+        confirmed = await module.ComelitRingRuntime._async_stop_native_process(
+            Stub(), process
+        )
+        elapsed = time.monotonic() - started
+
+        assert process.killed is True
+        assert confirmed is False
+        assert elapsed < 0.5, elapsed
+
+    asyncio.run(run())
+
+
+def test_recovery_teardown_has_separate_bounded_budget() -> None:
+    async def run_teardown_after_retry_deadline() -> None:
+        module = _module()
+        module.MEDIA_RELEASE_RECOVERY_DEADLINE_SECONDS = 0.1
+        module.MEDIA_RELEASE_SAFE_STOP_DEADLINE_SECONDS = 0.5
+        module.RECONNECT_INITIAL_DELAY_SECONDS = 0.01
+        module.RECONNECT_MAX_DELAY_SECONDS = 0.01
+
+        class LockHoldingRuntime(_Runtime):
+            lock = None
+            waits = 0
+
+            async def async_wait_ready(self, timeout: float) -> bool:
+                self.waits += 1
+                # The entry readiness wait must not hold the lifecycle lock.
+                # The first recovery wait holds it past the retry deadline so
+                # only a separate safe-stop budget can still stop the helper.
+                if self.waits >= 2:
+                    await self.lock.acquire()
+                    asyncio.get_running_loop().call_later(0.2, self.lock.release)
+                self.last_error = "http_status:500"
+                self.running = False
+                self.listener_ready = False
+                self.concurrent = max(0, self.concurrent - 1)
+                return False
+
+        runtime = LockHoldingRuntime([])
+        supervisor = module.ComelitRuntimeSupervisor(
+            object(), runtime, entry=_Entry()
+        )
+        runtime.lock = supervisor._lifecycle_lock
+        supervisor._media_paused = True
+        supervisor._state = module.LISTENER_STATE_PAUSED_MEDIA
+        await _confirm(supervisor)
+
+        started = time.monotonic()
+        try:
+            await supervisor.async_resume_after_media()
+        except RuntimeError:
+            pass
+        elapsed = time.monotonic() - started
+
+        status = supervisor.status()
+        assert runtime.waits >= 2
+        assert status["recovery_attempts"] == 1
+        # entry stop + recovery teardown, performed after the retry deadline
+        assert runtime.stop_calls == 2
+        assert elapsed >= 0.15, elapsed
+        assert status["recovery_last_reason"] == "budget_exhausted"
+        assert status["recovery_pending"] is False
+
+    async def run_teardown_deadline_is_bounded() -> None:
+        module = _module()
+        module.MEDIA_RELEASE_RECOVERY_DEADLINE_SECONDS = 5
+        module.MEDIA_RELEASE_SAFE_STOP_DEADLINE_SECONDS = 0.15
+        module.RECONNECT_INITIAL_DELAY_SECONDS = 0.01
+        module.RECONNECT_MAX_DELAY_SECONDS = 0.01
+
+        class StuckLockRuntime(_Runtime):
+            lock = None
+            waits = 0
+
+            async def async_wait_ready(self, timeout: float) -> bool:
+                self.waits += 1
+                if self.waits >= 2:
+                    await self.lock.acquire()
+                    asyncio.get_running_loop().call_later(0.6, self.lock.release)
+                self.last_error = "http_status:500"
+                self.running = False
+                self.listener_ready = False
+                self.concurrent = max(0, self.concurrent - 1)
+                return False
+
+        runtime = StuckLockRuntime([])
+        supervisor = module.ComelitRuntimeSupervisor(
+            object(), runtime, entry=_Entry()
+        )
+        runtime.lock = supervisor._lifecycle_lock
+        supervisor._media_paused = True
+        supervisor._state = module.LISTENER_STATE_PAUSED_MEDIA
+        await _confirm(supervisor)
+
+        started = time.monotonic()
+        try:
+            await supervisor.async_resume_after_media()
+        except RuntimeError:
+            pass
+        elapsed = time.monotonic() - started
+
+        status = supervisor.status()
+        assert runtime.waits >= 2
+        assert status["recovery_attempts"] == 1
+        # teardown never acquired the lock: fail closed instead of waiting
+        assert runtime.stop_calls == 1
+        assert elapsed < 0.45, elapsed
+        assert status["recovery_last_reason"] == "teardown_unconfirmed"
+        assert status["recovery_pending"] is False
+        assert supervisor._media_release_proven is False
+
+    asyncio.run(run_teardown_after_retry_deadline())
+    asyncio.run(run_teardown_deadline_is_bounded())
+
+
+def test_recovery_teardown_stop_itself_is_bounded() -> None:
+    async def run() -> None:
+        module = _module()
+        module.MEDIA_RELEASE_RECOVERY_DEADLINE_SECONDS = 5
+        module.MEDIA_RELEASE_SAFE_STOP_DEADLINE_SECONDS = 0.15
+        module.RECONNECT_INITIAL_DELAY_SECONDS = 0.01
+        module.RECONNECT_MAX_DELAY_SECONDS = 0.01
+
+        class HangingStopRuntime(_Runtime):
+            async def async_stop(self) -> None:
+                self.stop_calls += 1
+                if self.stop_calls >= 2:
+                    # The teardown after a failed recovery wait never returns;
+                    # the safe-stop budget must still bound the whole stop.
+                    await asyncio.sleep(5)
+                self.running = False
+                self.listener_ready = False
+
+        runtime = HangingStopRuntime(["http_status:500", "http_status:500"])
+        supervisor = module.ComelitRuntimeSupervisor(
+            object(), runtime, entry=_Entry()
+        )
+        supervisor._media_paused = True
+        supervisor._state = module.LISTENER_STATE_PAUSED_MEDIA
+        await _confirm(supervisor)
+
+        started = time.monotonic()
+        try:
+            await supervisor.async_resume_after_media()
+        except RuntimeError:
+            pass
+        elapsed = time.monotonic() - started
+
+        status = supervisor.status()
+        assert status["recovery_attempts"] == 1
+        assert runtime.stop_calls == 2
+        assert elapsed < 0.6, elapsed
+        assert status["recovery_last_reason"] == "teardown_unconfirmed"
+        assert status["recovery_pending"] is False
+        assert supervisor._media_release_proven is False
+
+    asyncio.run(run())
+
+
+def test_stop_locked_propagates_external_cancellation() -> None:
+    async def run() -> None:
+        module = _module()
+        supervisor = module.ComelitRuntimeSupervisor(
+            object(), _Runtime([]), entry=_Entry()
+        )
+
+        async def stubborn() -> None:
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                # Ignores the child cancellation; only a cancellation of the
+                # caller itself may end this await.
+                await asyncio.sleep(5)
+
+        task = asyncio.create_task(stubborn())
+        # Let the task enter its try block so the cancellation is swallowed
+        # exactly as intended by this regression scenario.
+        await asyncio.sleep(0)
+        supervisor._task = task
+        timed_out = False
+        started = time.monotonic()
+        try:
+            async with asyncio.timeout(0.1):
+                await supervisor._async_stop_locked(module.LISTENER_STATE_ERROR)
+        except TimeoutError:
+            timed_out = True
+        elapsed = time.monotonic() - started
+
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+        assert timed_out is True
+        assert elapsed < 0.5, elapsed
+        assert supervisor._lifecycle_lock.locked() is False
+
+    asyncio.run(run())
+
+
+def test_recovery_does_not_start_when_deadline_expires_during_lock_acquire() -> None:
+    async def run() -> None:
+        module = _module()
+        module.MEDIA_RELEASE_RECOVERY_DEADLINE_SECONDS = 0.05
+        module.RECONNECT_INITIAL_DELAY_SECONDS = 0
+        module.RECONNECT_MAX_DELAY_SECONDS = 0
+        runtime = _Runtime([])
+        supervisor = module.ComelitRuntimeSupervisor(
+            object(), runtime, entry=_Entry()
+        )
+        supervisor._media_release_proven = True
+        supervisor._media_paused = False
+        supervisor._shutdown_requested = False
+        supervisor._attached_stop_recovery_required = False
+        supervisor._state = module.LISTENER_STATE_RECONNECTING
+
+        async def slow_acquire(deadline):
+            await supervisor._lifecycle_lock.acquire()
+            # The retry budget expires while the lock is being acquired.
+            await asyncio.sleep(0.1)
+            return True
+
+        supervisor._async_acquire_lifecycle = slow_acquire
+        await supervisor._async_recover_released_listener("http_status:500")
+
+        status = supervisor.status()
+        assert runtime.start_calls == 0
+        assert status["recovery_attempts"] == 0
+        assert status["recovery_last_reason"] == "budget_exhausted"
+        # The recovery acquired the lock, so it must also release it.
+        assert supervisor._lifecycle_lock.locked() is False
+
+    asyncio.run(run())
+
+
+def test_teardown_not_confirmed_stops_retries_and_keeps_release_unproven() -> None:
+    async def run() -> None:
+        module = _module()
+        module.MEDIA_RELEASE_RECOVERY_DEADLINE_SECONDS = 30
+        module.RECONNECT_INITIAL_DELAY_SECONDS = 0.01
+        module.RECONNECT_MAX_DELAY_SECONDS = 0.01
+
+        class FailingStopRuntime(_Runtime):
+            async def async_stop(self) -> None:
+                self.stop_calls += 1
+                self.running = False
+                self.listener_ready = False
+                # The entry stop must succeed; the teardown after a failed
+                # recovery readiness wait is the one that cannot be confirmed.
+                if self.stop_calls >= 2:
+                    raise RuntimeError("runtime_stop_not_confirmed")
+
+        runtime = FailingStopRuntime(
+            ["http_status:500", "http_status:500", "http_status:500"]
+        )
+        supervisor = module.ComelitRuntimeSupervisor(
+            object(), runtime, entry=_Entry()
+        )
+        supervisor._media_paused = True
+        supervisor._state = module.LISTENER_STATE_PAUSED_MEDIA
+        await _confirm(supervisor)
+
+        try:
+            await supervisor.async_resume_after_media()
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("resume unexpectedly succeeded")
+
+        status = supervisor.status()
+        assert status["recovery_attempts"] == 1
+        assert runtime.stop_calls == 2
+        assert status["recovery_last_reason"] == "teardown_unconfirmed"
+        assert status["recovery_pending"] is False
+        assert supervisor._media_release_proven is False
+
+    asyncio.run(run())
+
+
 def test_release_proof_requires_all_local_owner_invariants() -> None:
     async def run(field: str, value: object) -> None:
         _, runtime, supervisor = await _paused_supervisor(["http_status:504"])
@@ -421,5 +858,297 @@ def test_media_manager_never_issues_proof_when_teardown_is_unconfirmed() -> None
         assert listener.proof_calls == 0
         assert listener.resume_calls == 0
         assert manager.status()["phase"] == "error"
+
+    asyncio.run(run())
+
+
+def test_lifecycle_lock_wait_is_bounded_with_queued_waiter() -> None:
+    """A released fair lock may already belong to a queued waiter.
+
+    ``locked()`` can read ``False`` while the lock is committed to a previously
+    queued acquirer; a check-then-acquire must not be treated as a no-suspend
+    guarantee.
+    """
+
+    async def run() -> None:
+        _, _runtime, supervisor = await _paused_supervisor([None])
+        lock = supervisor._lifecycle_lock
+        await lock.acquire()
+        holding = asyncio.Event()
+
+        async def prior_waiter() -> None:
+            await lock.acquire()
+            holding.set()
+            await asyncio.sleep(0.15)
+            lock.release()
+
+        waiter = asyncio.create_task(prior_waiter())
+        for _ in range(1000):
+            if getattr(lock, "_waiters", None):
+                break
+            await asyncio.sleep(0)
+        else:
+            raise AssertionError("prior waiter was not queued")
+
+        lock.release()
+        assert not lock.locked()
+        started = time.monotonic()
+        acquired = await supervisor._async_acquire_lifecycle(started + 0.05)
+        elapsed = time.monotonic() - started
+        assert acquired is False
+        assert elapsed < 0.12, elapsed
+        await waiter
+        assert not lock.locked()
+
+    asyncio.run(run())
+
+
+def test_recovery_budget_expiry_after_start_tears_down_owner() -> None:
+    """The budget may expire inside a started attempt, not only in a wait."""
+
+    async def run() -> None:
+        module = _module()
+        module.MEDIA_RELEASE_RECOVERY_DEADLINE_SECONDS = 0.05
+        module.RECONNECT_INITIAL_DELAY_SECONDS = 0
+        module.RECONNECT_MAX_DELAY_SECONDS = 0
+
+        class _SlowStartRuntime(_Runtime):
+            async def async_start(self) -> None:
+                if self.start_calls >= 1:
+                    # Consumes the whole recovery budget inside the attempt.
+                    await asyncio.sleep(0.08)
+                self.start_calls += 1
+                self.running = True
+                self.listener_ready = False
+                self.concurrent += 1
+                self.max_concurrent = max(self.max_concurrent, self.concurrent)
+
+            async def async_wait_ready(self, timeout: float) -> bool:
+                self.last_error = "http_status:500"
+                self.listener_ready = False
+                return False
+
+        runtime = _SlowStartRuntime([])
+        supervisor = module.ComelitRuntimeSupervisor(
+            object(), runtime, entry=_Entry()
+        )
+        supervisor._media_paused = True
+        supervisor._state = module.LISTENER_STATE_PAUSED_MEDIA
+        await _confirm(supervisor)
+
+        try:
+            await supervisor.async_resume_after_media()
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("resume unexpectedly succeeded")
+
+        status = supervisor.status()
+        assert runtime.start_calls == 2
+        assert runtime.stop_calls == 2, runtime.stop_calls
+        assert runtime.running is False
+        assert status["recovery_last_reason"] == "budget_exhausted"
+        assert status["recovery_pending"] is False
+
+    asyncio.run(run())
+
+
+def test_recovery_budget_expiry_with_unconfirmed_teardown_fails_closed() -> None:
+    async def run() -> None:
+        module = _module()
+        module.MEDIA_RELEASE_RECOVERY_DEADLINE_SECONDS = 0.05
+        module.RECONNECT_INITIAL_DELAY_SECONDS = 0
+        module.RECONNECT_MAX_DELAY_SECONDS = 0
+
+        class _StuckStartRuntime(_Runtime):
+            async def async_start(self) -> None:
+                if self.start_calls >= 1:
+                    await asyncio.sleep(0.08)
+                self.start_calls += 1
+                self.running = True
+                self.listener_ready = False
+
+            async def async_wait_ready(self, timeout: float) -> bool:
+                self.last_error = "http_status:500"
+                self.listener_ready = False
+                return False
+
+            async def async_stop(self) -> None:
+                self.stop_calls += 1
+                if self.stop_calls >= 2:
+                    raise RuntimeError("runtime_stop_not_confirmed")
+                self.running = False
+                self.listener_ready = False
+
+        runtime = _StuckStartRuntime([])
+        supervisor = module.ComelitRuntimeSupervisor(
+            object(), runtime, entry=_Entry()
+        )
+        supervisor._media_paused = True
+        supervisor._state = module.LISTENER_STATE_PAUSED_MEDIA
+        await _confirm(supervisor)
+
+        try:
+            await supervisor.async_resume_after_media()
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("resume unexpectedly succeeded")
+
+        status = supervisor.status()
+        assert status["recovery_last_reason"] == "teardown_unconfirmed"
+        assert supervisor._media_release_proven is False
+        assert status["recovery_pending"] is False
+        assert runtime.start_calls == 2
+        assert runtime.running is True
+
+    asyncio.run(run())
+
+
+def test_recovery_refuses_new_owner_when_previous_exit_unproven() -> None:
+    async def run() -> None:
+        module = _module()
+        module.MEDIA_RELEASE_RECOVERY_DEADLINE_SECONDS = 30
+        module.RECONNECT_INITIAL_DELAY_SECONDS = 0
+        module.RECONNECT_MAX_DELAY_SECONDS = 0
+
+        class _RetainedOwnerRuntime(_Runtime):
+            def __init__(self) -> None:
+                super().__init__([])
+                self.ready_calls = 0
+
+            async def async_wait_ready(self, timeout: float) -> bool:
+                self.ready_calls += 1
+                self.last_error = "http_status:500"
+                return False
+
+            async def async_start(self) -> None:
+                if self.ready_calls:
+                    raise RuntimeError("runtime_previous_owner_unconfirmed")
+                await super().async_start()
+
+        runtime = _RetainedOwnerRuntime()
+        supervisor = module.ComelitRuntimeSupervisor(
+            object(), runtime, entry=_Entry()
+        )
+        supervisor._media_paused = True
+        supervisor._state = module.LISTENER_STATE_PAUSED_MEDIA
+        await _confirm(supervisor)
+
+        try:
+            await supervisor.async_resume_after_media()
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("resume unexpectedly succeeded")
+
+        status = supervisor.status()
+        assert runtime.start_calls == 1
+        assert status["recovery_last_reason"] == "teardown_unconfirmed"
+        assert supervisor._media_release_proven is False
+        assert status["recovery_pending"] is False
+
+    asyncio.run(run())
+
+
+class _FakeHass:
+    async def async_add_executor_job(self, func, *args):
+        try:
+            return func(*args)
+        except OSError:
+            return None
+
+
+def _runtime_instance():
+    module = _load_component_module(str(ROOT), "runtime")
+    instance = module.ComelitRingRuntime(
+        _FakeHass(),
+        object(),
+        entry=_Entry(),
+        device_uuid="device",
+        vip_token="0" * 32,
+        oauth=object(),
+    )
+    return module, instance
+
+
+class _LiveProcess:
+    returncode = None
+    pid = 4242
+
+
+def test_runtime_refuses_second_owner_when_stop_unconfirmed() -> None:
+    async def run() -> None:
+        module, instance = _runtime_instance()
+        live = _LiveProcess()
+        instance._process = live
+        instance._stop_unconfirmed = True
+
+        try:
+            await instance.async_start()
+        except module.ComelitRingRuntimeError as exc:
+            assert str(exc) == "runtime_previous_owner_unconfirmed"
+        else:
+            raise AssertionError("runtime admitted a second native owner")
+
+        assert instance._process is live
+        assert instance._task is None
+
+    asyncio.run(run())
+
+
+def test_run_once_retains_process_identity_when_stop_unconfirmed() -> None:
+    async def run() -> None:
+        module, instance = _runtime_instance()
+        live = _LiveProcess()
+        instance._process = live
+
+        async def failing_cycle() -> None:
+            instance._stop_unconfirmed = True
+            raise module.ComelitRingRuntimeError("runtime_stop_not_confirmed")
+
+        instance._async_run_cycle = failing_cycle
+
+        await instance._async_run_once()
+
+        assert instance._process is live
+        assert instance._last_error == "runtime_stop_not_confirmed"
+        assert instance._stop_unconfirmed is True
+
+    asyncio.run(run())
+
+
+def test_async_stop_failure_keeps_owner_and_blocks_restart() -> None:
+    """The public stop path must retain the owner and close admission."""
+
+    async def run() -> None:
+        module, instance = _runtime_instance()
+        live = _LiveProcess()
+        instance._process = live
+        instance._task = None
+
+        async def _not_stopped(process) -> bool:
+            return False
+
+        instance._async_stop_native_process = _not_stopped
+
+        try:
+            await instance.async_stop()
+        except module.ComelitRingRuntimeError as exc:
+            assert str(exc) == "runtime_stop_not_confirmed"
+        else:
+            raise AssertionError("stop unexpectedly succeeded")
+
+        assert instance._process is live
+        assert instance._stop_unconfirmed is True
+
+        try:
+            await instance.async_start()
+        except module.ComelitRingRuntimeError as exc:
+            assert str(exc) == "runtime_previous_owner_unconfirmed"
+        else:
+            raise AssertionError("runtime admitted a second native owner")
+
+        assert instance._task is None
 
     asyncio.run(run())
