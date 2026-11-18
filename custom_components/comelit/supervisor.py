@@ -28,6 +28,7 @@ POLL_INTERVAL_SECONDS = 1
 DOOR_LIFECYCLE_LOCK_TIMEOUT_SECONDS = 0.5
 MEDIA_RELEASE_RECOVERY_MAX_ATTEMPTS = 3
 MEDIA_RELEASE_RECOVERY_DEADLINE_SECONDS = 90
+MEDIA_RELEASE_SAFE_STOP_DEADLINE_SECONDS = 20
 
 LISTENER_STATE_STARTING = "starting"
 LISTENER_STATE_READY = "ready"
@@ -611,11 +612,46 @@ class ComelitRuntimeSupervisor:
 
     @staticmethod
     def _transient_release_recovery_reason(value: object) -> str | None:
-        if value == "http_status:504":
-            return "http_status:504"
+        """Classify a listener-start failure the bounded budget may retry.
+
+        Only cloud/bootstrap 5xx (exactly three ASCII digits, 500-599) and a
+        missing remote SDP are transient.  Auth, 4xx, malformed and any other
+        cause stay terminal so a rejected authorization is never retried and
+        media ownership cannot be re-acquired by a blind loop.
+        """
+        if isinstance(value, str) and value.startswith("http_status:"):
+            status = value[len("http_status:"):]
+            if (
+                len(status) == 3
+                and status.isascii()
+                and status.isdigit()
+                and status[0] == "5"
+            ):
+                return value
         if value == "remote_sdp_missing":
             return "remote_sdp_missing"
         return None
+
+    async def _async_acquire_lifecycle(self, deadline: float | None) -> bool:
+        """Acquire ``_lifecycle_lock`` without ever exceeding ``deadline``.
+
+        ``asyncio.Lock.acquire`` on a free lock never suspends, so the
+        check-then-acquire pair is atomic on the event loop.  A held lock is
+        polled in short slices bounded by the remaining recovery budget, which
+        keeps the total recovery time inside the documented deadline without
+        cancelling an in-flight start (cancellation could leave an orphan
+        native media owner).
+        """
+        while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+            if not self._lifecycle_lock.locked():
+                await self._lifecycle_lock.acquire()
+                return True
+            if deadline is None:
+                await asyncio.sleep(0.02)
+                continue
+            await asyncio.sleep(min(0.02, deadline - time.monotonic()))
 
     async def _async_recover_released_listener(self, reason: str) -> None:
         """Retry a listener bootstrap within a small, observable budget."""
@@ -637,7 +673,11 @@ class ComelitRuntimeSupervisor:
                     max(0, self._recovery_deadline - time.monotonic()),
                 )
                 await asyncio.sleep(delay)
-                async with self._lifecycle_lock:
+                if not await self._async_acquire_lifecycle(
+                    self._recovery_deadline
+                ):
+                    break
+                try:
                     if (
                         self._shutdown_requested
                         or self._media_paused
@@ -652,12 +692,23 @@ class ComelitRuntimeSupervisor:
                             else LISTENER_STATE_ERROR
                         )
                         return
+                    # The lock may have been acquired just before the budget
+                    # expired: never admit another start after the deadline.
+                    if time.monotonic() >= self._recovery_deadline:
+                        break
                     self._recovery_attempts += 1
                     self._set_state(LISTENER_STATE_RECONNECTING)
                     self._notify_status()
                     await self._async_start_locked()
+                finally:
+                    self._lifecycle_lock.release()
 
-                ready = await self._runtime.async_wait_ready(timeout=30.0)
+                remaining = self._recovery_deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                ready = await self._runtime.async_wait_ready(
+                    timeout=min(30.0, remaining)
+                )
                 if ready:
                     if (
                         self._media_paused
@@ -681,8 +732,39 @@ class ComelitRuntimeSupervisor:
                 next_reason = self._transient_release_recovery_reason(
                     runtime_status.get("last_error")
                 )
-                async with self._lifecycle_lock:
-                    await self._async_stop_locked(LISTENER_STATE_ERROR)
+                teardown_deadline = (
+                    time.monotonic() + MEDIA_RELEASE_SAFE_STOP_DEADLINE_SECONDS
+                )
+                if not await self._async_acquire_lifecycle(teardown_deadline):
+                    self._media_release_proven = False
+                    self._recovery_last_reason = "teardown_unconfirmed"
+                    self._set_state(LISTENER_STATE_ERROR)
+                    self._notify_status()
+                    return
+                try:
+                    remaining_stop = teardown_deadline - time.monotonic()
+                    if remaining_stop <= 0:
+                        stop_confirmed = False
+                    else:
+                        # The safe-stop budget covers the WHOLE teardown, not
+                        # just the lock wait: a stuck stop must still fail
+                        # closed before the budget is exceeded.
+                        async with asyncio.timeout(remaining_stop):
+                            await self._async_stop_locked(LISTENER_STATE_ERROR)
+                            stop_confirmed = not (
+                                self._runtime.running
+                                or self._runtime.listener_ready
+                            )
+                except Exception:
+                    stop_confirmed = False
+                finally:
+                    self._lifecycle_lock.release()
+                if not stop_confirmed:
+                    self._media_release_proven = False
+                    self._recovery_last_reason = "teardown_unconfirmed"
+                    self._set_state(LISTENER_STATE_ERROR)
+                    self._notify_status()
+                    return
                 if next_reason is None:
                     self._recovery_last_reason = "non_transient"
                     self._notify_status()
@@ -779,7 +861,13 @@ class ComelitRuntimeSupervisor:
             try:
                 await task
             except asyncio.CancelledError:
-                pass
+                # Only the child task's own cancellation is expected here.
+                # A pending cancellation of THIS task (for example the
+                # safe-stop budget in asyncio.timeout) must propagate, or the
+                # bounded teardown would silently lose its deadline.
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
 
         self._task = None
         await self._runtime.async_stop()

@@ -149,6 +149,9 @@ _NATIVE_MARKER_CTPP_TRACE_LIMIT = 24
 _NATIVE_MARKER_PROTECTED_PER_KEY_LIMIT = 3
 _NATIVE_MARKER_CTPP_TRACE_FRAME_LIMIT = 4
 _POST_STOP_NATIVE_EVIDENCE_WINDOW_SECONDS = 10.0
+_NATIVE_STOP_FLUSH_SECONDS = 5.0
+_NATIVE_STOP_TERMINATE_SECONDS = 3.0
+_NATIVE_STOP_KILL_SECONDS = 5.0
 _OBSERVABILITY_CANARY_EVENT_LIMIT_PER_KEY = 4
 _OBSERVABILITY_CANARY_EVENT_LIMIT_PER_GENERATION = 96
 _OBSERVABILITY_TERMINAL_MARKER_KEYS = frozenset(
@@ -1698,14 +1701,23 @@ class ComelitRingRuntime:
             return True
         await self._hass.async_add_executor_job(_touch_stop)
         try:
-            await asyncio.wait_for(process.wait(), timeout=5)
+            await asyncio.wait_for(
+                process.wait(), timeout=_NATIVE_STOP_FLUSH_SECONDS
+            )
         except TimeoutError:
             process.terminate()
             try:
-                await asyncio.wait_for(process.wait(), timeout=3)
+                await asyncio.wait_for(
+                    process.wait(), timeout=_NATIVE_STOP_TERMINATE_SECONDS
+                )
             except TimeoutError:
                 process.kill()
-                await process.wait()
+                try:
+                    await asyncio.wait_for(
+                        process.wait(), timeout=_NATIVE_STOP_KILL_SECONDS
+                    )
+                except TimeoutError:
+                    return False
         return process.returncode is not None
 
     async def async_start(self) -> None:
@@ -1884,9 +1896,13 @@ class ComelitRingRuntime:
                 try:
                     await task
                 except asyncio.CancelledError:
-                    pass
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling():
+                        raise
             except asyncio.CancelledError:
-                pass
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
         self._task = None
         self._process = None
         self._listener_ready.clear()
