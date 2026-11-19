@@ -757,6 +757,7 @@ class ComelitRingRuntime:
         self._attached_media_closed = asyncio.Event()
         self._ring_lines: list[str] = []
         self._last_ring_event: dict[str, str] | None = None
+        self._ring_publish_latch: dict[tuple[str, str, str], float] = {}
         self._last_error: str | None = None
         self._stopping = False
         self._door_lock = asyncio.Lock()
@@ -1011,13 +1012,14 @@ class ComelitRingRuntime:
         *,
         require_media_start: bool = False,
         start_ring_media: bool = True,
+        begin_call_state: bool = True,
     ) -> dict[str, object]:
         if "event_id" not in event:
             event["event_id"] = str(uuid4())
         if "timestamp" not in event:
             event["timestamp"] = datetime.now(UTC).isoformat()
 
-        if event.get("synthetic") is not True:
+        if begin_call_state and event.get("synthetic") is not True:
             panel = event.get("door")
             event_id = event.get("event_id")
             started_at = event.get("timestamp")
@@ -1034,6 +1036,17 @@ class ComelitRingRuntime:
                 self._schedule_call_state_timeout(event_id)
                 if changed:
                     self._notify_status()
+
+        if event.get("synthetic") is not True:
+            panel = event.get("door")
+            source = event.get("source")
+            kind = event.get("kind")
+            if (
+                isinstance(panel, str)
+                and isinstance(source, str)
+                and isinstance(kind, str)
+            ):
+                self._note_ring_publish((panel, source, kind))
 
         self._last_ring_event = dict(event)
         self._hass.bus.async_fire(EVENT_RING, dict(event))
@@ -1055,6 +1068,24 @@ class ComelitRingRuntime:
 
         return dict(event)
 
+
+    def _note_ring_publish(self, key: tuple[str, str, str]) -> None:
+        """Remember a published call key so another owner cannot repeat it."""
+        now = monotonic()
+        self._ring_publish_latch[key] = now + _CALL_STATE_TIMEOUT_SECONDS
+        expired = [item for item, deadline in self._ring_publish_latch.items() if deadline <= now]
+        for item in expired:
+            self._ring_publish_latch.pop(item, None)
+
+    def _ring_publish_is_duplicate(self, key: tuple[str, str, str]) -> bool:
+        deadline = self._ring_publish_latch.get(key)
+        if deadline is None:
+            return False
+        if deadline <= monotonic():
+            self._ring_publish_latch.pop(key, None)
+            return False
+        return True
+
     async def async_emit_media_owner_ring(self, ring: RingEvent) -> None:
         """Publish a Ring observed by the media owner.
 
@@ -1066,9 +1097,21 @@ class ComelitRingRuntime:
         # where it is by construction the only observer of this call.
         if self.listener_ready:
             return
+        key = (ring.door, ring.source, ring.kind)
+        if self._ring_publish_is_duplicate(key):
+            _LOGGER.info(
+                "Comelit ring publication suppressed for an already published call"
+            )
+            return
+        self._note_ring_publish(key)
         payload: dict[str, object] = {}
         payload.update(ring.as_dict())
-        await self._async_emit_ring_event(payload, start_ring_media=False)
+        # Call state stays owned by the listener: the media owner never sees
+        # the remote release, so beginning it here would leave a phantom
+        # ringing state until the watchdog fires.
+        await self._async_emit_ring_event(
+            payload, start_ring_media=False, begin_call_state=False
+        )
 
     async def async_simulate_entrance_ring(self) -> dict[str, object]:
         """Emit one synthetic entrance ring and start the normal media lifecycle."""
@@ -2357,6 +2400,7 @@ class ComelitRingRuntime:
             }:
                 self._cancel_call_state_timeout()
                 if self._call_state_tracker().remote_release():
+                    self._ring_publish_latch.clear()
                     self._notify_status()
             if (
                 line == "R64_POST_CALL_SNAPSHOT=true"

@@ -1029,6 +1029,8 @@ class ComelitEntranceMediaTransport:
         self._last_native_failure_markers = []
         self._cancel_status_notify()
         self._progress.reset()
+        if getattr(self, "_ring_observation", None) is not None:
+            self._ring_observation.reset()
         self._last_status_notify_monotonic = None
         self._offer_ready.clear()
         self._media_active.clear()
@@ -1415,7 +1417,13 @@ class ComelitEntranceMediaTransport:
             if observation is None:
                 observation = RingObservationBuffer()
                 self._ring_observation = observation
-            ring_event = observation.feed(line)
+            try:
+                ring_event = observation.feed(line)
+            except Exception:
+                _LOGGER.warning(
+                    "Comelit ring observation parse failed", exc_info=True
+                )
+                ring_event = None
             sink = getattr(self, "_ring_event_sink", None)
             if ring_event is not None and sink is not None:
                 try:

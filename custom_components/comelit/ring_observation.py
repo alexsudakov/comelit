@@ -1,14 +1,19 @@
 """Streaming reader for the native, retransmission-suppressed Ring observation.
 
-The native helper prints one five-key observation per physical call, and it
-prints it *after* ``v4_ring_is_retransmit()`` has dropped every retransmission
-of the same frame (same SHA256 inside the helper's dedup window).  The probe
-lines (``V4_RING_PHASE``, ``V4_RING_PEER_CONNECTION``, ...) are printed for
-every attempt and therefore must never be used as a call signal.
+The native helper prints the five-key observation only after
+``v4_ring_is_retransmit()`` accepted the frame: the same body SHA256 inside the
+helper's sliding 15-second window is suppressed and printed as a probe only.
+The window is refreshed while the retransmission train continues, so the
+guarantee is "one observation per frame within that window", **not** "one per
+physical call".  Cross-owner repetition is handled by the runtime publication
+latch, not here.
+
+The probe lines (``V4_RING_PHASE``, ``V4_RING_PEER_CONNECTION``, ...) are
+printed for every attempt and therefore must never be used as a call signal.
 
 This module only re-assembles that already-suppressed observation so the media
 owner can publish the same event the listener publishes.  It introduces no
-identity, no time window and no frame-hash comparison of its own.
+identity of its own.
 """
 
 from __future__ import annotations
