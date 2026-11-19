@@ -90,9 +90,10 @@ _DOOR_LOG_STAGE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,47}$")
 _NATIVE_ENV_PASSTHROUGH = frozenset({"HOME", "LANG", "LC_ALL", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR"})
 _SUPPORTED_NATIVE_ARCHITECTURES = frozenset({"x86_64", "amd64"})
 _CALL_STATE_TIMEOUT_SECONDS = 120.0
-# Mirrors the native helper's retransmission window: the latch only
-# suppresses bytes-proven repeats of one frame, never a later call.
-_RING_PUBLISH_LATCH_SECONDS = 15.0
+# Fallback suppression window for publications without a frame digest.  It
+# covers the listener resume budget.  Byte-identical repeats inside the window
+# are indistinguishable from a later press and are suppressed on purpose.
+_RING_TUPLE_LATCH_SECONDS = 45.0
 _DOOR_LOG_WRITE_RE = re.compile(
     r"^V4_DOOR_OPERATION_WRITE_([1-5])_SENT=(true|false)$"
 )
@@ -760,7 +761,7 @@ class ComelitRingRuntime:
         self._attached_media_closed = asyncio.Event()
         self._ring_lines: list[str] = []
         self._last_ring_event: dict[str, str] | None = None
-        self._ring_publish_latch: dict[str, float] = {}
+        self._ring_publish_latch: dict[str, dict[str, object]] = {}
         self._last_ring_frame_sha: str | None = None
         self._last_error: str | None = None
         self._stopping = False
@@ -1008,6 +1009,7 @@ class ComelitRingRuntime:
         try:
             await coordinator.async_start_for_ring(event)
         except Exception:
+            self._ring_latch_clear_media(event)
             _LOGGER.exception("Failed to schedule Comelit ring media lifecycle")
 
     async def _async_emit_ring_event(
@@ -1042,17 +1044,17 @@ class ComelitRingRuntime:
                 latch_entries.append(
                     (
                         f"call:{panel}|{source}|{kind}",
-                        _RING_PUBLISH_LATCH_SECONDS,
+                        _RING_TUPLE_LATCH_SECONDS,
                     )
                 )
                 # Look up the digest when this owner has one: a different
                 # frame is a different call even within the fallback window.
-                lookup = (
-                    [f"sha:{frame_sha256}"]
-                    if frame_sha256
-                    else [f"call:{panel}|{source}|{kind}"]
+                lookup = [f"call:{panel}|{source}|{kind}"]
+                if frame_sha256:
+                    lookup.append(f"sha:{frame_sha256}")
+                latch_entry = self._ring_latch_find(
+                    lookup, caller_has_digest=bool(frame_sha256)
                 )
-                latch_entry = self._ring_latch_find(lookup)
                 if latch_entry is not None:
                     # The call is already published.  Do not re-fire the event,
                     # but still perform the lifecycle effects this owner is
@@ -1101,6 +1103,7 @@ class ComelitRingRuntime:
                 latch_entries,
                 event,
                 call_state=bool(begin_call_state and not synthetic),
+                digest_keyed=bool(frame_sha256),
             )
 
         started_media = False
@@ -1133,7 +1136,7 @@ class ComelitRingRuntime:
 
 
     def _ring_latch_find(
-        self, keys: list[str]
+        self, keys: list[str], *, caller_has_digest: bool = False
     ) -> dict[str, object] | None:
         now = monotonic()
         for key in keys:
@@ -1142,6 +1145,14 @@ class ComelitRingRuntime:
                 continue
             if float(entry["deadline"]) <= now:
                 self._ring_publish_latch.pop(key, None)
+                continue
+            if (
+                caller_has_digest
+                and key.startswith("call:")
+                and entry.get("digest_keyed")
+            ):
+                # A digest-keyed publication is only repeatable by the same
+                # digest; a different frame is a different call.
                 continue
             return entry
         return None
@@ -1152,6 +1163,7 @@ class ComelitRingRuntime:
         payload: dict[str, object],
         *,
         call_state: bool,
+        digest_keyed: bool = False,
     ) -> None:
         now = monotonic()
         for key, ttl in entries:
@@ -1160,6 +1172,7 @@ class ComelitRingRuntime:
                 "payload": dict(payload),
                 "call_state": call_state,
                 "media": False,
+                "digest_keyed": digest_keyed,
             }
         expired = [
             key
@@ -1169,13 +1182,49 @@ class ComelitRingRuntime:
         for key in expired:
             self._ring_publish_latch.pop(key, None)
 
+    def _ring_latch_set(
+        self, entry: dict[str, object], name: str, value: object
+    ) -> None:
+        """Mirror an effect flag to every alias of the same publication."""
+        entry[name] = value
+        payload = entry.get("payload")
+        event_id = payload.get("event_id") if isinstance(payload, dict) else None
+        for other in self._ring_publish_latch.values():
+            if other is entry:
+                continue
+            other_payload = other.get("payload")
+            if (
+                isinstance(other_payload, dict)
+                and other_payload.get("event_id") == event_id
+            ):
+                other[name] = value
+
     def _ring_latch_mark(
         self, entries: list[tuple[str, float]], *, media: bool
     ) -> None:
         for key, _ttl in entries:
             entry = self._ring_publish_latch.get(key)
             if entry is not None:
-                entry["media"] = media
+                self._ring_latch_set(entry, "media", media)
+
+    def _ring_latch_clear_media(self, event: dict[str, object]) -> None:
+        """A failed start must stay retryable by the next owner."""
+        event_id = event.get("event_id")
+        for entry in self._ring_publish_latch.values():
+            payload = entry.get("payload")
+            if isinstance(payload, dict) and payload.get("event_id") == event_id:
+                entry["media"] = False
+
+    def _ring_latch_forget_released(self) -> None:
+        """Drop only the entries of the call that announced its release."""
+        released = (self._last_ring_event or {}).get("event_id")
+        for key, entry in list(self._ring_publish_latch.items()):
+            payload = entry.get("payload")
+            if not isinstance(released, str):
+                self._ring_publish_latch.pop(key, None)
+                continue
+            if not isinstance(payload, dict) or payload.get("event_id") == released:
+                self._ring_publish_latch.pop(key, None)
 
     async def _ring_apply_missing_effects(
         self,
@@ -1203,7 +1252,7 @@ class ComelitRingRuntime:
                 self._schedule_call_state_timeout(event_id)
                 if changed:
                     self._notify_status()
-            entry["call_state"] = True
+                self._ring_latch_set(entry, "call_state", True)
         if start_media and not entry.get("media"):
             coordinator = self._ring_media_for_event(payload)
             if coordinator is not None:
@@ -1217,7 +1266,7 @@ class ComelitRingRuntime:
                         "observation"
                     )
                     started = False
-                entry["media"] = bool(started)
+                self._ring_latch_set(entry, "media", bool(started))
 
     async def async_emit_media_owner_ring(
         self, ring: RingEvent, frame_sha256: str | None = None
@@ -2533,7 +2582,7 @@ class ComelitRingRuntime:
             }:
                 self._cancel_call_state_timeout()
                 if self._call_state_tracker().remote_release():
-                    self._ring_publish_latch.clear()
+                    self._ring_latch_forget_released()
                     self._notify_status()
             if (
                 line == "R64_POST_CALL_SNAPSHOT=true"

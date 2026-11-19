@@ -7,6 +7,8 @@ from pathlib import Path
 import sys
 import types
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tests" / "miniapp" / "tools"))
@@ -32,6 +34,7 @@ class _RuntimeStub:
             "_ring_latch_find",
             "_ring_latch_write",
             "_ring_latch_mark",
+            "_ring_latch_set",
             "_ring_apply_missing_effects",
         ):
             setattr(
@@ -220,3 +223,41 @@ def test_listener_runs_the_effects_the_media_owner_skipped():
     assert len(stub.fired) == 1
     assert len(stub.media_starts) == 1
     assert len(stub.call_states) == 1
+
+
+def test_suppressed_observation_reuses_the_first_event_id():
+    stub = _FullStub()
+    _emit(stub, SHA_A)
+    first = stub.fired[0]["payload"]["event_id"]
+    asyncio.run(
+        runtime_mod.ComelitRingRuntime._async_emit_ring_event(
+            stub,
+            {"door": "entrance", "source": "00000643", "kind": "CALL_INIT"},
+            frame_sha256=SHA_A,
+        )
+    )
+    assert len(stub.fired) == 1
+    assert stub.fired[0]["payload"]["event_id"] == first
+    assert stub.call_states[0]["event_id"] == first
+
+
+def test_digest_and_tuple_windows_differ():
+    stub = _FullStub()
+    _emit(stub, SHA_A)
+    deadlines = {
+        key: entry["deadline"] for key, entry in stub._ring_publish_latch.items()
+    }
+    sha = next(value for key, value in deadlines.items() if key.startswith("sha:"))
+    call = next(value for key, value in deadlines.items() if key.startswith("call:"))
+    assert sha - call == pytest.approx(75.0, abs=1.0)
+
+
+def test_release_clears_only_the_released_call():
+    stub = _FullStub()
+    _emit(stub, SHA_A)
+    released = stub.fired[0]["payload"]["event_id"]
+    stub._last_ring_event = {"event_id": released}
+    other = dict(stub._ring_publish_latch)
+    runtime_mod.ComelitRingRuntime._ring_latch_forget_released(stub)
+    assert stub._ring_publish_latch == {}
+    assert other  # sanity: there was something to clear
