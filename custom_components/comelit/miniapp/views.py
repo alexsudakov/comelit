@@ -1080,6 +1080,15 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                                     reason = "client_close"
                                     break
                                 if kind == "error":
+                                    if (
+                                        attached_webcodecs
+                                        and str(code)
+                                        == "attached_webcodecs_transport_closed"
+                                        and self.controller.attached_call_handoff_for_current_session()
+                                    ):
+                                        log_event("source_eof")
+                                        await send_eos("call_handoff")
+                                        break
                                     if code == "unit_too_large":
                                         log_event("unit_too_large")
                                     elif code == "backlog_exceeded":

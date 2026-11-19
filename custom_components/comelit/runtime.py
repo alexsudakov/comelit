@@ -882,6 +882,7 @@ class ComelitRingRuntime:
             if shadow_hook is not None:
                 shadow_hook.note_watchdog_boundary_crossed()
             if self._call_state_tracker().fail_active("call_state_timeout"):
+                self._attached_call_handoff = False
                 _LOGGER.warning(
                     "Comelit call-state watchdog expired after %ss; "
                     "remote release was not observed",
@@ -1035,6 +1036,8 @@ class ComelitRingRuntime:
                 and isinstance(event_id, str)
                 and isinstance(started_at, str)
             ):
+                # A new call starts with no hand-off history.
+                self._attached_call_handoff = False
                 changed = self._call_state_tracker().begin(
                     panel=panel,
                     event_id=event_id,

@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 import sys
 import time
+import types
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -1216,6 +1217,29 @@ def test_release_during_a_live_call_latches_the_attached_handoff() -> None:
         # A fresh call-bound channel belongs to a new call.
         await instance._async_read_output(
             _Process(["R42_ATTACHED_MEDIA_ACTIVE=true"])
+        )
+        assert instance.attached_call_handoff is False
+
+    asyncio.run(run())
+
+
+def test_a_new_call_clears_the_previous_handoff_latch() -> None:
+    async def run() -> None:
+        _module, instance = _runtime_instance()
+        instance._hass.bus = types.SimpleNamespace(async_fire=lambda *a, **k: None)
+        instance._attached_call_handoff = True
+        instance._call_state_tracker().begin(
+            panel="entrance",
+            event_id="event-2",
+            started_at="2026-11-19T21:00:00+00:00",
+        )
+        await instance._async_emit_ring_event(
+            {
+                "direction": "inbound",
+                "kind": "CALL_INIT",
+                "door": "entrance",
+                "source": "00000643",
+            }
         )
         assert instance.attached_call_handoff is False
 
