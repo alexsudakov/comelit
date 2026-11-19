@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 import hashlib
 import logging
 import os
@@ -54,6 +54,8 @@ from .oauth import ComelitOAuthError, ComelitOAuthManager
 from .ring_probe_log import RING_PROBE_OWNER_MEDIA, RingProbeDisclosure
 from .ring_shadow import RingShadowController, RingShadowHook, SHADOW_OWNER_MEDIA
 from .ring_episode import RingEpisodeLedger
+from .ring_event import RingEvent
+from .ring_observation import RingObservationBuffer
 from .sdp import ComelitSdpError, transform_offer
 
 _LOGGER = logging.getLogger(__name__)
@@ -520,6 +522,14 @@ class ComelitEntranceMediaTransport:
         if callable(attach):
             attach(self._ring_episode)
         self._ring_probe_disclosure = RingProbeDisclosure(RING_PROBE_OWNER_MEDIA)
+        self._ring_observation = RingObservationBuffer()
+        self._ring_event_sink: Callable[[RingEvent], Awaitable[None]] | None = None
+
+    def set_ring_event_sink(
+        self, sink: Callable[[RingEvent], Awaitable[None]] | None
+    ) -> None:
+        """Register the one consumer allowed to publish media-owner rings."""
+        self._ring_event_sink = sink
 
     @property
     def active(self) -> bool:
@@ -1401,6 +1411,20 @@ class ComelitEntranceMediaTransport:
             if shadow_previous_line is not None:
                 self._shadow_hook.observe_line(shadow_previous_line)
             shadow_previous_line = line
+            observation = getattr(self, "_ring_observation", None)
+            if observation is None:
+                observation = RingObservationBuffer()
+                self._ring_observation = observation
+            ring_event = observation.feed(line)
+            sink = getattr(self, "_ring_event_sink", None)
+            if ring_event is not None and sink is not None:
+                try:
+                    await sink(ring_event)
+                except Exception:
+                    _LOGGER.warning(
+                        "Comelit media-owner ring publication failed",
+                        exc_info=True,
+                    )
             self._remember_native_marker(line)
             self._observe_latency_marker(line)
             self._observe_native_stage_marker(line)

@@ -32,7 +32,7 @@ from .const import (
 from .door_outcome import door_one_shot_sequence_sent
 from .media_diagnostics import MediaCallDiagnostics
 from .oauth import ComelitOAuthError, ComelitOAuthManager
-from .ring_event import RingObservationError, parse_v4_safe_ring
+from .ring_event import RingEvent, RingObservationError, parse_v4_safe_ring
 from .ring_probe_log import RING_PROBE_OWNER_LISTENER, RingProbeDisclosure
 from .ring_shadow import RingShadowController, RingShadowHook, SHADOW_OWNER_LISTENER
 from .sdp import ComelitSdpError, transform_offer
@@ -1010,6 +1010,7 @@ class ComelitRingRuntime:
         event: dict[str, object],
         *,
         require_media_start: bool = False,
+        start_ring_media: bool = True,
     ) -> dict[str, object]:
         if "event_id" not in event:
             event["event_id"] = str(uuid4())
@@ -1045,13 +1046,29 @@ class ComelitRingRuntime:
             if not started:
                 raise ComelitRingRuntimeError("synthetic_ring_media_not_started")
         else:
-            self._entry.async_create_background_task(
-                self._hass,
-                self._async_start_ring_media(dict(event)),
-                "comelit ring media scheduler",
-            )
+            if start_ring_media:
+                self._entry.async_create_background_task(
+                    self._hass,
+                    self._async_start_ring_media(dict(event)),
+                    "comelit ring media scheduler",
+                )
 
         return dict(event)
+
+    async def async_emit_media_owner_ring(self, ring: RingEvent) -> None:
+        """Publish a Ring observed by the media owner.
+
+        The media owner never starts ring media: it already holds the single
+        upstream session, and a second owner must not be created.
+        """
+        # The listener is the primary observer.  While it is ready it owns
+        # publication; the media owner only speaks during a paused listener,
+        # where it is by construction the only observer of this call.
+        if self.listener_ready:
+            return
+        payload: dict[str, object] = {}
+        payload.update(ring.as_dict())
+        await self._async_emit_ring_event(payload, start_ring_media=False)
 
     async def async_simulate_entrance_ring(self) -> dict[str, object]:
         """Emit one synthetic entrance ring and start the normal media lifecycle."""

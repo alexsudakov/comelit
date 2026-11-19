@@ -269,6 +269,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Camera state attributes are calculated on the HA event loop.
         # Perform file stat/hash for native identity in the executor first.
         await media_transport.async_prepare_native_identity_diagnostics()
+        set_ring_sink = getattr(media_transport, "set_ring_event_sink", None)
+        if callable(set_ring_sink):
+            set_ring_sink(runtime.async_emit_media_owner_ring)
 
         media_manager = ComelitMediaSessionManager(
             supervisor,
