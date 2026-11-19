@@ -1068,6 +1068,7 @@ class ComelitRingRuntime:
         await self._async_emit_ring_event(
             payload, start_ring_media=False, begin_call_state=False
         )
+        self._notify_status()
 
     async def async_simulate_entrance_ring(self) -> dict[str, object]:
         """Emit one synthetic entrance ring and start the normal media lifecycle."""

@@ -285,16 +285,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         media_sessions = domain_data.setdefault(DATA_MEDIA_SESSIONS, {})
         media_sessions[entry.entry_id] = media_manager
 
-        # The media owner may publish a Ring only while this manager holds the
-        # session; a late observation from a released session must not.
-        async def _publish_media_owner_ring(ring) -> None:
-            if not media_manager.active:
-                return
-            await runtime.async_emit_media_owner_ring(ring)
-
+        # The sink is called from the media session's own stdout reader, so a
+        # publication exists only while that session owns the stream.  That is
+        # the ownership window: no separate phase gate is added, because the
+        # call is announced while teardown may already be in flight.
         set_ring_sink = getattr(media_transport, "set_ring_event_sink", None)
         if callable(set_ring_sink):
-            set_ring_sink(_publish_media_owner_ring)
+            set_ring_sink(runtime.async_emit_media_owner_ring)
+        else:
+            _LOGGER.warning("Comelit media-owner ring sink is unavailable")
 
         attached_transport = ComelitAttachedRingMediaTransport(runtime)
         attached_transports = domain_data.setdefault(
