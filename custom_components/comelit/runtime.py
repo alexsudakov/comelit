@@ -1007,10 +1007,13 @@ class ComelitRingRuntime:
         if coordinator is None:
             return
         try:
-            await coordinator.async_start_for_ring(event)
+            started = await coordinator.async_start_for_ring(event)
         except Exception:
             self._ring_latch_clear_media(event)
             _LOGGER.exception("Failed to schedule Comelit ring media lifecycle")
+        else:
+            if not started:
+                self._ring_latch_clear_media(event)
 
     async def _async_emit_ring_event(
         self,

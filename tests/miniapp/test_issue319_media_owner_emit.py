@@ -255,9 +255,10 @@ def test_digest_and_tuple_windows_differ():
 def test_release_clears_only_the_released_call():
     stub = _FullStub()
     _emit(stub, SHA_A)
-    released = stub.fired[0]["payload"]["event_id"]
+    _emit(stub, SHA_B)
+    released = stub.fired[-1]["payload"]["event_id"]
     stub._last_ring_event = {"event_id": released}
-    other = dict(stub._ring_publish_latch)
     runtime_mod.ComelitRingRuntime._ring_latch_forget_released(stub)
-    assert stub._ring_publish_latch == {}
-    assert other  # sanity: there was something to clear
+    remaining = set(stub._ring_publish_latch)
+    assert f"sha:{SHA_A}" in remaining
+    assert f"sha:{SHA_B}" not in remaining
