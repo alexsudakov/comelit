@@ -523,10 +523,10 @@ class ComelitEntranceMediaTransport:
             attach(self._ring_episode)
         self._ring_probe_disclosure = RingProbeDisclosure(RING_PROBE_OWNER_MEDIA)
         self._ring_observation = RingObservationBuffer()
-        self._ring_event_sink: Callable[[RingEvent], Awaitable[None]] | None = None
+        self._ring_event_sink: Callable[[RingEvent, str | None], Awaitable[None]] | None = None
 
     def set_ring_event_sink(
-        self, sink: Callable[[RingEvent], Awaitable[None]] | None
+        self, sink: Callable[[RingEvent, str | None], Awaitable[None]] | None
     ) -> None:
         """Register the one consumer allowed to publish media-owner rings."""
         self._ring_event_sink = sink
@@ -1427,7 +1427,7 @@ class ComelitEntranceMediaTransport:
             sink = getattr(self, "_ring_event_sink", None)
             if ring_event is not None and sink is not None:
                 try:
-                    await sink(ring_event)
+                    await sink(ring_event, observation.frame_sha256)
                 except Exception:
                     _LOGGER.warning(
                         "Comelit media-owner ring publication failed",

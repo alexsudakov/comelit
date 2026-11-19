@@ -90,6 +90,9 @@ _DOOR_LOG_STAGE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,47}$")
 _NATIVE_ENV_PASSTHROUGH = frozenset({"HOME", "LANG", "LC_ALL", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR"})
 _SUPPORTED_NATIVE_ARCHITECTURES = frozenset({"x86_64", "amd64"})
 _CALL_STATE_TIMEOUT_SECONDS = 120.0
+# Mirrors the native helper's retransmission window: the latch only
+# suppresses bytes-proven repeats of one frame, never a later call.
+_RING_PUBLISH_LATCH_SECONDS = 15.0
 _DOOR_LOG_WRITE_RE = re.compile(
     r"^V4_DOOR_OPERATION_WRITE_([1-5])_SENT=(true|false)$"
 )
@@ -757,7 +760,8 @@ class ComelitRingRuntime:
         self._attached_media_closed = asyncio.Event()
         self._ring_lines: list[str] = []
         self._last_ring_event: dict[str, str] | None = None
-        self._ring_publish_latch: dict[tuple[str, str, str], float] = {}
+        self._ring_publish_latch: dict[str, float] = {}
+        self._last_ring_frame_sha: str | None = None
         self._last_error: str | None = None
         self._stopping = False
         self._door_lock = asyncio.Lock()
@@ -1013,7 +1017,29 @@ class ComelitRingRuntime:
         require_media_start: bool = False,
         start_ring_media: bool = True,
         begin_call_state: bool = True,
+        frame_sha256: str | None = None,
     ) -> dict[str, object]:
+        synthetic = event.get("synthetic") is True
+        latch_key: str | None = None
+        if not synthetic:
+            panel = event.get("door")
+            source = event.get("source")
+            kind = event.get("kind")
+            if (
+                isinstance(panel, str)
+                and isinstance(source, str)
+                and isinstance(kind, str)
+            ):
+                # Suppression key: the native frame digest when the caller has
+                # it, otherwise the bounded call tuple.  Never a call identity.
+                latch_key = frame_sha256 or f"{panel}|{source}|{kind}"
+                if self._ring_publish_is_duplicate(latch_key):
+                    _LOGGER.info(
+                        "Comelit ring publication suppressed for an already "
+                        "published call"
+                    )
+                    return dict(event)
+
         if "event_id" not in event:
             event["event_id"] = str(uuid4())
         if "timestamp" not in event:
@@ -1037,17 +1063,6 @@ class ComelitRingRuntime:
                 if changed:
                     self._notify_status()
 
-        if event.get("synthetic") is not True:
-            panel = event.get("door")
-            source = event.get("source")
-            kind = event.get("kind")
-            if (
-                isinstance(panel, str)
-                and isinstance(source, str)
-                and isinstance(kind, str)
-            ):
-                self._note_ring_publish((panel, source, kind))
-
         self._last_ring_event = dict(event)
         self._hass.bus.async_fire(EVENT_RING, dict(event))
 
@@ -1066,18 +1081,21 @@ class ComelitRingRuntime:
                     "comelit ring media scheduler",
                 )
 
+        if latch_key is not None:
+            self._note_ring_publish(latch_key)
+
         return dict(event)
 
 
-    def _note_ring_publish(self, key: tuple[str, str, str]) -> None:
+    def _note_ring_publish(self, key: str) -> None:
         """Remember a published call key so another owner cannot repeat it."""
         now = monotonic()
-        self._ring_publish_latch[key] = now + _CALL_STATE_TIMEOUT_SECONDS
+        self._ring_publish_latch[key] = now + _RING_PUBLISH_LATCH_SECONDS
         expired = [item for item, deadline in self._ring_publish_latch.items() if deadline <= now]
         for item in expired:
             self._ring_publish_latch.pop(item, None)
 
-    def _ring_publish_is_duplicate(self, key: tuple[str, str, str]) -> bool:
+    def _ring_publish_is_duplicate(self, key: str) -> bool:
         deadline = self._ring_publish_latch.get(key)
         if deadline is None:
             return False
@@ -1086,7 +1104,9 @@ class ComelitRingRuntime:
             return False
         return True
 
-    async def async_emit_media_owner_ring(self, ring: RingEvent) -> None:
+    async def async_emit_media_owner_ring(
+        self, ring: RingEvent, frame_sha256: str | None = None
+    ) -> None:
         """Publish a Ring observed by the media owner.
 
         The media owner never starts ring media: it already holds the single
@@ -1097,20 +1117,16 @@ class ComelitRingRuntime:
         # where it is by construction the only observer of this call.
         if self.listener_ready:
             return
-        key = (ring.door, ring.source, ring.kind)
-        if self._ring_publish_is_duplicate(key):
-            _LOGGER.info(
-                "Comelit ring publication suppressed for an already published call"
-            )
-            return
-        self._note_ring_publish(key)
         payload: dict[str, object] = {}
         payload.update(ring.as_dict())
         # Call state stays owned by the listener: the media owner never sees
         # the remote release, so beginning it here would leave a phantom
         # ringing state until the watchdog fires.
         await self._async_emit_ring_event(
-            payload, start_ring_media=False, begin_call_state=False
+            payload,
+            start_ring_media=False,
+            begin_call_state=False,
+            frame_sha256=frame_sha256,
         )
 
     async def async_simulate_entrance_ring(self) -> dict[str, object]:
@@ -1178,6 +1194,8 @@ class ComelitRingRuntime:
             and _RING_SHA_MARKER_VALUE_RE.fullmatch(value)
         ):
             _LOGGER.info("Comelit ring fingerprint marker; %s=%s", key, value)
+            if key == "V4_RING_FRAME_SHA256":
+                self._last_ring_frame_sha = value
             safe_value = "<redacted>"
         elif key in _OBSERVABILITY_PROTECTED_LONG_NUMERIC_KEYS:
             safe_value = (
@@ -2553,7 +2571,9 @@ class ComelitRingRuntime:
             if ring is None:
                 continue
             event = ring.as_dict()
-            await self._async_emit_ring_event(event)
+            frame_sha = getattr(self, "_last_ring_frame_sha", None)
+            self._last_ring_frame_sha = None
+            await self._async_emit_ring_event(event, frame_sha256=frame_sha)
             _LOGGER.warning(
                 "Comelit ring event emitted: door=%s source=%s",
                 ring.door,

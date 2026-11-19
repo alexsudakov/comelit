@@ -21,6 +21,8 @@ from __future__ import annotations
 from .ring_event import RingEvent, RingObservationError, parse_v4_safe_ring
 
 _OBSERVED_KEY = "V4_RING_OBSERVED"
+_FRAME_SHA_KEY = "V4_RING_FRAME_SHA256"
+_FRAME_SHA_RE = __import__("re").compile(r"^[0-9a-f]{64}$")
 _BATCH_KEYS = (
     "V4_RING_OBSERVED",
     "V4_RING_DIRECTION",
@@ -36,21 +38,27 @@ class RingObservationBuffer:
 
     def __init__(self) -> None:
         self._lines: list[str] = []
+        self.frame_sha256: str | None = None
 
     def reset(self) -> None:
         self._lines.clear()
+        self.frame_sha256 = None
 
     def feed(self, line: str) -> RingEvent | None:
         """Consume one raw line; return the event when a batch completes."""
         line = line.strip()
         if "=" not in line:
             return None
-        key = line.split("=", 1)[0]
+        key, _sep, raw_value = line.partition("=")
+        if key == _FRAME_SHA_KEY:
+            if _FRAME_SHA_RE.fullmatch(raw_value):
+                self.frame_sha256 = raw_value
+            return None
         if key == _OBSERVED_KEY:
             # A new observation always starts a new batch.  ``false`` is the
             # native listener timeout marker and never produces an event.
             self._lines = [line]
-            if line.split("=", 1)[1] != "true":
+            if raw_value != "true":
                 self._lines = []
                 return None
             return None
