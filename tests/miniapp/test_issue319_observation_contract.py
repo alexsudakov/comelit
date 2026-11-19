@@ -128,3 +128,21 @@ def test_invalid_direction_is_rejected(direction):
     lines[1] = f"V4_RING_DIRECTION={direction}"
     produced = [buffer.feed(line) for line in lines]
     assert [item for item in produced if item is not None] == []
+
+
+def test_frame_digest_is_consumed_once_and_never_inherited():
+    buffer = RingObservationBuffer()
+    produced = [
+        buffer.feed(line)
+        for line in ["V4_RING_FRAME_SHA256=" + "a" * 64]
+        + _probe("INITIAL")
+        + _observation()
+    ]
+    assert [item for item in produced if item is not None]
+    assert buffer.take_frame_sha() == "a" * 64
+    assert buffer.take_frame_sha() is None
+
+    # A second batch without its own digest must not inherit the first one.
+    produced = [buffer.feed(line) for line in _observation()]
+    assert [item for item in produced if item is not None]
+    assert buffer.take_frame_sha() is None

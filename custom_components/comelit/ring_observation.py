@@ -40,6 +40,12 @@ class RingObservationBuffer:
         self._lines: list[str] = []
         self.frame_sha256: str | None = None
 
+    def take_frame_sha(self) -> str | None:
+        """Return the digest of the batch just emitted and forget it."""
+        digest = self.frame_sha256
+        self.frame_sha256 = None
+        return digest
+
     def reset(self) -> None:
         self._lines.clear()
         self.frame_sha256 = None

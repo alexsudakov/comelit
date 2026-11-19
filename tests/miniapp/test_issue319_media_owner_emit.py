@@ -25,10 +25,15 @@ class _RuntimeStub:
     listener_ready = False
 
     def __init__(self) -> None:
-        self._ring_publish_latch: dict[str, float] = {}
+        self._ring_publish_latch: dict[str, dict] = {}
         self.emitted: list[tuple[dict, bool, bool]] = []
         self.fired: list[dict] = []
-        for name in ("_note_ring_publish", "_ring_publish_is_duplicate"):
+        for name in (
+            "_ring_latch_find",
+            "_ring_latch_write",
+            "_ring_latch_mark",
+            "_ring_apply_missing_effects",
+        ):
             setattr(
                 self,
                 name,
@@ -57,6 +62,8 @@ class _FullStub(_RuntimeStub):
     def __init__(self) -> None:
         super().__init__()
         self._last_ring_event = None
+        self.media_starts: list[dict] = []
+        self.call_states: list[dict] = []
         self._entry = types.SimpleNamespace(
             async_create_background_task=self._background_task
         )
@@ -75,7 +82,11 @@ class _FullStub(_RuntimeStub):
         self.fired.append({"type": event_type, "payload": dict(payload)})
 
     def _call_state_tracker(self):
-        return types.SimpleNamespace(begin=lambda **kwargs: False)
+        def begin(**kwargs):
+            self.call_states.append(kwargs)
+            return False
+
+        return types.SimpleNamespace(begin=begin)
 
     def _schedule_call_state_timeout(self, event_id):
         return None
@@ -84,7 +95,11 @@ class _FullStub(_RuntimeStub):
         return None
 
     def _ring_media_for_event(self, event):
-        return None
+        async def start(payload):
+            self.media_starts.append(dict(payload))
+            return True
+
+        return types.SimpleNamespace(async_start_for_ring=start)
 
     async def _async_start_ring_media(self, event):
         return None
@@ -140,8 +155,8 @@ def test_a_different_frame_is_a_different_call():
 def test_latch_expires_after_the_native_window(monkeypatch):
     stub = _FullStub()
     _emit(stub, SHA_A)
-    key = next(iter(stub._ring_publish_latch))
-    stub._ring_publish_latch[key] = 0.0
+    for key in stub._ring_publish_latch:
+        stub._ring_publish_latch[key]["deadline"] = 0.0
     _emit(stub, SHA_A)
     assert len(stub.fired) == 2
 
@@ -149,9 +164,16 @@ def test_latch_expires_after_the_native_window(monkeypatch):
 def test_latch_does_not_grow_without_bound():
     stub = _FullStub()
     for index in range(5):
-        stub._ring_publish_latch[f"stale-{index}"] = 0.0
+        stub._ring_publish_latch[f"stale-{index}"] = {
+            "deadline": 0.0,
+            "payload": {},
+            "call_state": False,
+            "media": False,
+        }
     _emit(stub, SHA_A)
-    assert all(deadline > 0.0 for deadline in stub._ring_publish_latch.values())
+    assert all(
+        entry["deadline"] > 0.0 for entry in stub._ring_publish_latch.values()
+    )
 
 
 def test_listener_path_consults_the_same_latch():
@@ -182,3 +204,19 @@ def test_synthetic_ring_is_never_latched():
     asyncio.run(runtime_mod.ComelitRingRuntime._async_emit_ring_event(stub, dict(event)))
     assert len(stub.fired) == 2
     assert stub._ring_publish_latch == {}
+
+
+def test_listener_runs_the_effects_the_media_owner_skipped():
+    stub = _FullStub()
+    _emit(stub, SHA_A)
+    assert stub.fired and stub.media_starts == [] and stub.call_states == []
+    asyncio.run(
+        runtime_mod.ComelitRingRuntime._async_emit_ring_event(
+            stub,
+            {"door": "entrance", "source": "00000643", "kind": "CALL_INIT"},
+            frame_sha256=SHA_A,
+        )
+    )
+    assert len(stub.fired) == 1
+    assert len(stub.media_starts) == 1
+    assert len(stub.call_states) == 1

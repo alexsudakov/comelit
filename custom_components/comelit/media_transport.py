@@ -1427,7 +1427,7 @@ class ComelitEntranceMediaTransport:
             sink = getattr(self, "_ring_event_sink", None)
             if ring_event is not None and sink is not None:
                 try:
-                    await sink(ring_event, observation.frame_sha256)
+                    await sink(ring_event, observation.take_frame_sha())
                 except Exception:
                     _LOGGER.warning(
                         "Comelit media-owner ring publication failed",
