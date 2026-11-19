@@ -10,7 +10,7 @@ import types
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tests" / "miniapp" / "tools"))
-from optionf_pr1a_replay import _load_component_module
+from optionf_pr1a_replay import _FakeProcess, _load_component_module, _media_instance
 
 
 runtime_mod = _load_component_module(str(ROOT), "runtime")
@@ -97,3 +97,48 @@ def test_media_owner_keeps_the_standard_payload():
     assert payload["source"] == "00000643"
     assert "event_id" in payload
     assert "timestamp" in payload
+
+
+FIXTURES = ROOT / "tests" / "miniapp" / "fixtures" / "optionf_pr1a"
+
+
+def _lines(name: str) -> list[str]:
+    return (FIXTURES / name).read_text(encoding="utf-8").splitlines()
+
+
+def test_media_reader_publishes_one_event_for_the_recorded_fixture():
+    media_transport = _load_component_module(str(ROOT), "media_transport")
+    instance, _events, _call_state, _shadow = _media_instance(
+        media_transport, shadow_enabled=False
+    )
+    published = []
+
+    async def sink(ring):
+        published.append(ring)
+
+    instance.set_ring_event_sink(sink)
+    asyncio.run(
+        instance._async_read_output(
+            _FakeProcess(_lines("03_media_owner_ring.golden.txt"))
+        )
+    )
+    assert len(published) == 1
+    assert published[0].door == "entrance"
+
+
+def test_a_failing_sink_does_not_break_the_native_reader():
+    media_transport = _load_component_module(str(ROOT), "media_transport")
+    instance, _events, _call_state, _shadow = _media_instance(
+        media_transport, shadow_enabled=False
+    )
+
+    async def sink(ring):
+        raise RuntimeError("publication failed")
+
+    instance.set_ring_event_sink(sink)
+    asyncio.run(
+        instance._async_read_output(
+            _FakeProcess(_lines("03_media_owner_ring.golden.txt"))
+        )
+    )
+    assert instance._media_active.is_set()

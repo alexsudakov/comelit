@@ -1423,7 +1423,13 @@ class ComelitEntranceMediaTransport:
                 ring_event = None
             sink = getattr(self, "_ring_event_sink", None)
             if ring_event is not None and sink is not None:
-                await sink(ring_event)
+                try:
+                    await sink(ring_event)
+                except Exception:
+                    _LOGGER.warning(
+                        "Comelit media-owner ring publication failed",
+                        exc_info=True,
+                    )
             self._remember_native_marker(line)
             self._observe_latency_marker(line)
             self._observe_native_stage_marker(line)
