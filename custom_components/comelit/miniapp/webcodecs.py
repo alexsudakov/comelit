@@ -865,6 +865,6 @@ def entrance_eos_reason(reason: str, *, kind: str, ring_handoff: bool) -> str:
     Only the session's own terminal reason is rewritten; any other failure
     keeps its diagnostic code, and this never starts another session.
     """
-    if reason == "source_eof" and kind == "entrance" and ring_handoff:
+    if reason == "source_eof" and kind in {"entrance", "attached"} and ring_handoff:
         return "call_handoff"
     return reason

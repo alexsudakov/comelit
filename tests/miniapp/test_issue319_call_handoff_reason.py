@@ -29,6 +29,9 @@ def test_entrance_eos_reason_rewrites_only_the_session_end():
     assert reason("source_eof", kind="entrance", ring_handoff=True) == "call_handoff"
     assert reason("source_eof", kind="entrance", ring_handoff=False) == "source_eof"
     assert reason("source_eof", kind="ordinary", ring_handoff=True) == "source_eof"
+    # The attached viewer shares the listener's call, so its end is explained.
+    assert reason("source_eof", kind="attached", ring_handoff=True) == "call_handoff"
+    assert reason("source_eof", kind="attached", ring_handoff=False) == "source_eof"
     assert (
         reason(
             "attached_webcodecs_source_failed", kind="entrance", ring_handoff=True

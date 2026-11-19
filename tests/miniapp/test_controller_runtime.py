@@ -4975,3 +4975,25 @@ def test_ring_end_reason_is_not_constant_after_viewer_stop(tmp_path):
     source = _read_file("custom_components/comelit/ring_media.py")
     assert 'self._ring_end_reason = "hard_limit"' not in source
     assert "async_request_stop" in source
+
+
+def test_attached_call_handoff_requires_a_live_call():
+    controller, hass = _controller(surveillance_label="Outside")
+
+    class _Runtime:
+        def __init__(self, state):
+            self._state = state
+
+        def call_status(self):
+            return {"state": self._state}
+
+    domain_data = hass.data.setdefault(controller_mod.DOMAIN, {})
+    runtimes = domain_data.setdefault(controller_mod.DATA_RUNTIMES, {})
+    runtimes["entry-1"] = _Runtime("ringing")
+    assert controller.attached_call_handoff_for_current_session() is True
+
+    runtimes["entry-1"] = _Runtime("active")
+    assert controller.attached_call_handoff_for_current_session() is True
+
+    runtimes["entry-1"] = _Runtime("idle")
+    assert controller.attached_call_handoff_for_current_session() is False

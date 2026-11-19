@@ -29,6 +29,7 @@ from ..const import (
     DATA_ATTACHED_MEDIA_SESSIONS,
     DATA_MINIAPP_ATTACHED_MEDIA_PROVIDERS,
     DATA_RING_MEDIA,
+    DATA_RUNTIMES,
     DOMAIN,
     DOOR_ENTRANCE,
     DOOR_GATE,
@@ -863,6 +864,27 @@ class ComelitMiniAppController:
             kind="ordinary",
             camera=get_camera_from_entity_id(self.hass, entity_id),
         )
+
+    def attached_call_handoff_for_current_session(self) -> bool:
+        """Whether the listener sees a live call for the attached session.
+
+        Attached WebCodecs reads the call-bound media owned by the listener, so
+        the listener is the only observer of the incoming call there.
+        """
+        entry = self._entry
+        entry_id = getattr(entry, "entry_id", None) if entry is not None else None
+        if not isinstance(entry_id, str) or not entry_id:
+            return False
+        runtime = (
+            self.hass.data.get(DOMAIN, {}).get(DATA_RUNTIMES, {}).get(entry_id)
+        )
+        if runtime is None:
+            return False
+        try:
+            state = runtime.call_status().get("state")
+        except Exception:
+            return False
+        return state in {"ringing", "active"}
 
     def entrance_ring_handoff_for_current_session(self) -> bool:
         """Whether the entrance media session currently held saw a Ring.

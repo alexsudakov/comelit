@@ -298,7 +298,11 @@ class ComelitAttachedRingMediaTransport:
     async def async_stop(self) -> None:
         async with self._lock:
             stop_error: Exception | None = None
-            if self._runtime.attached_media_open:
+            # A confirmed release clears attached_media_open before the native
+            # side reports the channel closed; the stop still has to be sent.
+            if self._runtime.attached_media_open or getattr(
+                self._runtime, "attached_media_busy", False
+            ):
                 try:
                     stopped = await self._runtime.async_stop_attached_media(
                         _ATTACHED_MEDIA_STOP_TIMEOUT_SECONDS

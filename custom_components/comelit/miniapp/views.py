@@ -1093,12 +1093,13 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                                     await send_eos(
                                         webcodecs_mod.entrance_eos_reason(
                                             str(code),
-                                            kind="entrance"
-                                            if not attached_webcodecs
-                                            else "attached",
+                                            kind="attached"
+                                            if attached_webcodecs
+                                            else target.kind,
                                             ring_handoff=(
-                                                not attached_webcodecs
-                                                and self.controller.entrance_ring_handoff_for_current_session()
+                                                self.controller.attached_call_handoff_for_current_session()
+                                                if attached_webcodecs
+                                                else self.controller.entrance_ring_handoff_for_current_session()
                                             ),
                                         )
                                     )
@@ -1177,8 +1178,18 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                 source_task.cancel()
                 # A failure while closing the source must not escape after the
                 # terminal event: the summary line still has to be written.
-                with contextlib.suppress(asyncio.CancelledError, Exception):
+                try:
                     await source_task
+                except asyncio.CancelledError:
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling():
+                        raise
+                except Exception:
+                    errors += 1
+                    _LOGGER.warning(
+                        "Comelit Mini App WebCodecs source close failed",
+                        exc_info=True,
+                    )
             if client_watch_task is not None:
                 client_watch_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
