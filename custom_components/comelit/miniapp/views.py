@@ -1175,7 +1175,9 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
         finally:
             if source_task is not None:
                 source_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
+                # A failure while closing the source must not escape after the
+                # terminal event: the summary line still has to be written.
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     await source_task
             if client_watch_task is not None:
                 client_watch_task.cancel()
