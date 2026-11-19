@@ -1180,8 +1180,8 @@ def test_confirmed_remote_release_clears_attached_media_open() -> None:
             _Process(["R37_REMOTE_RELEASE_OBSERVED=true"])
         )
         assert instance.attached_media_open is False
-        # A new preview must not be refused as intercom_media_busy.
-        assert instance.attached_media_busy is False
-        assert instance._attached_media_closed.is_set() is True
+        # Exclusivity is kept: the busy gate is released only by the native
+        # CLOSED marker, never by a release assumption.
+        assert instance.attached_media_busy is True
 
     asyncio.run(run())

@@ -71,7 +71,6 @@ _MEDIA_REMOTE_FILE = _MEDIA_RUN_DIR / "remote.sdp"
 _MEDIA_STOP_FILE = _MEDIA_RUN_DIR / "stop"
 _MEDIA_LOCAL_SDP_FILE = _MEDIA_RUN_DIR / "local-rtp.sdp"
 _MEDIA_STARTUP_WINDOW_SECONDS = 45.0
-_RING_HANDOFF_WINDOW_SECONDS = 120.0
 _MEDIA_LOCAL_SDP_READY_REASON = "local_sdp_ready_timeout"
 
 MEDIA_NATIVE_BINARY_SHA256 = (
@@ -1008,17 +1007,19 @@ class ComelitEntranceMediaTransport:
 
     @property
     def ring_observed(self) -> bool:
-        """Whether this session saw a confirmed Ring within the grace window.
+        """Whether the current session saw a confirmed Ring.
 
-        The window bounds the explanation only; it is not used for call
-        identity and never starts a media session.
+        Scoped to the session: the observation has to belong to the attempt
+        that is running now.  It is used only to explain that session's end;
+        it is not call identity and never starts a media session.
         """
         if not getattr(self, "_ring_observed", False):
             return False
         observed_at = getattr(self, "_ring_observed_at", None)
-        if observed_at is None:
+        started_at = getattr(self, "_session_started_at", None)
+        if observed_at is None or started_at is None:
             return False
-        return (time.monotonic() - observed_at) <= _RING_HANDOFF_WINDOW_SECONDS
+        return observed_at >= started_at
 
     def set_ring_event_sink(
         self, sink: Callable[[RingEvent], Awaitable[None]] | None
@@ -1050,6 +1051,7 @@ class ComelitEntranceMediaTransport:
             self._ring_observation.reset()
         self._ring_observed = False
         self._ring_observed_at = None
+        self._session_started_at = time.monotonic()
         self._last_status_notify_monotonic = None
         self._offer_ready.clear()
         self._media_active.clear()

@@ -168,6 +168,7 @@ def test_observation_read_during_teardown_is_still_published():
     # The panel stops preview first; the Ring INVITE is read while the media
     # teardown is already in flight.
     instance._stopping = True
+    instance._session_started_at = 0.0
     asyncio.run(
         instance._async_read_output(
             _FakeProcess(_lines("03_media_owner_ring.golden.txt"))
@@ -186,13 +187,15 @@ def test_identical_publications_still_notify_status():
     assert stub.notifies == 2
 
 
-def test_ring_observed_expires_after_the_grace_window():
+def test_ring_observed_is_scoped_to_the_current_session():
     import time as _time
 
     media_transport = _load_component_module(str(ROOT), "media_transport")
     instance = object.__new__(media_transport.ComelitEntranceMediaTransport)
     instance._ring_observed = True
-    instance._ring_observed_at = _time.monotonic() - 500
+    # A Ring seen before this session started does not belong to it.
+    instance._ring_observed_at = _time.monotonic() - 5
+    instance._session_started_at = _time.monotonic() - 1
     assert instance.ring_observed is False
     instance._ring_observed_at = _time.monotonic()
     assert instance.ring_observed is True

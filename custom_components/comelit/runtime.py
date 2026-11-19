@@ -1866,7 +1866,7 @@ class ComelitRingRuntime:
                     pass
 
     async def async_stop_attached_media(self, timeout: float = 10.0) -> bool:
-        if not self.attached_media_open:
+        if not self.attached_media_open and not self.attached_media_busy:
             return True
 
         process = self._process
@@ -2360,11 +2360,11 @@ class ComelitRingRuntime:
                 self._cancel_call_state_timeout()
                 # A confirmed remote release ends the call-bound attached media
                 # channel even when the native CLOSED marker never arrives, so a
-                # stale attached resource cannot stay selectable and a new
-                # preview is not reported as intercom_media_busy.
-                self._attached_media_busy.clear()
+                # stale attached resource is no longer selectable.  busy stays
+                # set until the channel is confirmed closed: clearing it early
+                # would let a second owner start while the native side may still
+                # hold the channel.
                 self._attached_media_open.clear()
-                self._attached_media_closed.set()
                 if self._call_state_tracker().remote_release():
                     self._notify_status()
             if (

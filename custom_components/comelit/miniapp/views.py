@@ -1093,8 +1093,13 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                                     await send_eos(
                                         webcodecs_mod.entrance_eos_reason(
                                             str(code),
-                                            kind=target.kind,
-                                            ring_handoff=self.controller.entrance_ring_handoff_for_current_session(),
+                                            kind="entrance"
+                                            if not attached_webcodecs
+                                            else "attached",
+                                            ring_handoff=(
+                                                not attached_webcodecs
+                                                and self.controller.entrance_ring_handoff_for_current_session()
+                                            ),
                                         )
                                     )
                                     break

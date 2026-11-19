@@ -2110,6 +2110,39 @@ def test_webcodecs_entrance_live_path_uses_manager_local_sdp_and_releases(monkey
     assert transport.active is False
 
 
+def test_webcodecs_entrance_eos_reports_call_handoff_after_a_ring(monkeypatch):
+    controller, hass = _controller(surveillance_label="Outside")
+    manager, transport = _install_webcodecs_entrance_runtime(hass)
+    transport.ring_observed = True
+    token, _session = controller.sessions.create(424242, 12345678)
+
+    async def open_sdp(source):
+        return _AsyncUnitSource(
+            [unit async for unit in _single_webcodecs_unit(source)]
+        )
+
+    monkeypatch.setattr(
+        views_mod.webcodecs_mod,
+        "open_h264_sdp_access_unit_source",
+        open_sdp,
+    )
+    view = views_mod.MiniAppCameraWebCodecsView(controller)
+
+    with _MSEWebSocketPatch(
+        monkeypatch,
+        _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+        messages=("wait_forever",),
+    ):
+        asyncio.run(
+            view.get(_mse_request(controller, token), "camera.comelit_entrance")
+        )
+
+    texts = _json_texts(_CaptureWebSocket.instances[-1])
+    # The session saw a confirmed Ring, so its end is explained as a hand-off.
+    assert texts[-1] == {"type": "eos", "reason": "call_handoff"}
+    assert manager.release_calls == ["miniapp_webcodecs"]
+
+
 def test_attached_webcodecs_active_ring_selects_miniapp_sdp_without_second_media_open(monkeypatch):
     controller, hass = _controller(surveillance_label="Outside")
     manager, _cold_transport = _install_webcodecs_entrance_runtime(hass)
