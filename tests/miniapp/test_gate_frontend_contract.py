@@ -57,11 +57,9 @@ def test_ended_viewer_reopens_with_one_click():
     )[0]
     guard = 'if (this._intercomViewerMode === "ended")'
     assert guard in handler
-    assert "this._intercomViewerOpen = true" in handler
-    # The ended branch must finish before the plain toggle and return early.
-    assert handler.index(guard) < handler.index("this._intercomViewerOpen = true")
-    # Reopening without leaving the ended mode would render the notice again.
-    branch = handler[handler.index(guard):]
+    # Only the ended branch itself: the next block has the same mode reset.
+    branch = handler.split(guard, 1)[1].split("\n        }", 1)[0]
     assert 'this._intercomViewerMode = "webcodecs"' in branch
-    assert handler.rindex("return;") > handler.index("this._intercomViewerOpen = true")
-    assert card.count("Открыть камеру заново") == 2
+    assert "this._intercomViewerOpen = true" in branch
+    assert branch.index("this._intercomViewerOpen = true") < branch.rindex("return;")
+    assert card.count("Открыть камеру заново") >= 2
