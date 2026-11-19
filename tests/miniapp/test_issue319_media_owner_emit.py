@@ -142,3 +142,11 @@ def test_a_failing_sink_does_not_break_the_native_reader():
         )
     )
     assert instance._media_active.is_set()
+
+
+def test_publication_is_gated_by_the_media_session_manager():
+    source = (ROOT / "custom_components" / "comelit" / "__init__.py").read_text(
+        encoding="utf-8"
+    )
+    assert "if not media_manager.active:" in source
+    assert "set_ring_sink(_publish_media_owner_ring)" in source

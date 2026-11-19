@@ -269,9 +269,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Camera state attributes are calculated on the HA event loop.
         # Perform file stat/hash for native identity in the executor first.
         await media_transport.async_prepare_native_identity_diagnostics()
-        set_ring_sink = getattr(media_transport, "set_ring_event_sink", None)
-        if callable(set_ring_sink):
-            set_ring_sink(runtime.async_emit_media_owner_ring)
+
 
         media_manager = ComelitMediaSessionManager(
             supervisor,
@@ -286,6 +284,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         media_sessions = domain_data.setdefault(DATA_MEDIA_SESSIONS, {})
         media_sessions[entry.entry_id] = media_manager
+
+        # The media owner may publish a Ring only while this manager holds the
+        # session; a late observation from a released session must not.
+        async def _publish_media_owner_ring(ring) -> None:
+            if not media_manager.active:
+                return
+            await runtime.async_emit_media_owner_ring(ring)
+
+        set_ring_sink = getattr(media_transport, "set_ring_event_sink", None)
+        if callable(set_ring_sink):
+            set_ring_sink(_publish_media_owner_ring)
 
         attached_transport = ComelitAttachedRingMediaTransport(runtime)
         attached_transports = domain_data.setdefault(
