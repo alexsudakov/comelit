@@ -1173,10 +1173,15 @@ def test_confirmed_remote_release_clears_attached_media_open() -> None:
     async def run() -> None:
         _module, instance = _runtime_instance()
         instance._attached_media_open.set()
+        instance._attached_media_busy.set()
+        instance._attached_media_closed.clear()
         instance._listener_ready.set()
         await instance._async_read_output(
             _Process(["R37_REMOTE_RELEASE_OBSERVED=true"])
         )
         assert instance.attached_media_open is False
+        # A new preview must not be refused as intercom_media_busy.
+        assert instance.attached_media_busy is False
+        assert instance._attached_media_closed.is_set() is True
 
     asyncio.run(run())

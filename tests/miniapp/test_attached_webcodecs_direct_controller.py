@@ -189,8 +189,8 @@ def test_public_miniapp_controller_exports_direct_attached_variant():
     assert "from .attached_controller import ComelitMiniAppController" in source
 
 
-def test_stale_attached_resource_is_not_selectable_after_call_release():
-    """A released call must not leave the attached source selectable.
+def test_released_call_media_is_not_selectable_contract():
+    """Contract invariant: without open call media the source is not selectable.
 
     The real transport derives ``active`` from the runtime's authoritative
     ``attached_media_open`` flag, which the listener clears on a confirmed

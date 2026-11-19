@@ -346,14 +346,9 @@ class MiniAppCameraStreamView(_MiniAppView):
                 session,
                 entity_id,
             )
-        except (MiniAppOperationError, HomeAssistantError, TimeoutError) as exc:
-            code = (
-                "call_handoff"
-                if str(exc) == "call_handoff"
-                else "camera_stream_unavailable"
-            )
+        except (MiniAppOperationError, HomeAssistantError, TimeoutError):
             return _json_response(
-                {"error": code},
+                {"error": "camera_stream_unavailable"},
                 status=HTTPStatus.CONFLICT,
             )
         return _json_response({"url": url})
@@ -1095,14 +1090,13 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                                     break
                                 if kind == "eos":
                                     log_event("source_eof")
-                                    eos_reason = str(code)
-                                    if (
-                                        eos_reason == "source_eof"
-                                        and target.kind == "entrance"
-                                        and self.controller.entrance_ring_handoff_for_current_session()
-                                    ):
-                                        eos_reason = "call_handoff"
-                                    await send_eos(eos_reason)
+                                    await send_eos(
+                                        webcodecs_mod.entrance_eos_reason(
+                                            str(code),
+                                            kind=target.kind,
+                                            ring_handoff=self.controller.entrance_ring_handoff_for_current_session(),
+                                        )
+                                    )
                                     break
                                 continue
 

@@ -830,6 +830,7 @@ def webcodecs_summary_line(
         "client_close",
         "duration_limit",
         "source_eof",
+        "call_handoff",
         "source_open_failed",
         "backlog_exceeded",
         "session_limit",
@@ -856,3 +857,14 @@ def webcodecs_summary_line(
 
 def monotonic_ms(started: float) -> int:
     return max(0, round((time.monotonic() - started) * 1000))
+
+
+def entrance_eos_reason(reason: str, *, kind: str, ring_handoff: bool) -> str:
+    """Explain the end of an entrance session that saw a confirmed Ring.
+
+    Only the session's own terminal reason is rewritten; any other failure
+    keeps its diagnostic code, and this never starts another session.
+    """
+    if reason == "source_eof" and kind == "entrance" and ring_handoff:
+        return "call_handoff"
+    return reason

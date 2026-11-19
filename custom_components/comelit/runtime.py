@@ -2360,8 +2360,11 @@ class ComelitRingRuntime:
                 self._cancel_call_state_timeout()
                 # A confirmed remote release ends the call-bound attached media
                 # channel even when the native CLOSED marker never arrives, so a
-                # stale attached resource cannot stay selectable for the Mini App.
+                # stale attached resource cannot stay selectable and a new
+                # preview is not reported as intercom_media_busy.
+                self._attached_media_busy.clear()
                 self._attached_media_open.clear()
+                self._attached_media_closed.set()
                 if self._call_state_tracker().remote_release():
                     self._notify_status()
             if (
