@@ -36,3 +36,15 @@ def test_gate_cross_panel_exception_does_not_bypass_backend_door_safety():
     assert "disabled: !pressAllowed || lockedByCall || inFlight" in card
     assert 'await this._hass.callService("button", "press", {' in card
     assert "No automatic retry is allowed here." in card
+
+
+def test_ended_intercom_viewer_is_not_remounted_until_the_user_reopens():
+    card = CARD.read_text(encoding="utf-8")
+    mount = card.split("async _mountIntercomViewer()", 1)[1]
+    body = mount.split("_mountIntercomWebCodecsViewer", 1)[0]
+    assert 'this._intercomViewerMode === "ended"' in body
+    assert "data-call-handoff" in body
+    # The ended notice must be rendered before any new viewer is created.
+    assert body.index('_intercomViewerMode === "ended"') < body.index(
+        "++this._intercomViewerGeneration"
+    )

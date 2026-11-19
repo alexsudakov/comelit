@@ -1370,6 +1370,19 @@ class ComelitCard extends HTMLElement {
       return;
     }
 
+    if (this._intercomViewerMode === "ended") {
+      // The previous session ended because of an incoming call. Keep that
+      // state until the user explicitly opens the camera again.
+      if (!target.querySelector("[data-call-handoff]")) {
+        target.innerHTML = `
+          <div class="notice compact" data-call-handoff>
+            Просмотр завершён из-за входящего вызова.
+          </div>
+        `;
+      }
+      return;
+    }
+
     const model = this._intercomModel();
     const camera = this._cameraPresentation(model);
     if (!camera.entityId || !camera.available) {
@@ -1455,7 +1468,7 @@ class ComelitCard extends HTMLElement {
     this._intercomViewerMode = "ended";
     this._intercomViewerElement = undefined;
     currentTarget.innerHTML = `
-      <div class="notice compact">
+      <div class="notice compact" data-call-handoff>
         Просмотр завершён из-за входящего вызова.
       </div>
     `;

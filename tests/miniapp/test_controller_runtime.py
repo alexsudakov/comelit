@@ -4991,3 +4991,120 @@ def test_attached_call_handoff_requires_a_live_call():
 
     runtimes["entry-1"] = _Runtime(False)
     assert controller.attached_call_handoff_for_current_session() is False
+
+
+def test_streaming_session_interrupted_by_a_call_is_explained_as_handoff(monkeypatch):
+    """Live evidence 2026-11-19: a streaming session died with source_open_failed."""
+    controller, hass = _controller(surveillance_label="Outside")
+    manager, transport = _install_webcodecs_entrance_runtime(hass)
+    transport.ring_observed = True
+    token, _session = controller.sessions.create(424242, 12345678)
+
+    async def streaming_then_failing(source):
+        class _Source(_AsyncUnitSource):
+            async def __anext__(self):
+                if self.units:
+                    return self.units.pop(0)
+                raise webcodecs_mod.WebCodecsSourceError("source_open_failed")
+
+        return _Source(
+            [unit async for unit in _single_webcodecs_unit(source)]
+        )
+
+    monkeypatch.setattr(
+        views_mod.webcodecs_mod,
+        "open_h264_sdp_access_unit_source",
+        streaming_then_failing,
+    )
+    view = views_mod.MiniAppCameraWebCodecsView(controller)
+    with _MSEWebSocketPatch(
+        monkeypatch,
+        _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+        messages=("wait_forever",),
+    ):
+        asyncio.run(
+            view.get(_mse_request(controller, token), "camera.comelit_entrance")
+        )
+
+    texts = _json_texts(_CaptureWebSocket.instances[-1])
+    assert texts[-1] == {"type": "eos", "reason": "call_handoff"}
+    assert manager.release_calls == ["miniapp_webcodecs"]
+
+
+def test_streaming_failure_without_a_ring_keeps_its_diagnostic(monkeypatch):
+    controller, hass = _controller(surveillance_label="Outside")
+    _manager, transport = _install_webcodecs_entrance_runtime(hass)
+    transport.ring_observed = False
+    token, _session = controller.sessions.create(424242, 12345678)
+
+    async def streaming_then_failing(source):
+        class _Source(_AsyncUnitSource):
+            async def __anext__(self):
+                if self.units:
+                    return self.units.pop(0)
+                raise webcodecs_mod.WebCodecsSourceError("source_open_failed")
+
+        return _Source(
+            [unit async for unit in _single_webcodecs_unit(source)]
+        )
+
+    monkeypatch.setattr(
+        views_mod.webcodecs_mod,
+        "open_h264_sdp_access_unit_source",
+        streaming_then_failing,
+    )
+    view = views_mod.MiniAppCameraWebCodecsView(controller)
+    with _MSEWebSocketPatch(
+        monkeypatch,
+        _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+        messages=("wait_forever",),
+    ):
+        asyncio.run(
+            view.get(_mse_request(controller, token), "camera.comelit_entrance")
+        )
+
+    texts = _json_texts(_CaptureWebSocket.instances[-1])
+    assert texts[-1] == {"type": "error", "code": "source_open_failed"}
+
+
+def test_attached_transport_close_after_release_is_explained_as_handoff(monkeypatch):
+    controller, hass = _controller(surveillance_label="Outside")
+    _install_webcodecs_entrance_runtime(hass)
+    coordinator = _install_attached_ring_coordinator(hass)
+    domain_data = hass.data.setdefault(controller_mod.DOMAIN, {})
+    domain_data[controller_mod.DATA_RUNTIMES] = {
+        "entry-1": types.SimpleNamespace(attached_call_handoff=True)
+    }
+    token, _session = controller.sessions.create(424242, 12345678)
+
+    async def closing_after_open(_source):
+        class _ClosingSource(_AsyncUnitSource):
+            async def __anext__(self):
+                raise webcodecs_mod.WebCodecsSourceError("source_open_failed")
+
+        return _ClosingSource([])
+
+    async def activate_ring():
+        await coordinator.attached_session.async_acquire(
+            panel="entrance",
+            reason="camera_view",
+        )
+
+    asyncio.run(activate_ring())
+    monkeypatch.setattr(
+        views_mod.webcodecs_mod,
+        "open_h264_sdp_access_unit_source",
+        closing_after_open,
+    )
+    view = views_mod.MiniAppCameraWebCodecsView(controller)
+    with _MSEWebSocketPatch(
+        monkeypatch,
+        _FakeWSMessage(views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'),
+        messages=("wait_forever",),
+    ):
+        asyncio.run(
+            view.get(_mse_request(controller, token), "camera.comelit_entrance")
+        )
+
+    texts = _json_texts(_CaptureWebSocket.instances[-1])
+    assert texts[-1] == {"type": "eos", "reason": "call_handoff"}

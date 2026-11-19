@@ -740,6 +740,28 @@ class MiniAppCameraMSEView(_MiniAppView):
         return websocket
 
 
+def error_is_call_handoff(
+    reason: str,
+    *,
+    kind: str,
+    delivered_units: int,
+    ring_handoff: bool,
+    attached_handoff: bool,
+) -> bool:
+    """Whether a terminal source error is the end caused by the incoming call.
+
+    Only a session that was already streaming can be interrupted by the call;
+    a source that never delivered media keeps its diagnostic code.
+    """
+    if kind == "attached":
+        return (
+            reason == "attached_webcodecs_transport_closed" and attached_handoff
+        )
+    if kind != "entrance":
+        return False
+    return reason == "source_open_failed" and delivered_units > 0 and ring_handoff
+
+
 class MiniAppCameraWebCodecsView(_MiniAppView):
     url = r"/api/comelit/miniapp/camera/{entity_id}/webcodecs"
     name = "api:comelit:miniapp:camera_webcodecs"
@@ -1080,16 +1102,19 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                                     reason = "client_close"
                                     break
                                 if kind == "error":
-                                    if (
-                                        attached_webcodecs
-                                        and str(code)
-                                        == "attached_webcodecs_transport_closed"
-                                        and self.controller.attached_call_handoff_for_current_session()
+                                    if error_is_call_handoff(
+                                        str(code),
+                                        kind="attached"
+                                        if attached_webcodecs
+                                        else target.kind,
+                                        delivered_units=units,
+                                        ring_handoff=self.controller.entrance_ring_handoff_for_current_session(),
+                                        attached_handoff=self.controller.attached_call_handoff_for_current_session(),
                                     ):
                                         log_event("source_eof")
                                         _LOGGER.info(
-                                            "Comelit attached WebCodecs transport "
-                                            "closed on a call hand-off: code=%s",
+                                            "Comelit WebCodecs session ended on a "
+                                            "call hand-off: code=%s",
                                             code,
                                         )
                                         await send_eos("call_handoff")
