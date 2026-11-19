@@ -52,8 +52,13 @@ def test_ended_intercom_viewer_is_not_remounted_until_the_user_reopens():
 
 def test_ended_viewer_reopens_with_one_click():
     card = CARD.read_text(encoding="utf-8")
-    toggle = card.split('if (cameraToggle) {', 1)[1].split('const camera = this._cameraPresentation(model);', 1)[1]
-    handler = card.split('cameraToggle.addEventListener("click"', 1)[1].split('});', 1)[0]
-    assert 'this._intercomViewerMode === "ended"' in handler
+    handler = card.split('cameraToggle.addEventListener("click"', 1)[1].split(
+        "this._intercomViewerOpen = !this._intercomViewerOpen", 1
+    )[0]
+    guard = 'if (this._intercomViewerMode === "ended")'
+    assert guard in handler
     assert "this._intercomViewerOpen = true" in handler
-    assert "Открыть камеру заново" in card
+    # The ended branch must finish before the plain toggle and return early.
+    assert handler.index(guard) < handler.index("this._intercomViewerOpen = true")
+    assert handler.rindex("return;") > handler.index("this._intercomViewerOpen = true")
+    assert card.count("Открыть камеру заново") == 2
