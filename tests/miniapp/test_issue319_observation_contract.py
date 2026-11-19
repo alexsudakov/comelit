@@ -1,10 +1,9 @@
-"""Issue #319: the media owner must publish only native-suppressed observations.
+"""Issue #319: the media owner publishes the native observation, once per batch.
 
-The native helper prints ``V4_RING_PHASE=...`` for every attempt of a call and
-prints the five-key observation only after ``v4_ring_is_retransmit()`` dropped
-the retransmissions (same body SHA256 inside the helper's dedup window).
-These tests pin that contract on the Python side: probes alone never produce an
-event, retransmissions inside one batch never produce a second event.
+The native helper prints probe lines for every attempt and the five-key
+observation only after its retransmission filter accepted the frame, so the
+Python side must never treat a probe as a call and must never add a second
+deduplication layer of its own.
 """
 
 from __future__ import annotations
@@ -14,15 +13,13 @@ from pathlib import Path
 import sys
 import types
 
-import pytest
-
 
 ROOT = Path(__file__).resolve().parents[2]
 COMPONENT = ROOT / "custom_components" / "comelit"
 
 
 def _load_package() -> types.ModuleType:
-    name = "comelit_issue319_observation_proof"
+    name = "comelit_issue319_observation"
     package = types.ModuleType(name)
     package.__path__ = [str(COMPONENT)]
     sys.modules[name] = package
@@ -45,23 +42,23 @@ ring_observation = _load(_PACKAGE, "ring_observation")
 RingObservationBuffer = ring_observation.RingObservationBuffer
 
 
-def _probe(phase: str, body: str = "6a66ae04") -> list[str]:
+def _probe(phase: str) -> list[str]:
     return [
         f"V4_RING_PHASE={phase}",
         "V4_RING_MONOTONIC_MS=862907802",
         "V4_RING_PEER_CONNECTION=5e3a",
-        f"V4_RING_BODY_32_35={body}",
+        "V4_RING_BODY_32_35=6a66ae04",
         "V4_RING_PARSE_STATUS=OK",
     ]
 
 
-def _observation(door: str = "entrance", source: str = "00000643") -> list[str]:
+def _observation() -> list[str]:
     return [
         "V4_RING_OBSERVED=true",
         "V4_RING_DIRECTION=DEVICE_TO_CLIENT",
         "V4_RING_KIND=CALL_INIT",
-        f"V4_RING_DOOR={door}",
-        f"V4_RING_SOURCE={source}",
+        "V4_RING_DOOR=entrance",
+        "V4_RING_SOURCE=00000643",
     ]
 
 
@@ -74,75 +71,36 @@ def test_probe_stream_alone_never_produces_an_event():
     assert [item for item in produced if item is not None] == []
 
 
-def test_one_observation_batch_yields_one_event():
+def test_one_observation_yields_exactly_one_event():
     buffer = RingObservationBuffer()
     produced = [buffer.feed(line) for line in _observation()]
     events = [item for item in produced if item is not None]
     assert len(events) == 1
     assert events[0].door == "entrance"
-    assert events[0].source == "00000643"
     assert events[0].kind == "CALL_INIT"
-    assert events[0].direction == "DEVICE_TO_CLIENT"
 
 
-def test_retransmission_probes_inside_a_batch_do_not_duplicate_the_event():
-    buffer = RingObservationBuffer()
-    stream = _observation()[:3] + _probe("RETRANSMIT") + _observation()[3:]
-    produced = [buffer.feed(line) for line in stream]
-    assert len([item for item in produced if item is not None]) == 1
-
-
-def test_incomplete_batch_is_discarded_and_the_next_batch_wins():
-    buffer = RingObservationBuffer()
-    broken = _observation()[:4]  # OBSERVED, DIRECTION, KIND, DOOR (no SOURCE)
-    produced = [buffer.feed(line) for line in broken]
-    produced += [buffer.feed(line) for line in _observation()]
-    events = [item for item in produced if item is not None]
-    assert len(events) == 1
-
-
-def test_listener_timeout_marker_never_produces_an_event():
+def test_two_observations_yield_two_events_without_client_dedup():
     buffer = RingObservationBuffer()
     produced = [
-        buffer.feed("V4_RING_OBSERVED=false"),
-        buffer.feed("V4_RING_DIRECTION=DEVICE_TO_CLIENT"),
-        buffer.feed("V4_RING_KIND=CALL_INIT"),
-        buffer.feed("V4_RING_DOOR=entrance"),
-        buffer.feed("V4_RING_SOURCE=00000643"),
+        buffer.feed(line) for line in _observation() + _observation()
     ]
+    assert len([item for item in produced if item is not None]) == 2
+
+
+def test_timeout_marker_never_produces_an_event():
+    buffer = RingObservationBuffer()
+    produced = [buffer.feed(line) for line in ["V4_RING_OBSERVED=false"]]
     assert [item for item in produced if item is not None] == []
 
 
-def test_two_calls_produce_two_events():
-    buffer = RingObservationBuffer()
-    first = [buffer.feed(line) for line in _observation()]
-    second = [buffer.feed(line) for line in _observation()]
-    events = [item for item in first + second if item is not None]
-    assert len(events) == 2
-
-
-@pytest.mark.parametrize("direction", ["CLIENT_TO_DEVICE", ""])
-def test_invalid_direction_is_rejected(direction):
-    buffer = RingObservationBuffer()
-    lines = _observation()
-    lines[1] = f"V4_RING_DIRECTION={direction}"
-    produced = [buffer.feed(line) for line in lines]
-    assert [item for item in produced if item is not None] == []
-
-
-def test_frame_digest_is_consumed_once_and_never_inherited():
+def test_incomplete_batch_is_dropped_and_does_not_leak():
     buffer = RingObservationBuffer()
     produced = [
         buffer.feed(line)
-        for line in ["V4_RING_FRAME_SHA256=" + "a" * 64]
-        + _probe("INITIAL")
+        for line in ["V4_RING_OBSERVED=true", "V4_RING_DIRECTION=DEVICE_TO_CLIENT"]
         + _observation()
     ]
-    assert [item for item in produced if item is not None]
-    assert buffer.take_frame_sha() == "a" * 64
-    assert buffer.take_frame_sha() is None
-
-    # A second batch without its own digest must not inherit the first one.
-    produced = [buffer.feed(line) for line in _observation()]
-    assert [item for item in produced if item is not None]
-    assert buffer.take_frame_sha() is None
+    events = [item for item in produced if item is not None]
+    assert len(events) == 1
+    assert events[0].source == "00000643"

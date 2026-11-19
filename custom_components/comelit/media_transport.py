@@ -51,11 +51,11 @@ from .latency_timeline import (
 )
 from .media_diagnostics import MediaProgressDiagnostics
 from .oauth import ComelitOAuthError, ComelitOAuthManager
+from .ring_event import RingEvent
+from .ring_observation import RingObservationBuffer
 from .ring_probe_log import RING_PROBE_OWNER_MEDIA, RingProbeDisclosure
 from .ring_shadow import RingShadowController, RingShadowHook, SHADOW_OWNER_MEDIA
 from .ring_episode import RingEpisodeLedger
-from .ring_event import RingEvent
-from .ring_observation import RingObservationBuffer
 from .sdp import ComelitSdpError, transform_offer
 
 _LOGGER = logging.getLogger(__name__)
@@ -523,13 +523,7 @@ class ComelitEntranceMediaTransport:
             attach(self._ring_episode)
         self._ring_probe_disclosure = RingProbeDisclosure(RING_PROBE_OWNER_MEDIA)
         self._ring_observation = RingObservationBuffer()
-        self._ring_event_sink: Callable[[RingEvent, str | None], Awaitable[None]] | None = None
-
-    def set_ring_event_sink(
-        self, sink: Callable[[RingEvent, str | None], Awaitable[None]] | None
-    ) -> None:
-        """Register the one consumer allowed to publish media-owner rings."""
-        self._ring_event_sink = sink
+        self._ring_event_sink: Callable[[RingEvent], Awaitable[None]] | None = None
 
     @property
     def active(self) -> bool:
@@ -1008,6 +1002,11 @@ class ComelitEntranceMediaTransport:
             dict(self._native_ack_diagnostics),
         )
 
+    def set_ring_event_sink(
+        self, sink: Callable[[RingEvent], Awaitable[None]] | None
+    ) -> None:
+        self._ring_event_sink = sink
+
     async def async_start(self, panel: str) -> None:
         if panel != "entrance":
             raise ComelitMediaTransportError("unsupported_media_panel")
@@ -1420,19 +1419,11 @@ class ComelitEntranceMediaTransport:
             try:
                 ring_event = observation.feed(line)
             except Exception:
-                _LOGGER.warning(
-                    "Comelit ring observation parse failed", exc_info=True
-                )
+                _LOGGER.warning("Comelit ring observation parse failed", exc_info=True)
                 ring_event = None
             sink = getattr(self, "_ring_event_sink", None)
             if ring_event is not None and sink is not None:
-                try:
-                    await sink(ring_event, observation.take_frame_sha())
-                except Exception:
-                    _LOGGER.warning(
-                        "Comelit media-owner ring publication failed",
-                        exc_info=True,
-                    )
+                await sink(ring_event)
             self._remember_native_marker(line)
             self._observe_latency_marker(line)
             self._observe_native_stage_marker(line)
