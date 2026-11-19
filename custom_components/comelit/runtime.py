@@ -1036,8 +1036,6 @@ class ComelitRingRuntime:
                 and isinstance(event_id, str)
                 and isinstance(started_at, str)
             ):
-                # A new call starts with no hand-off history.
-                self._attached_call_handoff = False
                 changed = self._call_state_tracker().begin(
                     panel=panel,
                     event_id=event_id,

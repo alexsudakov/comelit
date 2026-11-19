@@ -1087,6 +1087,11 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                                         and self.controller.attached_call_handoff_for_current_session()
                                     ):
                                         log_event("source_eof")
+                                        _LOGGER.info(
+                                            "Comelit attached WebCodecs transport "
+                                            "closed on a call hand-off: code=%s",
+                                            code,
+                                        )
                                         await send_eos("call_handoff")
                                         break
                                     if code == "unit_too_large":
