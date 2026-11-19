@@ -1065,14 +1065,12 @@ class ComelitRingRuntime:
         """
         payload: dict[str, object] = {}
         payload.update(ring.as_dict())
-        signature = dict(ring.as_dict())
-        previous = getattr(self, "_last_published_ring", None)
         await self._async_emit_ring_event(
             payload, start_ring_media=False, begin_call_state=False
         )
-        if previous != signature:
-            self._last_published_ring = signature
-            self._notify_status()
+        # Two identical Ring payloads can be two different calls, so the status
+        # is refreshed on every publication instead of being deduplicated.
+        self._notify_status()
 
     async def async_simulate_entrance_ring(self) -> dict[str, object]:
         """Emit one synthetic entrance ring and start the normal media lifecycle."""
@@ -2360,6 +2358,10 @@ class ComelitRingRuntime:
                 "R64_TERMINAL_REMOTE_RELEASE_OBSERVED=true",
             }:
                 self._cancel_call_state_timeout()
+                # A confirmed remote release ends the call-bound attached media
+                # channel even when the native CLOSED marker never arrives, so a
+                # stale attached resource cannot stay selectable for the Mini App.
+                self._attached_media_open.clear()
                 if self._call_state_tracker().remote_release():
                     self._notify_status()
             if (

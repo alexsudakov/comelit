@@ -1095,7 +1095,14 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                                     break
                                 if kind == "eos":
                                     log_event("source_eof")
-                                    await send_eos(str(code))
+                                    eos_reason = str(code)
+                                    if (
+                                        eos_reason == "source_eof"
+                                        and target.kind == "entrance"
+                                        and self.controller.entrance_ring_handoff_for_current_session()
+                                    ):
+                                        eos_reason = "call_handoff"
+                                    await send_eos(eos_reason)
                                     break
                                 continue
 

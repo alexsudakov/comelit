@@ -1152,3 +1152,31 @@ def test_async_stop_failure_keeps_owner_and_blocks_restart() -> None:
         assert instance._task is None
 
     asyncio.run(run())
+
+
+def test_confirmed_remote_release_clears_attached_media_open() -> None:
+    """A released call must not keep the attached media channel selectable."""
+
+    class _Stdout:
+        def __init__(self, lines):
+            self._lines = list(lines)
+
+        async def readline(self):
+            if not self._lines:
+                return b""
+            return (self._lines.pop(0) + "\n").encode()
+
+    class _Process:
+        def __init__(self, lines):
+            self.stdout = _Stdout(lines)
+
+    async def run() -> None:
+        _module, instance = _runtime_instance()
+        instance._attached_media_open.set()
+        instance._listener_ready.set()
+        await instance._async_read_output(
+            _Process(["R37_REMOTE_RELEASE_OBSERVED=true"])
+        )
+        assert instance.attached_media_open is False
+
+    asyncio.run(run())

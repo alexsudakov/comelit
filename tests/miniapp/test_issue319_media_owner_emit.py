@@ -177,12 +177,13 @@ def test_observation_read_during_teardown_is_still_published():
     assert instance.ring_observed is True
 
 
-def test_identical_publications_notify_status_once():
+def test_identical_publications_still_notify_status():
     stub = _Stub()
     _emit(stub)
     _emit(stub)
     assert len(stub.fired) == 2
-    assert stub.notifies == 1
+    # Two identical Ring payloads may be two different calls.
+    assert stub.notifies == 2
 
 
 def test_ring_observed_expires_after_the_grace_window():

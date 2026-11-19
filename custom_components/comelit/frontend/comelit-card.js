@@ -1413,6 +1413,10 @@ class ComelitCard extends HTMLElement {
       }
       this._intercomViewerFallbackReason =
         String(event?.detail?.reason || "webcodecs_error");
+      if (this._intercomViewerFallbackReason === "call_handoff") {
+        this._showIntercomCallHandoff(generation);
+        return;
+      }
       if (
         this._intercomViewerFallbackReason ===
         "attached_webcodecs_transport_closed"
@@ -1432,6 +1436,29 @@ class ComelitCard extends HTMLElement {
 
     this._intercomViewerElement = viewer;
     target.replaceChildren(viewer);
+  }
+
+  _showIntercomCallHandoff(generation) {
+    if (
+      generation !== this._intercomViewerGeneration ||
+      !this._intercomViewerOpen ||
+      this._selectedIntercomPanel !== "entrance"
+    ) {
+      return;
+    }
+    const currentTarget = this.shadowRoot?.querySelector("#intercom-viewer");
+    if (!currentTarget) {
+      return;
+    }
+    // The device stopped the preview because of the incoming call. Explain it
+    // and stay idle: no fallback and no new media session are started.
+    this._intercomViewerMode = "ended";
+    this._intercomViewerElement = undefined;
+    currentTarget.innerHTML = `
+      <div class="notice compact">
+        Просмотр завершён из-за входящего вызова.
+      </div>
+    `;
   }
 
   _showIntercomLegacyFallback(generation) {

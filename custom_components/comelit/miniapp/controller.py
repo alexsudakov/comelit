@@ -864,11 +864,12 @@ class ComelitMiniAppController:
             camera=get_camera_from_entity_id(self.hass, entity_id),
         )
 
-    def _entrance_ring_handoff_recent(self) -> bool:
-        """Whether the last entrance media session saw a confirmed Ring.
+    def entrance_ring_handoff_for_current_session(self) -> bool:
+        """Whether the entrance media session currently held saw a Ring.
 
-        Used only to explain an unavailable stream to the user; it never starts
-        a new media session and never changes the source selection itself.
+        Used only to explain the end of that session; it never starts a media
+        session, never changes source selection and never classifies a later
+        open attempt.
         """
         try:
             _manager, transport = self._webcodecs_entrance_runtime()
@@ -1253,8 +1254,6 @@ class ComelitMiniAppController:
             async with self._attached_viewer_lock:
                 upstream_master = self._miniapp_attached_hls_master_path_locked()
             if upstream_master is None:
-                if self._entrance_ring_handoff_recent():
-                    raise MiniAppOperationError("call_handoff")
                 raise MiniAppOperationError("attached_media_stream_unavailable")
         else:
             await self._await_webcodecs_entrance_cleanup(entity_id)
