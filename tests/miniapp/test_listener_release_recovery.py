@@ -1185,3 +1185,38 @@ def test_confirmed_remote_release_clears_attached_media_open() -> None:
         assert instance.attached_media_busy is True
 
     asyncio.run(run())
+
+
+def test_release_during_a_live_call_latches_the_attached_handoff() -> None:
+    class _Stdout:
+        def __init__(self, lines):
+            self._lines = list(lines)
+
+        async def readline(self):
+            if not self._lines:
+                return b""
+            return (self._lines.pop(0) + "\n").encode()
+
+    class _Process:
+        def __init__(self, lines):
+            self.stdout = _Stdout(lines)
+
+    async def run() -> None:
+        _module, instance = _runtime_instance()
+        instance._call_state_tracker().begin(
+            panel="entrance",
+            event_id="event-1",
+            started_at="2026-11-19T20:00:00+00:00",
+        )
+        await instance._async_read_output(
+            _Process(["R37_REMOTE_RELEASE_OBSERVED=true"])
+        )
+        assert instance.attached_call_handoff is True
+
+        # A fresh call-bound channel belongs to a new call.
+        await instance._async_read_output(
+            _Process(["R42_ATTACHED_MEDIA_ACTIVE=true"])
+        )
+        assert instance.attached_call_handoff is False
+
+    asyncio.run(run())

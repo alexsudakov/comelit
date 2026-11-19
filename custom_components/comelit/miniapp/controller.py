@@ -880,11 +880,7 @@ class ComelitMiniAppController:
         )
         if runtime is None:
             return False
-        try:
-            state = runtime.call_status().get("state")
-        except Exception:
-            return False
-        return state in {"ringing", "active"}
+        return bool(getattr(runtime, "attached_call_handoff", False))
 
     def entrance_ring_handoff_for_current_session(self) -> bool:
         """Whether the entrance media session currently held saw a Ring.

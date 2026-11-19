@@ -754,6 +754,9 @@ class ComelitRingRuntime:
         self._listener_ready = asyncio.Event()
         self._attached_media_busy = asyncio.Event()
         self._attached_media_open = asyncio.Event()
+        # Set when a confirmed remote release ends a live call; used only to
+        # explain the end of the attached viewer session.
+        self._attached_call_handoff = False
         self._attached_media_closed = asyncio.Event()
         self._ring_lines: list[str] = []
         self._last_ring_event: dict[str, str] | None = None
@@ -809,6 +812,11 @@ class ComelitRingRuntime:
     def attached_media_busy(self) -> bool:
         event = getattr(self, "_attached_media_busy", None)
         return event is not None and event.is_set()
+
+    @property
+    def attached_call_handoff(self) -> bool:
+        """Whether a confirmed release ended a live call for the attached viewer."""
+        return bool(getattr(self, "_attached_call_handoff", False))
 
     @property
     def attached_media_open(self) -> bool:
@@ -2365,8 +2373,11 @@ class ComelitRingRuntime:
                 # would let a second owner start while the native side may still
                 # hold the channel.
                 self._attached_media_open.clear()
+                was_live = self._call_state_tracker().active
                 if self._call_state_tracker().remote_release():
                     self._notify_status()
+                if was_live:
+                    self._attached_call_handoff = True
             if (
                 line == "R64_POST_CALL_SNAPSHOT=true"
                 or line == "P116_NATIVE_EXIT_INTENTIONAL_STOP=true"
@@ -2391,6 +2402,7 @@ class ComelitRingRuntime:
                 continue
 
             if line == "R42_ATTACHED_MEDIA_ACTIVE=true":
+                self._attached_call_handoff = False
                 self._attached_media_busy.set()
                 self._attached_media_closed.clear()
                 self._attached_media_open.set()
