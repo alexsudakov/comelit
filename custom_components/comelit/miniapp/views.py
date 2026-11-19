@@ -346,9 +346,14 @@ class MiniAppCameraStreamView(_MiniAppView):
                 session,
                 entity_id,
             )
-        except (MiniAppOperationError, HomeAssistantError, TimeoutError):
+        except (MiniAppOperationError, HomeAssistantError, TimeoutError) as exc:
+            code = (
+                "call_handoff"
+                if str(exc) == "call_handoff"
+                else "camera_stream_unavailable"
+            )
             return _json_response(
-                {"error": "camera_stream_unavailable"},
+                {"error": code},
                 status=HTTPStatus.CONFLICT,
             )
         return _json_response({"url": url})

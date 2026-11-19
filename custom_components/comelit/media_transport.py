@@ -524,6 +524,7 @@ class ComelitEntranceMediaTransport:
         self._ring_probe_disclosure = RingProbeDisclosure(RING_PROBE_OWNER_MEDIA)
         self._ring_observation = RingObservationBuffer()
         self._ring_event_sink: Callable[[RingEvent], Awaitable[None]] | None = None
+        self._ring_observed = False
 
     @property
     def active(self) -> bool:
@@ -1002,6 +1003,11 @@ class ComelitEntranceMediaTransport:
             dict(self._native_ack_diagnostics),
         )
 
+    @property
+    def ring_observed(self) -> bool:
+        """Whether the current or last finished session saw a confirmed Ring."""
+        return bool(getattr(self, "_ring_observed", False))
+
     def set_ring_event_sink(
         self, sink: Callable[[RingEvent], Awaitable[None]] | None
     ) -> None:
@@ -1030,6 +1036,7 @@ class ComelitEntranceMediaTransport:
         self._progress.reset()
         if getattr(self, "_ring_observation", None) is not None:
             self._ring_observation.reset()
+        self._ring_observed = False
         self._last_status_notify_monotonic = None
         self._offer_ready.clear()
         self._media_active.clear()
@@ -1422,6 +1429,8 @@ class ComelitEntranceMediaTransport:
                 _LOGGER.warning("Comelit ring observation parse failed", exc_info=True)
                 ring_event = None
             sink = getattr(self, "_ring_event_sink", None)
+            if ring_event is not None:
+                self._ring_observed = True
             if ring_event is not None and sink is not None:
                 try:
                     await sink(ring_event)

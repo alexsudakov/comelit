@@ -150,3 +150,26 @@ def test_publication_is_bound_to_the_session_stdout_reader():
     )
     assert "set_ring_sink(runtime.async_emit_media_owner_ring)" in source
     assert "media_manager.active" not in source
+
+
+def test_observation_read_during_teardown_is_still_published():
+    media_transport = _load_component_module(str(ROOT), "media_transport")
+    instance, _events, _call_state, _shadow = _media_instance(
+        media_transport, shadow_enabled=False
+    )
+    published = []
+
+    async def sink(ring):
+        published.append(ring)
+
+    instance.set_ring_event_sink(sink)
+    # The panel stops preview first; the Ring INVITE is read while the media
+    # teardown is already in flight.
+    instance._stopping = True
+    asyncio.run(
+        instance._async_read_output(
+            _FakeProcess(_lines("03_media_owner_ring.golden.txt"))
+        )
+    )
+    assert len(published) == 1
+    assert instance.ring_observed is True
