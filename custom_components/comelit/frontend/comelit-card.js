@@ -867,9 +867,12 @@ class ComelitCard extends HTMLElement {
     if (cameraToggle) {
       const camera = this._cameraPresentation(model);
       cameraToggle.disabled = !camera.available;
-      cameraToggle.textContent = this._intercomViewerOpen
-        ? "Скрыть камеру"
-        : "Показать камеру";
+      cameraToggle.textContent =
+        this._intercomViewerMode === "ended"
+          ? "Открыть камеру заново"
+          : this._intercomViewerOpen
+            ? "Скрыть камеру"
+            : "Показать камеру";
     }
   }
 
@@ -1017,7 +1020,13 @@ class ComelitCard extends HTMLElement {
               class="secondary-action"
               data-intercom-camera-toggle
               ${camera.available ? "" : "disabled"}
-            >${this._intercomViewerOpen ? "Скрыть камеру" : "Показать камеру"}</button>
+            >${
+              this._intercomViewerMode === "ended"
+                ? "Открыть камеру заново"
+                : this._intercomViewerOpen
+                  ? "Скрыть камеру"
+                  : "Показать камеру"
+            }</button>
           </div>
           ${camera.available
             ? this._intercomViewerOpen
@@ -1164,6 +1173,14 @@ class ComelitCard extends HTMLElement {
         const model = this._intercomModel();
         const camera = this._cameraPresentation(model);
         if (!camera.available || this._selectedIntercomPanel !== "entrance") {
+          return;
+        }
+        if (this._intercomViewerMode === "ended") {
+          // One explicit click re-opens the camera after a call hand-off.
+          this._intercomViewerMode = "webcodecs";
+          this._intercomViewerFallbackReason = undefined;
+          this._intercomViewerOpen = true;
+          this._render();
           return;
         }
         if (!this._intercomViewerOpen) {

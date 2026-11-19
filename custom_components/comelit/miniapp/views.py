@@ -750,8 +750,10 @@ def error_is_call_handoff(
 ) -> bool:
     """Whether a terminal source error is the end caused by the incoming call.
 
-    Only a session that was already streaming can be interrupted by the call;
-    a source that never delivered media keeps its diagnostic code.
+    An entrance session needs delivered media and its own Ring, so a source
+    that never streamed keeps its diagnostic code.  The attached branch leans
+    on the listener's live-call latch instead of media evidence: that channel
+    exists only for the inbound call.
     """
     if kind == "attached":
         return (
@@ -1042,6 +1044,10 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                         )
                     except Exception:
                         send_source_eof = False
+                        _LOGGER.warning(
+                            "Comelit WebCodecs source failed unexpectedly",
+                            exc_info=True,
+                        )
                         await queue.put(
                             (
                                 "error",
