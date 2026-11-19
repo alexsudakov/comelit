@@ -1769,6 +1769,7 @@ class ComelitRingRuntime:
         self._listener_ready.clear()
         self._attached_media_busy.clear()
         self._attached_media_open.clear()
+        self._attached_call_handoff = False
         self._attached_media_closed.clear()
         self._ring_lines.clear()
         self._native_marker_tail.clear()
@@ -1950,6 +1951,7 @@ class ComelitRingRuntime:
         self._listener_ready.clear()
         self._attached_media_busy.clear()
         self._attached_media_open.clear()
+        self._attached_call_handoff = False
         self._attached_media_closed.clear()
         self._call_state_tracker().reset()
         self._notify_status()
@@ -2204,6 +2206,7 @@ class ComelitRingRuntime:
             self._listener_ready.clear()
             self._attached_media_busy.clear()
             self._attached_media_open.clear()
+            self._attached_call_handoff = False
             future = self._door_result_future
             if future is not None and not future.done():
                 future.set_result("UNKNOWN_OUTCOME")
