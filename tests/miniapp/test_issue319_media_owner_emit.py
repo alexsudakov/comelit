@@ -23,6 +23,8 @@ class _Stub:
         self.fired: list[dict] = []
         self.media_starts = 0
         self.call_states = 0
+        self.notifies = 0
+        self._last_published_ring = None
         self._last_ring_event = None
         self._hass = types.SimpleNamespace(
             bus=types.SimpleNamespace(async_fire=self._fire)
@@ -53,7 +55,7 @@ class _Stub:
         return None
 
     def _notify_status(self):
-        return None
+        self.notifies += 1
 
     def _ring_media_for_event(self, event):
         return None
@@ -172,4 +174,24 @@ def test_observation_read_during_teardown_is_still_published():
         )
     )
     assert len(published) == 1
+    assert instance.ring_observed is True
+
+
+def test_identical_publications_notify_status_once():
+    stub = _Stub()
+    _emit(stub)
+    _emit(stub)
+    assert len(stub.fired) == 2
+    assert stub.notifies == 1
+
+
+def test_ring_observed_expires_after_the_grace_window():
+    import time as _time
+
+    media_transport = _load_component_module(str(ROOT), "media_transport")
+    instance = object.__new__(media_transport.ComelitEntranceMediaTransport)
+    instance._ring_observed = True
+    instance._ring_observed_at = _time.monotonic() - 500
+    assert instance.ring_observed is False
+    instance._ring_observed_at = _time.monotonic()
     assert instance.ring_observed is True

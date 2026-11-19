@@ -9,6 +9,7 @@ from pathlib import Path
 import platform
 import re
 import signal
+import time
 from uuid import uuid4
 
 from aiohttp import ClientSession
@@ -70,6 +71,7 @@ _MEDIA_REMOTE_FILE = _MEDIA_RUN_DIR / "remote.sdp"
 _MEDIA_STOP_FILE = _MEDIA_RUN_DIR / "stop"
 _MEDIA_LOCAL_SDP_FILE = _MEDIA_RUN_DIR / "local-rtp.sdp"
 _MEDIA_STARTUP_WINDOW_SECONDS = 45.0
+_RING_HANDOFF_WINDOW_SECONDS = 120.0
 _MEDIA_LOCAL_SDP_READY_REASON = "local_sdp_ready_timeout"
 
 MEDIA_NATIVE_BINARY_SHA256 = (
@@ -525,6 +527,7 @@ class ComelitEntranceMediaTransport:
         self._ring_observation = RingObservationBuffer()
         self._ring_event_sink: Callable[[RingEvent], Awaitable[None]] | None = None
         self._ring_observed = False
+        self._ring_observed_at = None
 
     @property
     def active(self) -> bool:
@@ -1005,8 +1008,17 @@ class ComelitEntranceMediaTransport:
 
     @property
     def ring_observed(self) -> bool:
-        """Whether the current or last finished session saw a confirmed Ring."""
-        return bool(getattr(self, "_ring_observed", False))
+        """Whether this session saw a confirmed Ring within the grace window.
+
+        The window bounds the explanation only; it is not used for call
+        identity and never starts a media session.
+        """
+        if not getattr(self, "_ring_observed", False):
+            return False
+        observed_at = getattr(self, "_ring_observed_at", None)
+        if observed_at is None:
+            return False
+        return (time.monotonic() - observed_at) <= _RING_HANDOFF_WINDOW_SECONDS
 
     def set_ring_event_sink(
         self, sink: Callable[[RingEvent], Awaitable[None]] | None
@@ -1037,6 +1049,7 @@ class ComelitEntranceMediaTransport:
         if getattr(self, "_ring_observation", None) is not None:
             self._ring_observation.reset()
         self._ring_observed = False
+        self._ring_observed_at = None
         self._last_status_notify_monotonic = None
         self._offer_ready.clear()
         self._media_active.clear()
@@ -1431,6 +1444,7 @@ class ComelitEntranceMediaTransport:
             sink = getattr(self, "_ring_event_sink", None)
             if ring_event is not None:
                 self._ring_observed = True
+                self._ring_observed_at = time.monotonic()
             if ring_event is not None and sink is not None:
                 try:
                     await sink(ring_event)

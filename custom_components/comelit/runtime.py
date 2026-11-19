@@ -1065,11 +1065,13 @@ class ComelitRingRuntime:
         """
         payload: dict[str, object] = {}
         payload.update(ring.as_dict())
-        previous = dict(self._last_ring_event or {})
+        signature = dict(ring.as_dict())
+        previous = getattr(self, "_last_published_ring", None)
         await self._async_emit_ring_event(
             payload, start_ring_media=False, begin_call_state=False
         )
-        if previous != dict(self._last_ring_event or {}):
+        if previous != signature:
+            self._last_published_ring = signature
             self._notify_status()
 
     async def async_simulate_entrance_ring(self) -> dict[str, object]:
