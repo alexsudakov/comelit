@@ -1275,7 +1275,26 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                         timeout=webcodecs_mod.WEBCODECS_RELEASE_JOIN_SECONDS,
                     )
                 except asyncio.CancelledError:
+                    # The release keeps running detached, and the teardown must
+                    # not orphan the producer or the receive watcher: both are
+                    # signalled synchronously (cancel() cannot be interrupted)
+                    # and joined only briefly, because a second cancellation
+                    # may interrupt this path.
                     release_task.add_done_callback(_consume_task_result)
+                    children = [
+                        task
+                        for task in (client_watch_task, source_task)
+                        if task is not None
+                    ]
+                    for task in children:
+                        task.add_done_callback(_consume_task_result)
+                        task.cancel()
+                    if children:
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await asyncio.wait(
+                                set(children),
+                                timeout=webcodecs_mod.WEBCODECS_CLOSE_JOIN_SECONDS,
+                            )
                     _LOGGER.info(
                         webcodecs_mod.webcodecs_teardown_line(
                             entity_id, phase="handler_cancelled"

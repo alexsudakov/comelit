@@ -5534,6 +5534,7 @@ def test_webcodecs_handler_cancellation_still_releases_the_lease(
     controller, hass = _controller(surveillance_label="Outside")
     manager, transport = _install_webcodecs_entrance_runtime(hass)
     token, _session = controller.sessions.create(424242, 12345678)
+    source = _EndlessUnitSource()
     started = asyncio.Event()
     finished = asyncio.Event()
     original_release = manager.async_release
@@ -5548,9 +5549,7 @@ def test_webcodecs_handler_cancellation_still_releases_the_lease(
     monkeypatch.setattr(manager, "async_release", slow_release)
 
     async def open_sdp(_source):
-        return _AsyncUnitSource(
-            [unit async for unit in _single_webcodecs_unit(_source)]
-        )
+        return source
 
     monkeypatch.setattr(
         views_mod.webcodecs_mod,
@@ -5567,7 +5566,16 @@ def test_webcodecs_handler_cancellation_still_releases_the_lease(
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+        # Observed immediately after the handler unwound: the children must
+        # already be signalled, otherwise they outlive their owner.
+        leftover = [
+            pending
+            for pending in asyncio.all_tasks()
+            if "produce_units" in repr(pending.get_coro())
+        ]
+        closed_at_cancel = source.closed
         await asyncio.wait_for(finished.wait(), timeout=2.0)
+        return leftover, closed_at_cancel
 
     with caplog.at_level(
         logging.INFO, logger="custom_components.comelit.miniapp.views"
@@ -5579,11 +5587,16 @@ def test_webcodecs_handler_cancellation_still_releases_the_lease(
             ),
             messages=(_FakeWSMessage(views_mod.WSMsgType.CLOSE),),
         ):
-            asyncio.run(run())
+            leftover, closed_at_cancel = asyncio.run(run())
 
+    assert leftover == []
+    assert closed_at_cancel is True
     assert manager.release_calls == ["miniapp_webcodecs"]
     assert manager.phase == "inactive"
     assert transport.active is False
+    # Cancellation must not orphan the producer: its close ran, so the PyAV
+    # owner got its queued close instead of holding the source forever.
+    assert source.closed is True
     messages = [record.getMessage() for record in caplog.records]
     assert any(
         "COMELIT_MINIAPP_WEBCODECS_CLOSE_TEARDOWN" in message
