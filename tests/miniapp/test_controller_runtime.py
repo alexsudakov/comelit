@@ -5686,3 +5686,126 @@ def test_webcodecs_release_that_outlives_the_budget_keeps_the_channel_busy(
         )
     assert str(exc.value) == "intercom_media_busy"
     assert manager.acquire_calls == [("entrance", "miniapp_webcodecs")]
+
+
+class _CancelTolerantWatcherSocket(_CaptureWebSocket):
+    """Receive side that ignores the first cancellation for a short window."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.watch_started = asyncio.Event()
+
+    async def __anext__(self):
+        self.watch_started.set()
+        try:
+            await asyncio.sleep(0.35)
+        except asyncio.CancelledError:
+            # Mirrors an aiohttp receive that needs a moment to unwind.
+            await asyncio.sleep(0.35)
+            raise StopAsyncIteration
+        return _FakeWSMessage(views_mod.WSMsgType.CLOSE)
+
+
+class _SlowCloseUnitSource(_AsyncUnitSource):
+    """Delivers one unit, fails, then needs time to close."""
+
+    def __init__(self, units):
+        super().__init__(units)
+        self.events: list[str] = []
+
+    async def __anext__(self):
+        if self.units:
+            return self.units.pop(0)
+        raise webcodecs_mod.WebCodecsSourceError("source_open_failed")
+
+    async def aclose(self):
+        deadline = time.monotonic() + 0.3
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                await asyncio.sleep(remaining)
+            except asyncio.CancelledError:
+                continue
+        self.closed = True
+        self.events.append("source_closed")
+
+
+def test_webcodecs_cancellation_during_watcher_join_still_stops_the_producer(
+    monkeypatch, caplog
+):
+    """The last teardown await must not orphan the producer either."""
+
+    controller, hass = _controller(surveillance_label="Outside")
+    manager, transport = _install_webcodecs_entrance_runtime(hass)
+    token, _session = controller.sessions.create(424242, 12345678)
+    source = _SlowCloseUnitSource(
+        [
+            webcodecs_mod.H264AccessUnit(
+                payload=b"\x00\x00\x00\x01\x65\x88",
+                keyframe=True,
+                media_pts_us=33333,
+                codec="avc1.640029",
+            )
+        ]
+    )
+    release_started = asyncio.Event()
+    original_release = manager.async_release
+
+    async def release(*, reason):
+        release_started.set()
+        return await original_release(reason=reason)
+
+    monkeypatch.setattr(manager, "async_release", release)
+
+    async def open_sdp(_source):
+        return source
+
+    monkeypatch.setattr(
+        views_mod.webcodecs_mod,
+        "open_h264_sdp_access_unit_source",
+        open_sdp,
+    )
+    _CaptureWebSocket.instances = []
+    _CancelTolerantWatcherSocket.next_first = _FakeWSMessage(
+        views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'
+    )
+    monkeypatch.setattr(
+        views_mod.web, "WebSocketResponse", _CancelTolerantWatcherSocket
+    )
+    view = views_mod.MiniAppCameraWebCodecsView(controller)
+
+    async def run():
+        task = asyncio.ensure_future(
+            view.get(_mse_request(controller, token), "camera.comelit_entrance")
+        )
+        await asyncio.wait_for(release_started.wait(), timeout=2.0)
+        # The release is done; the handler is inside the watcher join.
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        leftover = [
+            pending
+            for pending in asyncio.all_tasks()
+            if "produce_units" in repr(pending.get_coro())
+        ]
+        closed_at_cancel = source.closed
+        await asyncio.sleep(0.4)
+        return leftover, closed_at_cancel
+
+    with caplog.at_level(
+        logging.INFO, logger="custom_components.comelit.miniapp.views"
+    ):
+        leftover, closed_at_cancel = asyncio.run(run())
+
+    assert leftover == []
+    assert closed_at_cancel is True
+    assert manager.release_calls == ["miniapp_webcodecs"]
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "COMELIT_MINIAPP_WEBCODECS_CLOSE_TEARDOWN" in message
+        and "phase=handler_cancelled" in message
+        for message in messages
+    )

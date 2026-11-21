@@ -1261,114 +1261,110 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                     phase="send_stalled" if send_stalled else reason,
                 )
             )
-            if entrance_lease is not None:
-                # Release first and never await it directly: `asyncio.wait`
-                # bounds the handler's wait without cancelling the release,
-                # so a closed viewer or a cancelled request can neither skip
-                # the lease hand-back nor hang the handler on it.  An
-                # unfinished release keeps the manager in its own non-idle
-                # phase, which is what still refuses a second owner.
-                release_task = asyncio.ensure_future(entrance_lease.release())
-                try:
+            # One teardown body, one cancellation handler: whatever await is
+            # interrupted, both child tasks are signalled synchronously before
+            # this task unwinds, and the detached release keeps running.
+            teardown_children = [
+                task
+                for task in (client_watch_task, source_task)
+                if task is not None
+            ]
+            try:
+                if entrance_lease is not None:
+                    # Release first and never await it directly: `asyncio.wait`
+                    # bounds the handler's wait without cancelling the release.
+                    # An unfinished release keeps the manager in its own
+                    # non-idle phase, which is what still refuses a second
+                    # owner.
+                    release_task = asyncio.ensure_future(entrance_lease.release())
                     done, _pending = await asyncio.wait(
                         {release_task},
                         timeout=webcodecs_mod.WEBCODECS_RELEASE_JOIN_SECONDS,
                     )
-                except asyncio.CancelledError:
-                    # The release keeps running detached, and the teardown must
-                    # not orphan the producer or the receive watcher: both are
-                    # signalled synchronously (cancel() cannot be interrupted)
-                    # and joined only briefly, because a second cancellation
-                    # may interrupt this path.
-                    release_task.add_done_callback(_consume_task_result)
-                    children = [
-                        task
-                        for task in (client_watch_task, source_task)
-                        if task is not None
-                    ]
-                    for task in children:
-                        task.add_done_callback(_consume_task_result)
-                        task.cancel()
-                    if children:
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await asyncio.wait(
-                                set(children),
-                                timeout=webcodecs_mod.WEBCODECS_CLOSE_JOIN_SECONDS,
+                    if release_task in done:
+                        try:
+                            release_task.result()
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception:
+                            errors += 1
+                            _LOGGER.exception(
+                                "Comelit Mini App WebCodecs entrance media "
+                                "release failed"
                             )
-                    _LOGGER.info(
-                        webcodecs_mod.webcodecs_teardown_line(
-                            entity_id, phase="handler_cancelled"
+                    else:
+                        _LOGGER.info(
+                            webcodecs_mod.webcodecs_teardown_line(
+                                entity_id, phase="release_join_timeout"
+                            )
                         )
+                        release_task.add_done_callback(_consume_task_result)
+                if client_watch_task is not None:
+                    client_watch_task.cancel()
+                    done, _pending = await asyncio.wait(
+                        {client_watch_task},
+                        timeout=webcodecs_mod.WEBCODECS_CLOSE_JOIN_SECONDS,
                     )
-                    raise
-                if release_task in done:
-                    try:
-                        release_task.result()
-                    except asyncio.CancelledError:
-                        pass
-                    except Exception:
-                        errors += 1
-                        _LOGGER.exception(
-                            "Comelit Mini App WebCodecs entrance media release failed"
+                    if client_watch_task in done:
+                        _consume_task_result(client_watch_task)
+                    else:
+                        _LOGGER.info(
+                            webcodecs_mod.webcodecs_teardown_line(
+                                entity_id, phase="watcher_join_timeout"
+                            )
                         )
-                else:
-                    _LOGGER.info(
-                        webcodecs_mod.webcodecs_teardown_line(
-                            entity_id, phase="release_join_timeout"
-                        )
+                        client_watch_task.add_done_callback(_consume_task_result)
+                if source_task is not None:
+                    source_task.cancel()
+                    done, _pending = await asyncio.wait(
+                        {source_task},
+                        timeout=webcodecs_mod.WEBCODECS_SOURCE_CLOSE_JOIN_TIMEOUT,
                     )
-                    release_task.add_done_callback(_consume_task_result)
-            if client_watch_task is not None:
-                client_watch_task.cancel()
-                done, _pending = await asyncio.wait(
-                    {client_watch_task},
-                    timeout=webcodecs_mod.WEBCODECS_CLOSE_JOIN_SECONDS,
+                    if source_task in done:
+                        try:
+                            source_task.result()
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception:
+                            errors += 1
+                            _LOGGER.warning(
+                                "Comelit Mini App WebCodecs source close failed",
+                                exc_info=True,
+                            )
+                    else:
+                        _LOGGER.info(
+                            webcodecs_mod.webcodecs_teardown_line(
+                                entity_id, phase="source_join_timeout"
+                            )
+                        )
+                        source_task.add_done_callback(_consume_task_result)
+                log_event("session_close")
+                _LOGGER.info(
+                    webcodecs_mod.webcodecs_summary_line(
+                        entity_id,
+                        units=units,
+                        keyframes=keyframes,
+                        bytes_sent=bytes_sent,
+                        errors=errors,
+                        reason=reason,
+                    )
                 )
-                if client_watch_task in done:
-                    _consume_task_result(client_watch_task)
-                else:
-                    _LOGGER.info(
-                        webcodecs_mod.webcodecs_teardown_line(
-                            entity_id, phase="watcher_join_timeout"
+            except asyncio.CancelledError:
+                for task in teardown_children:
+                    task.add_done_callback(_consume_task_result)
+                    task.cancel()
+                if teardown_children:
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.wait(
+                            set(teardown_children),
+                            timeout=webcodecs_mod.WEBCODECS_CLOSE_JOIN_SECONDS,
                         )
+                _LOGGER.info(
+                    webcodecs_mod.webcodecs_teardown_line(
+                        entity_id, phase="handler_cancelled"
                     )
-                    client_watch_task.add_done_callback(_consume_task_result)
-            if source_task is not None:
-                source_task.cancel()
-            if source_task is not None:
-                done, _pending = await asyncio.wait(
-                    {source_task},
-                    timeout=webcodecs_mod.WEBCODECS_SOURCE_CLOSE_JOIN_TIMEOUT,
                 )
-                if source_task in done:
-                    try:
-                        source_task.result()
-                    except asyncio.CancelledError:
-                        pass
-                    except Exception:
-                        errors += 1
-                        _LOGGER.warning(
-                            "Comelit Mini App WebCodecs source close failed",
-                            exc_info=True,
-                        )
-                else:
-                    _LOGGER.info(
-                        webcodecs_mod.webcodecs_teardown_line(
-                            entity_id, phase="source_join_timeout"
-                        )
-                    )
-                    source_task.add_done_callback(_consume_task_result)
-            log_event("session_close")
-            _LOGGER.info(
-                webcodecs_mod.webcodecs_summary_line(
-                    entity_id,
-                    units=units,
-                    keyframes=keyframes,
-                    bytes_sent=bytes_sent,
-                    errors=errors,
-                    reason=reason,
-                )
-            )
+                raise
 
         return websocket
 
