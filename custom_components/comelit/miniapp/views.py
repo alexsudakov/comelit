@@ -1269,6 +1269,7 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                 for task in (client_watch_task, source_task)
                 if task is not None
             ]
+            release_task: asyncio.Task[object] | None = None
             try:
                 if entrance_lease is not None:
                     # Release first and never await it directly: `asyncio.wait`
@@ -1350,6 +1351,11 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                     )
                 )
             except asyncio.CancelledError:
+                # The release may still be running detached; retrieve its late
+                # result so a teardown failure cannot surface as an unhandled
+                # task exception after this handler is gone.
+                if release_task is not None:
+                    release_task.add_done_callback(_consume_task_result)
                 for task in teardown_children:
                     task.add_done_callback(_consume_task_result)
                     task.cancel()

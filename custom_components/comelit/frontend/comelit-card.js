@@ -869,18 +869,16 @@ class ComelitCard extends HTMLElement {
     );
     if (cameraToggle) {
       const camera = this._cameraPresentation(model);
-      const channelBusy = this._intercomChannelBusy(model);
-      const channelError = camera.channelError && !camera.available;
-      cameraToggle.disabled = !camera.available || channelBusy;
-      cameraToggle.textContent = channelError
-        ? "Камера недоступна"
-        : channelBusy
-          ? "Освобождение канала…"
+      const channelLabel = this._intercomChannelBusyLabel(model);
+      cameraToggle.disabled = !camera.available || channelLabel !== null;
+      cameraToggle.textContent =
+        channelLabel !== null
+          ? channelLabel
           : this._intercomViewerMode === "ended"
-          ? "Открыть камеру заново"
-          : this._intercomViewerOpen
-            ? "Скрыть камеру"
-            : "Показать камеру";
+            ? "Открыть камеру заново"
+            : this._intercomViewerOpen
+              ? "Скрыть камеру"
+              : "Показать камеру";
     }
   }
 
@@ -919,18 +917,33 @@ class ComelitCard extends HTMLElement {
   _cameraPresentation(model) {
     const state = model.entranceCamera.state;
     const attributes = state?.attributes || {};
+    const phase = String(attributes.media_phase || "");
+    // The media manager is the only authority on whether the upstream channel
+    // is still owned.  Fail closed: a free channel is *explicitly* confirmed by
+    // its own "inactive" phase together with `media_active === false`.  A
+    // viewer EOS is not a release, "error" is not a release, and an absent
+    // attribute is unknown -- never free.
+    const confirmedIdle =
+      phase === "inactive" && attributes.media_active === false;
+    let channelState = "unknown";
+    if (phase === "error") {
+      channelState = "error";
+    } else if (confirmedIdle) {
+      channelState = "idle";
+    } else if (
+      ["starting", "active", "stopping"].includes(phase) ||
+      attributes.media_active === true
+    ) {
+      channelState = "busy";
+    }
+    // Anything else -- no phase, an unrecognised phase, or "inactive" without
+    // an explicit `media_active === false` -- stays "unknown" and is not
+    // openable.
     return {
       entityId: model.entranceCamera.entry?.entity_id || null,
       available: Boolean(state) && state.state !== "unavailable",
-      // The media manager is the only authority on whether the upstream
-      // channel is still owned.  A viewer EOS is not a release, and neither a
-      // failed teardown ("error") nor an absent phase is a confirmed release:
-      // only the manager's own "inactive" state re-arms the open button.
-      channelPhase: String(attributes.media_phase || ""),
-      channelBusy:
-        attributes.media_active === true ||
-        !["", "inactive"].includes(String(attributes.media_phase || "")),
-      channelError: String(attributes.media_phase || "") === "error",
+      channelPhase: phase,
+      channelState,
     };
   }
 
@@ -938,7 +951,21 @@ class ComelitCard extends HTMLElement {
     const camera = this._cameraPresentation(model);
     const ownsViewer =
       this._intercomViewerMode !== "ended" && this._intercomViewerOpen;
-    return camera.channelBusy && !ownsViewer;
+    return camera.channelState !== "idle" && !ownsViewer;
+  }
+
+  _intercomChannelBusyLabel(model) {
+    if (!this._intercomChannelBusy(model)) {
+      return null;
+    }
+    const camera = this._cameraPresentation(model);
+    if (camera.channelState === "error") {
+      return "Камера недоступна";
+    }
+    if (camera.channelState === "unknown") {
+      return "Состояние канала неизвестно";
+    }
+    return "Освобождение канала…";
   }
 
   _renderSurveillance(cameras) {
@@ -1028,7 +1055,7 @@ class ComelitCard extends HTMLElement {
     const entranceDoor = this._doorPresentation("entrance", model, call);
     const gateDoor = this._doorPresentation("gate", model, call);
     const camera = this._cameraPresentation(model);
-    const intercomChannelBusy = this._intercomChannelBusy(model);
+    const intercomChannelLabel = this._intercomChannelBusyLabel(model);
 
     const actionMessage = `
       <div
@@ -1045,13 +1072,11 @@ class ComelitCard extends HTMLElement {
             <button
               class="secondary-action"
               data-intercom-camera-toggle
-              ${camera.available && !intercomChannelBusy ? "" : "disabled"}
+              ${camera.available && intercomChannelLabel === null ? "" : "disabled"}
             >${
-              camera.channelError && !camera.available
-                ? "Камера недоступна"
-                : intercomChannelBusy
-                  ? "Освобождение канала…"
-                  : this._intercomViewerMode === "ended"
+              intercomChannelLabel !== null
+                ? intercomChannelLabel
+                : this._intercomViewerMode === "ended"
                   ? "Открыть камеру заново"
                   : this._intercomViewerOpen
                     ? "Скрыть камеру"
