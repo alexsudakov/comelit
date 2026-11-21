@@ -740,6 +740,38 @@ class MiniAppCameraMSEView(_MiniAppView):
         return websocket
 
 
+def error_is_call_handoff(
+    reason: str,
+    *,
+    kind: str,
+    delivered_units: int,
+    ring_handoff: bool,
+    attached_handoff: bool,
+) -> bool:
+    """Whether a terminal source error is the end caused by the incoming call.
+
+    An entrance session needs delivered media and its own Ring, so a source
+    that never streamed keeps its diagnostic code.  The attached branch leans
+    on the listener's live-call latch instead of media evidence: that channel
+    exists only for the inbound call.
+    """
+    if kind == "attached":
+        return (
+            reason == "attached_webcodecs_transport_closed" and attached_handoff
+        )
+    if kind != "entrance":
+        return False
+    return reason == "source_open_failed" and delivered_units > 0 and ring_handoff
+
+
+def _consume_task_result(task: asyncio.Task[object]) -> None:
+    """Retrieve a late result so an abandoned teardown task stays silent."""
+    if task.cancelled():
+        return
+    with contextlib.suppress(BaseException):
+        task.exception()
+
+
 class MiniAppCameraWebCodecsView(_MiniAppView):
     url = r"/api/comelit/miniapp/camera/{entity_id}/webcodecs"
     name = "api:comelit:miniapp:camera_webcodecs"
@@ -771,6 +803,7 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
         bytes_sent = 0
         errors = 0
         reason = "client_close"
+        send_stalled = False
         first_source_logged = False
         first_binary_logged = False
         source_task: asyncio.Task[None] | None = None
@@ -779,6 +812,10 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
         attached_webcodecs = False
         queued_bytes = 0
         queued_units = 0
+        # The receive side is the authority for a viewer that left.  aiohttp can
+        # keep reporting the response as open after the terminal frame, so a
+        # local signal is what guarantees every later send is refused.
+        client_closed = asyncio.Event()
         queue: asyncio.Queue[object] = asyncio.Queue(
             maxsize=webcodecs_mod.WEBCODECS_MAX_QUEUE_UNITS + 4
         )
@@ -795,24 +832,40 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
             )
 
         async def send_json(payload: dict[str, object]) -> bool:
-            nonlocal reason
-            if websocket.closed:
+            nonlocal reason, send_stalled
+            if websocket.closed or client_closed.is_set():
                 reason = "client_close"
                 return False
             try:
-                await websocket.send_json(payload)
+                async with asyncio.timeout(
+                    webcodecs_mod.WEBCODECS_SEND_TIMEOUT_SECONDS
+                ):
+                    await websocket.send_json(payload)
+            except TimeoutError:
+                # The send made no progress; the session outcome keeps its own
+                # reason and the marker names the stalled branch.
+                send_stalled = True
+                return False
             except _WEBSOCKET_SEND_ERRORS:
                 reason = "client_close"
                 return False
             return True
 
         async def send_bytes(payload: bytes) -> bool:
-            nonlocal reason
-            if websocket.closed:
+            nonlocal reason, send_stalled
+            if websocket.closed or client_closed.is_set():
                 reason = "client_close"
                 return False
             try:
-                await websocket.send_bytes(payload)
+                async with asyncio.timeout(
+                    webcodecs_mod.WEBCODECS_SEND_TIMEOUT_SECONDS
+                ):
+                    await websocket.send_bytes(payload)
+            except TimeoutError:
+                # The send made no progress; the session outcome keeps its own
+                # reason and the marker names the stalled branch.
+                send_stalled = True
+                return False
             except _WEBSOCKET_SEND_ERRORS:
                 reason = "client_close"
                 return False
@@ -839,16 +892,22 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                 reason = code
             if not websocket.closed:
                 await send_json({"type": "error", "code": code})
-                with contextlib.suppress(*_WEBSOCKET_SEND_ERRORS):
-                    await websocket.close()
+                with contextlib.suppress(*_WEBSOCKET_SEND_ERRORS, TimeoutError):
+                    async with asyncio.timeout(
+                        webcodecs_mod.WEBCODECS_SEND_TIMEOUT_SECONDS
+                    ):
+                        await websocket.close()
 
         async def send_eos(eos_reason: str) -> None:
             nonlocal reason
             reason = eos_reason
             if not websocket.closed:
                 await send_json({"type": "eos", "reason": eos_reason})
-                with contextlib.suppress(*_WEBSOCKET_SEND_ERRORS):
-                    await websocket.close()
+                with contextlib.suppress(*_WEBSOCKET_SEND_ERRORS, TimeoutError):
+                    async with asyncio.timeout(
+                        webcodecs_mod.WEBCODECS_SEND_TIMEOUT_SECONDS
+                    ):
+                        await websocket.close()
 
         try:
             try:
@@ -944,6 +1003,7 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                     except _WEBSOCKET_SEND_ERRORS:
                         pass
                     log_event("client_close")
+                    client_closed.set()
                     await queue.put(("client_close", "client_close"))
 
                 # Exactly one receive-side owner is created after the initial
@@ -1020,6 +1080,10 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                         )
                     except Exception:
                         send_source_eof = False
+                        _LOGGER.warning(
+                            "Comelit WebCodecs source failed unexpectedly",
+                            exc_info=True,
+                        )
                         await queue.put(
                             (
                                 "error",
@@ -1053,7 +1117,7 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
 
                 try:
                     async with asyncio.timeout(duration):
-                        while not websocket.closed:
+                        while not websocket.closed and not client_closed.is_set():
                             item = await queue.get()
                             if isinstance(item, tuple):
                                 kind, code = item
@@ -1080,6 +1144,23 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                                     reason = "client_close"
                                     break
                                 if kind == "error":
+                                    if error_is_call_handoff(
+                                        str(code),
+                                        kind="attached"
+                                        if attached_webcodecs
+                                        else target.kind,
+                                        delivered_units=units,
+                                        ring_handoff=self.controller.entrance_ring_handoff_for_current_session(),
+                                        attached_handoff=self.controller.attached_call_handoff_for_current_session(),
+                                    ):
+                                        log_event("source_eof")
+                                        _LOGGER.info(
+                                            "Comelit WebCodecs session ended on a "
+                                            "call hand-off: code=%s",
+                                            code,
+                                        )
+                                        await send_eos("call_handoff")
+                                        break
                                     if code == "unit_too_large":
                                         log_event("unit_too_large")
                                     elif code == "backlog_exceeded":
@@ -1090,7 +1171,19 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                                     break
                                 if kind == "eos":
                                     log_event("source_eof")
-                                    await send_eos(str(code))
+                                    await send_eos(
+                                        webcodecs_mod.entrance_eos_reason(
+                                            str(code),
+                                            kind="attached"
+                                            if attached_webcodecs
+                                            else target.kind,
+                                            ring_handoff=(
+                                                self.controller.attached_call_handoff_for_current_session()
+                                                if attached_webcodecs
+                                                else self.controller.entrance_ring_handoff_for_current_session()
+                                            ),
+                                        )
+                                    )
                                     break
                                 continue
 
@@ -1162,33 +1255,122 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                 except TimeoutError:
                     await send_eos("duration_limit")
         finally:
-            if source_task is not None:
-                source_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await source_task
-            if client_watch_task is not None:
-                client_watch_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await client_watch_task
-            if entrance_lease is not None:
-                try:
-                    await entrance_lease.release()
-                except Exception:
-                    errors += 1
-                    _LOGGER.exception(
-                        "Comelit Mini App WebCodecs entrance media release failed"
-                    )
-            log_event("session_close")
             _LOGGER.info(
-                webcodecs_mod.webcodecs_summary_line(
+                webcodecs_mod.webcodecs_teardown_line(
                     entity_id,
-                    units=units,
-                    keyframes=keyframes,
-                    bytes_sent=bytes_sent,
-                    errors=errors,
-                    reason=reason,
+                    phase="send_stalled" if send_stalled else reason,
                 )
             )
+            # One teardown body, one cancellation handler: whatever await is
+            # interrupted, both child tasks are signalled synchronously before
+            # this task unwinds, and the detached release keeps running.
+            teardown_children = [
+                task
+                for task in (client_watch_task, source_task)
+                if task is not None
+            ]
+            release_task: asyncio.Task[object] | None = None
+            try:
+                if entrance_lease is not None:
+                    # Release first and never await it directly: `asyncio.wait`
+                    # bounds the handler's wait without cancelling the release.
+                    # An unfinished release keeps the manager in its own
+                    # non-idle phase, which is what still refuses a second
+                    # owner.
+                    release_task = asyncio.ensure_future(entrance_lease.release())
+                    done, _pending = await asyncio.wait(
+                        {release_task},
+                        timeout=webcodecs_mod.WEBCODECS_RELEASE_JOIN_SECONDS,
+                    )
+                    if release_task in done:
+                        try:
+                            release_task.result()
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception:
+                            errors += 1
+                            _LOGGER.exception(
+                                "Comelit Mini App WebCodecs entrance media "
+                                "release failed"
+                            )
+                    else:
+                        _LOGGER.info(
+                            webcodecs_mod.webcodecs_teardown_line(
+                                entity_id, phase="release_join_timeout"
+                            )
+                        )
+                        release_task.add_done_callback(_consume_task_result)
+                if client_watch_task is not None:
+                    client_watch_task.cancel()
+                    done, _pending = await asyncio.wait(
+                        {client_watch_task},
+                        timeout=webcodecs_mod.WEBCODECS_CLOSE_JOIN_SECONDS,
+                    )
+                    if client_watch_task in done:
+                        _consume_task_result(client_watch_task)
+                    else:
+                        _LOGGER.info(
+                            webcodecs_mod.webcodecs_teardown_line(
+                                entity_id, phase="watcher_join_timeout"
+                            )
+                        )
+                        client_watch_task.add_done_callback(_consume_task_result)
+                if source_task is not None:
+                    source_task.cancel()
+                    done, _pending = await asyncio.wait(
+                        {source_task},
+                        timeout=webcodecs_mod.WEBCODECS_SOURCE_CLOSE_JOIN_TIMEOUT,
+                    )
+                    if source_task in done:
+                        try:
+                            source_task.result()
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception:
+                            errors += 1
+                            _LOGGER.warning(
+                                "Comelit Mini App WebCodecs source close failed",
+                                exc_info=True,
+                            )
+                    else:
+                        _LOGGER.info(
+                            webcodecs_mod.webcodecs_teardown_line(
+                                entity_id, phase="source_join_timeout"
+                            )
+                        )
+                        source_task.add_done_callback(_consume_task_result)
+                log_event("session_close")
+                _LOGGER.info(
+                    webcodecs_mod.webcodecs_summary_line(
+                        entity_id,
+                        units=units,
+                        keyframes=keyframes,
+                        bytes_sent=bytes_sent,
+                        errors=errors,
+                        reason=reason,
+                    )
+                )
+            except asyncio.CancelledError:
+                # The release may still be running detached; retrieve its late
+                # result so a teardown failure cannot surface as an unhandled
+                # task exception after this handler is gone.
+                if release_task is not None:
+                    release_task.add_done_callback(_consume_task_result)
+                for task in teardown_children:
+                    task.add_done_callback(_consume_task_result)
+                    task.cancel()
+                if teardown_children:
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.wait(
+                            set(teardown_children),
+                            timeout=webcodecs_mod.WEBCODECS_CLOSE_JOIN_SECONDS,
+                        )
+                _LOGGER.info(
+                    webcodecs_mod.webcodecs_teardown_line(
+                        entity_id, phase="handler_cancelled"
+                    )
+                )
+                raise
 
         return websocket
 

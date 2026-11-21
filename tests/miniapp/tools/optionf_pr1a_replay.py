@@ -209,7 +209,7 @@ def _listener_instance(runtime, shadow_enabled: bool):
     instance._cancel_call_state_timeout = lambda: None
     instance._emit_post_call_transport_state_once = lambda: None
 
-    async def emit(event):
+    async def emit(event, **kwargs):
         payload = dict(event)
         payload.setdefault("event_id", "<EVENT_ID>")
         events.append(payload)

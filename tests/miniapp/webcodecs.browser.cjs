@@ -171,7 +171,14 @@ async function main() {
           },
           "camera.comelit_entrance": {
             state: "idle",
-            attributes: { friendly_name: "Comelit — Камера подъезда" },
+            // The integration publishes the media-manager state on every write;
+            // the card's reopen gate is fail-closed, so an idle channel must be
+            // explicit here.
+            attributes: {
+              friendly_name: "Comelit — Камера подъезда",
+              media_active: false,
+              media_phase: "inactive",
+            },
           },
         },
         callWS: async (message) => {

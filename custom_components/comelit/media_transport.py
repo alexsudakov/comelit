@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 import hashlib
 import logging
 import os
@@ -9,6 +9,7 @@ from pathlib import Path
 import platform
 import re
 import signal
+import time
 from uuid import uuid4
 
 from aiohttp import ClientSession
@@ -51,6 +52,8 @@ from .latency_timeline import (
 )
 from .media_diagnostics import MediaProgressDiagnostics
 from .oauth import ComelitOAuthError, ComelitOAuthManager
+from .ring_event import RingEvent
+from .ring_observation import RingObservationBuffer
 from .ring_probe_log import RING_PROBE_OWNER_MEDIA, RingProbeDisclosure
 from .ring_shadow import RingShadowController, RingShadowHook, SHADOW_OWNER_MEDIA
 from .ring_episode import RingEpisodeLedger
@@ -520,6 +523,10 @@ class ComelitEntranceMediaTransport:
         if callable(attach):
             attach(self._ring_episode)
         self._ring_probe_disclosure = RingProbeDisclosure(RING_PROBE_OWNER_MEDIA)
+        self._ring_observation = RingObservationBuffer()
+        self._ring_event_sink: Callable[[RingEvent], Awaitable[None]] | None = None
+        self._ring_observed = False
+        self._ring_observed_at = None
 
     @property
     def active(self) -> bool:
@@ -998,6 +1005,27 @@ class ComelitEntranceMediaTransport:
             dict(self._native_ack_diagnostics),
         )
 
+    @property
+    def ring_observed(self) -> bool:
+        """Whether the current session saw a confirmed Ring.
+
+        Scoped to the session: the observation has to belong to the attempt
+        that is running now.  It is used only to explain that session's end;
+        it is not call identity and never starts a media session.
+        """
+        if not getattr(self, "_ring_observed", False):
+            return False
+        observed_at = getattr(self, "_ring_observed_at", None)
+        started_at = getattr(self, "_session_started_at", None)
+        if observed_at is None or started_at is None:
+            return False
+        return observed_at >= started_at
+
+    def set_ring_event_sink(
+        self, sink: Callable[[RingEvent], Awaitable[None]] | None
+    ) -> None:
+        self._ring_event_sink = sink
+
     async def async_start(self, panel: str) -> None:
         if panel != "entrance":
             raise ComelitMediaTransportError("unsupported_media_panel")
@@ -1019,6 +1047,11 @@ class ComelitEntranceMediaTransport:
         self._last_native_failure_markers = []
         self._cancel_status_notify()
         self._progress.reset()
+        if getattr(self, "_ring_observation", None) is not None:
+            self._ring_observation.reset()
+        self._ring_observed = False
+        self._ring_observed_at = None
+        self._session_started_at = time.monotonic()
         self._last_status_notify_monotonic = None
         self._offer_ready.clear()
         self._media_active.clear()
@@ -1401,6 +1434,27 @@ class ComelitEntranceMediaTransport:
             if shadow_previous_line is not None:
                 self._shadow_hook.observe_line(shadow_previous_line)
             shadow_previous_line = line
+            observation = getattr(self, "_ring_observation", None)
+            if observation is None:
+                observation = RingObservationBuffer()
+                self._ring_observation = observation
+            try:
+                ring_event = observation.feed(line)
+            except Exception:
+                _LOGGER.warning("Comelit ring observation parse failed", exc_info=True)
+                ring_event = None
+            sink = getattr(self, "_ring_event_sink", None)
+            if ring_event is not None:
+                self._ring_observed = True
+                self._ring_observed_at = time.monotonic()
+            if ring_event is not None and sink is not None:
+                try:
+                    await sink(ring_event)
+                except Exception:
+                    _LOGGER.warning(
+                        "Comelit media-owner ring publication failed",
+                        exc_info=True,
+                    )
             self._remember_native_marker(line)
             self._observe_latency_marker(line)
             self._observe_native_stage_marker(line)

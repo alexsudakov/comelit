@@ -107,7 +107,7 @@ def test_shadow_observation_runs_after_production_handling():
         runtime.SHADOW_OWNER_LISTENER,
     )
 
-    async def emit(event):
+    async def emit(event, **kwargs):
         order.append("production:emit")
         events.append(event)
 
