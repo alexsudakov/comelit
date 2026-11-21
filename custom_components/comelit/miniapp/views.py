@@ -764,6 +764,14 @@ def error_is_call_handoff(
     return reason == "source_open_failed" and delivered_units > 0 and ring_handoff
 
 
+def _consume_task_result(task: asyncio.Task[object]) -> None:
+    """Retrieve a late result so an abandoned teardown task stays silent."""
+    if task.cancelled():
+        return
+    with contextlib.suppress(BaseException):
+        task.exception()
+
+
 class MiniAppCameraWebCodecsView(_MiniAppView):
     url = r"/api/comelit/miniapp/camera/{entity_id}/webcodecs"
     name = "api:comelit:miniapp:camera_webcodecs"
@@ -795,6 +803,7 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
         bytes_sent = 0
         errors = 0
         reason = "client_close"
+        send_stalled = False
         first_source_logged = False
         first_binary_logged = False
         source_task: asyncio.Task[None] | None = None
@@ -803,6 +812,10 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
         attached_webcodecs = False
         queued_bytes = 0
         queued_units = 0
+        # The receive side is the authority for a viewer that left.  aiohttp can
+        # keep reporting the response as open after the terminal frame, so a
+        # local signal is what guarantees every later send is refused.
+        client_closed = asyncio.Event()
         queue: asyncio.Queue[object] = asyncio.Queue(
             maxsize=webcodecs_mod.WEBCODECS_MAX_QUEUE_UNITS + 4
         )
@@ -819,24 +832,40 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
             )
 
         async def send_json(payload: dict[str, object]) -> bool:
-            nonlocal reason
-            if websocket.closed:
+            nonlocal reason, send_stalled
+            if websocket.closed or client_closed.is_set():
                 reason = "client_close"
                 return False
             try:
-                await websocket.send_json(payload)
+                async with asyncio.timeout(
+                    webcodecs_mod.WEBCODECS_SEND_TIMEOUT_SECONDS
+                ):
+                    await websocket.send_json(payload)
+            except TimeoutError:
+                # The send made no progress; the session outcome keeps its own
+                # reason and the marker names the stalled branch.
+                send_stalled = True
+                return False
             except _WEBSOCKET_SEND_ERRORS:
                 reason = "client_close"
                 return False
             return True
 
         async def send_bytes(payload: bytes) -> bool:
-            nonlocal reason
-            if websocket.closed:
+            nonlocal reason, send_stalled
+            if websocket.closed or client_closed.is_set():
                 reason = "client_close"
                 return False
             try:
-                await websocket.send_bytes(payload)
+                async with asyncio.timeout(
+                    webcodecs_mod.WEBCODECS_SEND_TIMEOUT_SECONDS
+                ):
+                    await websocket.send_bytes(payload)
+            except TimeoutError:
+                # The send made no progress; the session outcome keeps its own
+                # reason and the marker names the stalled branch.
+                send_stalled = True
+                return False
             except _WEBSOCKET_SEND_ERRORS:
                 reason = "client_close"
                 return False
@@ -968,6 +997,7 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                     except _WEBSOCKET_SEND_ERRORS:
                         pass
                     log_event("client_close")
+                    client_closed.set()
                     await queue.put(("client_close", "client_close"))
 
                 # Exactly one receive-side owner is created after the initial
@@ -1081,7 +1111,7 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
 
                 try:
                     async with asyncio.timeout(duration):
-                        while not websocket.closed:
+                        while not websocket.closed and not client_closed.is_set():
                             item = await queue.get()
                             if isinstance(item, tuple):
                                 kind, code = item
@@ -1219,26 +1249,32 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                 except TimeoutError:
                     await send_eos("duration_limit")
         finally:
-            if source_task is not None:
-                source_task.cancel()
-                # A failure while closing the source must not escape after the
-                # terminal event: the summary line still has to be written.
-                try:
-                    await source_task
-                except asyncio.CancelledError:
-                    current = asyncio.current_task()
-                    if current is not None and current.cancelling():
-                        raise
-                except Exception:
-                    errors += 1
-                    _LOGGER.warning(
-                        "Comelit Mini App WebCodecs source close failed",
-                        exc_info=True,
-                    )
+            _LOGGER.info(
+                webcodecs_mod.webcodecs_teardown_line(
+                    entity_id,
+                    phase="send_stalled" if send_stalled else reason,
+                )
+            )
             if client_watch_task is not None:
                 client_watch_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await client_watch_task
+                done, _pending = await asyncio.wait(
+                    {client_watch_task},
+                    timeout=webcodecs_mod.WEBCODECS_CLOSE_JOIN_SECONDS,
+                )
+                if client_watch_task in done:
+                    _consume_task_result(client_watch_task)
+                else:
+                    _LOGGER.info(
+                        webcodecs_mod.webcodecs_teardown_line(
+                            entity_id, phase="watcher_join_timeout"
+                        )
+                    )
+                    client_watch_task.add_done_callback(_consume_task_result)
+            if source_task is not None:
+                # Stop the producer first, but never let its join sit in front
+                # of the release: a PyAV owner close can outlive its budget and
+                # the media lease must still be handed back.
+                source_task.cancel()
             if entrance_lease is not None:
                 try:
                     await entrance_lease.release()
@@ -1247,6 +1283,29 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                     _LOGGER.exception(
                         "Comelit Mini App WebCodecs entrance media release failed"
                     )
+            if source_task is not None:
+                done, _pending = await asyncio.wait(
+                    {source_task},
+                    timeout=webcodecs_mod.WEBCODECS_SOURCE_CLOSE_JOIN_TIMEOUT,
+                )
+                if source_task in done:
+                    try:
+                        source_task.result()
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        errors += 1
+                        _LOGGER.warning(
+                            "Comelit Mini App WebCodecs source close failed",
+                            exc_info=True,
+                        )
+                else:
+                    _LOGGER.info(
+                        webcodecs_mod.webcodecs_teardown_line(
+                            entity_id, phase="source_join_timeout"
+                        )
+                    )
+                    source_task.add_done_callback(_consume_task_result)
             log_event("session_close")
             _LOGGER.info(
                 webcodecs_mod.webcodecs_summary_line(

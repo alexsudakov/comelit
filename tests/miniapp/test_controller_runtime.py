@@ -5108,3 +5108,416 @@ def test_attached_transport_close_after_release_is_explained_as_handoff(monkeypa
 
     texts = _json_texts(_CaptureWebSocket.instances[-1])
     assert texts[-1] == {"type": "eos", "reason": "call_handoff"}
+
+
+# --- PR #357: client_close must always reach the lease release -----------------
+
+
+class _EndlessUnitSource:
+    """A live entrance source that never runs out of H.264 units."""
+
+    def __init__(self):
+        self.closed = False
+        self.units = 0
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await asyncio.sleep(0)
+        self.units += 1
+        return webcodecs_mod.H264AccessUnit(
+            payload=b"\x00\x00\x00\x01\x65\x88" + bytes([self.units % 251]),
+            keyframe=False,
+            media_pts_us=self.units * 33333,
+            codec="avc1.640029",
+        )
+
+    async def aclose(self):
+        self.closed = True
+
+
+class _StalledViewerSocket:
+    """A viewer that left: the socket stops draining but never reports closed.
+
+    This is the state that produced the 2026-11-21 stall: the receive watcher
+    sees the terminal frame and logs ``client_close``, while aiohttp still
+    reports the response as open, so the next ``send_bytes`` waits on a peer
+    that will never read again.
+    """
+
+    instances: list["_StalledViewerSocket"] = []
+    stall_after = 1
+
+    def __init__(self, *args, **kwargs):
+        self.closed = False
+        self.texts: list[str] = []
+        self.binaries: list[bytes] = []
+        self.close_count = 0
+        self.stalled = asyncio.Event()
+        self.resume = asyncio.Event()
+        self._messages: list[object] = [
+            ("sleep", 0.02),
+            _FakeWSMessage(views_mod.WSMsgType.CLOSE),
+        ]
+        self.__class__.instances.append(self)
+
+    async def prepare(self, request):
+        return None
+
+    async def receive(self, timeout=None):
+        return _FakeWSMessage(
+            views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'
+        )
+
+    async def send_json(self, payload):
+        self.texts.append(json.dumps(payload, separators=(",", ":")))
+
+    async def send_bytes(self, payload):
+        if len(self.binaries) >= self.stall_after:
+            self.stalled.set()
+            await self.resume.wait()
+        self.binaries.append(bytes(payload))
+
+    async def close(self):
+        self.closed = True
+        self.close_count += 1
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._messages:
+            raise StopAsyncIteration
+        message = self._messages.pop(0)
+        if isinstance(message, tuple) and message[0] == "sleep":
+            await asyncio.sleep(message[1])
+            return await self.__anext__()
+        return message
+
+
+def test_webcodecs_client_close_releases_lease_when_send_stalls(monkeypatch, caplog):
+    controller, hass = _controller(surveillance_label="Outside")
+    manager, transport = _install_webcodecs_entrance_runtime(hass)
+    token, _session = controller.sessions.create(424242, 12345678)
+    source = _EndlessUnitSource()
+
+    async def endless(_source):
+        return source
+
+    monkeypatch.setattr(
+        views_mod.webcodecs_mod,
+        "open_h264_sdp_access_unit_source",
+        endless,
+    )
+    monkeypatch.setattr(
+        views_mod.webcodecs_mod,
+        "WEBCODECS_SEND_TIMEOUT_SECONDS",
+        0.05,
+        raising=False,
+    )
+    _StalledViewerSocket.instances = []
+    view = views_mod.MiniAppCameraWebCodecsView(controller)
+
+    async def run():
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                views_mod.web, "WebSocketResponse", _StalledViewerSocket
+            )
+            with caplog.at_level(
+                logging.INFO, logger="custom_components.comelit.miniapp.views"
+            ):
+                await asyncio.wait_for(
+                    view.get(
+                        _mse_request(controller, token),
+                        "camera.comelit_entrance",
+                    ),
+                    timeout=2.0,
+                )
+
+    asyncio.run(run())
+
+    websocket = _StalledViewerSocket.instances[-1]
+    assert websocket.stalled.is_set()
+    # The client already left: no frame may be reported as delivered after the
+    # stall, and the media lease must be handed back without waiting for the
+    # hard limit or for a native refresh failure.
+    assert manager.acquire_calls == [("entrance", "miniapp_webcodecs")]
+    assert manager.release_calls == ["miniapp_webcodecs"]
+    assert manager.phase == "inactive"
+    assert manager.active is False
+    assert transport.active is False
+    assert source.closed is True
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "COMELIT_MINIAPP_WEBCODECS_CLOSE_TEARDOWN" in message
+        and "phase=send_stalled" in message
+        for message in messages
+    )
+    assert any(
+        "COMELIT_MINIAPP_WEBCODECS_SUMMARY" in message
+        and "reason=client_close" in message
+        for message in messages
+    )
+
+
+class _StubbornUnitSource:
+    """A source whose close ignores cancellation, like a stuck PyAV owner."""
+
+    def __init__(self, events: list[str]):
+        self.events = events
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await asyncio.sleep(3600)
+
+    async def aclose(self):
+        deadline = time.monotonic() + 0.3
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                await asyncio.sleep(remaining)
+            except asyncio.CancelledError:
+                continue
+        self.events.append("source_closed")
+
+
+def test_webcodecs_client_close_releases_before_source_join(monkeypatch, caplog):
+    controller, hass = _controller(surveillance_label="Outside")
+    manager, transport = _install_webcodecs_entrance_runtime(hass)
+    token, _session = controller.sessions.create(424242, 12345678)
+    events: list[str] = []
+    source = _StubbornUnitSource(events)
+
+    async def stubborn(_source):
+        return source
+
+    original_release = manager.async_release
+
+    async def release(*, reason):
+        events.append("release")
+        return await original_release(reason=reason)
+
+    monkeypatch.setattr(manager, "async_release", release)
+    monkeypatch.setattr(
+        views_mod.webcodecs_mod,
+        "open_h264_sdp_access_unit_source",
+        stubborn,
+    )
+    monkeypatch.setattr(
+        views_mod.webcodecs_mod, "WEBCODECS_SOURCE_CLOSE_JOIN_TIMEOUT", 0.05
+    )
+    view = views_mod.MiniAppCameraWebCodecsView(controller)
+
+    with caplog.at_level(
+        logging.INFO, logger="custom_components.comelit.miniapp.views"
+    ):
+        with _MSEWebSocketPatch(
+            monkeypatch,
+            _FakeWSMessage(
+                views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'
+            ),
+            messages=(_FakeWSMessage(views_mod.WSMsgType.CLOSE),),
+        ):
+            asyncio.run(
+                view.get(
+                    _mse_request(controller, token), "camera.comelit_entrance"
+                )
+            )
+
+    # The lease is returned before the producer's close finishes; a source that
+    # ignores its cancellation cannot hold the upstream owner hostage.
+    assert events[:2] == ["release", "source_closed"]
+    assert manager.release_calls == ["miniapp_webcodecs"]
+    assert manager.phase == "inactive"
+    assert transport.active is False
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "COMELIT_MINIAPP_WEBCODECS_CLOSE_TEARDOWN" in message
+        and "phase=source_join_timeout" in message
+        for message in messages
+    )
+    assert any(
+        "COMELIT_MINIAPP_WEBCODECS_SUMMARY" in message
+        and "reason=client_close" in message
+        for message in messages
+    )
+
+
+def test_webcodecs_reopen_during_teardown_is_refused_without_second_owner(
+    monkeypatch,
+):
+    controller, hass = _controller(surveillance_label="Outside")
+    manager, transport = _install_webcodecs_entrance_runtime(hass)
+    token, _session = controller.sessions.create(424242, 12345678)
+    manager.phase = "stopping"
+    manager.active = True
+    manager.leases = {"miniapp_webcodecs": 1}
+    transport.active = True
+    transport.local_sdp_ready = True
+    monkeypatch.setattr(
+        controller_mod, "_WEBCODECS_HLS_FALLBACK_CLEANUP_SECONDS", 0.1
+    )
+    view = views_mod.MiniAppCameraWebCodecsView(controller)
+
+    with _MSEWebSocketPatch(
+        monkeypatch,
+        _FakeWSMessage(
+            views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'
+        ),
+        messages=("wait_forever",),
+    ):
+        asyncio.run(
+            view.get(_mse_request(controller, token), "camera.comelit_entrance")
+        )
+
+    assert _json_texts(_CaptureWebSocket.instances[-1]) == [
+        {"type": "error", "code": "intercom_media_busy"}
+    ]
+    # Safe refusal: the in-flight teardown keeps its single upstream owner and
+    # no replacement media session is started on the user's behalf.
+    assert manager.acquire_calls == []
+    assert manager.start_count == 0
+    assert manager.release_calls == []
+    assert transport.active is True
+
+
+def test_webcodecs_reopen_after_confirmed_release_starts_exactly_one_session():
+    controller, hass = _controller(surveillance_label="Outside")
+    manager, transport = _install_webcodecs_entrance_runtime(hass)
+    target = controller.get_webcodecs_camera_target("camera.comelit_entrance")
+
+    async def run():
+        first = await controller.acquire_webcodecs_entrance(target)
+        assert manager.start_count == 1
+        assert manager.phase == "active"
+
+        await first.release()
+        assert manager.phase == "inactive"
+        assert manager.active is False
+        assert transport.active is False
+
+        second = await controller.acquire_webcodecs_entrance(target)
+        assert manager.start_count == 2
+        assert manager.phase == "active"
+        assert manager.leases == {"miniapp_webcodecs": 1}
+        assert second.local_sdp_path == first.local_sdp_path
+
+        await second.release()
+        assert manager.phase == "inactive"
+
+    asyncio.run(run())
+
+
+class _RealManagerListener:
+    media_paused = False
+    attached_media_busy = False
+
+    def __init__(self, events: list[str]):
+        self.events = events
+        self.proofs: list[dict[str, object]] = []
+
+    async def async_pause_for_media(self) -> None:
+        self.events.append("pause")
+        self.media_paused = True
+
+    async def async_confirm_media_owner_released(self, **proof) -> None:
+        self.events.append("release_proof")
+        self.proofs.append(proof)
+
+    async def async_resume_after_media(self) -> None:
+        self.events.append("resume")
+        self.media_paused = False
+
+
+class _RealManagerTransport:
+    def __init__(self, events: list[str]):
+        self.events = events
+        self.active = False
+        self.local_sdp_ready = False
+        self.local_sdp_path = Path("/run/comelit-media/local-rtp.sdp")
+
+    async def async_start(self, panel):
+        self.events.append("transport_start")
+        self.active = True
+        self.local_sdp_ready = True
+
+    async def async_stop(self):
+        self.events.append("transport_stop")
+        self.active = False
+        self.local_sdp_ready = False
+
+
+def test_webcodecs_client_close_drives_real_manager_teardown_and_listener_resume(
+    monkeypatch,
+):
+    """The view's close path must reach the production lease release.
+
+    Uses the real ``ComelitMediaSessionManager`` so the ordering that matters --
+    transport stopped, release proof, listener resumed -- is the production one.
+    """
+
+    controller, hass = _controller(surveillance_label="Outside")
+    media_session_mod = _load(
+        PKG_ROOT / "media_session.py",
+        "custom_components.comelit.media_session",
+    )
+    events: list[str] = []
+    listener = _RealManagerListener(events)
+    transport = _RealManagerTransport(events)
+    manager = media_session_mod.ComelitMediaSessionManager(listener, transport)
+    domain_data = hass.data.setdefault(controller_mod.DOMAIN, {})
+    domain_data.setdefault(controller_mod.DATA_MEDIA_SESSIONS, {})[
+        "entry-1"
+    ] = manager
+    domain_data.setdefault(controller_mod.DATA_MEDIA_TRANSPORTS, {})[
+        "entry-1"
+    ] = transport
+    token, _session = controller.sessions.create(424242, 12345678)
+
+    async def open_sdp(_source):
+        return _AsyncUnitSource(
+            [unit async for unit in _single_webcodecs_unit(_source)]
+        )
+
+    monkeypatch.setattr(
+        views_mod.webcodecs_mod,
+        "open_h264_sdp_access_unit_source",
+        open_sdp,
+    )
+    view = views_mod.MiniAppCameraWebCodecsView(controller)
+
+    with _MSEWebSocketPatch(
+        monkeypatch,
+        _FakeWSMessage(
+            views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'
+        ),
+        messages=(_FakeWSMessage(views_mod.WSMsgType.CLOSE),),
+    ):
+        asyncio.run(
+            view.get(_mse_request(controller, token), "camera.comelit_entrance")
+        )
+
+    assert events == [
+        "pause",
+        "transport_start",
+        "transport_stop",
+        "release_proof",
+        "resume",
+    ]
+    assert listener.proofs == [
+        {
+            "phase": "stopping",
+            "transport_active": False,
+            "leases_empty": True,
+            "teardown_confirmed": True,
+        }
+    ]
+    assert transport.active is False
+    assert manager.phase == "inactive"
+    assert manager.active is False

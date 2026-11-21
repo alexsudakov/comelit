@@ -26,6 +26,14 @@ WEBCODECS_MAX_SESSION_SECONDS = 600
 WEBCODECS_ENTRANCE_MAX_SESSION_SECONDS = 600
 WEBCODECS_MAX_SESSIONS = 4
 WEBCODECS_SOURCE_CLOSE_JOIN_TIMEOUT = 6.0
+# A live viewer drains a bounded backlog; a send that makes no progress for
+# this long means the embedded browser stopped reading while the socket still
+# looks open.  Without a ceiling that await never returns and the media lease
+# is never released.
+WEBCODECS_SEND_TIMEOUT_SECONDS = 5.0
+# Bounded joins for the teardown path.  The lease release must never sit
+# behind a producer or a receive watcher that ignores cancellation.
+WEBCODECS_CLOSE_JOIN_SECONDS = 2.0
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -817,16 +825,8 @@ def webcodecs_log_line(
     )
 
 
-def webcodecs_summary_line(
-    entity_id: str,
-    *,
-    units: int,
-    keyframes: int,
-    bytes_sent: int,
-    errors: int,
-    reason: str,
-) -> str:
-    allowed_reasons = {
+_WEBSOCKET_SESSION_REASONS = frozenset(
+    {
         "client_close",
         "duration_limit",
         "source_eof",
@@ -846,12 +846,52 @@ def webcodecs_summary_line(
         "intercom_media_unavailable",
         "cancelled",
     }
+)
+
+# Teardown outcomes that are not a session reason.  They mark where the close
+# path had to stop waiting, so a future live run can name the branch instead of
+# inferring it from the absence of a log line.
+_TEARDOWN_ONLY_PHASES = frozenset(
+    {
+        "send_stalled",
+        "source_join_timeout",
+        "watcher_join_timeout",
+    }
+)
+
+
+def webcodecs_summary_line(
+    entity_id: str,
+    *,
+    units: int,
+    keyframes: int,
+    bytes_sent: int,
+    errors: int,
+    reason: str,
+) -> str:
+    allowed_reasons = _WEBSOCKET_SESSION_REASONS
     if reason not in allowed_reasons:
         raise WebCodecsProtocolError("invalid_summary_reason")
     return (
         f"COMELIT_MINIAPP_WEBCODECS_SUMMARY entity={entity_id} units={int(units)} "
         f"keyframes={int(keyframes)} bytes={int(bytes_sent)} errors={int(errors)} "
         f"reason={reason}"
+    )
+
+
+def webcodecs_teardown_line(entity_id: str, *, phase: str) -> str:
+    """Name the close branch that started the teardown of one session.
+
+    One bounded INFO line per session.  It exists because a session that never
+    reaches its own teardown leaves no marker at all otherwise.  A diagnostic
+    line must never be able to abort the teardown, so an unexpected phase
+    degrades to ``unknown`` instead of raising.
+    """
+    if phase not in _WEBSOCKET_SESSION_REASONS | _TEARDOWN_ONLY_PHASES:
+        phase = "unknown"
+    return (
+        f"COMELIT_MINIAPP_WEBCODECS_CLOSE_TEARDOWN entity={entity_id} "
+        f"phase={phase}"
     )
 
 
