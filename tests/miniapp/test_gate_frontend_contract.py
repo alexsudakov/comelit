@@ -140,26 +140,23 @@ process.stdout.write(JSON.stringify(out));
 """
 
 
-def _channel_gate(attributes_cases):
+def _channel_gate(attributes_cases, tmp_path):
     node = shutil.which("node")
     assert node is not None, "node is required by this repository's CI gate"
-    harness = ROOT / "tests" / "miniapp" / "_channel_gate_harness.cjs"
+    harness = tmp_path / "channel_gate_harness.cjs"
     harness.write_text(_NODE_HARNESS, encoding="utf-8")
-    try:
-        completed = subprocess.run(
-            [node, str(harness), str(CARD), json.dumps(attributes_cases)],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-    finally:
-        harness.unlink()
+    completed = subprocess.run(
+        [node, str(harness), str(CARD), json.dumps(attributes_cases)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
     assert completed.returncode == 0, completed.stderr[-2000:]
     return json.loads(completed.stdout)
 
 
-def test_channel_gate_is_fail_closed_on_unconfirmed_state():
+def test_channel_gate_is_fail_closed_on_unconfirmed_state(tmp_path):
     """The production predicate, executed: only a confirmed release opens.
 
     `media_phase` is one of inactive/starting/active/stopping/error
@@ -177,8 +174,11 @@ def test_channel_gate_is_fail_closed_on_unconfirmed_state():
         {"media_phase": "stopping", "media_active": False},
         {"media_phase": "active", "media_active": True},
         {"media_phase": "error", "media_active": False},
+        {"media_phase": ["inactive"], "media_active": False},
+        {"media_phase": 1, "media_active": False},
+        {"media_phase": {"phase": "inactive"}, "media_active": False},
     ]
-    result = _channel_gate(cases)
+    result = _channel_gate(cases, tmp_path)
 
     # Confirmed release: the only openable state.
     assert result[0] == {
@@ -207,6 +207,10 @@ def test_channel_gate_is_fail_closed_on_unconfirmed_state():
     assert result[7]["state"] == "error"
     assert result[7]["closedBusy"] is True
     assert result[7]["closedLabel"] == "Камера недоступна"
+    # Malformed attribute types are unknown state, never "inactive".
+    for index in (8, 9, 10):
+        assert result[index]["state"] == "unknown", (index, result[index])
+        assert result[index]["closedBusy"] is True, (index, result[index])
 
 
 def test_reopen_click_is_refused_while_the_channel_is_still_released():

@@ -917,14 +917,17 @@ class ComelitCard extends HTMLElement {
   _cameraPresentation(model) {
     const state = model.entranceCamera.state;
     const attributes = state?.attributes || {};
-    const phase = String(attributes.media_phase || "");
+    const rawPhase = attributes.media_phase;
+    // No coercion: only a real string is a phase.  Anything else (absent, an
+    // array, a number, an object) is unknown state, never "inactive".
+    const phase = typeof rawPhase === "string" ? rawPhase : "";
     // The media manager is the only authority on whether the upstream channel
     // is still owned.  Fail closed: a free channel is *explicitly* confirmed by
     // its own "inactive" phase together with `media_active === false`.  A
-    // viewer EOS is not a release, "error" is not a release, and an absent
-    // attribute is unknown -- never free.
+    // viewer EOS is not a release, "error" is not a release, and an absent or
+    // malformed attribute is unknown -- never free.
     const confirmedIdle =
-      phase === "inactive" && attributes.media_active === false;
+      rawPhase === "inactive" && attributes.media_active === false;
     let channelState = "unknown";
     if (phase === "error") {
       channelState = "error";
