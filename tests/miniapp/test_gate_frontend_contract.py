@@ -81,8 +81,12 @@ def test_reopen_waits_for_the_media_manager_to_confirm_the_release():
     # The media manager is the authority, not the viewer EOS.  Both the lease
     # flag and the transition phase are consulted.
     assert "attributes.media_active === true" in presentation
-    assert '"starting", "active", "stopping"' in presentation
-    assert "String(attributes.media_phase || \"\")" in presentation
+    # Fail closed: only the manager's own "inactive" state is a confirmed
+    # release.  An absent phase and a failed teardown ("error") are not.
+    assert '!["", "inactive"].includes(String(attributes.media_phase || ""))' in presentation
+    assert 'channelError: String(attributes.media_phase || "") === "error"' in presentation
+    assert "const channelError = camera.channelError && !camera.available;" in _card()
+    assert '"Камера недоступна"' in _card()
 
     busy = card.split("_intercomChannelBusy(model) {", 1)[1].split("\n  }", 1)[0]
     assert 'this._intercomViewerMode !== "ended" && this._intercomViewerOpen' in busy

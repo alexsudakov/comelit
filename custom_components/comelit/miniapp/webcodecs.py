@@ -32,8 +32,14 @@ WEBCODECS_SOURCE_CLOSE_JOIN_TIMEOUT = 6.0
 # is never released.
 WEBCODECS_SEND_TIMEOUT_SECONDS = 5.0
 # Bounded joins for the teardown path.  The lease release must never sit
-# behind a producer or a receive watcher that ignores cancellation.
+# behind a producer or a receive watcher that ignores cancellation, and the
+# handler must not wait on the manager forever: the documented stop budget is
+# 8 s for the native process + 3 s after terminate + 2 s task join, plus the
+# listener resume.  A release that outlives this keeps running detached while
+# the manager stays in its own non-idle phase, so a second owner is still
+# refused.
 WEBCODECS_CLOSE_JOIN_SECONDS = 2.0
+WEBCODECS_RELEASE_JOIN_SECONDS = 20.0
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -856,6 +862,8 @@ _TEARDOWN_ONLY_PHASES = frozenset(
         "send_stalled",
         "source_join_timeout",
         "watcher_join_timeout",
+        "release_join_timeout",
+        "handler_cancelled",
     }
 )
 

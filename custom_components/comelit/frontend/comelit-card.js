@@ -870,10 +870,13 @@ class ComelitCard extends HTMLElement {
     if (cameraToggle) {
       const camera = this._cameraPresentation(model);
       const channelBusy = this._intercomChannelBusy(model);
+      const channelError = camera.channelError && !camera.available;
       cameraToggle.disabled = !camera.available || channelBusy;
-      cameraToggle.textContent = channelBusy
-        ? "Освобождение канала…"
-        : this._intercomViewerMode === "ended"
+      cameraToggle.textContent = channelError
+        ? "Камера недоступна"
+        : channelBusy
+          ? "Освобождение канала…"
+          : this._intercomViewerMode === "ended"
           ? "Открыть камеру заново"
           : this._intercomViewerOpen
             ? "Скрыть камеру"
@@ -920,12 +923,14 @@ class ComelitCard extends HTMLElement {
       entityId: model.entranceCamera.entry?.entity_id || null,
       available: Boolean(state) && state.state !== "unavailable",
       // The media manager is the only authority on whether the upstream
-      // channel is still owned.  A viewer EOS is not a release.
+      // channel is still owned.  A viewer EOS is not a release, and neither a
+      // failed teardown ("error") nor an absent phase is a confirmed release:
+      // only the manager's own "inactive" state re-arms the open button.
+      channelPhase: String(attributes.media_phase || ""),
       channelBusy:
         attributes.media_active === true ||
-        ["starting", "active", "stopping"].includes(
-          String(attributes.media_phase || ""),
-        ),
+        !["", "inactive"].includes(String(attributes.media_phase || "")),
+      channelError: String(attributes.media_phase || "") === "error",
     };
   }
 
@@ -1042,9 +1047,11 @@ class ComelitCard extends HTMLElement {
               data-intercom-camera-toggle
               ${camera.available && !intercomChannelBusy ? "" : "disabled"}
             >${
-              intercomChannelBusy
-                ? "Освобождение канала…"
-                : this._intercomViewerMode === "ended"
+              camera.channelError && !camera.available
+                ? "Камера недоступна"
+                : intercomChannelBusy
+                  ? "Освобождение канала…"
+                  : this._intercomViewerMode === "ended"
                   ? "Открыть камеру заново"
                   : this._intercomViewerOpen
                     ? "Скрыть камеру"

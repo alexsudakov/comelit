@@ -892,16 +892,22 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                 reason = code
             if not websocket.closed:
                 await send_json({"type": "error", "code": code})
-                with contextlib.suppress(*_WEBSOCKET_SEND_ERRORS):
-                    await websocket.close()
+                with contextlib.suppress(*_WEBSOCKET_SEND_ERRORS, TimeoutError):
+                    async with asyncio.timeout(
+                        webcodecs_mod.WEBCODECS_SEND_TIMEOUT_SECONDS
+                    ):
+                        await websocket.close()
 
         async def send_eos(eos_reason: str) -> None:
             nonlocal reason
             reason = eos_reason
             if not websocket.closed:
                 await send_json({"type": "eos", "reason": eos_reason})
-                with contextlib.suppress(*_WEBSOCKET_SEND_ERRORS):
-                    await websocket.close()
+                with contextlib.suppress(*_WEBSOCKET_SEND_ERRORS, TimeoutError):
+                    async with asyncio.timeout(
+                        webcodecs_mod.WEBCODECS_SEND_TIMEOUT_SECONDS
+                    ):
+                        await websocket.close()
 
         try:
             try:
@@ -1255,6 +1261,44 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                     phase="send_stalled" if send_stalled else reason,
                 )
             )
+            if entrance_lease is not None:
+                # Release first and never await it directly: `asyncio.wait`
+                # bounds the handler's wait without cancelling the release,
+                # so a closed viewer or a cancelled request can neither skip
+                # the lease hand-back nor hang the handler on it.  An
+                # unfinished release keeps the manager in its own non-idle
+                # phase, which is what still refuses a second owner.
+                release_task = asyncio.ensure_future(entrance_lease.release())
+                try:
+                    done, _pending = await asyncio.wait(
+                        {release_task},
+                        timeout=webcodecs_mod.WEBCODECS_RELEASE_JOIN_SECONDS,
+                    )
+                except asyncio.CancelledError:
+                    release_task.add_done_callback(_consume_task_result)
+                    _LOGGER.info(
+                        webcodecs_mod.webcodecs_teardown_line(
+                            entity_id, phase="handler_cancelled"
+                        )
+                    )
+                    raise
+                if release_task in done:
+                    try:
+                        release_task.result()
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        errors += 1
+                        _LOGGER.exception(
+                            "Comelit Mini App WebCodecs entrance media release failed"
+                        )
+                else:
+                    _LOGGER.info(
+                        webcodecs_mod.webcodecs_teardown_line(
+                            entity_id, phase="release_join_timeout"
+                        )
+                    )
+                    release_task.add_done_callback(_consume_task_result)
             if client_watch_task is not None:
                 client_watch_task.cancel()
                 done, _pending = await asyncio.wait(
@@ -1271,18 +1315,7 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                     )
                     client_watch_task.add_done_callback(_consume_task_result)
             if source_task is not None:
-                # Stop the producer first, but never let its join sit in front
-                # of the release: a PyAV owner close can outlive its budget and
-                # the media lease must still be handed back.
                 source_task.cancel()
-            if entrance_lease is not None:
-                try:
-                    await entrance_lease.release()
-                except Exception:
-                    errors += 1
-                    _LOGGER.exception(
-                        "Comelit Mini App WebCodecs entrance media release failed"
-                    )
             if source_task is not None:
                 done, _pending = await asyncio.wait(
                     {source_task},

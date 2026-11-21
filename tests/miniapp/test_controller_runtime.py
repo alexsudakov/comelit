@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
 import json
 import logging
@@ -5140,10 +5141,12 @@ class _EndlessUnitSource:
 class _StalledViewerSocket:
     """A viewer that left: the socket stops draining but never reports closed.
 
-    This is the state that produced the 2026-11-21 stall: the receive watcher
+    This is one of the two stalls consistent with the frozen 2026-11-21
+    evidence (the other is an unbounded producer join): the receive watcher
     sees the terminal frame and logs ``client_close``, while aiohttp still
     reports the response as open, so the next ``send_bytes`` waits on a peer
-    that will never read again.
+    that will never read again.  The evidence does not discriminate between
+    the two, so neither is claimed as the observed cause.
     """
 
     instances: list["_StalledViewerSocket"] = []
@@ -5521,3 +5524,152 @@ def test_webcodecs_client_close_drives_real_manager_teardown_and_listener_resume
     assert transport.active is False
     assert manager.phase == "inactive"
     assert manager.active is False
+
+
+def test_webcodecs_handler_cancellation_still_releases_the_lease(
+    monkeypatch, caplog
+):
+    """Cancelling the request must not skip the lease hand-back."""
+
+    controller, hass = _controller(surveillance_label="Outside")
+    manager, transport = _install_webcodecs_entrance_runtime(hass)
+    token, _session = controller.sessions.create(424242, 12345678)
+    started = asyncio.Event()
+    finished = asyncio.Event()
+    original_release = manager.async_release
+
+    async def slow_release(*, reason):
+        started.set()
+        await asyncio.sleep(0.2)
+        result = await original_release(reason=reason)
+        finished.set()
+        return result
+
+    monkeypatch.setattr(manager, "async_release", slow_release)
+
+    async def open_sdp(_source):
+        return _AsyncUnitSource(
+            [unit async for unit in _single_webcodecs_unit(_source)]
+        )
+
+    monkeypatch.setattr(
+        views_mod.webcodecs_mod,
+        "open_h264_sdp_access_unit_source",
+        open_sdp,
+    )
+    view = views_mod.MiniAppCameraWebCodecsView(controller)
+
+    async def run():
+        task = asyncio.ensure_future(
+            view.get(_mse_request(controller, token), "camera.comelit_entrance")
+        )
+        await asyncio.wait_for(started.wait(), timeout=2.0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        await asyncio.wait_for(finished.wait(), timeout=2.0)
+
+    with caplog.at_level(
+        logging.INFO, logger="custom_components.comelit.miniapp.views"
+    ):
+        with _MSEWebSocketPatch(
+            monkeypatch,
+            _FakeWSMessage(
+                views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'
+            ),
+            messages=(_FakeWSMessage(views_mod.WSMsgType.CLOSE),),
+        ):
+            asyncio.run(run())
+
+    assert manager.release_calls == ["miniapp_webcodecs"]
+    assert manager.phase == "inactive"
+    assert transport.active is False
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "COMELIT_MINIAPP_WEBCODECS_CLOSE_TEARDOWN" in message
+        and "phase=handler_cancelled" in message
+        for message in messages
+    )
+
+
+def test_webcodecs_release_that_outlives_the_budget_keeps_the_channel_busy(
+    monkeypatch, caplog
+):
+    """An unconfirmed teardown must neither hang the handler nor free the channel."""
+
+    controller, hass = _controller(surveillance_label="Outside")
+    manager, transport = _install_webcodecs_entrance_runtime(hass)
+    token, _session = controller.sessions.create(424242, 12345678)
+    original_release = manager.async_release
+    release_calls: list[str] = []
+
+    async def stuck_release(*, reason):
+        release_calls.append(reason)
+        # Mirrors the production order: the manager leaves ACTIVE before the
+        # transport stop and never reaches INACTIVE while it is unconfirmed.
+        manager.phase = "stopping"
+        manager.active = False
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(manager, "async_release", stuck_release)
+    monkeypatch.setattr(
+        views_mod.webcodecs_mod,
+        "WEBCODECS_RELEASE_JOIN_SECONDS",
+        0.05,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        controller_mod, "_WEBCODECS_HLS_FALLBACK_CLEANUP_SECONDS", 0.05
+    )
+
+    async def open_sdp(_source):
+        return _AsyncUnitSource(
+            [unit async for unit in _single_webcodecs_unit(_source)]
+        )
+
+    monkeypatch.setattr(
+        views_mod.webcodecs_mod,
+        "open_h264_sdp_access_unit_source",
+        open_sdp,
+    )
+    view = views_mod.MiniAppCameraWebCodecsView(controller)
+
+    with caplog.at_level(
+        logging.INFO, logger="custom_components.comelit.miniapp.views"
+    ):
+        with _MSEWebSocketPatch(
+            monkeypatch,
+            _FakeWSMessage(
+                views_mod.WSMsgType.TEXT, '{"type":"webcodecs","value":"h264"}'
+            ),
+            messages=(_FakeWSMessage(views_mod.WSMsgType.CLOSE),),
+        ):
+            asyncio.run(
+                asyncio.wait_for(
+                    view.get(
+                        _mse_request(controller, token),
+                        "camera.comelit_entrance",
+                    ),
+                    timeout=2.0,
+                )
+            )
+
+    assert release_calls == ["miniapp_webcodecs"]
+    assert manager.phase == "stopping"
+    assert transport.active is True
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "COMELIT_MINIAPP_WEBCODECS_CLOSE_TEARDOWN" in message
+        and "phase=release_join_timeout" in message
+        for message in messages
+    )
+    # Fail closed: while the teardown is unconfirmed the channel refuses a
+    # second owner instead of handing it out.
+    with pytest.raises(controller_mod.MiniAppOperationError) as exc:
+        asyncio.run(
+            controller.acquire_webcodecs_entrance(
+                controller.get_webcodecs_camera_target("camera.comelit_entrance")
+            )
+        )
+    assert str(exc.value) == "intercom_media_busy"
+    assert manager.acquire_calls == [("entrance", "miniapp_webcodecs")]
