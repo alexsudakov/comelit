@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
+import gc
 from pathlib import Path
 import sys
 import threading
@@ -1002,27 +1003,56 @@ def test_a_stale_marker_does_not_fail_a_later_clean_cycle() -> None:
 
 
 def test_a_reader_that_failed_between_stops_is_retrieved() -> None:
-    """A reader finishing with an error after a stop is not dropped unseen."""
+    """A reader finishing with an error after a stop is not dropped unseen.
+
+    The first stop cannot join the reader and reports an unconfirmed teardown.
+    The reader then fails on its own, and the second stop must retrieve that
+    result: otherwise asyncio reports "Task exception was never retrieved" when
+    the task is collected.
+    """
 
     async def run() -> None:
         media = _load_component_module(str(ROOT), "media_transport")
-        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 0.2
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 0.05
         transport = _transport(media, Hass())
+        loop = asyncio.get_running_loop()
+        unretrieved: list[str] = []
+        loop.set_exception_handler(
+            lambda _loop, ctx: unretrieved.append(str(ctx.get("message", "")))
+        )
 
-        async def failing_reader() -> None:
+        async def slow_failing_reader() -> None:
+            # fails on its own, after the first stop already gave up on it
+            await asyncio.sleep(0.2)
             raise RuntimeError("reader broke")
 
-        reader = asyncio.create_task(failing_reader())
+        reader = asyncio.create_task(slow_failing_reader())
         transport._reader_task = reader
         await asyncio.sleep(0)
-        try:
-            await reader
-        except RuntimeError:
-            pass
 
         with _runtime_files(media):
+            try:
+                await transport.async_stop()
+            except media.ComelitMediaTransportError as exc:
+                assert str(exc) == "media_teardown_not_confirmed", str(exc)
+            else:
+                raise AssertionError("a live reader was reported as stopped")
+            assert transport._reader_task is reader
+
+            # let the reader fail on its own, without awaiting it
+            for _ in range(200):
+                if reader.done():
+                    break
+                await asyncio.sleep(0.01)
+            # deliberately do not call reader.exception() here: the stop must
+            assert reader.done()
+
             await transport.async_stop()
 
         assert transport._reader_task is None
+        del reader
+        gc.collect()
+        await asyncio.sleep(0)
+        assert not [m for m in unretrieved if "never retrieved" in m], unretrieved
 
     asyncio.run(run())
