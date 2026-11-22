@@ -1006,27 +1006,28 @@ def test_a_reader_that_failed_between_stops_is_retrieved() -> None:
     """A reader finishing with an error after a stop is not dropped unseen.
 
     The first stop cannot join the reader and reports an unconfirmed teardown.
-    The reader then fails on its own, and the second stop must retrieve that
+    The reader is then allowed to fail, and the second stop must retrieve that
     result: otherwise asyncio reports "Task exception was never retrieved" when
-    the task is collected.
+    the task is collected.  The failure is gated on an event, so no wall-clock
+    race decides which path the stop takes.
     """
 
     async def run() -> None:
         media = _load_component_module(str(ROOT), "media_transport")
-        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 0.05
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 0.2
         transport = _transport(media, Hass())
         loop = asyncio.get_running_loop()
         unretrieved: list[str] = []
         loop.set_exception_handler(
             lambda _loop, ctx: unretrieved.append(str(ctx.get("message", "")))
         )
+        fail_now = asyncio.Event()
 
-        async def slow_failing_reader() -> None:
-            # fails on its own, after the first stop already gave up on it
-            await asyncio.sleep(0.2)
+        async def gated_failing_reader() -> None:
+            await fail_now.wait()
             raise RuntimeError("reader broke")
 
-        reader = asyncio.create_task(slow_failing_reader())
+        reader = asyncio.create_task(gated_failing_reader())
         transport._reader_task = reader
         await asyncio.sleep(0)
 
@@ -1039,12 +1040,9 @@ def test_a_reader_that_failed_between_stops_is_retrieved() -> None:
                 raise AssertionError("a live reader was reported as stopped")
             assert transport._reader_task is reader
 
-            # let the reader fail on its own, without awaiting it
-            for _ in range(200):
-                if reader.done():
-                    break
-                await asyncio.sleep(0.01)
-            # deliberately do not call reader.exception() here: the stop must
+            # the first stop has returned; now let the reader fail on its own
+            fail_now.set()
+            await asyncio.wait({reader}, timeout=2.0)
             assert reader.done()
 
             await transport.async_stop()
