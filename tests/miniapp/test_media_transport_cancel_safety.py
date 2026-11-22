@@ -841,3 +841,78 @@ def test_cancellation_during_the_cleanup_join_marks_the_teardown() -> None:
             await transport._cleanup_task
 
     asyncio.run(run())
+
+
+def test_a_successful_cleanup_retry_does_not_hide_the_cycle_failure() -> None:
+    """The stop observed a failed cleanup; its own retry must not clear it."""
+
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 0.2
+        calls = {"secret": 0}
+
+        def secret() -> None:
+            calls["secret"] += 1
+            if calls["secret"] == 1:
+                raise PermissionError("secret first attempt")
+
+        transport = _transport(media, Hass())
+
+        async def silent_cycle() -> None:
+            return None
+
+        transport._async_run_cycle = silent_cycle
+        with _runtime_files(media, secret, lambda: None):
+            cycle_task = asyncio.create_task(transport._async_run_once())
+            transport._task = cycle_task
+
+            try:
+                await transport.async_stop()
+            except media.ComelitMediaTransportError as exc:
+                assert str(exc) == "media_teardown_not_confirmed", str(exc)
+            else:
+                raise AssertionError("a retried cleanup hid the cycle failure")
+
+            assert calls["secret"] == 2, calls
+            try:
+                await cycle_task
+            except Exception:
+                pass
+
+    asyncio.run(run())
+
+
+def test_an_already_finished_cycle_result_is_retrieved_and_kept() -> None:
+    """A cycle that failed before the stop starts still fails the stop closed."""
+
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 0.2
+
+        def secret() -> None:
+            raise PermissionError("secret not writable")
+
+        transport = _transport(media, Hass())
+
+        async def silent_cycle() -> None:
+            return None
+
+        transport._async_run_cycle = silent_cycle
+        with _runtime_files(media, secret, lambda: None):
+            cycle_task = asyncio.create_task(transport._async_run_once())
+            transport._task = cycle_task
+            try:
+                await cycle_task
+            except Exception:
+                pass
+            assert cycle_task.done()
+            assert transport._last_error == "media_teardown_not_confirmed"
+
+            try:
+                await transport.async_stop()
+            except media.ComelitMediaTransportError as exc:
+                assert str(exc) == "media_teardown_not_confirmed", str(exc)
+            else:
+                raise AssertionError("an unconfirmed teardown was reported as released")
+
+    asyncio.run(run())

@@ -1135,6 +1135,7 @@ class ComelitEntranceMediaTransport:
                 hook.note_native_exit(process.returncode)
 
         task = self._task
+        cycle_error: BaseException | None = None
         if task is not None and not task.done():
             # Never await the child task directly: its own result (including a
             # cleanup failure raised from its finally) would escape from this
@@ -1150,10 +1151,11 @@ class ComelitEntranceMediaTransport:
                 await asyncio.wait(
                     {task}, timeout=_EXECUTOR_JOIN_TIMEOUT_SECONDS
                 )
-            if task.done() and not task.cancelled():
-                # Mark the child's result as retrieved; the stop reports the
-                # failure through its own confirmation check below.
-                task.exception()
+        if task is not None and task.done() and not task.cancelled():
+            # Retrieve the result even when the task had already finished, and
+            # keep a teardown failure visible: a successful retry must not hide
+            # a cleanup failure that this stop observed.
+            cycle_error = task.exception()
 
         reader = self._reader_task
         if reader is not None and reader.done():
@@ -1179,7 +1181,19 @@ class ComelitEntranceMediaTransport:
         self._door_diagnostics = {}
         self._cancel_status_notify()
         await self._async_stop_video_recovery_shim()
+        # Only a failure observed on this cycle's task is sticky; a stale
+        # marker from an earlier stop must not fail a clean teardown.
+        teardown_failed = (
+            task is not None
+            and task.done()
+            and not task.cancelled()
+            and self._last_error == _MEDIA_TEARDOWN_UNCONFIRMED_REASON
+        )
         cleanup_error = await self._async_cleanup_teardown()
+        if cleanup_error is None and teardown_failed:
+            cleanup_error = cycle_error or ComelitMediaTransportError(
+                _MEDIA_TEARDOWN_UNCONFIRMED_REASON
+            )
         self._latency_timeline = None
         if (
             (process is not None and process.returncode is None)
