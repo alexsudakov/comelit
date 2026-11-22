@@ -68,6 +68,8 @@ _MEDIA_REMOTE_FILE = _MEDIA_RUN_DIR / "remote.sdp"
 _MEDIA_STOP_FILE = _MEDIA_RUN_DIR / "stop"
 _MEDIA_LOCAL_SDP_FILE = _MEDIA_RUN_DIR / "local-rtp.sdp"
 _MEDIA_STARTUP_WINDOW_SECONDS = 45.0
+_EXECUTOR_JOIN_TIMEOUT_SECONDS = 2.0
+
 _MEDIA_LOCAL_SDP_READY_REASON = "local_sdp_ready_timeout"
 
 MEDIA_NATIVE_BINARY_SHA256 = (
@@ -488,6 +490,12 @@ class ComelitEntranceMediaTransport:
         self._oauth = oauth
         self._task: asyncio.Task[None] | None = None
         self._reader_task: asyncio.Task[None] | None = None
+        # Executor jobs cannot be cancelled once they started: cancelling the
+        # Future that waits for one only detaches the wait. Both the stop
+        # marker and the runtime-file cleanup are kept as tasks so a later
+        # stop observes the same work instead of starting a second one.
+        self._stop_signal_task: asyncio.Task[None] | None = None
+        self._cleanup_task: asyncio.Task[None] | None = None
         self._process: asyncio.subprocess.Process | None = None
         self._offer_ready = asyncio.Event()
         self._media_active = asyncio.Event()
@@ -1097,7 +1105,7 @@ class ComelitEntranceMediaTransport:
         process = self._process
         if process is not None and process.returncode is None:
             try:
-                await self._hass.async_add_executor_job(_touch_stop)
+                await self._async_run_stop_signal()
                 await asyncio.wait_for(process.wait(), timeout=8)
             except TimeoutError:
                 process.terminate()
@@ -1122,6 +1130,10 @@ class ComelitEntranceMediaTransport:
                 except asyncio.CancelledError:
                     pass
 
+        reader = self._reader_task
+        if reader is not None and reader.done():
+            self._reader_task = None
+
         self._task = None
         self._process = None
         self._media_active.clear()
@@ -1136,8 +1148,7 @@ class ComelitEntranceMediaTransport:
         self._door_diagnostics = {}
         self._cancel_status_notify()
         await self._async_stop_video_recovery_shim()
-        await self._hass.async_add_executor_job(_remove_helper_secret)
-        await self._hass.async_add_executor_job(_remove_local_sdp)
+        await self._async_join_cleanup()
         self._latency_timeline = None
         if (
             (process is not None and process.returncode is None)
@@ -1146,6 +1157,14 @@ class ComelitEntranceMediaTransport:
             or self._process is not None
             or self._reader_task is not None
             or self._video_recovery_shim is not None
+            or (
+                getattr(self, "_stop_signal_task", None) is not None
+                and not self._stop_signal_task.done()
+            )
+            or (
+                getattr(self, "_cleanup_task", None) is not None
+                and not self._cleanup_task.done()
+            )
         ):
             raise ComelitMediaTransportError("media_teardown_not_confirmed")
 
@@ -1173,6 +1192,67 @@ class ComelitEntranceMediaTransport:
         except BaseException:
             await self._async_stop_video_recovery_shim()
             raise
+
+    async def _async_run_stop_signal(self) -> None:
+        """Signal the native helper to stop, at most once per teardown."""
+
+        task = getattr(self, "_stop_signal_task", None)
+        if task is None or task.done():
+            task = asyncio.create_task(
+                self._hass.async_add_executor_job(_touch_stop)
+            )
+            self._stop_signal_task = task
+        # The executor job keeps running even if this coroutine is cancelled,
+        # so the shield keeps it referenced and the completion joinable.
+        await self._async_join_executor_task(task)
+
+    async def _async_join_executor_task(self, task: asyncio.Task[None]) -> None:
+        """Wait for an executor job without detaching from it.
+
+        Cancelling the wait leaves the thread job running, so the caller keeps
+        its reference and reports an unconfirmed teardown instead of a release.
+        """
+
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(task), timeout=_EXECUTOR_JOIN_TIMEOUT_SECONDS
+            )
+        except TimeoutError as exc:
+            raise ComelitMediaTransportError(
+                "media_teardown_not_confirmed"
+            ) from exc
+
+    async def _async_stop_reader(self) -> None:
+        """Cancel the helper output reader and forget it only once it is done.
+
+        A cancelled ``await`` does not prove that the reader returned: it can
+        delay or suppress the cancellation, so the reference stays until the
+        task is finished and a later stop still sees an unfinished teardown.
+        """
+
+        reader = self._reader_task
+        if reader is None:
+            return
+        if not reader.done():
+            reader.cancel()
+        try:
+            await asyncio.shield(reader)
+        finally:
+            if reader.done():
+                self._reader_task = None
+
+    async def _async_remove_runtime_files(self) -> None:
+        await self._hass.async_add_executor_job(_remove_helper_secret)
+        await self._hass.async_add_executor_job(_remove_local_sdp)
+
+    async def _async_join_cleanup(self) -> None:
+        """Remove the helper secret and the local SDP exactly once."""
+
+        task = getattr(self, "_cleanup_task", None)
+        if task is None or task.done():
+            task = asyncio.create_task(self._async_remove_runtime_files())
+            self._cleanup_task = task
+        await self._async_join_executor_task(task)
 
     async def _async_stop_video_recovery_shim(self) -> None:
         shim = self._video_recovery_shim
@@ -1220,8 +1300,7 @@ class ComelitEntranceMediaTransport:
             self._local_sdp_ready_event.clear()
             self._process = None
             await self._async_stop_video_recovery_shim()
-            await self._hass.async_add_executor_job(_remove_helper_secret)
-            await self._hass.async_add_executor_job(_remove_local_sdp)
+            await self._async_join_cleanup()
 
     async def _async_run_cycle(self) -> None:
         await self._hass.async_add_executor_job(_native_gate)
@@ -1366,7 +1445,7 @@ class ComelitEntranceMediaTransport:
                 raise ComelitMediaTransportError(f"media_native_exit:{rc}")
         finally:
             if process.returncode is None:
-                await self._hass.async_add_executor_job(_touch_stop)
+                await self._async_run_stop_signal()
                 try:
                     await asyncio.wait_for(process.wait(), timeout=8)
                 except TimeoutError:
@@ -1376,14 +1455,7 @@ class ComelitEntranceMediaTransport:
                     except TimeoutError:
                         process.kill()
                         await process.wait()
-            reader = self._reader_task
-            if reader is not None and not reader.done():
-                reader.cancel()
-                try:
-                    await reader
-                except asyncio.CancelledError:
-                    pass
-            self._reader_task = None
+            await self._async_stop_reader()
 
     async def _async_read_output(self, process: asyncio.subprocess.Process) -> None:
         if process.stdout is None:
