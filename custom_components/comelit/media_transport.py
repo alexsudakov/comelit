@@ -1162,7 +1162,9 @@ class ComelitEntranceMediaTransport:
 
         reader = self._reader_task
         if reader is not None and reader.done():
-            self._reader_task = None
+            # Same path as the cancelled case: a finished reader's result is
+            # retrieved before the reference is dropped.
+            await self._async_stop_reader()
 
         # Forget a resource only when its release is confirmed: a task that
         # still runs (or a child whose exit code is unknown) must stay

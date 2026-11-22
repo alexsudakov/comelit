@@ -999,3 +999,30 @@ def test_a_stale_marker_does_not_fail_a_later_clean_cycle() -> None:
             await transport.async_stop()
 
     asyncio.run(run())
+
+
+def test_a_reader_that_failed_between_stops_is_retrieved() -> None:
+    """A reader finishing with an error after a stop is not dropped unseen."""
+
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 0.2
+        transport = _transport(media, Hass())
+
+        async def failing_reader() -> None:
+            raise RuntimeError("reader broke")
+
+        reader = asyncio.create_task(failing_reader())
+        transport._reader_task = reader
+        await asyncio.sleep(0)
+        try:
+            await reader
+        except RuntimeError:
+            pass
+
+        with _runtime_files(media):
+            await transport.async_stop()
+
+        assert transport._reader_task is None
+
+    asyncio.run(run())
