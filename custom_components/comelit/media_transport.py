@@ -380,6 +380,17 @@ def _touch_stop() -> None:
     os.chmod(_MEDIA_STOP_FILE, 0o600)
 
 
+def _consume_marker_result(task: asyncio.Task[None]) -> None:
+    """Retrieve a finished marker job's result without changing its outcome."""
+
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except asyncio.CancelledError:
+        pass
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -509,6 +520,7 @@ class ComelitEntranceMediaTransport:
         self._video_forwarding = asyncio.Event()
         self._audio_forwarding = asyncio.Event()
         self._stopping = False
+        self._stop_calls_in_flight = 0
         self._last_error: str | None = None
         # Tri-state proof of the stop marker for the current owner:
         # ``None`` = no marker needed yet, ``True`` = the marker job completed,
@@ -1065,6 +1077,10 @@ class ComelitEntranceMediaTransport:
             # channel may still be held upstream, so no new owner is admitted
             # even when the child process and its tasks are already gone.
             raise ComelitMediaTransportError(_MEDIA_TEARDOWN_UNCONFIRMED_REASON)
+        if getattr(self, "_stop_calls_in_flight", 0):
+            # A stop is still running: its verdict belongs to this owner, so a
+            # new owner must not start underneath it.
+            raise ComelitMediaTransportError(_MEDIA_TEARDOWN_UNCONFIRMED_REASON)
 
         self._stopping = False
         self._last_error = None
@@ -1163,6 +1179,20 @@ class ComelitEntranceMediaTransport:
                     pass
 
     async def async_stop(self) -> None:
+        """Run one stop and keep owner transitions out while it is in flight.
+
+        A stop that is still joining its marker can outlive the owner it
+        serves; refusing a start for the duration keeps a stale stop from
+        writing its verdict into the next owner.
+        """
+
+        self._stop_calls_in_flight = getattr(self, "_stop_calls_in_flight", 0) + 1
+        try:
+            await self._async_stop_owner()
+        finally:
+            self._stop_calls_in_flight -= 1
+
+    async def _async_stop_owner(self) -> None:
         self._stopping = True
         self._shadow_hook.note_state("media_transport_stop")
         process = self._process
@@ -1327,6 +1357,9 @@ class ComelitEntranceMediaTransport:
             task = asyncio.create_task(
                 self._hass.async_add_executor_job(_touch_stop)
             )
+            # Retrieve a late failure even when no later join observes it, so
+            # the loop does not report an unobserved Task exception.
+            task.add_done_callback(_consume_marker_result)
             self._stop_signal_task = task
         # The executor job keeps running even if this coroutine is cancelled,
         # so the shield keeps it referenced and the completion joinable.

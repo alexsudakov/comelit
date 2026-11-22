@@ -1439,3 +1439,76 @@ def test_a_late_marker_failure_does_not_downgrade_a_proven_release() -> None:
             assert transport._process is None
 
     asyncio.run(run())
+
+
+def test_async_start_refuses_while_a_stop_is_still_running() -> None:
+    """A stop in flight still owns the verdict; no owner may start under it.
+
+    A stop suspended in its marker join can resume after a new owner began and
+    write the previous owner's verdict into the new one, so the start must wait.
+    """
+
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 2.0
+        started = threading.Event()
+        release = threading.Event()
+        admitted: list[str] = []
+
+        transport = _transport(media, Hass())
+        process = _LiveProcess(exit_after=0.05)
+
+        async def join_slowly() -> None:
+            started.set()
+            # bounded: the broken path runs a cleanup stop through this join
+            for _ in range(400):
+                if release.is_set():
+                    return
+                await asyncio.sleep(0.005)
+
+        transport._async_run_stop_signal = join_slowly
+
+        class Entry:
+            def async_create_background_task(self, _hass, coro, name):
+                admitted.append(name)
+                return asyncio.create_task(coro)
+
+        transport._entry = Entry()
+        transport._native_marker_tail = deque(maxlen=8)
+        transport._native_p116_marker_tail = deque(maxlen=8)
+        transport._native_protocol_markers = {}
+        transport._native_protocol_markers_seen_total = 0
+        transport._native_protocol_markers_evicted = 0
+        transport._native_refresh_diagnostics = {}
+        transport._native_ack_diagnostics = {}
+        transport._last_native_exit_code = None
+        transport._last_native_failure_markers = []
+        transport._progress = SimpleNamespace(reset=lambda: None)
+        transport._ring_observation = None
+        transport._ring_observed = False
+        transport._ring_observed_at = None
+        transport._session_started_at = None
+        transport._last_status_notify_monotonic = None
+
+        async def run_once() -> None:
+            raise media.ComelitMediaTransportError("media_native_exit:1")
+
+        transport._async_run_once = run_once
+        with _runtime_files(media):
+            transport._process = process
+            stop = asyncio.create_task(transport.async_stop())
+            await _wait_started(started)
+            try:
+                await transport.async_start("entrance")
+            except media.ComelitMediaTransportError as exc:
+                assert str(exc) == "media_teardown_not_confirmed", str(exc)
+            else:
+                raise AssertionError(
+                    "a new owner was admitted while a stop was still running"
+                )
+            assert not admitted, admitted
+            release.set()
+            await stop
+            assert transport._stop_marker_confirmed is True
+
+    asyncio.run(run())
