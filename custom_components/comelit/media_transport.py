@@ -1065,21 +1065,22 @@ class ComelitEntranceMediaTransport:
     async def async_start(self, panel: str) -> None:
         if panel != "entrance":
             raise ComelitMediaTransportError("unsupported_media_panel")
-        if self.active:
-            return
-        if self._task is not None and not self._task.done():
-            raise ComelitMediaTransportError("media_transport_start_in_progress")
-        cleanup = getattr(self, "_cleanup_task", None)
-        if cleanup is not None and not self._cleanup_confirmed(cleanup):
+        if getattr(self, "_stop_calls_in_flight", 0):
+            # A stop is still running: its verdict belongs to this owner, so a
+            # new owner must not start underneath it — not even as a silent
+            # no-op while the child is still active.
             raise ComelitMediaTransportError(_MEDIA_TEARDOWN_UNCONFIRMED_REASON)
         if self._stop_marker_unproven():
             # A stop for this owner ran but never proved the release: the
             # channel may still be held upstream, so no new owner is admitted
             # even when the child process and its tasks are already gone.
             raise ComelitMediaTransportError(_MEDIA_TEARDOWN_UNCONFIRMED_REASON)
-        if getattr(self, "_stop_calls_in_flight", 0):
-            # A stop is still running: its verdict belongs to this owner, so a
-            # new owner must not start underneath it.
+        if self.active:
+            return
+        if self._task is not None and not self._task.done():
+            raise ComelitMediaTransportError("media_transport_start_in_progress")
+        cleanup = getattr(self, "_cleanup_task", None)
+        if cleanup is not None and not self._cleanup_confirmed(cleanup):
             raise ComelitMediaTransportError(_MEDIA_TEARDOWN_UNCONFIRMED_REASON)
 
         self._stopping = False

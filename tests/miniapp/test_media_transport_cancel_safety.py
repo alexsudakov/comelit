@@ -1507,6 +1507,17 @@ def test_async_start_refuses_while_a_stop_is_still_running() -> None:
                     "a new owner was admitted while a stop was still running"
                 )
             assert not admitted, admitted
+            # the child still looks active: a no-op "start" must not succeed
+            transport._media_active.set()
+            try:
+                await transport.async_start("entrance")
+            except media.ComelitMediaTransportError as exc:
+                assert str(exc) == "media_teardown_not_confirmed", str(exc)
+            else:
+                raise AssertionError(
+                    "a start returned success while a stop was still running"
+                )
+            assert not admitted, admitted
             release.set()
             await stop
             assert transport._stop_marker_confirmed is True
