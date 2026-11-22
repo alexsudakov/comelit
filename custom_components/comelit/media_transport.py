@@ -1187,7 +1187,7 @@ class ComelitEntranceMediaTransport:
             task is not None
             and task.done()
             and not task.cancelled()
-            and self._last_error == _MEDIA_TEARDOWN_UNCONFIRMED_REASON
+            and getattr(self, "_last_error", None) == _MEDIA_TEARDOWN_UNCONFIRMED_REASON
         )
         cleanup_error = await self._async_cleanup_teardown()
         if cleanup_error is None and teardown_failed:
