@@ -390,3 +390,35 @@ def test_run_once_does_not_forget_a_process_that_is_still_running() -> None:
             assert transport._process.returncode is None
 
     asyncio.run(run())
+
+
+def test_caller_cancellation_during_the_child_join_propagates() -> None:
+    """Cancelling the stop must not be confused with cancelling its child task."""
+
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 0.05
+        entered = asyncio.Event()
+
+        async def stubborn_child() -> None:
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                entered.set()
+                await asyncio.sleep(30)
+
+        transport = _transport(media, Hass())
+        with _runtime_files(media):
+            transport._task = asyncio.create_task(stubborn_child())
+            await asyncio.sleep(0)
+            stop = asyncio.create_task(transport.async_stop())
+            await asyncio.wait_for(entered.wait(), 3)
+            stop.cancel()
+            try:
+                await stop
+            except asyncio.CancelledError:
+                pass
+            else:
+                raise AssertionError("caller cancellation was swallowed")
+
+    asyncio.run(run())

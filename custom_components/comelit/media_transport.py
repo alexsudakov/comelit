@@ -1131,16 +1131,16 @@ class ComelitEntranceMediaTransport:
         task = self._task
         if task is not None and not task.done():
             try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=2)
+                await asyncio.wait_for(
+                    asyncio.shield(task), timeout=_EXECUTOR_JOIN_TIMEOUT_SECONDS
+                )
             except TimeoutError:
                 task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    if not task.cancelled():
-                        # Our own cancellation, not the child's: the teardown
-                        # is unfinished and must not be reported as released.
-                        raise
+                # Never await the child task itself here: its own
+                # CancelledError is indistinguishable from the caller's
+                # cancellation. ``asyncio.wait`` completes without raising the
+                # child's result and still lets our cancellation propagate.
+                await asyncio.wait({task}, timeout=_EXECUTOR_JOIN_TIMEOUT_SECONDS)
 
         reader = self._reader_task
         if reader is not None and reader.done():
