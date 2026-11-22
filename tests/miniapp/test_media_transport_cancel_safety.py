@@ -537,3 +537,37 @@ def test_a_failing_marker_does_not_skip_the_child_teardown() -> None:
             media._touch_stop = original_touch
 
     asyncio.run(run())
+
+
+def test_cleanup_failure_keeps_the_pending_cancellation_and_the_teardown_marked() -> None:
+    """A filesystem error in the cleanup must not mask the cycle cancellation."""
+
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 0.2
+        removed: list[str] = []
+
+        def remove_secret() -> None:
+            raise PermissionError("secret not writable")
+
+        def remove_sdp() -> None:
+            removed.append("sdp")
+
+        transport = _transport(media, Hass())
+        with _runtime_files(media, remove_secret, remove_sdp):
+
+            async def cancelled_cycle() -> None:
+                raise asyncio.CancelledError
+
+            transport._async_run_cycle = cancelled_cycle
+            try:
+                await transport._async_run_once()
+            except asyncio.CancelledError:
+                pass
+            else:
+                raise AssertionError("the cancellation was replaced")
+
+            assert removed == ["sdp"], removed
+            assert transport._last_error == "media_teardown_not_confirmed"
+
+    asyncio.run(run())

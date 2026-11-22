@@ -1245,7 +1245,13 @@ class ComelitEntranceMediaTransport:
 
         try:
             await self._async_join_cleanup()
-        except ComelitMediaTransportError:
+        except asyncio.CancelledError:
+            # Our own cancellation always wins over the cleanup result.
+            raise
+        except Exception:
+            # A filesystem error in the cleanup must not replace an error that
+            # is already propagating, but it still marks the teardown as
+            # unconfirmed.
             self._last_error = _MEDIA_TEARDOWN_UNCONFIRMED_REASON
             if pending_error is None:
                 raise
@@ -1272,8 +1278,11 @@ class ComelitEntranceMediaTransport:
             self._reader_task = None
 
     async def _async_remove_runtime_files(self) -> None:
-        await self._hass.async_add_executor_job(_remove_helper_secret)
-        await self._hass.async_add_executor_job(_remove_local_sdp)
+        try:
+            await self._hass.async_add_executor_job(_remove_helper_secret)
+        finally:
+            # A failure on the secret must not skip the SDP removal.
+            await self._hass.async_add_executor_job(_remove_local_sdp)
 
     async def _async_join_cleanup(self) -> None:
         """Remove the helper secret and the local SDP exactly once."""
