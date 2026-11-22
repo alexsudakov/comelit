@@ -1410,3 +1410,32 @@ def test_a_proven_release_is_not_retried_by_a_later_stop() -> None:
             media._touch_stop = original_touch
 
     asyncio.run(run())
+
+
+def test_a_late_marker_failure_does_not_downgrade_a_proven_release() -> None:
+    """Whichever terminal verdict lands first is the owner's answer.
+
+    Two joins can disagree about a job that finished at their deadline: one
+    observes its success, the other its own bound. A failure handler that runs
+    after a proven release must not turn the stop into an unconfirmed teardown.
+    """
+
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 0.2
+        transport = _transport(media, Hass())
+        process = _LiveProcess(exit_after=0.05)
+
+        async def join_then_time_out() -> None:
+            # a concurrent join proves the release, then this one's bound lands
+            transport._confirm_stop_marker()
+            raise TimeoutError("join bound")
+
+        transport._async_run_stop_signal = join_then_time_out
+        with _runtime_files(media):
+            transport._process = process
+            await transport.async_stop()
+            assert transport._stop_marker_confirmed is True
+            assert transport._process is None
+
+    asyncio.run(run())

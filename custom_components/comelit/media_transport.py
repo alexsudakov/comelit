@@ -1191,9 +1191,9 @@ class ComelitEntranceMediaTransport:
                     # A marker job that failed or outlived its bound must not
                     # skip the child teardown, but it must also never be read
                     # as a release: the verdict is recorded and fails this stop.
-                    self._stop_marker_confirmed = False
-                    self._stop_marker_error = exc
-                    self._last_error = _MEDIA_STOP_MARKER_UNCONFIRMED_REASON
+                    self._record_stop_marker_failure(exc)
+                    if self._stop_marker_confirmed is False:
+                        self._last_error = _MEDIA_STOP_MARKER_UNCONFIRMED_REASON
                 else:
                     self._confirm_stop_marker()
             try:
@@ -1343,6 +1343,15 @@ class ComelitEntranceMediaTransport:
 
         confirmed = getattr(self, "_stop_marker_confirmed", None)
         if confirmed is not None:
+            # A terminal verdict stands, but a job that finished later still
+            # has to have its exception retrieved so the loop does not report
+            # an unobserved Task exception for this owner.
+            task = getattr(self, "_stop_signal_task", None)
+            if task is not None and task.done() and not task.cancelled():
+                try:
+                    task.exception()
+                except asyncio.CancelledError:
+                    pass
             return confirmed
         task = getattr(self, "_stop_signal_task", None)
         if task is None or not task.done() or task.cancelled():
@@ -1357,6 +1366,19 @@ class ComelitEntranceMediaTransport:
         self._stop_marker_confirmed = False
         self._stop_marker_error = error
         return False
+
+    def _record_stop_marker_failure(self, error: BaseException) -> None:
+        """Record a marker failure unless a terminal verdict already exists.
+
+        A concurrent join can observe the job's outcome from its own deadline;
+        whichever terminal verdict is recorded first is the owner's answer, and
+        the other join must not overwrite it in either direction.
+        """
+
+        if getattr(self, "_stop_marker_confirmed", None) is not None:
+            return
+        self._stop_marker_confirmed = False
+        self._stop_marker_error = error
 
     def _confirm_stop_marker(self) -> None:
         """Record a successful marker without overwriting a negative verdict.
@@ -1732,8 +1754,7 @@ class ComelitEntranceMediaTransport:
                     # must not skip the child termination below or mask the cycle
                     # error already recorded in _last_error, but they stay on the
                     # record so a later stop cannot confirm this release.
-                    self._stop_marker_confirmed = False
-                    self._stop_marker_error = exc
+                    self._record_stop_marker_failure(exc)
                 else:
                     self._confirm_stop_marker()
             try:
