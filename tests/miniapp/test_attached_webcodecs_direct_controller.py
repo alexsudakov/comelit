@@ -5,6 +5,7 @@ import importlib
 import importlib.util
 from pathlib import Path
 import sys
+import types
 
 import pytest
 
@@ -186,3 +187,47 @@ def test_hls_attached_viewer_keeps_existing_ha_stream_resource_path():
 def test_public_miniapp_controller_exports_direct_attached_variant():
     source = (base.MINIAPP_ROOT / "__init__.py").read_text(encoding="utf-8")
     assert "from .attached_controller import ComelitMiniAppController" in source
+
+
+def test_released_call_media_is_not_selectable_contract():
+    """Contract invariant: without open call media the source is not selectable.
+
+    The real transport derives ``active`` from the runtime's authoritative
+    ``attached_media_open`` flag, which the listener clears on a confirmed
+    remote release.  A transport that was started before that release must
+    therefore stop being reported as ready, and a lease attempt must fail
+    closed instead of reading an idle RTP channel.
+    """
+    controller, hass, _module = _fixed_controller()
+    base._install_attached_ring_coordinator(hass)
+    attached = base._attached_media_mod()
+    controller_mod = importlib.import_module(
+        "custom_components.comelit.miniapp.controller"
+    )
+    runtime = types.SimpleNamespace(running=True, attached_media_open=True)
+    transport = attached.ComelitAttachedRingMediaTransport(runtime)
+    transport._active = True
+    session = attached.ComelitAttachedRingMediaSession(transport)
+    domain_data = hass.data[controller_mod.DOMAIN]
+    domain_data[controller_mod.DATA_ATTACHED_MEDIA_SESSIONS]["entry-1"] = session
+
+    async def run():
+        assert session.active is True
+        lease = await session.async_acquire(
+            panel="entrance", reason="miniapp_attached_view"
+        )
+        assert lease["leases"] == {"miniapp_attached_view": 1}
+
+        # Confirmed remote release clears the authoritative flag.
+        runtime.attached_media_open = False
+
+        assert session.active is False
+        assert await controller.attached_webcodecs_entrance_ready() is False
+        target = controller.get_webcodecs_camera_target("camera.comelit_entrance")
+        with pytest.raises(_module.MiniAppOperationError) as exc:
+            await controller.acquire_attached_webcodecs_entrance(target)
+        assert str(exc.value) == "attached_webcodecs_bootstrap_not_ready"
+
+        await session.async_release(reason="miniapp_attached_view")
+
+    asyncio.run(run())

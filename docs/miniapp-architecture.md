@@ -800,6 +800,21 @@ the bounded PyAV read timeout unblocks. The daemon owner thread is an explicit
 limitation accepted here because PyAV open/read calls use the 5.0 second timeout
 bound and teardown does not rely on process shutdown for normal cleanup.
 
+The close path itself must not depend on anything that can wait indefinitely.
+The receive side is the authority for a viewer that left: once the terminal
+frame arrives, a local close signal refuses every later send even while the
+HTTP stack still reports the socket as open, and every `send_json`/`send_bytes`
+is bounded by `WEBCODECS_SEND_TIMEOUT_SECONDS`. A send that makes no progress
+for that interval is treated as `client_close`, because a viewer that cannot
+drain its bounded backlog is gone. The `finally` path then cancels the
+producer, releases the media lease, and only afterwards joins the producer with
+`WEBCODECS_CLOSE_JOIN_SECONDS`; a PyAV owner close that outlives that budget is
+reported by `COMELIT_MINIAPP_WEBCODECS_CLOSE_TEARDOWN phase=source_join_timeout`
+instead of delaying the release. Upstream ownership is never declared released
+by the absence of a viewer: only `ComelitMediaSessionManager.async_release()`
+confirms the teardown, and while it is still running the channel stays busy and
+a second owner is refused.
+
 The primary WebCodecs source does not call the legacy MSE/WebRTC/HLS transport
 while it is healthy. Those paths remain isolated fallbacks. The WebCodecs
 transport does not call Door or Gate services.
@@ -809,6 +824,7 @@ Closed, bounded log lines use:
 ```text
 COMELIT_MINIAPP_WEBCODECS ...
 COMELIT_MINIAPP_WEBCODECS_SUMMARY ...
+COMELIT_MINIAPP_WEBCODECS_CLOSE_TEARDOWN ...
 ```
 
 They include entity id, fixed event/reason enums, elapsed milliseconds, access

@@ -237,6 +237,7 @@ class MVP1SyntheticRingControlTests(unittest.TestCase):
                 event: dict[str, object],
                 *,
                 require_media_start: bool = False,
+                **kwargs: object,
             ) -> dict[str, object]:
                 event = dict(event)
                 event.setdefault("event_id", f"event-{len(calls)}")
@@ -277,6 +278,7 @@ class MVP1SyntheticRingControlTests(unittest.TestCase):
                 event: dict[str, object],
                 *,
                 require_media_start: bool = False,
+                **kwargs: object,
             ) -> dict[str, object]:
                 del require_media_start
                 calls.append(dict(event))

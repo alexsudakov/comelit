@@ -29,6 +29,7 @@ from ..const import (
     DATA_ATTACHED_MEDIA_SESSIONS,
     DATA_MINIAPP_ATTACHED_MEDIA_PROVIDERS,
     DATA_RING_MEDIA,
+    DATA_RUNTIMES,
     DOMAIN,
     DOOR_ENTRANCE,
     DOOR_GATE,
@@ -67,6 +68,14 @@ SAFE_STATE_ATTRIBUTES = frozenset(
         "blocked_by_media_session",
     }
 )
+# The card's reopen gate is fail-closed on the media manager's own release: it
+# offers "open" only when the entrance camera reports media_phase == "inactive"
+# together with a literal media_active == false.  These two attributes are
+# therefore part of the contract for that one entity; without them every Mini
+# App card path reports «Состояние канала неизвестно» and the camera cannot be
+# opened at all.  Scope is the entrance camera's registry identity
+# (platform == comelit AND unique_id): no other camera gains them.
+ENTRANCE_MEDIA_STATE_ATTRIBUTES = frozenset({"media_phase", "media_active"})
 DOOR_UNIQUE_IDS = {
     DOOR_ENTRANCE: MAIN_ENTRANCE_UNIQUE_ID,
     DOOR_GATE: MAIN_GATE_UNIQUE_ID,
@@ -312,11 +321,16 @@ class ComelitMiniAppController:
         return result
 
     @staticmethod
-    def _safe_state(entity_id: str, state: Any) -> dict[str, Any]:
+    def _safe_state(
+        entity_id: str,
+        state: Any,
+        *,
+        allowed_attributes: frozenset[str] = SAFE_STATE_ATTRIBUTES,
+    ) -> dict[str, Any]:
         attributes = state.attributes if state is not None else {}
         safe_attributes = {
             key: attributes[key]
-            for key in SAFE_STATE_ATTRIBUTES
+            for key in allowed_attributes
             if key in attributes
         }
         return {
@@ -328,11 +342,21 @@ class ComelitMiniAppController:
     def _state_payload_for_entries(
         self, entries: list[dict[str, Any]]
     ) -> dict[str, dict[str, Any]]:
-        return {
-            entity_id: self._safe_state(entity_id, self.hass.states.get(entity_id))
-            for entry in entries
-            if (entity_id := str(entry["entity_id"]))
-        }
+        payload: dict[str, dict[str, Any]] = {}
+        for entry in entries:
+            entity_id = str(entry["entity_id"])
+            allowed = SAFE_STATE_ATTRIBUTES
+            if (
+                entry.get("platform") == DOMAIN
+                and entry.get("unique_id") == ENTRANCE_CAMERA_UNIQUE_ID
+            ):
+                allowed = SAFE_STATE_ATTRIBUTES | ENTRANCE_MEDIA_STATE_ATTRIBUTES
+            payload[entity_id] = self._safe_state(
+                entity_id,
+                self.hass.states.get(entity_id),
+                allowed_attributes=allowed,
+            )
+        return payload
 
     def bootstrap(self, session: MiniAppSession) -> dict[str, Any]:
         entries = self._allowed_registry_entries()
@@ -863,6 +887,36 @@ class ComelitMiniAppController:
             kind="ordinary",
             camera=get_camera_from_entity_id(self.hass, entity_id),
         )
+
+    def attached_call_handoff_for_current_session(self) -> bool:
+        """Whether the listener sees a live call for the attached session.
+
+        Attached WebCodecs reads the call-bound media owned by the listener, so
+        the listener is the only observer of the incoming call there.
+        """
+        entry = self._entry
+        entry_id = getattr(entry, "entry_id", None) if entry is not None else None
+        if not isinstance(entry_id, str) or not entry_id:
+            return False
+        runtime = (
+            self.hass.data.get(DOMAIN, {}).get(DATA_RUNTIMES, {}).get(entry_id)
+        )
+        if runtime is None:
+            return False
+        return bool(getattr(runtime, "attached_call_handoff", False))
+
+    def entrance_ring_handoff_for_current_session(self) -> bool:
+        """Whether the entrance media session currently held saw a Ring.
+
+        Used only to explain the end of that session; it never starts a media
+        session, never changes source selection and never classifies a later
+        open attempt.
+        """
+        try:
+            _manager, transport = self._webcodecs_entrance_runtime()
+        except MiniAppOperationError:
+            return False
+        return bool(getattr(transport, "ring_observed", False))
 
     def _webcodecs_entrance_runtime(self) -> tuple[Any, Any]:
         entry = self._entry

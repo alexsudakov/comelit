@@ -1178,7 +1178,12 @@ class H264RecoveryRtpShim:
                 asyncio.DatagramProtocol,
                 local_addr=(self._host, port),
             )
+            # Publish before closing: a close that raises must leave the socket
+            # reachable for the next teardown attempt.
+            self._check_transport = check_transport
             check_transport.close()
+            if self._check_transport is check_transport:
+                self._check_transport = None
             await asyncio.sleep(0)
         try:
             for port in self._output_ports:
@@ -1201,6 +1206,10 @@ class H264RecoveryRtpShim:
                 local_addr=(self._host, self._input_port),
             )
         except BaseException:
+            # Publish the sockets before closing them: if a close raises, the
+            # references must survive so a retried teardown can free them.
+            self._input_transport = input_transport
+            self._output_transports = tuple(output_transports)
             if input_transport is not None:
                 input_transport.close()
             for output_transport in output_transports:
@@ -1212,20 +1221,28 @@ class H264RecoveryRtpShim:
         self._protocol = protocol
         self._input_transport = input_transport
         self._output_transports = tuple(output_transports)
+        self._check_transport = None
 
     async def async_stop(self) -> None:
         input_transport = self._input_transport
         output_transports = self._output_transports
+        check_transport = getattr(self, "_check_transport", None)
         protocol = self._protocol
         if protocol is not None:
             protocol.emit_input_summary()
-        self._input_transport = None
-        self._output_transports = ()
-        self._protocol = None
+        # Close before forgetting: if a close raises, the sockets stay
+        # referenced so a retried stop re-attempts the same release instead of
+        # finding nothing and reporting a teardown that never happened.
+        if check_transport is not None:
+            check_transport.close()
         if input_transport is not None:
             input_transport.close()
         for output_transport in output_transports:
             output_transport.close()
+        self._check_transport = None
+        self._input_transport = None
+        self._output_transports = ()
+        self._protocol = None
         await asyncio.sleep(0)
 
     async def async_activate_output_port(self, port: int) -> None:

@@ -43,6 +43,7 @@ _T02_LISTENER_PAUSE_REQUESTED = "T02_LISTENER_PAUSE_REQUESTED"
 _T03_LISTENER_PAUSED_CONFIRMED = "T03_LISTENER_PAUSED_CONFIRMED"
 
 MEDIA_SESSION_HARD_LIMIT_SECONDS = 600
+MEDIA_START_RECOVERY_TIMEOUT_SECONDS = 20.0
 MEDIA_TRANSPORT_WATCH_INTERVAL_SECONDS = 0.5
 MEDIA_PHASE_INACTIVE = "inactive"
 MEDIA_PHASE_STARTING = "starting"
@@ -110,7 +111,7 @@ class _MediaStartFailure(NamedTuple):
     transport_native_exit_code: int | None
 
 
-def _safe_start_failure_reason(exc: Exception) -> str:
+def _safe_start_failure_reason(exc: BaseException) -> str:
     failure_type = type(exc).__name__
     if _SAFE_FAILURE_TYPE_RE.fullmatch(failure_type) is None:
         failure_type = "Exception"
@@ -170,11 +171,42 @@ TaskFactory = Callable[
 ]
 
 
+def _consume_task_result(task: asyncio.Task[Any]) -> None:
+    """Mark a detached task's exception as retrieved."""
+
+    if task.cancelled():
+        return
+    task.exception()
+
+
 def _default_task_factory(
     coro: Coroutine[Any, Any, None],
     name: str,
 ) -> asyncio.Task[None]:
     return asyncio.create_task(coro, name=name)
+
+
+async def _await_shielded(task: asyncio.Task[Any]) -> asyncio.CancelledError | None:
+    """Await a detached task even after the caller has been cancelled.
+
+    ``asyncio.shield`` alone re-raises ``CancelledError`` in the caller while
+    the child keeps running, so a cancelled startup would leave the recovery
+    unfinished and the manager wedged in its transitional phase.  The caller
+    of this helper has already decided that the child must finish; keep
+    awaiting it and return the cancellation that was absorbed so the caller
+    can re-raise it afterwards.
+    """
+
+    absorbed: asyncio.CancelledError | None = None
+    while True:
+        try:
+            await asyncio.shield(task)
+            return absorbed
+        except asyncio.CancelledError as exc:
+            if task.done():
+                raise
+            absorbed = exc
+            continue
 
 
 class ComelitMediaSessionManager:
@@ -196,6 +228,7 @@ class ComelitMediaSessionManager:
         transport_watch_interval_seconds: float = (
             MEDIA_TRANSPORT_WATCH_INTERVAL_SECONDS
         ),
+        recovery_timeout_seconds: float = MEDIA_START_RECOVERY_TIMEOUT_SECONDS,
         task_factory: TaskFactory | None = None,
         ring_shadow: RingShadowController | None = None,
         diagnostic_status_notify: Callable[[], None] | None = None,
@@ -204,11 +237,14 @@ class ComelitMediaSessionManager:
             raise ValueError("hard_limit_seconds must be positive")
         if transport_watch_interval_seconds <= 0:
             raise ValueError("transport_watch_interval_seconds must be positive")
+        if recovery_timeout_seconds <= 0:
+            raise ValueError("recovery_timeout_seconds must be positive")
 
         self._listener = listener
         self._transport = transport
         self._hard_limit_seconds = hard_limit_seconds
         self._transport_watch_interval_seconds = transport_watch_interval_seconds
+        self._recovery_timeout_seconds = recovery_timeout_seconds
         self._task_factory = task_factory or _default_task_factory
         self._lock = asyncio.Lock()
         self._phase = MEDIA_PHASE_INACTIVE
@@ -221,6 +257,9 @@ class ComelitMediaSessionManager:
         self._watchdog_task: asyncio.Task[None] | None = None
         self._last_error: str | None = None
         self._last_start_failure: _MediaStartFailure | None = None
+        self._teardown_unconfirmed = False
+        self._stop_task: asyncio.Task[Any] | None = None
+        self._resume_task: asyncio.Task[None] | None = None
         self._status_listeners: set[Callable[[], None]] = set()
         self._latency_timeline: Any | None = None
         self._shadow_hook = RingShadowHook(ring_shadow, SHADOW_OWNER_MEDIA)
@@ -318,6 +357,13 @@ class ComelitMediaSessionManager:
         if not reason or len(reason) > 64:
             raise ComelitMediaSessionError("invalid_media_reason")
 
+        # Cheap admission checks before any await that can block on the
+        # listener supervisor lock; they are repeated under the media lock.
+        if self._teardown_unconfirmed:
+            raise ComelitMediaSessionError("media_teardown_unconfirmed")
+        if self._resume_task is not None and not self._resume_task.done():
+            raise ComelitMediaSessionError("media_listener_recovery_busy")
+
         cancel_recovery = getattr(
             self._listener, "async_cancel_listener_recovery_for_media", None
         )
@@ -327,6 +373,15 @@ class ComelitMediaSessionManager:
         async with self._lock:
             if getattr(self._listener, "attached_media_busy", False):
                 raise ComelitMediaSessionError("attached_inbound_media_busy")
+            if self._teardown_unconfirmed:
+                # The previous session's upstream teardown never confirmed.
+                # Starting again could create a second media owner.
+                raise ComelitMediaSessionError("media_teardown_unconfirmed")
+            if self._resume_task is not None and not self._resume_task.done():
+                # A timed-out listener resume is still running; starting media
+                # now would let it resume the listener next to an active
+                # session (two upstream owners).
+                raise ComelitMediaSessionError("media_listener_recovery_busy")
 
             if self._phase == MEDIA_PHASE_ACTIVE:
                 if self._panel != panel or not self._transport.active:
@@ -345,6 +400,8 @@ class ComelitMediaSessionManager:
 
             timeline = self._latency_timeline
             start_stage = _MEDIA_START_STAGE_LISTENER_PAUSE
+            start_ok = False
+            transport_start_attempted = False
             try:
                 if timeline is not None:
                     timeline.mark(
@@ -361,10 +418,26 @@ class ComelitMediaSessionManager:
                     )
 
                 start_stage = _MEDIA_START_STAGE_TRANSPORT_START
+                transport_start_attempted = True
                 await self._transport.async_start(panel)
                 if not self._transport.active:
                     raise ComelitMediaSessionError("media_start_not_confirmed")
+                start_ok = True
+            except asyncio.CancelledError as exc:
+                # Cancellation during startup is delivered as BaseException, so
+                # the generic handler below never sees it.  Recover before
+                # unwinding: the transport must be stopped and the manager must
+                # reach a terminal phase, otherwise the card gate stays closed
+                # until HA restarts.
+                self._teardown_unconfirmed = (
+                    self._teardown_unconfirmed or transport_start_attempted
+                )
+                await self._async_abort_failed_start(exc, start_stage)
+                raise
             except Exception as exc:
+                self._teardown_unconfirmed = (
+                    self._teardown_unconfirmed or transport_start_attempted
+                )
                 self._last_start_failure = _MediaStartFailure(
                     reason=_safe_start_failure_reason(exc),
                     stage=start_stage,
@@ -376,8 +449,27 @@ class ComelitMediaSessionManager:
                         getattr(self._transport, "last_native_exit_code", None)
                     ),
                 )
-                await self._recover_failed_start(exc)
+                absorbed = await self._async_recover_start_failure(exc)
+                if absorbed is not None:
+                    # The recovery finished, but the caller was cancelled while
+                    # waiting for it: propagate the cancellation, not a start
+                    # error, so the WebSocket handler unwinds normally.
+                    raise absorbed
                 raise ComelitMediaSessionError(self._last_error or "media_start_failed") from exc
+            except BaseException as exc:
+                # Anything else (GeneratorExit, SystemExit, KeyboardInterrupt)
+                # must not leave the manager in STARTING either.
+                self._teardown_unconfirmed = (
+                    self._teardown_unconfirmed or transport_start_attempted
+                )
+                await self._async_abort_failed_start(exc, start_stage)
+                raise
+            finally:
+                if not start_ok and self._phase == MEDIA_PHASE_STARTING:
+                    # Fail closed: a transitional phase must never survive the
+                    # acquire call, even if an error handler was interrupted.
+                    self._last_error = self._last_error or "media_start_aborted"
+                    self._set_phase(MEDIA_PHASE_ERROR)
 
             now = datetime.now(UTC)
             self._started_at = now
@@ -435,16 +527,44 @@ class ComelitMediaSessionManager:
             self._leases.clear()
             expiry_task = self._expiry_task
             watchdog_task = self._watchdog_task
-            self._expiry_task = None
-            self._watchdog_task = None
+            # Clear each reference only after its task is confirmed cancelled
+            # and finished, so a failed unload can still join it next time.
             await self._cancel_background_task(expiry_task)
+            self._forget_background_task("_expiry_task", expiry_task)
             await self._cancel_background_task(watchdog_task)
+            self._forget_background_task("_watchdog_task", watchdog_task)
 
             if self._phase != MEDIA_PHASE_INACTIVE:
                 self._set_phase(MEDIA_PHASE_STOPPING)
+            # A stop left running by a recovery timeout still owns native and
+            # shim resources; unload must not report success while it runs.
+            await self._await_pending_stop()
+            resume_task = self._resume_task
+            if resume_task is not None and not resume_task.done():
+                # A resume left running by a recovery timeout may still touch
+                # the supervisor; unload must not report success while it runs.
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(resume_task),
+                        timeout=self._recovery_timeout_seconds,
+                    )
+                except TimeoutError as exc:
+                    self._teardown_unconfirmed = True
+                    self._last_error = "shutdown_listener_recovery_in_flight"
+                    self._set_phase(MEDIA_PHASE_ERROR)
+                    self._notify_diagnostic_terminal()
+                    raise ComelitMediaSessionError(
+                        "media_listener_recovery_busy"
+                    ) from exc
             try:
                 await self._transport.async_stop()
+                if self._transport.active:
+                    raise ComelitMediaSessionError("media_stop_not_confirmed")
             except Exception as exc:
+                # Unload keeps its pre-change contract: a teardown that cannot
+                # be confirmed fails the unload instead of being reported as a
+                # success, so reload cannot create a competing owner.
+                self._teardown_unconfirmed = True
                 self._last_error = f"shutdown_teardown_failed:{type(exc).__name__}"
                 teardown_handle = self._shadow_hook.note_teardown(False)
                 self._set_phase(MEDIA_PHASE_ERROR)
@@ -489,7 +609,75 @@ class ComelitMediaSessionManager:
         except asyncio.CancelledError:
             raise
 
-    async def _recover_failed_start(self, exc: Exception) -> None:
+    async def _async_recover_start_failure(
+        self,
+        exc: BaseException,
+    ) -> asyncio.CancelledError | None:
+        """Run failed-start recovery to completion, surviving caller cancellation."""
+
+        recovery_coro = self._recover_failed_start(exc)
+        try:
+            recovery = self._task_factory(
+                recovery_coro,
+                "comelit media failed-start recovery",
+            )
+        except BaseException:
+            recovery_coro.close()
+            raise
+        try:
+            return await _await_shielded(recovery)
+        except Exception:
+            self._last_error = self._last_error or "media_start_aborted"
+            self._set_phase(MEDIA_PHASE_ERROR)
+            return None
+
+    async def _async_abort_failed_start(
+        self,
+        exc: BaseException,
+        stage: str,
+    ) -> None:
+        """Recover a startup that was cancelled or aborted by a BaseException.
+
+        The recovery runs in its own task and is awaited to completion even
+        though the caller is already being cancelled; otherwise the manager
+        would stay in ``STARTING`` and the UI gate would never reopen.
+        """
+
+        self._last_start_failure = _MediaStartFailure(
+            reason=_safe_start_failure_reason(exc),
+            stage=stage,
+            at=datetime.now(UTC).isoformat(),
+            transport_last_error=_sanitize_transport_last_error(
+                getattr(self._transport, "last_error", None)
+            ),
+            transport_native_exit_code=_sanitize_transport_native_exit_code(
+                getattr(self._transport, "last_native_exit_code", None)
+            ),
+        )
+        recovery_coro = self._recover_failed_start(exc)
+        try:
+            recovery = self._task_factory(
+                recovery_coro,
+                "comelit media aborted-start recovery",
+            )
+        except BaseException:
+            recovery_coro.close()
+            raise
+        try:
+            await _await_shielded(recovery)
+        except asyncio.CancelledError:
+            if recovery.done():
+                raise
+        except Exception:
+            self._set_phase(MEDIA_PHASE_ERROR)
+        finally:
+            if self._phase == MEDIA_PHASE_STARTING:
+                # Fail closed: never leave a transitional phase behind, and
+                # never claim a release that was not confirmed.
+                self._last_error = self._last_error or "media_start_aborted"
+                self._set_phase(MEDIA_PHASE_ERROR)
+
+    async def _recover_failed_start(self, exc: BaseException) -> None:
         self._last_error = f"start_failed:{type(exc).__name__}"
         self._shadow_hook.note_stop_reason("start_failed")
 
@@ -497,21 +685,79 @@ class ComelitMediaSessionManager:
         # The transport background task may still be reaping the child,
         # stopping the recovery shim, and removing temporary SDP/credentials.
         # async_stop() is idempotent and must finish even after native exit.
+        def _finish_stop(task: asyncio.Task[Any]) -> None:
+            _consume_task_result(task)
+            if self._stop_task is not task:
+                # A newer recovery owns the guard now; a late stop from an
+                # older one must not clear it.
+                return
+            self._stop_task = None
+            if task.cancelled() or task.exception() is not None:
+                return
+            if not self._transport.active:
+                self._teardown_unconfirmed = False
+
+        stop_task = self._stop_task
+        if stop_task is None or stop_task.done():
+            stop_task = asyncio.create_task(self._transport.async_stop())
+            self._stop_task = stop_task
+            stop_task.add_done_callback(_finish_stop)
+
+        # Until this stop returns cleanly the upstream owner is unconfirmed:
+        # a later acquire must not start a second one, even if this recovery
+        # is itself cancelled.
+        done, _ = await asyncio.wait(
+            {stop_task}, timeout=self._recovery_timeout_seconds
+        )
         try:
-            await self._transport.async_stop()
+            if stop_task not in done:
+                raise TimeoutError
+            stop_task.result()
             if self._transport.active:
                 raise ComelitMediaSessionError("media_stop_not_confirmed")
+        except TimeoutError:
+            # The stop keeps running detached; releasing the listener now could
+            # create a second upstream owner, so stay failed closed.
+            teardown_handle = self._shadow_hook.note_teardown(False)
+            self._last_error = "start_cleanup_timeout"
+            self._teardown_unconfirmed = True
+            self._set_phase(MEDIA_PHASE_ERROR)
+            self._shadow_hook.seal_episode("teardown_failed", teardown_handle)
+            self._notify_diagnostic_terminal()
+            return
         except Exception as stop_exc:
             teardown_handle = self._shadow_hook.note_teardown(False)
             self._last_error = f"start_cleanup_failed:{type(stop_exc).__name__}"
+            self._teardown_unconfirmed = True
             self._set_phase(MEDIA_PHASE_ERROR)
             self._shadow_hook.seal_episode("teardown_failed", teardown_handle)
             self._notify_diagnostic_terminal()
             return
         self._shadow_hook.note_teardown(True)
+        self._teardown_unconfirmed = False
 
+        resume_task = asyncio.create_task(self._listener.async_resume_after_media())
+        self._resume_task = resume_task
+
+        def _finish_resume(task: asyncio.Task[Any]) -> None:
+            _consume_task_result(task)
+            if self._resume_task is task:
+                self._resume_task = None
+
+        resume_task.add_done_callback(_finish_resume)
+        done, _ = await asyncio.wait(
+            {resume_task}, timeout=self._recovery_timeout_seconds
+        )
         try:
-            await self._listener.async_resume_after_media()
+            if resume_task not in done:
+                raise TimeoutError
+            resume_task.result()
+        except TimeoutError:
+            self._shadow_hook.note_listener_resume(False)
+            self._last_error = "listener_restore_timeout"
+            self._set_phase(MEDIA_PHASE_ERROR)
+            self._notify_diagnostic_terminal()
+            return
         except Exception as resume_exc:
             self._shadow_hook.note_listener_resume(False)
             self._last_error = f"listener_restore_failed:{type(resume_exc).__name__}"
@@ -523,6 +769,44 @@ class ComelitMediaSessionManager:
 
         self._reset_inactive()
         self._notify_diagnostic_terminal()
+
+    async def _await_pending_stop(self) -> None:
+        """Wait for a stop left running by a recovery timeout.
+
+        Both unload and a later release must observe the same teardown: a
+        second stop that returns earlier would clear the guard while the first
+        one can still touch the transport.
+        """
+
+        pending = self._stop_task
+        if pending is None or pending.done():
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(pending),
+                timeout=self._recovery_timeout_seconds,
+            )
+        except TimeoutError as exc:
+            self._teardown_unconfirmed = True
+            self._last_error = "teardown_in_flight"
+            self._set_phase(MEDIA_PHASE_ERROR)
+            self._notify_diagnostic_terminal()
+            raise ComelitMediaSessionError("media_teardown_in_flight") from exc
+
+    def _forget_background_task(
+        self,
+        attribute: str,
+        task: asyncio.Task[Any] | None,
+    ) -> None:
+        """Drop a background-task reference only once it cannot run again."""
+
+        if task is None or getattr(self, attribute) is not task:
+            return
+        if task is asyncio.current_task() or not task.done():
+            # Self-cancel: the task is still executing this release; keep it
+            # tracked until it finishes.
+            return
+        setattr(self, attribute, None)
 
     async def _cancel_background_task(
         self,
@@ -555,11 +839,17 @@ class ComelitMediaSessionManager:
         self._set_phase(MEDIA_PHASE_STOPPING)
         expiry_task = self._expiry_task
         watchdog_task = self._watchdog_task
-        self._expiry_task = None
-        self._watchdog_task = None
+        # Clear each reference only after its task is confirmed cancelled, so a
+        # failed or cancelled release can still join it on the next attempt.
         await self._cancel_background_task(expiry_task)
+        self._forget_background_task("_expiry_task", expiry_task)
         await self._cancel_background_task(watchdog_task)
+        self._forget_background_task("_watchdog_task", watchdog_task)
 
+        # A stop still running from an earlier recovery owns the transport:
+        # join it first, otherwise a quicker second stop would clear the guard
+        # while the first one can still touch the session.
+        await self._await_pending_stop()
         try:
             # A dead native child is not proof that its owner task and local
             # cleanup finished. Always join the transport before allowing a
@@ -571,6 +861,7 @@ class ComelitMediaSessionManager:
             # Fail closed: if upstream media teardown is not confirmed, do not
             # restart the persistent listener and create two concurrent Comelit
             # sessions. Manual recovery can inspect the error state instead.
+            self._teardown_unconfirmed = True
             self._last_error = f"teardown_failed:{type(exc).__name__}"
             teardown_handle = self._shadow_hook.note_teardown(False)
             self._set_phase(MEDIA_PHASE_ERROR)
@@ -611,7 +902,8 @@ class ComelitMediaSessionManager:
         self._started_at = None
         self._expires_at = None
         self._deadline_monotonic = None
-        self._expiry_task = None
-        self._watchdog_task = None
+        self._forget_background_task("_expiry_task", self._expiry_task)
+        self._forget_background_task("_watchdog_task", self._watchdog_task)
         self._last_error = None
+        self._teardown_unconfirmed = False
         self._set_phase(MEDIA_PHASE_INACTIVE)
