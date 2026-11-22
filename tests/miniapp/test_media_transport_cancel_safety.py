@@ -770,3 +770,74 @@ def test_unconfirmed_teardown_blocks_unload_and_a_second_owner() -> None:
             assert transport._cleanup_confirmed(transport._cleanup_task) is True
 
     asyncio.run(run())
+
+
+def test_stop_waiting_on_a_failing_cycle_reports_the_canonical_error() -> None:
+    """The cycle's cleanup error must not escape a concurrent stop raw."""
+
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 0.2
+
+        def secret() -> None:
+            raise PermissionError("secret not writable")
+
+        transport = _transport(media, Hass())
+
+        async def silent_cycle() -> None:
+            return None
+
+        transport._async_run_cycle = silent_cycle
+        with _runtime_files(media, secret, lambda: None):
+            cycle_task = asyncio.create_task(transport._async_run_once())
+            transport._task = cycle_task
+            await asyncio.sleep(0)
+            try:
+                await transport.async_stop()
+            except media.ComelitMediaTransportError as exc:
+                assert str(exc) == "media_teardown_not_confirmed", str(exc)
+                assert isinstance(exc.__cause__, PermissionError), exc.__cause__
+            else:
+                raise AssertionError("a failed cleanup was reported as confirmed")
+
+            assert transport._last_error == "media_teardown_not_confirmed"
+            try:
+                await cycle_task
+            except Exception:
+                pass
+
+    asyncio.run(run())
+
+
+def test_cancellation_during_the_cleanup_join_marks_the_teardown() -> None:
+    """Cancelling the join keeps the reference and the unconfirmed marker."""
+
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 2.0
+        started = threading.Event()
+        release = threading.Event()
+
+        def secret() -> None:
+            started.set()
+            release.wait(2)
+
+        transport = _transport(media, Hass())
+        with _runtime_files(media, secret, lambda: None):
+            stop = asyncio.create_task(transport.async_stop())
+            await _wait_started(started)
+            stop.cancel()
+            try:
+                await stop
+            except asyncio.CancelledError:
+                pass
+            else:
+                raise AssertionError("the cancellation was swallowed")
+
+            assert transport._last_error == "media_teardown_not_confirmed"
+            assert transport._cleanup_task is not None
+            assert not transport._cleanup_task.done()
+            release.set()
+            await transport._cleanup_task
+
+    asyncio.run(run())

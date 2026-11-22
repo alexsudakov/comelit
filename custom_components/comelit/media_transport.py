@@ -1136,17 +1136,24 @@ class ComelitEntranceMediaTransport:
 
         task = self._task
         if task is not None and not task.done():
-            try:
-                await asyncio.wait_for(
-                    asyncio.shield(task), timeout=_EXECUTOR_JOIN_TIMEOUT_SECONDS
-                )
-            except TimeoutError:
+            # Never await the child task directly: its own result (including a
+            # cleanup failure raised from its finally) would escape from this
+            # stop as a raw error instead of the canonical unconfirmed
+            # teardown, and its CancelledError is indistinguishable from the
+            # caller's cancellation. ``asyncio.wait`` returns without raising
+            # either, and still lets our cancellation propagate.
+            done, _ = await asyncio.wait(
+                {task}, timeout=_EXECUTOR_JOIN_TIMEOUT_SECONDS
+            )
+            if not done:
                 task.cancel()
-                # Never await the child task itself here: its own
-                # CancelledError is indistinguishable from the caller's
-                # cancellation. ``asyncio.wait`` completes without raising the
-                # child's result and still lets our cancellation propagate.
-                await asyncio.wait({task}, timeout=_EXECUTOR_JOIN_TIMEOUT_SECONDS)
+                await asyncio.wait(
+                    {task}, timeout=_EXECUTOR_JOIN_TIMEOUT_SECONDS
+                )
+            if task.done() and not task.cancelled():
+                # Mark the child's result as retrieved; the stop reports the
+                # failure through its own confirmation check below.
+                task.exception()
 
         reader = self._reader_task
         if reader is not None and reader.done():
@@ -1272,11 +1279,19 @@ class ComelitEntranceMediaTransport:
         try:
             await self._async_join_cleanup()
         except asyncio.CancelledError:
+            if not self._cleanup_confirmed_cleanup():
+                self._last_error = _MEDIA_TEARDOWN_UNCONFIRMED_REASON
             raise
         except Exception as exc:
             self._last_error = _MEDIA_TEARDOWN_UNCONFIRMED_REASON
             return exc
         return None
+
+    def _cleanup_confirmed_cleanup(self) -> bool:
+        """True when no runtime-file cleanup is pending or failed."""
+
+        task = getattr(self, "_cleanup_task", None)
+        return task is None or self._cleanup_confirmed(task)
 
     async def _async_stop_reader(self) -> None:
         """Cancel the helper output reader and forget it only once it is done.
