@@ -315,13 +315,20 @@ def test_reader_teardown_keeps_a_task_that_delays_cancellation() -> None:
 
 
 class _LiveProcess:
-    """Native child that stays alive until it is terminated."""
+    """Native child that stays alive until it is terminated or times out."""
 
-    def __init__(self) -> None:
+    def __init__(self, exit_after: float | None = None) -> None:
         self.returncode = None
+        self._exit_after = exit_after
         self._done = asyncio.Event()
 
     async def wait(self):
+        if self._exit_after is not None:
+            try:
+                await asyncio.wait_for(self._done.wait(), self._exit_after)
+            except TimeoutError:
+                self.returncode = -15
+                return self.returncode
         await self._done.wait()
         return self.returncode
 
@@ -460,5 +467,44 @@ def test_a_second_stop_cannot_confirm_a_task_that_never_finished() -> None:
                 await asyncio.sleep(0.02)
             await transport.async_stop()
             assert transport._task is None
+
+    asyncio.run(run())
+
+
+def test_cycle_teardown_survives_a_marker_timeout_and_keeps_the_original_error() -> None:
+    """A slow marker must not skip the child teardown or mask the cycle error."""
+
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 0.2
+        started = threading.Event()
+        release = threading.Event()
+
+        def touch() -> None:
+            started.set()
+            release.wait(2)
+
+        transport = _transport(media, Hass())
+        process = _LiveProcess(exit_after=0.3)
+        original_touch = media._touch_stop
+        media._touch_stop = touch
+        try:
+            with _runtime_files(media):
+                transport._process = process
+                transport._last_error = "media_offer_timeout"
+
+                await transport._async_finish_cycle(process)
+
+                assert started.is_set()
+                assert process.returncode == -15, process.returncode
+                # the cycle error is not replaced by the marker timeout
+                assert transport._last_error == "media_offer_timeout"
+                # and the unfinished marker keeps the teardown unconfirmed
+                assert transport._stop_signal_task is not None
+                assert not transport._stop_signal_task.done()
+                release.set()
+                await transport._stop_signal_task
+        finally:
+            media._touch_stop = original_touch
 
     asyncio.run(run())

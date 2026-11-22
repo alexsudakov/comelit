@@ -1263,11 +1263,13 @@ class ComelitEntranceMediaTransport:
             return
         if not reader.done():
             reader.cancel()
-        try:
-            await asyncio.shield(reader)
-        finally:
-            if reader.done():
-                self._reader_task = None
+        # The reader's own CancelledError must not be raised here: it would be
+        # indistinguishable from the caller's cancellation and would mask an
+        # error that is already propagating. ``asyncio.wait`` completes
+        # without raising the reader's result.
+        await asyncio.wait({reader}, timeout=_EXECUTOR_JOIN_TIMEOUT_SECONDS)
+        if reader.done():
+            self._reader_task = None
 
     async def _async_remove_runtime_files(self) -> None:
         await self._hass.async_add_executor_job(_remove_helper_secret)
@@ -1475,18 +1477,32 @@ class ComelitEntranceMediaTransport:
                 self._capture_native_failure(rc)
                 raise ComelitMediaTransportError(f"media_native_exit:{rc}")
         finally:
-            if process.returncode is None:
+            await self._async_finish_cycle(process)
+
+    async def _async_finish_cycle(self, process: asyncio.subprocess.Process) -> None:
+        """Stop the child, the marker and the reader after one cycle.
+
+        A marker job that outlived its bound must not skip the rest of the
+        teardown: the child is still terminated and reaped below, the cycle
+        error stays in ``_last_error``, and the unfinished marker keeps the
+        teardown unconfirmed for any later stop.
+        """
+
+        if process.returncode is None:
+            try:
                 await self._async_run_stop_signal()
+            except ComelitMediaTransportError:
+                pass
+            try:
+                await asyncio.wait_for(process.wait(), timeout=8)
+            except TimeoutError:
+                process.terminate()
                 try:
-                    await asyncio.wait_for(process.wait(), timeout=8)
+                    await asyncio.wait_for(process.wait(), timeout=3)
                 except TimeoutError:
-                    process.terminate()
-                    try:
-                        await asyncio.wait_for(process.wait(), timeout=3)
-                    except TimeoutError:
-                        process.kill()
-                        await process.wait()
-            await self._async_stop_reader()
+                    process.kill()
+                    await process.wait()
+        await self._async_stop_reader()
 
     async def _async_read_output(self, process: asyncio.subprocess.Process) -> None:
         if process.stdout is None:
