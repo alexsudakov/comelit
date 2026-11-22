@@ -17,8 +17,10 @@ No HA instance, network or native helper is involved.
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from contextlib import contextmanager
 import gc
+from types import SimpleNamespace
 from pathlib import Path
 import sys
 import threading
@@ -1168,6 +1170,164 @@ def test_a_confirmed_marker_stop_still_reports_success() -> None:
                 assert touched, "the stop marker was never written"
                 assert transport._stop_marker_confirmed is True
                 assert transport._process is None
+        finally:
+            media._touch_stop = original_touch
+
+    asyncio.run(run())
+
+
+def test_a_cancelled_stop_cannot_admit_a_new_owner() -> None:
+    """Cancelling mid-marker must not open the channel for a new owner.
+
+    The stop was cancelled before the marker job proved the release, so the
+    verdict stays unresolved: a new upstream owner may only start once the
+    marker either confirms the release or the teardown fails closed.
+    """
+
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 2.0
+        started = threading.Event()
+        fail = threading.Event()
+
+        def touch() -> None:
+            started.set()
+            fail.wait(3)
+            raise PermissionError("stop marker not writable")
+
+        transport = _transport(media, Hass())
+        process = _LiveProcess(exit_after=0.2)
+        admitted: list[str] = []
+
+        class Entry:
+            def async_create_background_task(self, _hass, coro, name):
+                admitted.append(name)
+                return asyncio.create_task(coro)
+
+        transport._entry = Entry()
+        transport._native_marker_tail = deque(maxlen=8)
+        transport._native_p116_marker_tail = deque(maxlen=8)
+        transport._native_protocol_markers = {}
+        transport._native_protocol_markers_seen_total = 0
+        transport._native_protocol_markers_evicted = 0
+        transport._native_refresh_diagnostics = {}
+        transport._native_ack_diagnostics = {}
+        transport._last_native_exit_code = None
+        transport._last_native_failure_markers = []
+        transport._progress = SimpleNamespace(reset=lambda: None)
+        transport._ring_observation = None
+        transport._ring_observed = False
+        transport._ring_observed_at = None
+        transport._session_started_at = None
+        transport._last_status_notify_monotonic = None
+
+        async def run_once() -> None:
+            raise media.ComelitMediaTransportError("media_native_exit:1")
+
+        transport._async_run_once = run_once
+        original_touch = media._touch_stop
+        media._touch_stop = touch
+        try:
+            with _runtime_files(media):
+                transport._process = process
+                stop = asyncio.create_task(transport.async_stop())
+                await _wait_started(started)
+                stop.cancel()
+                try:
+                    await stop
+                except asyncio.CancelledError:
+                    pass
+
+                # the marker job now finishes with a failure
+                fail.set()
+                marker = transport._stop_signal_task
+                for _ in range(300):
+                    if marker.done():
+                        break
+                    await asyncio.sleep(0.01)
+                assert marker.done(), "marker job never finished"
+                await process.wait()
+                assert process.returncode is not None
+
+                # admission for a new upstream owner stays closed
+                try:
+                    await transport.async_start("entrance")
+                except media.ComelitMediaTransportError:
+                    pass
+                assert not admitted, (
+                    "a new upstream owner was admitted after a cancelled stop"
+                )
+
+                # and a repeat stop still completes the teardown, fail closed
+                try:
+                    await transport.async_stop()
+                except media.ComelitMediaTransportError as exc:
+                    assert str(exc) == "media_teardown_not_confirmed", str(exc)
+                else:
+                    raise AssertionError(
+                        "a repeat stop confirmed a release the cancelled stop "
+                        "never proved"
+                    )
+                assert transport._stop_marker_confirmed is False
+        finally:
+            media._touch_stop = original_touch
+
+    asyncio.run(run())
+
+
+def test_a_second_stop_does_not_upgrade_a_failed_marker() -> None:
+    """A negative verdict stays negative while the child is still alive."""
+
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 0.2
+        calls: list[int] = []
+        first_failed = threading.Event()
+
+        def touch() -> None:
+            calls.append(1)
+            if len(calls) == 1:
+                first_failed.set()
+                raise PermissionError("transient stop marker failure")
+
+        transport = _transport(media, Hass())
+        process = _LiveProcess(exit_after=1.0)
+        original_touch = media._touch_stop
+        media._touch_stop = touch
+        try:
+            with _runtime_files(media):
+                transport._process = process
+                first = asyncio.create_task(transport.async_stop())
+                await _wait_started(first_failed)
+                marker = transport._stop_signal_task
+                for _ in range(300):
+                    if marker.done():
+                        break
+                    await asyncio.sleep(0.01)
+                assert marker.done(), "first marker job never finished"
+                assert process.returncode is None, process.returncode
+
+                try:
+                    await transport.async_stop()
+                except media.ComelitMediaTransportError as exc:
+                    assert str(exc) == "media_teardown_not_confirmed", str(exc)
+                else:
+                    raise AssertionError(
+                        "a second stop confirmed an unproven release"
+                    )
+
+                # the negative verdict was not retried into a positive one
+                assert calls == [1], calls
+                assert transport._stop_marker_confirmed is False
+
+                # the first stop still owns its teardown and fails closed
+                try:
+                    await first
+                except media.ComelitMediaTransportError as exc:
+                    assert str(exc) == "media_teardown_not_confirmed", str(exc)
+                else:
+                    raise AssertionError("the first stop confirmed a failed marker")
+                assert process.returncode is not None
         finally:
             media._touch_stop = original_touch
 

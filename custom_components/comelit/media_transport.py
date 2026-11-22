@@ -1060,11 +1060,20 @@ class ComelitEntranceMediaTransport:
         cleanup = getattr(self, "_cleanup_task", None)
         if cleanup is not None and not self._cleanup_confirmed(cleanup):
             raise ComelitMediaTransportError(_MEDIA_TEARDOWN_UNCONFIRMED_REASON)
+        if self._stop_marker_unproven():
+            # A stop for this owner ran but never proved the release: the
+            # channel may still be held upstream, so no new owner is admitted
+            # even when the child process and its tasks are already gone.
+            raise ComelitMediaTransportError(_MEDIA_TEARDOWN_UNCONFIRMED_REASON)
 
         self._stopping = False
         self._last_error = None
         self._stop_marker_confirmed = None
         self._stop_marker_error = None
+        # A new owner starts with no marker job of its own: the previous job
+        # (already resolved by the admission gate above) must not stand in as
+        # proof for this owner's later stops.
+        self._stop_signal_task = None
         self._native_marker_tail.clear()
         self._native_p116_marker_tail.clear()
         self._native_protocol_markers.clear()
@@ -1158,18 +1167,31 @@ class ComelitEntranceMediaTransport:
         self._shadow_hook.note_state("media_transport_stop")
         process = self._process
         marker_error: BaseException | None = None
+        verdict = self._stop_marker_verdict()
         if process is not None and process.returncode is None:
-            try:
-                await self._async_run_stop_signal()
-            except Exception as exc:
-                # A marker job that failed or outlived its bound must not skip
-                # the child teardown, but it must also never be read as a
-                # release: the verdict is recorded and fails this stop below.
-                self._stop_marker_confirmed = False
-                self._stop_marker_error = exc
-                self._last_error = _MEDIA_STOP_MARKER_UNCONFIRMED_REASON
+            if verdict is False:
+                # A negative verdict is final for this owner: repeating the
+                # marker would retry the same signal, not prove that the first
+                # attempt released the channel.
+                marker_error = getattr(self, "_stop_marker_error", None)
             else:
-                self._stop_marker_confirmed = True
+                try:
+                    await self._async_run_stop_signal()
+                except asyncio.CancelledError:
+                    # Cancelled before the marker job proved the release.  The
+                    # verdict stays unresolved (or negative) so no new owner is
+                    # admitted, and a later stop can still join the same job.
+                    self._stop_marker_verdict()
+                    raise
+                except Exception as exc:
+                    # A marker job that failed or outlived its bound must not
+                    # skip the child teardown, but it must also never be read
+                    # as a release: the verdict is recorded and fails this stop.
+                    self._stop_marker_confirmed = False
+                    self._stop_marker_error = exc
+                    self._last_error = _MEDIA_STOP_MARKER_UNCONFIRMED_REASON
+                else:
+                    self._stop_marker_confirmed = True
             try:
                 await asyncio.wait_for(process.wait(), timeout=8)
             except TimeoutError:
@@ -1179,7 +1201,7 @@ class ComelitEntranceMediaTransport:
                 except TimeoutError:
                     process.kill()
                     await process.wait()
-        elif getattr(self, "_stop_marker_confirmed", None) is False:
+        elif verdict is False:
             # The child is gone, but an earlier stop never proved the release.
             # Absence of the process is not evidence for the upstream channel,
             # so the unconfirmed verdict stays sticky for this owner.
@@ -1262,7 +1284,7 @@ class ComelitEntranceMediaTransport:
                 and not self._cleanup_task.done()
             )
             or cleanup_error is not None
-            or getattr(self, "_stop_marker_confirmed", None) is False
+            or self._stop_marker_verdict() is False
         ):
             raise ComelitMediaTransportError(
                 "media_teardown_not_confirmed"
@@ -1305,6 +1327,47 @@ class ComelitEntranceMediaTransport:
         # The executor job keeps running even if this coroutine is cancelled,
         # so the shield keeps it referenced and the completion joinable.
         await self._async_join_executor_task(task)
+
+    def _stop_marker_verdict(self) -> bool | None:
+        """Resolve the release proof from the record and the marker job.
+
+        ``None`` only while the outcome is genuinely unknown (no stop ran yet,
+        or its job is still in flight).  Recording the job's own result here
+        keeps a stop that was cancelled mid-join from hiding a later failure:
+        the job outlives the cancelled wait.
+        """
+
+        confirmed = getattr(self, "_stop_marker_confirmed", None)
+        if confirmed is not None:
+            return confirmed
+        task = getattr(self, "_stop_signal_task", None)
+        if task is None or not task.done() or task.cancelled():
+            return None
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return None
+        if error is None:
+            self._stop_marker_confirmed = True
+            return True
+        self._stop_marker_confirmed = False
+        self._stop_marker_error = error
+        return False
+
+    def _stop_marker_unproven(self) -> bool:
+        """True when a stop ran but never proved the upstream release.
+
+        A transport that never attempted a marker is untouched (the owner may
+        start normally); every attempted stop must end with a confirmed marker
+        before the next owner is admitted.
+        """
+
+        if (
+            getattr(self, "_stop_marker_confirmed", None) is None
+            and getattr(self, "_stop_signal_task", None) is None
+        ):
+            return False
+        return self._stop_marker_verdict() is not True
 
     async def _async_join_executor_task(self, task: asyncio.Task[None]) -> None:
         """Wait for an executor job without detaching from it.
@@ -1645,17 +1708,18 @@ class ComelitEntranceMediaTransport:
         """
 
         if process.returncode is None:
-            try:
-                await self._async_run_stop_signal()
-            except Exception as exc:
-                # Marker failures (including a filesystem error in _touch_stop)
-                # must not skip the child termination below or mask the cycle
-                # error already recorded in _last_error, but they stay on the
-                # record so a later stop cannot confirm this release.
-                self._stop_marker_confirmed = False
-                self._stop_marker_error = exc
-            else:
-                self._stop_marker_confirmed = True
+            if self._stop_marker_verdict() is not False:
+                try:
+                    await self._async_run_stop_signal()
+                except Exception as exc:
+                    # Marker failures (including a filesystem error in _touch_stop)
+                    # must not skip the child termination below or mask the cycle
+                    # error already recorded in _last_error, but they stay on the
+                    # record so a later stop cannot confirm this release.
+                    self._stop_marker_confirmed = False
+                    self._stop_marker_error = exc
+                else:
+                    self._stop_marker_confirmed = True
             try:
                 await asyncio.wait_for(process.wait(), timeout=8)
             except TimeoutError:
