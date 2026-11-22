@@ -86,6 +86,8 @@ def _transport(media, hass):
     transport._cancel_status_notify = lambda: None
     transport._stopping = False
     transport._last_error = None
+    transport._stop_marker_confirmed = None
+    transport._stop_marker_error = None
     return transport
 
 
@@ -1052,5 +1054,121 @@ def test_a_reader_that_failed_between_stops_is_retrieved() -> None:
         gc.collect()
         await asyncio.sleep(0)
         assert not [m for m in unretrieved if "never retrieved" in m], unretrieved
+
+    asyncio.run(run())
+
+
+def test_a_failed_stop_marker_fails_the_stop_even_when_the_child_exits() -> None:
+    """A dead child is not proof that the upstream channel was released.
+
+    ``_touch_stop`` is the only stop signal the helper understands.  When that
+    job fails, terminating the child afterwards proves nothing about the
+    device-side session: the stop must fail closed instead of reporting a
+    clean release.
+    """
+
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 0.2
+
+        def touch() -> None:
+            raise PermissionError("stop marker not writable")
+
+        transport = _transport(media, Hass())
+        process = _LiveProcess(exit_after=0.2)
+        original_touch = media._touch_stop
+        media._touch_stop = touch
+        try:
+            with _runtime_files(media):
+                transport._process = process
+
+                try:
+                    await transport.async_stop()
+                except media.ComelitMediaTransportError as exc:
+                    assert str(exc) == "media_teardown_not_confirmed", str(exc)
+                else:
+                    raise AssertionError(
+                        "a failed stop marker was reported as a confirmed release"
+                    )
+
+                # the child was still reaped, and the reason stays visible
+                assert process.returncode == -15, process.returncode
+                assert transport._stop_marker_confirmed is False
+                assert transport.last_error == "media_stop_marker_not_confirmed"
+        finally:
+            media._touch_stop = original_touch
+
+    asyncio.run(run())
+
+
+def test_a_repeat_stop_keeps_an_unconfirmed_marker_verdict() -> None:
+    """A later stop must not confirm a release the earlier marker never proved."""
+
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 0.2
+
+        def touch() -> None:
+            raise PermissionError("stop marker not writable")
+
+        transport = _transport(media, Hass())
+        process = _LiveProcess(exit_after=0.2)
+        original_touch = media._touch_stop
+        media._touch_stop = touch
+        try:
+            with _runtime_files(media):
+                transport._process = process
+                try:
+                    await transport.async_stop()
+                except media.ComelitMediaTransportError:
+                    pass
+                else:
+                    raise AssertionError("first stop confirmed a failed marker")
+
+                # the child and its references are gone; only the marker verdict
+                # remains, and it must keep the teardown unconfirmed
+                assert transport._process is None
+                assert transport._task is None
+
+                try:
+                    await transport.async_stop()
+                except media.ComelitMediaTransportError as exc:
+                    assert str(exc) == "media_teardown_not_confirmed", str(exc)
+                else:
+                    raise AssertionError(
+                        "a repeat stop confirmed an unproven release"
+                    )
+        finally:
+            media._touch_stop = original_touch
+
+    asyncio.run(run())
+
+
+def test_a_confirmed_marker_stop_still_reports_success() -> None:
+    """The new verdict must not turn a healthy stop into a failure."""
+
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 0.2
+        touched: list[int] = []
+
+        def touch() -> None:
+            touched.append(1)
+
+        transport = _transport(media, Hass())
+        process = _LiveProcess(exit_after=0.2)
+        original_touch = media._touch_stop
+        media._touch_stop = touch
+        try:
+            with _runtime_files(media):
+                transport._process = process
+
+                await transport.async_stop()
+
+                assert touched, "the stop marker was never written"
+                assert transport._stop_marker_confirmed is True
+                assert transport._process is None
+        finally:
+            media._touch_stop = original_touch
 
     asyncio.run(run())

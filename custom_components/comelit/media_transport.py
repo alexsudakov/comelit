@@ -510,6 +510,13 @@ class ComelitEntranceMediaTransport:
         self._audio_forwarding = asyncio.Event()
         self._stopping = False
         self._last_error: str | None = None
+        # Tri-state proof of the stop marker for the current owner:
+        # ``None`` = no marker needed yet, ``True`` = the marker job completed,
+        # ``False`` = it failed or outlived its bound.  Only ``True`` proves the
+        # release; ``False`` stays sticky for every later stop of this owner so
+        # a dead child is never mistaken for a released channel.
+        self._stop_marker_confirmed: bool | None = None
+        self._stop_marker_error: BaseException | None = None
         # Type name of a second runtime-file removal failure; the first one
         # stays primary in the raised error.
         self._teardown_secondary_error: str | None = None
@@ -1056,6 +1063,8 @@ class ComelitEntranceMediaTransport:
 
         self._stopping = False
         self._last_error = None
+        self._stop_marker_confirmed = None
+        self._stop_marker_error = None
         self._native_marker_tail.clear()
         self._native_p116_marker_tail.clear()
         self._native_protocol_markers.clear()
@@ -1148,14 +1157,19 @@ class ComelitEntranceMediaTransport:
         self._stopping = True
         self._shadow_hook.note_state("media_transport_stop")
         process = self._process
+        marker_error: BaseException | None = None
         if process is not None and process.returncode is None:
             try:
                 await self._async_run_stop_signal()
-            except Exception:
+            except Exception as exc:
                 # A marker job that failed or outlived its bound must not skip
-                # the child teardown: the child is still terminated below, and
-                # the marker failure is recorded instead of raised.
+                # the child teardown, but it must also never be read as a
+                # release: the verdict is recorded and fails this stop below.
+                self._stop_marker_confirmed = False
+                self._stop_marker_error = exc
                 self._last_error = _MEDIA_STOP_MARKER_UNCONFIRMED_REASON
+            else:
+                self._stop_marker_confirmed = True
             try:
                 await asyncio.wait_for(process.wait(), timeout=8)
             except TimeoutError:
@@ -1165,6 +1179,11 @@ class ComelitEntranceMediaTransport:
                 except TimeoutError:
                     process.kill()
                     await process.wait()
+        elif getattr(self, "_stop_marker_confirmed", None) is False:
+            # The child is gone, but an earlier stop never proved the release.
+            # Absence of the process is not evidence for the upstream channel,
+            # so the unconfirmed verdict stays sticky for this owner.
+            marker_error = getattr(self, "_stop_marker_error", None)
         if process is not None and process.returncode is not None:
             hook = getattr(self, "_shadow_hook", None)
             if hook is not None:
@@ -1243,10 +1262,11 @@ class ComelitEntranceMediaTransport:
                 and not self._cleanup_task.done()
             )
             or cleanup_error is not None
+            or getattr(self, "_stop_marker_confirmed", None) is False
         ):
             raise ComelitMediaTransportError(
                 "media_teardown_not_confirmed"
-            ) from cleanup_error
+            ) from (cleanup_error or marker_error)
 
     async def _async_start_video_recovery_shim(self) -> None:
         timeline = self._latency_timeline
@@ -1627,11 +1647,15 @@ class ComelitEntranceMediaTransport:
         if process.returncode is None:
             try:
                 await self._async_run_stop_signal()
-            except Exception:
+            except Exception as exc:
                 # Marker failures (including a filesystem error in _touch_stop)
                 # must not skip the child termination below or mask the cycle
-                # error already recorded in _last_error.
-                pass
+                # error already recorded in _last_error, but they stay on the
+                # record so a later stop cannot confirm this release.
+                self._stop_marker_confirmed = False
+                self._stop_marker_error = exc
+            else:
+                self._stop_marker_confirmed = True
             try:
                 await asyncio.wait_for(process.wait(), timeout=8)
             except TimeoutError:
