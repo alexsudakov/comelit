@@ -422,3 +422,43 @@ def test_caller_cancellation_during_the_child_join_propagates() -> None:
                 raise AssertionError("caller cancellation was swallowed")
 
     asyncio.run(run())
+
+
+def test_a_second_stop_cannot_confirm_a_task_that_never_finished() -> None:
+    """A child that outlives the join timeout must stay referenced."""
+
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 0.05
+
+        async def stubborn_child() -> None:
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.5)
+
+        transport = _transport(media, Hass())
+        with _runtime_files(media):
+            transport._task = asyncio.create_task(stubborn_child())
+            await asyncio.sleep(0)
+
+            try:
+                await transport.async_stop()
+            except media.ComelitMediaTransportError as exc:
+                assert str(exc) == "media_teardown_not_confirmed"
+            else:
+                raise AssertionError("stop confirmed a live child")
+
+            # the child outlived the join: it must still be referenced, so a
+            # later stop cannot mistake it for a finished teardown
+            assert transport._task is not None
+            assert not transport._task.done()
+
+            for _ in range(200):
+                if transport._task.done():
+                    break
+                await asyncio.sleep(0.02)
+            await transport.async_stop()
+            assert transport._task is None
+
+    asyncio.run(run())

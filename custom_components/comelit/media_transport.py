@@ -1146,8 +1146,14 @@ class ComelitEntranceMediaTransport:
         if reader is not None and reader.done():
             self._reader_task = None
 
-        self._task = None
-        self._process = None
+        # Forget a resource only when its release is confirmed: a task that
+        # still runs (or a child whose exit code is unknown) must stay
+        # referenced so a later stop cannot report a finished teardown.
+        if task is None or task.done():
+            self._task = None
+        current_process = self._process
+        if current_process is None or current_process.returncode is not None:
+            self._process = None
         self._media_active.clear()
         self._local_sdp_ready_event.clear()
         self._offer_ready.clear()
