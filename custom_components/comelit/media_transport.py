@@ -1159,6 +1159,14 @@ class ComelitEntranceMediaTransport:
                     self._last_error or "media_transport_ended_before_local_sdp"
                 )
             if sdp_wait in done and sdp_wait.result() and self.local_sdp_ready:
+                # Final admission check: a stop can start while this start was
+                # waiting, and a successful start must never overlap it.
+                if getattr(self, "_stop_calls_in_flight", 0) or (
+                    self._stop_marker_unproven()
+                ):
+                    raise ComelitMediaTransportError(
+                        _MEDIA_TEARDOWN_UNCONFIRMED_REASON
+                    )
                 return
             self._last_error = _MEDIA_LOCAL_SDP_READY_REASON
             raise ComelitMediaTransportError(_MEDIA_LOCAL_SDP_READY_REASON)
