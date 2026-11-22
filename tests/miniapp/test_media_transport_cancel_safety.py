@@ -53,6 +53,17 @@ def _runtime_files(media, secret=None, sdp=None):
         media._remove_helper_secret, media._remove_local_sdp = original
 
 
+async def _wait_started(event: threading.Event, timeout: float = 3.0) -> None:
+    """Wait for the executor job to start without hanging the test."""
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not event.is_set():
+        if loop.time() > deadline:
+            raise AssertionError("executor job did not start")
+        await asyncio.sleep(0.01)
+
+
 def _transport(media, hass):
     transport = media.ComelitEntranceMediaTransport.__new__(
         media.ComelitEntranceMediaTransport
@@ -72,6 +83,8 @@ def _transport(media, hass):
     transport._video_recovery_shim = None
     transport._latency_timeline = None
     transport._cancel_status_notify = lambda: None
+    transport._stopping = False
+    transport._last_error = None
     return transport
 
 
@@ -86,15 +99,14 @@ def test_cancelled_stop_keeps_the_stop_marker_tracked() -> None:
         def touch() -> None:
             calls.append(1)
             started.set()
-            release.wait(5)
+            release.wait(2)
 
         transport = _transport(media, Hass())
         original = media._touch_stop
         media._touch_stop = touch
         try:
             stop = asyncio.create_task(transport._async_run_stop_signal())
-            while not started.is_set():
-                await asyncio.sleep(0.01)
+            await _wait_started(started)
             stop.cancel()
             try:
                 await stop
@@ -133,7 +145,7 @@ def test_cancelled_stop_keeps_the_file_cleanup_tracked() -> None:
 
         def remove_secret() -> None:
             started.set()
-            release.wait(5)
+            release.wait(2)
             removed.append("secret")
 
         def remove_sdp() -> None:
@@ -142,8 +154,7 @@ def test_cancelled_stop_keeps_the_file_cleanup_tracked() -> None:
         transport = _transport(media, Hass())
         with _runtime_files(media, remove_secret, remove_sdp):
             stop = asyncio.create_task(transport._async_join_cleanup())
-            while not started.is_set():
-                await asyncio.sleep(0.01)
+            await _wait_started(started)
             stop.cancel()
             try:
                 await stop
@@ -176,13 +187,12 @@ def test_stop_refuses_to_confirm_while_the_cleanup_is_unfinished() -> None:
 
         def remove_secret() -> None:
             started.set()
-            release.wait(5)
+            release.wait(2)
 
         transport = _transport(media, Hass())
         with _runtime_files(media, remove_secret):
             stop = asyncio.create_task(transport.async_stop())
-            while not started.is_set():
-                await asyncio.sleep(0.01)
+            await _wait_started(started)
             stop.cancel()
             try:
                 await stop
@@ -246,18 +256,17 @@ def test_run_once_finally_keeps_an_unfinished_cleanup() -> None:
 
         def remove_secret() -> None:
             started.set()
-            release.wait(5)
+            release.wait(2)
 
         transport = _transport(media, Hass())
         with _runtime_files(media, remove_secret):
 
             async def failing_cycle() -> None:
-                raise media.ComelitMediaTransportError("media_native_exit:6")
+                raise media.ComelitMediaTransportError("media_signaling_timeout")
 
             transport._async_run_cycle = failing_cycle
             run_once = asyncio.create_task(transport._async_run_once())
-            while not started.is_set():
-                await asyncio.sleep(0.01)
+            await _wait_started(started)
             run_once.cancel()
             try:
                 await run_once
@@ -301,5 +310,83 @@ def test_reader_teardown_keeps_a_task_that_delays_cancellation() -> None:
             assert teardown.done()
             assert reader.done()
             assert transport._reader_task is None
+
+    asyncio.run(run())
+
+
+class _LiveProcess:
+    """Native child that stays alive until it is terminated."""
+
+    def __init__(self) -> None:
+        self.returncode = None
+        self._done = asyncio.Event()
+
+    async def wait(self):
+        await self._done.wait()
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.returncode = -15
+        self._done.set()
+
+    def kill(self) -> None:
+        self.returncode = -9
+        self._done.set()
+
+
+def test_run_once_keeps_a_live_process_when_the_cleanup_times_out() -> None:
+    """A failed cleanup must not forget the native child that still runs."""
+
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 0.2
+        started = threading.Event()
+        release = threading.Event()
+
+        def remove_secret() -> None:
+            started.set()
+            release.wait(2)
+
+        transport = _transport(media, Hass())
+        process = _LiveProcess()
+        with _runtime_files(media, remove_secret):
+
+            async def failing_cycle() -> None:
+                transport._process = process
+                process.terminate()
+                raise media.ComelitMediaTransportError("media_signaling_timeout")
+
+            transport._async_run_cycle = failing_cycle
+            try:
+                await transport._async_run_once()
+            except media.ComelitMediaTransportError as exc:
+                assert str(exc) == "media_teardown_not_confirmed"
+            else:
+                raise AssertionError("an unfinished cleanup was reported as done")
+            assert transport._last_error == "media_teardown_not_confirmed"
+
+            # the child exited (returncode known), so the reference may go
+            assert transport._process is None
+
+    asyncio.run(run())
+
+
+def test_run_once_does_not_forget_a_process_that_is_still_running() -> None:
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 5.0
+        transport = _transport(media, Hass())
+        process = _LiveProcess()
+        with _runtime_files(media):
+
+            async def failing_cycle() -> None:
+                transport._process = process
+                raise media.ComelitMediaTransportError("media_signaling_timeout")
+
+            transport._async_run_cycle = failing_cycle
+            await transport._async_run_once()
+
+            assert transport._process is process
+            assert transport._process.returncode is None
 
     asyncio.run(run())

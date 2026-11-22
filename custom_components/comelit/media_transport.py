@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import Callable
 import hashlib
 import logging
@@ -69,6 +70,8 @@ _MEDIA_STOP_FILE = _MEDIA_RUN_DIR / "stop"
 _MEDIA_LOCAL_SDP_FILE = _MEDIA_RUN_DIR / "local-rtp.sdp"
 _MEDIA_STARTUP_WINDOW_SECONDS = 45.0
 _EXECUTOR_JOIN_TIMEOUT_SECONDS = 2.0
+_MEDIA_TEARDOWN_UNCONFIRMED_REASON = "media_teardown_not_confirmed"
+_MEDIA_STOP_MARKER_UNCONFIRMED_REASON = "media_stop_marker_not_confirmed"
 
 _MEDIA_LOCAL_SDP_READY_REASON = "local_sdp_ready_timeout"
 
@@ -1106,6 +1109,12 @@ class ComelitEntranceMediaTransport:
         if process is not None and process.returncode is None:
             try:
                 await self._async_run_stop_signal()
+            except ComelitMediaTransportError:
+                # The marker job outlived its bound: the child is still
+                # terminated below, and the unfinished marker keeps the
+                # teardown unconfirmed at the end of this stop.
+                self._last_error = _MEDIA_STOP_MARKER_UNCONFIRMED_REASON
+            try:
                 await asyncio.wait_for(process.wait(), timeout=8)
             except TimeoutError:
                 process.terminate()
@@ -1128,7 +1137,10 @@ class ComelitEntranceMediaTransport:
                 try:
                     await task
                 except asyncio.CancelledError:
-                    pass
+                    if not task.cancelled():
+                        # Our own cancellation, not the child's: the teardown
+                        # is unfinished and must not be reported as released.
+                        raise
 
         reader = self._reader_task
         if reader is not None and reader.done():
@@ -1222,6 +1234,16 @@ class ComelitEntranceMediaTransport:
                 "media_teardown_not_confirmed"
             ) from exc
 
+    async def _async_join_cleanup_or_keep(self, pending_error: object) -> None:
+        """Join the file cleanup, keeping an in-flight error observable."""
+
+        try:
+            await self._async_join_cleanup()
+        except ComelitMediaTransportError:
+            self._last_error = _MEDIA_TEARDOWN_UNCONFIRMED_REASON
+            if pending_error is None:
+                raise
+
     async def _async_stop_reader(self) -> None:
         """Cancel the helper output reader and forget it only once it is done.
 
@@ -1296,11 +1318,14 @@ class ComelitEntranceMediaTransport:
             if not self._stopping:
                 _LOGGER.exception("Unexpected Comelit entrance media failure")
         finally:
+            pending_error = sys.exc_info()[1]
             self._media_active.clear()
             self._local_sdp_ready_event.clear()
-            self._process = None
+            process = self._process
+            if process is None or process.returncode is not None:
+                self._process = None
             await self._async_stop_video_recovery_shim()
-            await self._async_join_cleanup()
+            await self._async_join_cleanup_or_keep(pending_error)
 
     async def _async_run_cycle(self) -> None:
         await self._hass.async_add_executor_job(_native_gate)
