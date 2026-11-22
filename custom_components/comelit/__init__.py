@@ -270,6 +270,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Perform file stat/hash for native identity in the executor first.
         await media_transport.async_prepare_native_identity_diagnostics()
 
+
         media_manager = ComelitMediaSessionManager(
             supervisor,
             media_transport,
@@ -283,6 +284,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         media_sessions = domain_data.setdefault(DATA_MEDIA_SESSIONS, {})
         media_sessions[entry.entry_id] = media_manager
+
+        # The sink is called from the media session's own stdout reader, so a
+        # publication exists only while that session owns the stream.  That is
+        # the ownership window: no separate phase gate is added, because the
+        # call is announced while teardown may already be in flight.
+        set_ring_sink = getattr(media_transport, "set_ring_event_sink", None)
+        if callable(set_ring_sink):
+            set_ring_sink(runtime.async_emit_media_owner_ring)
+        else:
+            _LOGGER.warning("Comelit media-owner ring sink is unavailable")
 
         attached_transport = ComelitAttachedRingMediaTransport(runtime)
         attached_transports = domain_data.setdefault(

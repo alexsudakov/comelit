@@ -66,6 +66,7 @@ class ComelitCard extends HTMLElement {
     this._intercomViewerOpen = false;
     this._intercomViewerMode = "webcodecs";
     this._intercomViewerFallbackReason = undefined;
+    this._intercomEndedReason = undefined;
     this._selectedIntercomPanel = "entrance";
     this._doorActionInFlight = new Set();
     this._doorActionMessage = undefined;
@@ -125,6 +126,7 @@ class ComelitCard extends HTMLElement {
     this._surveillanceViewerFallbackReason = undefined;
     this._intercomViewerMode = "webcodecs";
     this._intercomViewerFallbackReason = undefined;
+    this._intercomEndedReason = undefined;
     this._forceFullRender = true;
     this._render();
   }
@@ -392,6 +394,7 @@ class ComelitCard extends HTMLElement {
         this._intercomViewerOpen = false;
         this._intercomViewerMode = "webcodecs";
         this._intercomViewerFallbackReason = undefined;
+        this._intercomEndedReason = undefined;
       }
       this._selectedIntercomPanel = call.panel;
     }
@@ -866,10 +869,16 @@ class ComelitCard extends HTMLElement {
     );
     if (cameraToggle) {
       const camera = this._cameraPresentation(model);
-      cameraToggle.disabled = !camera.available;
-      cameraToggle.textContent = this._intercomViewerOpen
-        ? "Скрыть камеру"
-        : "Показать камеру";
+      const channelLabel = this._intercomChannelBusyLabel(model);
+      cameraToggle.disabled = !camera.available || channelLabel !== null;
+      cameraToggle.textContent =
+        channelLabel !== null
+          ? channelLabel
+          : this._intercomViewerMode === "ended"
+            ? "Открыть камеру заново"
+            : this._intercomViewerOpen
+              ? "Скрыть камеру"
+              : "Показать камеру";
     }
   }
 
@@ -907,10 +916,59 @@ class ComelitCard extends HTMLElement {
 
   _cameraPresentation(model) {
     const state = model.entranceCamera.state;
+    const attributes = state?.attributes || {};
+    const rawPhase = attributes.media_phase;
+    // No coercion: only a real string is a phase.  Anything else (absent, an
+    // array, a number, an object) is unknown state, never "inactive".
+    const phase = typeof rawPhase === "string" ? rawPhase : "";
+    // The media manager is the only authority on whether the upstream channel
+    // is still owned.  Fail closed: a free channel is *explicitly* confirmed by
+    // its own "inactive" phase together with `media_active === false`.  A
+    // viewer EOS is not a release, "error" is not a release, and an absent or
+    // malformed attribute is unknown -- never free.
+    const confirmedIdle =
+      rawPhase === "inactive" && attributes.media_active === false;
+    let channelState = "unknown";
+    if (phase === "error") {
+      channelState = "error";
+    } else if (confirmedIdle) {
+      channelState = "idle";
+    } else if (
+      ["starting", "active", "stopping"].includes(phase) ||
+      attributes.media_active === true
+    ) {
+      channelState = "busy";
+    }
+    // Anything else -- no phase, an unrecognised phase, or "inactive" without
+    // an explicit `media_active === false` -- stays "unknown" and is not
+    // openable.
     return {
       entityId: model.entranceCamera.entry?.entity_id || null,
       available: Boolean(state) && state.state !== "unavailable",
+      channelPhase: phase,
+      channelState,
     };
+  }
+
+  _intercomChannelBusy(model) {
+    const camera = this._cameraPresentation(model);
+    const ownsViewer =
+      this._intercomViewerMode !== "ended" && this._intercomViewerOpen;
+    return camera.channelState !== "idle" && !ownsViewer;
+  }
+
+  _intercomChannelBusyLabel(model) {
+    if (!this._intercomChannelBusy(model)) {
+      return null;
+    }
+    const camera = this._cameraPresentation(model);
+    if (camera.channelState === "error") {
+      return "Камера недоступна";
+    }
+    if (camera.channelState === "unknown") {
+      return "Состояние канала неизвестно";
+    }
+    return "Освобождение канала…";
   }
 
   _renderSurveillance(cameras) {
@@ -1000,6 +1058,7 @@ class ComelitCard extends HTMLElement {
     const entranceDoor = this._doorPresentation("entrance", model, call);
     const gateDoor = this._doorPresentation("gate", model, call);
     const camera = this._cameraPresentation(model);
+    const intercomChannelLabel = this._intercomChannelBusyLabel(model);
 
     const actionMessage = `
       <div
@@ -1016,8 +1075,16 @@ class ComelitCard extends HTMLElement {
             <button
               class="secondary-action"
               data-intercom-camera-toggle
-              ${camera.available ? "" : "disabled"}
-            >${this._intercomViewerOpen ? "Скрыть камеру" : "Показать камеру"}</button>
+              ${camera.available && intercomChannelLabel === null ? "" : "disabled"}
+            >${
+              intercomChannelLabel !== null
+                ? intercomChannelLabel
+                : this._intercomViewerMode === "ended"
+                  ? "Открыть камеру заново"
+                  : this._intercomViewerOpen
+                    ? "Скрыть камеру"
+                    : "Показать камеру"
+            }</button>
           </div>
           ${camera.available
             ? this._intercomViewerOpen
@@ -1149,6 +1216,7 @@ class ComelitCard extends HTMLElement {
           this._intercomViewerOpen = false;
           this._intercomViewerMode = "webcodecs";
           this._intercomViewerFallbackReason = undefined;
+          this._intercomEndedReason = undefined;
         }
         this._selectedIntercomPanel = panel;
         this._doorActionMessage = undefined;
@@ -1166,9 +1234,25 @@ class ComelitCard extends HTMLElement {
         if (!camera.available || this._selectedIntercomPanel !== "entrance") {
           return;
         }
+        if (this._intercomChannelBusy(model)) {
+          // The upstream owner has not confirmed its release yet.  Never start
+          // a second session and never guess a delay: the button re-arms from
+          // the media manager's own state.
+          return;
+        }
+        if (this._intercomViewerMode === "ended") {
+          // One explicit click re-opens the camera after a call hand-off.
+          this._intercomViewerMode = "webcodecs";
+          this._intercomViewerFallbackReason = undefined;
+          this._intercomEndedReason = undefined;
+          this._intercomViewerOpen = true;
+          this._render();
+          return;
+        }
         if (!this._intercomViewerOpen) {
           this._intercomViewerMode = "webcodecs";
           this._intercomViewerFallbackReason = undefined;
+          this._intercomEndedReason = undefined;
         }
         this._intercomViewerOpen = !this._intercomViewerOpen;
         this._render();
@@ -1370,6 +1454,16 @@ class ComelitCard extends HTMLElement {
       return;
     }
 
+    if (this._intercomViewerMode === "ended") {
+      // The previous session ended on a call hand-off or because the media
+      // channel was still owned. Keep that state until the user explicitly
+      // opens the camera again.
+      if (!target.querySelector("[data-call-handoff]")) {
+        target.innerHTML = this._intercomEndedNotice();
+      }
+      return;
+    }
+
     const model = this._intercomModel();
     const camera = this._cameraPresentation(model);
     if (!camera.entityId || !camera.available) {
@@ -1413,6 +1507,16 @@ class ComelitCard extends HTMLElement {
       }
       this._intercomViewerFallbackReason =
         String(event?.detail?.reason || "webcodecs_error");
+      if (this._intercomViewerFallbackReason === "call_handoff") {
+        this._showIntercomCallHandoff(generation);
+        return;
+      }
+      if (this._intercomViewerFallbackReason === "intercom_media_busy") {
+        // The channel was still owned when the reopen started. Never fall back
+        // to HLS here: that would open a second consumer on the same upstream.
+        this._showIntercomChannelBusy(generation);
+        return;
+      }
       if (
         this._intercomViewerFallbackReason ===
         "attached_webcodecs_transport_closed"
@@ -1432,6 +1536,61 @@ class ComelitCard extends HTMLElement {
 
     this._intercomViewerElement = viewer;
     target.replaceChildren(viewer);
+  }
+
+  _intercomEndedNotice() {
+    if (this._intercomEndedReason === "intercom_media_busy") {
+      return `
+        <div class="notice compact" data-call-handoff data-ended-reason="intercom_media_busy">
+          Канал камеры ещё освобождается. Открытие станет доступно после подтверждённого освобождения.
+        </div>
+      `;
+    }
+    return `
+      <div class="notice compact" data-call-handoff data-ended-reason="call_handoff">
+        Просмотр завершён из-за входящего вызова.
+      </div>
+    `;
+  }
+
+  _showIntercomCallHandoff(generation) {
+    if (
+      generation !== this._intercomViewerGeneration ||
+      !this._intercomViewerOpen ||
+      this._selectedIntercomPanel !== "entrance"
+    ) {
+      return;
+    }
+    const currentTarget = this.shadowRoot?.querySelector("#intercom-viewer");
+    if (!currentTarget) {
+      return;
+    }
+    // The device stopped the preview because of the incoming call. Explain it
+    // and stay idle: no fallback and no new media session are started.
+    this._intercomViewerMode = "ended";
+    this._intercomEndedReason = "call_handoff";
+    this._intercomViewerElement = undefined;
+    currentTarget.innerHTML = this._intercomEndedNotice();
+  }
+
+  _showIntercomChannelBusy(generation) {
+    if (
+      generation !== this._intercomViewerGeneration ||
+      !this._intercomViewerOpen ||
+      this._selectedIntercomPanel !== "entrance"
+    ) {
+      return;
+    }
+    const currentTarget = this.shadowRoot?.querySelector("#intercom-viewer");
+    if (!currentTarget) {
+      return;
+    }
+    // The reopen raced the previous teardown. Stay ended and explain it; the
+    // legacy HLS fallback would start a second consumer of the same channel.
+    this._intercomViewerMode = "ended";
+    this._intercomEndedReason = "intercom_media_busy";
+    this._intercomViewerElement = undefined;
+    currentTarget.innerHTML = this._intercomEndedNotice();
   }
 
   _showIntercomLegacyFallback(generation) {
@@ -1472,6 +1631,7 @@ class ComelitCard extends HTMLElement {
         return;
       }
       this._intercomViewerFallbackReason = undefined;
+      this._intercomEndedReason = undefined;
       this._mountIntercomViewer();
     });
   }

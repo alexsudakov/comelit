@@ -32,7 +32,7 @@ from .const import (
 from .door_outcome import door_one_shot_sequence_sent
 from .media_diagnostics import MediaCallDiagnostics
 from .oauth import ComelitOAuthError, ComelitOAuthManager
-from .ring_event import RingObservationError, parse_v4_safe_ring
+from .ring_event import RingEvent, RingObservationError, parse_v4_safe_ring
 from .ring_probe_log import RING_PROBE_OWNER_LISTENER, RingProbeDisclosure
 from .ring_shadow import RingShadowController, RingShadowHook, SHADOW_OWNER_LISTENER
 from .sdp import ComelitSdpError, transform_offer
@@ -754,6 +754,9 @@ class ComelitRingRuntime:
         self._listener_ready = asyncio.Event()
         self._attached_media_busy = asyncio.Event()
         self._attached_media_open = asyncio.Event()
+        # Set when a confirmed remote release ends a live call; used only to
+        # explain the end of the attached viewer session.
+        self._attached_call_handoff = False
         self._attached_media_closed = asyncio.Event()
         self._ring_lines: list[str] = []
         self._last_ring_event: dict[str, str] | None = None
@@ -809,6 +812,11 @@ class ComelitRingRuntime:
     def attached_media_busy(self) -> bool:
         event = getattr(self, "_attached_media_busy", None)
         return event is not None and event.is_set()
+
+    @property
+    def attached_call_handoff(self) -> bool:
+        """Whether a confirmed release ended a live call for the attached viewer."""
+        return bool(getattr(self, "_attached_call_handoff", False))
 
     @property
     def attached_media_open(self) -> bool:
@@ -874,6 +882,7 @@ class ComelitRingRuntime:
             if shadow_hook is not None:
                 shadow_hook.note_watchdog_boundary_crossed()
             if self._call_state_tracker().fail_active("call_state_timeout"):
+                self._attached_call_handoff = False
                 _LOGGER.warning(
                     "Comelit call-state watchdog expired after %ss; "
                     "remote release was not observed",
@@ -1010,13 +1019,15 @@ class ComelitRingRuntime:
         event: dict[str, object],
         *,
         require_media_start: bool = False,
+        start_ring_media: bool = True,
+        begin_call_state: bool = True,
     ) -> dict[str, object]:
         if "event_id" not in event:
             event["event_id"] = str(uuid4())
         if "timestamp" not in event:
             event["timestamp"] = datetime.now(UTC).isoformat()
 
-        if event.get("synthetic") is not True:
+        if begin_call_state and event.get("synthetic") is not True:
             panel = event.get("door")
             event_id = event.get("event_id")
             started_at = event.get("timestamp")
@@ -1044,7 +1055,7 @@ class ComelitRingRuntime:
             started = await coordinator.async_start_for_ring(dict(event))
             if not started:
                 raise ComelitRingRuntimeError("synthetic_ring_media_not_started")
-        else:
+        elif start_ring_media:
             self._entry.async_create_background_task(
                 self._hass,
                 self._async_start_ring_media(dict(event)),
@@ -1052,6 +1063,23 @@ class ComelitRingRuntime:
             )
 
         return dict(event)
+
+    async def async_emit_media_owner_ring(self, ring: RingEvent) -> None:
+        """Publish a Ring observed on the media owner's own upstream socket.
+
+        The observation arrives on the media session this process owns, so it
+        goes through the normal publication path.  Ring media is not started
+        (the owner already holds the single upstream session) and call state is
+        untouched (only the listener sees the remote release).
+        """
+        payload: dict[str, object] = {}
+        payload.update(ring.as_dict())
+        await self._async_emit_ring_event(
+            payload, start_ring_media=False, begin_call_state=False
+        )
+        # Two identical Ring payloads can be two different calls, so the status
+        # is refreshed on every publication instead of being deduplicated.
+        self._notify_status()
 
     async def async_simulate_entrance_ring(self) -> dict[str, object]:
         """Emit one synthetic entrance ring and start the normal media lifecycle."""
@@ -1742,6 +1770,7 @@ class ComelitRingRuntime:
         self._listener_ready.clear()
         self._attached_media_busy.clear()
         self._attached_media_open.clear()
+        self._attached_call_handoff = False
         self._attached_media_closed.clear()
         self._ring_lines.clear()
         self._native_marker_tail.clear()
@@ -1847,7 +1876,7 @@ class ComelitRingRuntime:
                     pass
 
     async def async_stop_attached_media(self, timeout: float = 10.0) -> bool:
-        if not self.attached_media_open:
+        if not self.attached_media_open and not self.attached_media_busy:
             return True
 
         process = self._process
@@ -1923,6 +1952,7 @@ class ComelitRingRuntime:
         self._listener_ready.clear()
         self._attached_media_busy.clear()
         self._attached_media_open.clear()
+        self._attached_call_handoff = False
         self._attached_media_closed.clear()
         self._call_state_tracker().reset()
         self._notify_status()
@@ -2177,6 +2207,7 @@ class ComelitRingRuntime:
             self._listener_ready.clear()
             self._attached_media_busy.clear()
             self._attached_media_open.clear()
+            self._attached_call_handoff = False
             future = self._door_result_future
             if future is not None and not future.done():
                 future.set_result("UNKNOWN_OUTCOME")
@@ -2339,8 +2370,18 @@ class ComelitRingRuntime:
                 "R64_TERMINAL_REMOTE_RELEASE_OBSERVED=true",
             }:
                 self._cancel_call_state_timeout()
+                # A confirmed remote release ends the call-bound attached media
+                # channel even when the native CLOSED marker never arrives, so a
+                # stale attached resource is no longer selectable.  busy stays
+                # set until the channel is confirmed closed: clearing it early
+                # would let a second owner start while the native side may still
+                # hold the channel.
+                self._attached_media_open.clear()
+                was_live = self._call_state_tracker().active
                 if self._call_state_tracker().remote_release():
                     self._notify_status()
+                if was_live:
+                    self._attached_call_handoff = True
             if (
                 line == "R64_POST_CALL_SNAPSHOT=true"
                 or line == "P116_NATIVE_EXIT_INTENTIONAL_STOP=true"
@@ -2365,6 +2406,7 @@ class ComelitRingRuntime:
                 continue
 
             if line == "R42_ATTACHED_MEDIA_ACTIVE=true":
+                self._attached_call_handoff = False
                 self._attached_media_busy.set()
                 self._attached_media_closed.clear()
                 self._attached_media_open.set()

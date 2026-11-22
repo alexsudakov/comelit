@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 import sys
 import time
+import types
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -1150,5 +1151,116 @@ def test_async_stop_failure_keeps_owner_and_blocks_restart() -> None:
             raise AssertionError("runtime admitted a second native owner")
 
         assert instance._task is None
+
+    asyncio.run(run())
+
+
+def test_confirmed_remote_release_clears_attached_media_open() -> None:
+    """A released call must not keep the attached media channel selectable."""
+
+    class _Stdout:
+        def __init__(self, lines):
+            self._lines = list(lines)
+
+        async def readline(self):
+            if not self._lines:
+                return b""
+            return (self._lines.pop(0) + "\n").encode()
+
+    class _Process:
+        def __init__(self, lines):
+            self.stdout = _Stdout(lines)
+
+    async def run() -> None:
+        _module, instance = _runtime_instance()
+        instance._attached_media_open.set()
+        instance._attached_media_busy.set()
+        instance._attached_media_closed.clear()
+        instance._listener_ready.set()
+        await instance._async_read_output(
+            _Process(["R37_REMOTE_RELEASE_OBSERVED=true"])
+        )
+        assert instance.attached_media_open is False
+        # Exclusivity is kept: the busy gate is released only by the native
+        # CLOSED marker, never by a release assumption.
+        assert instance.attached_media_busy is True
+
+    asyncio.run(run())
+
+
+def test_release_during_a_live_call_latches_the_attached_handoff() -> None:
+    class _Stdout:
+        def __init__(self, lines):
+            self._lines = list(lines)
+
+        async def readline(self):
+            if not self._lines:
+                return b""
+            return (self._lines.pop(0) + "\n").encode()
+
+    class _Process:
+        def __init__(self, lines):
+            self.stdout = _Stdout(lines)
+
+    async def run() -> None:
+        _module, instance = _runtime_instance()
+        instance._call_state_tracker().begin(
+            panel="entrance",
+            event_id="event-1",
+            started_at="2026-11-19T20:00:00+00:00",
+        )
+        await instance._async_read_output(
+            _Process(["R37_REMOTE_RELEASE_OBSERVED=true"])
+        )
+        assert instance.attached_call_handoff is True
+
+        # A fresh call-bound channel belongs to a new call.
+        await instance._async_read_output(
+            _Process(["R42_ATTACHED_MEDIA_ACTIVE=true"])
+        )
+        assert instance.attached_call_handoff is False
+
+    asyncio.run(run())
+
+
+def test_a_duplicate_ring_does_not_clear_the_handoff_latch() -> None:
+    """A repeated ring batch of the same call must keep an in-flight hand-off."""
+
+    class _Stdout:
+        def __init__(self, lines):
+            self._lines = list(lines)
+
+        async def readline(self):
+            if not self._lines:
+                return b""
+            return (self._lines.pop(0) + "\n").encode()
+
+    class _Process:
+        def __init__(self, lines):
+            self.stdout = _Stdout(lines)
+
+    async def run() -> None:
+        _module, instance = _runtime_instance()
+        instance._hass.bus = types.SimpleNamespace(async_fire=lambda *a, **k: None)
+        instance._call_state_tracker().begin(
+            panel="entrance",
+            event_id="event-1",
+            started_at="2026-11-19T20:00:00+00:00",
+        )
+        await instance._async_read_output(
+            _Process(["R37_REMOTE_RELEASE_OBSERVED=true"])
+        )
+        assert instance.attached_call_handoff is True
+
+        # The same call can publish another ring batch; it is not a new call.
+        await instance._async_emit_ring_event(
+            {
+                "direction": "inbound",
+                "kind": "CALL_INIT",
+                "door": "entrance",
+                "source": "00000643",
+            }
+        )
+        assert instance.attached_call_handoff is True
 
     asyncio.run(run())
