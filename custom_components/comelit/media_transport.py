@@ -510,6 +510,9 @@ class ComelitEntranceMediaTransport:
         # Type name of a second runtime-file removal failure; the first one
         # stays primary in the raised error.
         self._teardown_secondary_error: str | None = None
+        # Cleanup failure observed on one specific cycle task.  A later stop
+        # must not attach a stale marker to a different, clean cycle.
+        self._cycle_cleanup_failure: tuple[asyncio.Task[object] | None, BaseException] | None = None
         self._native_marker_tail: list[str] = []
         self._native_p116_marker_tail: list[str] = []
         self._native_protocol_markers: list[str] = []
@@ -1181,19 +1184,13 @@ class ComelitEntranceMediaTransport:
         self._door_diagnostics = {}
         self._cancel_status_notify()
         await self._async_stop_video_recovery_shim()
-        # Only a failure observed on this cycle's task is sticky; a stale
-        # marker from an earlier stop must not fail a clean teardown.
-        teardown_failed = (
-            task is not None
-            and task.done()
-            and not task.cancelled()
-            and getattr(self, "_last_error", None) == _MEDIA_TEARDOWN_UNCONFIRMED_REASON
-        )
+        # Only a cleanup failure observed on *this* cycle task is sticky; a
+        # stale marker from an earlier stop must not fail a clean teardown.
+        record = getattr(self, "_cycle_cleanup_failure", None)
+        cycle_failure = record[1] if record is not None and record[0] is task else None
         cleanup_error = await self._async_cleanup_teardown()
-        if cleanup_error is None and teardown_failed:
-            cleanup_error = cycle_error or ComelitMediaTransportError(
-                _MEDIA_TEARDOWN_UNCONFIRMED_REASON
-            )
+        if cleanup_error is None and cycle_failure is not None:
+            cleanup_error = cycle_failure or cycle_error
         self._latency_timeline = None
         if (
             (process is not None and process.returncode is None)
@@ -1326,6 +1323,12 @@ class ComelitEntranceMediaTransport:
         # without raising the reader's result.
         await asyncio.wait({reader}, timeout=_EXECUTOR_JOIN_TIMEOUT_SECONDS)
         if reader.done():
+            if not reader.cancelled():
+                # Retrieve the reader's result before forgetting the task.
+                try:
+                    reader.exception()
+                except Exception:
+                    pass
             self._reader_task = None
 
     async def _async_remove_runtime_files(self) -> None:
@@ -1357,7 +1360,12 @@ class ComelitEntranceMediaTransport:
         """Remove the helper secret and the local SDP exactly once."""
 
         task = getattr(self, "_cleanup_task", None)
-        if task is None or task.done():
+        if task is not None and task.done():
+            if not task.cancelled():
+                # Retrieve the previous result before replacing the reference.
+                task.exception()
+            task = None
+        if task is None:
             task = asyncio.create_task(self._async_remove_runtime_files())
             self._cleanup_task = task
         await self._async_join_executor_task(task)
@@ -1412,9 +1420,16 @@ class ComelitEntranceMediaTransport:
                 self._process = None
             await self._async_stop_video_recovery_shim()
             cleanup_error = await self._async_cleanup_teardown()
-            if cleanup_error is not None and pending_error is None:
-                # Nothing else is propagating: surface the cleanup failure.
-                raise cleanup_error
+            if cleanup_error is not None:
+                # Remember which cycle failed to clean up, even when the cycle
+                # itself ends cancelled: a stop joining this task must not
+                # report a confirmed teardown.
+                self._cycle_cleanup_failure = (
+                    asyncio.current_task(), cleanup_error,
+                )
+                if pending_error is None:
+                    # Nothing else is propagating: surface the cleanup failure.
+                    raise cleanup_error
 
     async def _async_run_cycle(self) -> None:
         await self._hass.async_add_executor_job(_native_gate)
