@@ -507,6 +507,9 @@ class ComelitEntranceMediaTransport:
         self._audio_forwarding = asyncio.Event()
         self._stopping = False
         self._last_error: str | None = None
+        # Type name of a second runtime-file removal failure; the first one
+        # stays primary in the raised error.
+        self._teardown_secondary_error: str | None = None
         self._native_marker_tail: list[str] = []
         self._native_p116_marker_tail: list[str] = []
         self._native_protocol_markers: list[str] = []
@@ -1016,6 +1019,9 @@ class ComelitEntranceMediaTransport:
             return
         if self._task is not None and not self._task.done():
             raise ComelitMediaTransportError("media_transport_start_in_progress")
+        cleanup = getattr(self, "_cleanup_task", None)
+        if cleanup is not None and not self._cleanup_confirmed(cleanup):
+            raise ComelitMediaTransportError(_MEDIA_TEARDOWN_UNCONFIRMED_REASON)
 
         self._stopping = False
         self._last_error = None
@@ -1166,7 +1172,7 @@ class ComelitEntranceMediaTransport:
         self._door_diagnostics = {}
         self._cancel_status_notify()
         await self._async_stop_video_recovery_shim()
-        await self._async_join_cleanup()
+        cleanup_error = await self._async_cleanup_teardown()
         self._latency_timeline = None
         if (
             (process is not None and process.returncode is None)
@@ -1183,8 +1189,11 @@ class ComelitEntranceMediaTransport:
                 getattr(self, "_cleanup_task", None) is not None
                 and not self._cleanup_task.done()
             )
+            or cleanup_error is not None
         ):
-            raise ComelitMediaTransportError("media_teardown_not_confirmed")
+            raise ComelitMediaTransportError(
+                "media_teardown_not_confirmed"
+            ) from cleanup_error
 
     async def _async_start_video_recovery_shim(self) -> None:
         timeline = self._latency_timeline
@@ -1240,21 +1249,34 @@ class ComelitEntranceMediaTransport:
                 "media_teardown_not_confirmed"
             ) from exc
 
-    async def _async_join_cleanup_or_keep(self, pending_error: object) -> None:
-        """Join the file cleanup, keeping an in-flight error observable."""
+    @staticmethod
+    def _cleanup_confirmed(task: asyncio.Task[None]) -> bool:
+        """True only when the cleanup finished without a failure."""
+
+        if not task.done() or task.cancelled():
+            return False
+        try:
+            return task.exception() is None
+        except asyncio.CancelledError:
+            return False
+
+    async def _async_cleanup_teardown(self) -> BaseException | None:
+        """Remove the runtime files and report an unconfirmed teardown.
+
+        A cleanup failure, a cleanup timeout and a cancellation of the join all
+        leave the teardown unconfirmed. The first failure is returned so the
+        caller can chain it; the value stays ``None`` only when the cleanup is
+        confirmed.
+        """
 
         try:
             await self._async_join_cleanup()
         except asyncio.CancelledError:
-            # Our own cancellation always wins over the cleanup result.
             raise
-        except Exception:
-            # A filesystem error in the cleanup must not replace an error that
-            # is already propagating, but it still marks the teardown as
-            # unconfirmed.
+        except Exception as exc:
             self._last_error = _MEDIA_TEARDOWN_UNCONFIRMED_REASON
-            if pending_error is None:
-                raise
+            return exc
+        return None
 
     async def _async_stop_reader(self) -> None:
         """Cancel the helper output reader and forget it only once it is done.
@@ -1278,11 +1300,29 @@ class ComelitEntranceMediaTransport:
             self._reader_task = None
 
     async def _async_remove_runtime_files(self) -> None:
+        """Remove both runtime files, keeping the first failure primary."""
+
+        primary: BaseException | None = None
+        secondary: BaseException | None = None
         try:
             await self._hass.async_add_executor_job(_remove_helper_secret)
-        finally:
-            # A failure on the secret must not skip the SDP removal.
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            primary = exc
+        try:
             await self._hass.async_add_executor_job(_remove_local_sdp)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            secondary = exc
+        if secondary is not None:
+            # Only the type name is kept: the messages may carry paths.
+            self._teardown_secondary_error = type(secondary).__name__
+        if primary is not None:
+            raise primary
+        if secondary is not None:
+            raise secondary
 
     async def _async_join_cleanup(self) -> None:
         """Remove the helper secret and the local SDP exactly once."""
@@ -1342,7 +1382,10 @@ class ComelitEntranceMediaTransport:
             if process is None or process.returncode is not None:
                 self._process = None
             await self._async_stop_video_recovery_shim()
-            await self._async_join_cleanup_or_keep(pending_error)
+            cleanup_error = await self._async_cleanup_teardown()
+            if cleanup_error is not None and pending_error is None:
+                # Nothing else is propagating: surface the cleanup failure.
+                raise cleanup_error
 
     async def _async_run_cycle(self) -> None:
         await self._hass.async_add_executor_job(_native_gate)

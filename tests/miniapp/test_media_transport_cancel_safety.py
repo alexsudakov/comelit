@@ -571,3 +571,202 @@ def test_cleanup_failure_keeps_the_pending_cancellation_and_the_teardown_marked(
             assert transport._last_error == "media_teardown_not_confirmed"
 
     asyncio.run(run())
+
+
+def test_helper_secret_failure_leaves_the_teardown_unconfirmed() -> None:
+    """A failed secret removal must not report a finished teardown."""
+
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 0.2
+        removed: list[str] = []
+
+        def secret() -> None:
+            raise PermissionError("secret not writable")
+
+        def sdp() -> None:
+            removed.append("sdp")
+
+        transport = _transport(media, Hass())
+        with _runtime_files(media, secret, sdp):
+            try:
+                await transport.async_stop()
+            except media.ComelitMediaTransportError as exc:
+                assert str(exc) == "media_teardown_not_confirmed", str(exc)
+                assert isinstance(exc.__cause__, PermissionError), exc.__cause__
+            else:
+                raise AssertionError("a failed cleanup was reported as confirmed")
+
+        assert transport._last_error == "media_teardown_not_confirmed"
+        assert removed == ["sdp"], removed
+
+    asyncio.run(run())
+
+
+def test_sdp_failure_leaves_the_teardown_unconfirmed() -> None:
+    """A failed SDP removal is enough to leave the teardown unconfirmed."""
+
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 0.2
+        removed: list[str] = []
+
+        def secret() -> None:
+            removed.append("secret")
+
+        def sdp() -> None:
+            raise OSError("sdp not writable")
+
+        transport = _transport(media, Hass())
+        with _runtime_files(media, secret, sdp):
+            try:
+                await transport.async_stop()
+            except media.ComelitMediaTransportError as exc:
+                assert str(exc) == "media_teardown_not_confirmed", str(exc)
+                assert isinstance(exc.__cause__, OSError), exc.__cause__
+            else:
+                raise AssertionError("a failed cleanup was reported as confirmed")
+
+        assert transport._last_error == "media_teardown_not_confirmed"
+        assert removed == ["secret"], removed
+
+    asyncio.run(run())
+
+
+def test_two_cleanup_failures_keep_the_first_as_primary() -> None:
+    """The first removal failure stays primary; the second is only diagnosed."""
+
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 0.2
+
+        def secret() -> None:
+            raise PermissionError("secret first")
+
+        def sdp() -> None:
+            raise OSError("sdp second")
+
+        transport = _transport(media, Hass())
+        transport._teardown_secondary_error = None
+        with _runtime_files(media, secret, sdp):
+            try:
+                await transport.async_stop()
+            except media.ComelitMediaTransportError as exc:
+                cause = exc.__cause__
+                assert isinstance(cause, PermissionError), cause
+                assert str(cause) == "secret first", str(cause)
+            else:
+                raise AssertionError("a failed cleanup was reported as confirmed")
+
+        assert transport._teardown_secondary_error == "OSError"
+
+    asyncio.run(run())
+
+
+def test_cleanup_failure_through_the_run_once_finally_surfaces_the_error() -> None:
+    """A failing cleanup after a silent cycle raises instead of passing."""
+
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 0.2
+
+        def secret() -> None:
+            raise PermissionError("secret not writable")
+
+        transport = _transport(media, Hass())
+
+        async def silent_cycle() -> None:
+            return None
+
+        transport._async_run_cycle = silent_cycle
+        with _runtime_files(media, secret, lambda: None):
+            try:
+                await transport._async_run_once()
+            except PermissionError:
+                pass
+            else:
+                raise AssertionError("the cleanup failure was swallowed")
+
+        assert transport._last_error == "media_teardown_not_confirmed"
+
+    asyncio.run(run())
+
+
+def test_repeat_stop_after_a_failed_cleanup_does_not_confirm() -> None:
+    """The first stop fails, the second retries, the third may confirm."""
+
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 0.2
+        fail = {"on": True}
+        removed: list[str] = []
+
+        def secret() -> None:
+            if fail["on"]:
+                raise PermissionError("secret not writable")
+            removed.append("secret")
+
+        def sdp() -> None:
+            removed.append("sdp")
+
+        transport = _transport(media, Hass())
+        with _runtime_files(media, secret, sdp):
+            for attempt in (1, 2):
+                try:
+                    await transport.async_stop()
+                except media.ComelitMediaTransportError as exc:
+                    assert str(exc) == "media_teardown_not_confirmed"
+                else:
+                    raise AssertionError(f"stop {attempt} confirmed a failed cleanup")
+
+            fail["on"] = False
+            await transport.async_stop()
+
+        assert removed[-2:] == ["secret", "sdp"], removed
+
+    asyncio.run(run())
+
+
+def test_unconfirmed_teardown_blocks_unload_and_a_second_owner() -> None:
+    """A failed cleanup fails unload and refuses a new upstream owner."""
+
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 0.2
+        fail = {"on": True}
+
+        def secret() -> None:
+            if fail["on"]:
+                raise PermissionError("secret not writable")
+
+        transport = _transport(media, Hass())
+
+        # mirrors the unload contract: any failing teardown means "not unloaded"
+        unloaded = True
+
+        async def attempt(awaitable) -> None:
+            nonlocal unloaded
+            try:
+                await awaitable
+            except Exception:
+                unloaded = False
+
+        with _runtime_files(media, secret, lambda: None):
+            await attempt(transport.async_stop())
+            assert unloaded is False
+            assert transport._cleanup_confirmed(transport._cleanup_task) is False
+
+            try:
+                await transport.async_start("entrance")
+            except media.ComelitMediaTransportError as exc:
+                assert str(exc) == "media_teardown_not_confirmed", str(exc)
+            else:
+                raise AssertionError("a second owner was admitted after a failed teardown")
+
+            fail["on"] = False
+            await transport.async_stop()
+            # the retried cleanup is confirmed, so the start guard no longer
+            # refuses a new owner (same predicate async_start uses)
+            assert transport._cleanup_confirmed(transport._cleanup_task) is True
+
+    asyncio.run(run())
