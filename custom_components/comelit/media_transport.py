@@ -1318,9 +1318,9 @@ class ComelitEntranceMediaTransport:
             if not self._stopping:
                 _LOGGER.exception("Unexpected Comelit entrance media failure")
         finally:
-            pending_error = sys.exc_info()[1]
             self._media_active.clear()
             self._local_sdp_ready_event.clear()
+            pending_error = sys.exc_info()[1]
             process = self._process
             if process is None or process.returncode is not None:
                 self._process = None
