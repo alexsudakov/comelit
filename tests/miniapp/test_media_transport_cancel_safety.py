@@ -1332,3 +1332,81 @@ def test_a_second_stop_does_not_upgrade_a_failed_marker() -> None:
             media._touch_stop = original_touch
 
     asyncio.run(run())
+
+
+def test_a_late_marker_success_does_not_upgrade_a_negative_verdict() -> None:
+    """A join that timed out keeps its negative verdict, even if the job ends well.
+
+    The bound that failed is the proof the owner has; a later success of the
+    same job (observed by a second join) must not launder it into a release.
+    """
+
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 2.0
+        started = threading.Event()
+        release = threading.Event()
+
+        def touch() -> None:
+            started.set()
+            release.wait(3)
+
+        transport = _transport(media, Hass())
+        process = _LiveProcess(exit_after=0.05)
+        original_touch = media._touch_stop
+        media._touch_stop = touch
+        try:
+            with _runtime_files(media):
+                transport._process = process
+                stop = asyncio.create_task(transport.async_stop())
+                await _wait_started(started)
+                # a concurrent join whose own bound elapsed first
+                transport._stop_marker_confirmed = False
+                transport._stop_marker_error = TimeoutError("join bound")
+                release.set()
+                try:
+                    await stop
+                except media.ComelitMediaTransportError as exc:
+                    assert str(exc) == "media_teardown_not_confirmed", str(exc)
+                else:
+                    raise AssertionError(
+                        "a late marker success upgraded an unconfirmed release"
+                    )
+                assert transport._stop_marker_confirmed is False
+        finally:
+            media._touch_stop = original_touch
+
+    asyncio.run(run())
+
+
+def test_a_proven_release_is_not_retried_by_a_later_stop() -> None:
+    """Once the marker proved the release, a later stop must not re-signal it.
+
+    Re-opening the same signal lets a transient failure downgrade a healthy
+    release into an unconfirmed teardown the owner cannot recover from.
+    """
+
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 0.2
+        calls: list[int] = []
+
+        def touch() -> None:
+            calls.append(1)
+            raise PermissionError("marker dir read-only now")
+
+        transport = _transport(media, Hass())
+        process = _LiveProcess(exit_after=0.05)
+        original_touch = media._touch_stop
+        media._touch_stop = touch
+        transport._stop_marker_confirmed = True
+        try:
+            with _runtime_files(media):
+                transport._process = process
+                await transport.async_stop()
+                assert calls == [], f"the proven marker was re-sent: {calls}"
+                assert transport._stop_marker_confirmed is True
+        finally:
+            media._touch_stop = original_touch
+
+    asyncio.run(run())

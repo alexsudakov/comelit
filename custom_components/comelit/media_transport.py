@@ -1174,6 +1174,10 @@ class ComelitEntranceMediaTransport:
                 # marker would retry the same signal, not prove that the first
                 # attempt released the channel.
                 marker_error = getattr(self, "_stop_marker_error", None)
+            elif verdict is True:
+                # The release was already proven for this owner; a second write
+                # would only let a late failure downgrade a healthy release.
+                marker_error = None
             else:
                 try:
                     await self._async_run_stop_signal()
@@ -1191,7 +1195,7 @@ class ComelitEntranceMediaTransport:
                     self._stop_marker_error = exc
                     self._last_error = _MEDIA_STOP_MARKER_UNCONFIRMED_REASON
                 else:
-                    self._stop_marker_confirmed = True
+                    self._confirm_stop_marker()
             try:
                 await asyncio.wait_for(process.wait(), timeout=8)
             except TimeoutError:
@@ -1353,6 +1357,18 @@ class ComelitEntranceMediaTransport:
         self._stop_marker_confirmed = False
         self._stop_marker_error = error
         return False
+
+    def _confirm_stop_marker(self) -> None:
+        """Record a successful marker without overwriting a negative verdict.
+
+        A concurrent join can observe a late success of the same job after
+        another stop already recorded the failure its own bound produced; that
+        late write is not fresh proof for this owner, so ``False`` stays final.
+        """
+
+        if getattr(self, "_stop_marker_confirmed", None) is False:
+            return
+        self._stop_marker_confirmed = True
 
     def _stop_marker_unproven(self) -> bool:
         """True when a stop ran but never proved the upstream release.
@@ -1708,7 +1724,7 @@ class ComelitEntranceMediaTransport:
         """
 
         if process.returncode is None:
-            if self._stop_marker_verdict() is not False:
+            if self._stop_marker_verdict() is None:
                 try:
                     await self._async_run_stop_signal()
                 except Exception as exc:
@@ -1719,7 +1735,7 @@ class ComelitEntranceMediaTransport:
                     self._stop_marker_confirmed = False
                     self._stop_marker_error = exc
                 else:
-                    self._stop_marker_confirmed = True
+                    self._confirm_stop_marker()
             try:
                 await asyncio.wait_for(process.wait(), timeout=8)
             except TimeoutError:
