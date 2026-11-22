@@ -508,3 +508,32 @@ def test_cycle_teardown_survives_a_marker_timeout_and_keeps_the_original_error()
             media._touch_stop = original_touch
 
     asyncio.run(run())
+
+
+def test_a_failing_marker_does_not_skip_the_child_teardown() -> None:
+    """A filesystem error in the stop marker must not abort the teardown."""
+
+    async def run() -> None:
+        media = _load_component_module(str(ROOT), "media_transport")
+        media._EXECUTOR_JOIN_TIMEOUT_SECONDS = 0.2
+
+        def touch() -> None:
+            raise PermissionError("stop marker not writable")
+
+        transport = _transport(media, Hass())
+        process = _LiveProcess(exit_after=0.2)
+        original_touch = media._touch_stop
+        media._touch_stop = touch
+        try:
+            with _runtime_files(media):
+                transport._process = process
+                transport._last_error = "media_offer_timeout"
+
+                await transport._async_finish_cycle(process)
+
+                assert process.returncode == -15
+                assert transport._last_error == "media_offer_timeout"
+        finally:
+            media._touch_stop = original_touch
+
+    asyncio.run(run())

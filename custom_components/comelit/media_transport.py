@@ -1109,10 +1109,10 @@ class ComelitEntranceMediaTransport:
         if process is not None and process.returncode is None:
             try:
                 await self._async_run_stop_signal()
-            except ComelitMediaTransportError:
-                # The marker job outlived its bound: the child is still
-                # terminated below, and the unfinished marker keeps the
-                # teardown unconfirmed at the end of this stop.
+            except Exception:
+                # A marker job that failed or outlived its bound must not skip
+                # the child teardown: the child is still terminated below, and
+                # the marker failure is recorded instead of raised.
                 self._last_error = _MEDIA_STOP_MARKER_UNCONFIRMED_REASON
             try:
                 await asyncio.wait_for(process.wait(), timeout=8)
@@ -1491,7 +1491,10 @@ class ComelitEntranceMediaTransport:
         if process.returncode is None:
             try:
                 await self._async_run_stop_signal()
-            except ComelitMediaTransportError:
+            except Exception:
+                # Marker failures (including a filesystem error in _touch_stop)
+                # must not skip the child termination below or mask the cycle
+                # error already recorded in _last_error.
                 pass
             try:
                 await asyncio.wait_for(process.wait(), timeout=8)
