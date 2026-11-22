@@ -219,3 +219,62 @@ def test_concrete_transport_stop_rejects_stray_reader():
         except asyncio.CancelledError:
             pass
     asyncio.run(run())
+
+
+class UnconfirmedMarkerTransport:
+    """Transport whose stop marker failed: the channel is not proven released."""
+
+    def __init__(self):
+        self.active = False
+        self.start_calls = 0
+        self.stop_calls = 0
+
+    async def async_start(self, panel):
+        self.start_calls += 1
+        self.active = True
+
+    async def async_stop(self):
+        self.stop_calls += 1
+        self.active = False
+        # mirrors media_transport.async_stop() when _touch_stop failed
+        raise RuntimeError("media_teardown_not_confirmed")
+
+
+def test_an_unconfirmed_marker_stop_keeps_the_reopen_gate_closed():
+    """No inactive state, no listener resume, no second owner.
+
+    This is the physical failure of 2026-11-22: the helper stopped, the marker
+    was never confirmed, the session still reported a clean release and the
+    reopening camera was admitted onto a channel the device still held.
+    """
+
+    async def run():
+        media = _load_component_module(str(ROOT), "media_session")
+        listener = Listener()
+        transport = UnconfirmedMarkerTransport()
+        manager = media.ComelitMediaSessionManager(listener, transport)
+
+        await manager.async_acquire(panel="entrance", reason="camera")
+        assert manager.phase == media.MEDIA_PHASE_ACTIVE
+
+        await manager.async_release(reason="camera")
+
+        # fail closed: explicit error, not a false inactive
+        assert manager.phase == media.MEDIA_PHASE_ERROR, manager.phase
+        assert manager.status()["last_error"], manager.status()
+        # the listener is not resumed next to an unproven release
+        assert listener.resume_count == 0
+        assert listener.proofs == []
+
+        # and the reopen gate stays shut for a new upstream owner
+        try:
+            await manager.async_acquire(panel="entrance", reason="camera")
+        except media.ComelitMediaSessionError as exc:
+            assert str(exc) == "media_teardown_unconfirmed", str(exc)
+        else:
+            raise AssertionError(
+                "a new media owner was admitted after an unconfirmed stop"
+            )
+        assert transport.start_calls == 1
+
+    asyncio.run(run())
