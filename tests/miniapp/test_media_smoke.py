@@ -213,6 +213,7 @@ class FakeTransport:
         self.video_packet_count = 0
         self.video_forwarding = False
         self.marker_unproven = False
+        self.ring_observed = False
     def _stop_marker_unproven(self):
         return self.marker_unproven
     @property
@@ -440,4 +441,85 @@ def test_missing_rtp_after_clean_close_prevents_automatic_retry():
             assert events == ["open", "release"]
         finally:
             ms.MAX_WATCH_SECONDS = old
+    asyncio.run(run())
+
+
+def test_ring_arriving_during_smoke_must_not_count_as_success():
+    async def run():
+        budget, manager, sup, _, _, events = await runner()
+        call = {"state": "idle"}
+        cycle = ms.MediaSmokeCycle(
+            budget, manager, sup, FakeTransport(manager), FakeAttached(),
+            call_state=lambda: call["state"], media_child_absent=lambda: True,
+            installed_sha=lambda: "a" * 40,
+        )
+
+        class RingPacketTransport(FakeTransport):
+            def __init__(self, owner):
+                self._reads = 0
+                self._count = 0
+                super().__init__(owner)
+
+            @property
+            def video_packet_count(self):
+                self._reads += 1
+                if self._reads == 2:
+                    call["state"] = "ringing"
+                    self.ring_observed = True
+                    self._count = 1
+                return self._count
+
+            @video_packet_count.setter
+            def video_packet_count(self, value):
+                self._count = value
+
+        cycle._transport = RingPacketTransport(manager)
+        cycle._transport.video_forwarding = True
+        out = await cycle.async_run(T1)
+        assert out["open"] == "PASS"
+        assert out["rtp"] == "NOT_PROVEN"
+        assert out["close"] == "UNCONFIRMED"
+        assert (await budget.async_status())["inflight"] is True
+        assert events == ["open", "release"]
+        assert manager.force_stops == 0
+
+    asyncio.run(run())
+
+
+def test_attached_owner_race_during_media_observation_is_not_success():
+    async def run():
+        budget, manager, sup, _, _, events = await runner()
+        cycle = ms.MediaSmokeCycle(
+            budget, manager, sup, FakeTransport(manager), FakeAttached(),
+            call_state=lambda: "idle", media_child_absent=lambda: True,
+            installed_sha=lambda: "a" * 40,
+        )
+
+        class AttachedPacketTransport(FakeTransport):
+            def __init__(self, owner):
+                self._reads = 0
+                self._count = 0
+                super().__init__(owner)
+
+            @property
+            def video_packet_count(self):
+                self._reads += 1
+                if self._reads == 2:
+                    previous = sup.status
+                    sup.status = lambda: {**previous(), "attached_media_busy": True}
+                    self._count = 1
+                return self._count
+
+            @video_packet_count.setter
+            def video_packet_count(self, value):
+                self._count = value
+
+        cycle._transport = AttachedPacketTransport(manager)
+        cycle._transport.video_forwarding = True
+        out = await cycle.async_run(T1)
+        assert out["rtp"] == "NOT_PROVEN"
+        assert (await budget.async_status())["inflight"] is True
+        assert events == ["open", "release"]
+        assert manager.force_stops == 0
+
     asyncio.run(run())
