@@ -409,6 +409,10 @@ class ComelitMiniAppController:
     async def _ensure_miniapp_attached_resource_locked(self) -> None:
         resource = self._miniapp_attached_resource
         if resource is not None:
+            # A previously started local stream is not proof that the native
+            # inbound-call channel is still open. Never join a stale owner.
+            if not getattr(resource.session, "active", False):
+                raise MiniAppOperationError("attached_media_not_active")
             resource.refcount += 1
             _LOGGER.info(
                 "miniapp_attached_stream_reused miniapp_attached_viewers=%s "
@@ -424,6 +428,7 @@ class ComelitMiniAppController:
             await session.async_acquire(
                 panel="entrance",
                 reason=_MINIAPP_ATTACHED_VIEW_REASON,
+                require_active=True,
             )
             lease_acquired = True
             await provider.async_acquire_consumer(_MINIAPP_ATTACHED_VIEW_REASON)
@@ -473,7 +478,11 @@ class ComelitMiniAppController:
                     _MINIAPP_ATTACHED_CONSUMER_NOT_READY
                 ) from exc
             if isinstance(exc, ComelitAttachedMediaError):
-                raise MiniAppOperationError("attached_media_unavailable") from exc
+                raise MiniAppOperationError(
+                    "attached_media_not_active"
+                    if str(exc) == "attached_media_not_active"
+                    else "attached_media_unavailable"
+                ) from exc
             raise
 
         self._miniapp_attached_resource = _MiniAppAttachedResource(
@@ -1293,6 +1302,11 @@ class ComelitMiniAppController:
 
         if self._is_entrance_camera_entity(entity_id):
             async with self._attached_viewer_lock:
+                resource = self._miniapp_attached_resource
+                if resource is None or not getattr(
+                    resource.session, "active", False
+                ):
+                    raise MiniAppOperationError("attached_media_not_active")
                 upstream_master = self._miniapp_attached_hls_master_path_locked()
             if upstream_master is None:
                 raise MiniAppOperationError("attached_media_stream_unavailable")
