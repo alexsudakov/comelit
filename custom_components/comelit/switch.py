@@ -106,9 +106,19 @@ class ComelitEntranceMediaSwitch(SwitchEntity):
     async def async_turn_on(self, **kwargs: Any) -> None:
         async with self._lease_lock:
             if self._owns_live_lease():
+                if not self._manager.active:
+                    raise HomeAssistantError(
+                        "Cannot start Comelit media: owned lease is not active"
+                    )
                 return
-            # Expiry or a failed session may already have discarded our lease.
-            # Never release another viewer merely because the switch was on.
+            if self._lease_held:
+                # A stale lease may only be forgotten after a confirmed idle
+                # transition. Do not overlap an unconfirmed old teardown.
+                status = self._manager.status()
+                if status.get("phase") != "inactive" or status.get("leases") != {}:
+                    raise HomeAssistantError(
+                        "Cannot start Comelit media: previous lease unconfirmed"
+                    )
             self._lease_held = False
             try:
                 await self._manager.async_acquire(panel="entrance", reason="ha_switch")
@@ -126,11 +136,24 @@ class ComelitEntranceMediaSwitch(SwitchEntity):
             if self._owns_live_lease():
                 try:
                     # Do NOT force-stop: camera/WebCodecs may own other leases.
-                    await self._manager.async_release(reason="ha_switch")
+                    status = await self._manager.async_release(reason="ha_switch")
                 except ComelitMediaSessionError as exc:
                     # Keep ownership until a subsequent call can reconcile it.
                     raise HomeAssistantError(
                         f"Cannot stop Comelit entrance media session safely: {exc}"
                     ) from exc
-            self._lease_held = False
+                self._lease_held = False
+                if status.get("phase") == "error":
+                    raise HomeAssistantError(
+                        "Cannot confirm Comelit media teardown after switch release"
+                    )
+            else:
+                # A disappeared lease is only safe to forget after the manager
+                # proved the earlier session has reached INACTIVE.
+                status = self._manager.status()
+                if status.get("phase") != "inactive" or status.get("leases") != {}:
+                    raise HomeAssistantError(
+                        "Cannot confirm Comelit media teardown after lease loss"
+                    )
+                self._lease_held = False
         self.async_write_ha_state()
