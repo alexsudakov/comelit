@@ -710,3 +710,208 @@ def test_receipts_are_bounded_without_resetting_historical_task_quota():
         assert len(backend.data["tasks"]) == ms.MAX_RECEIPTS + 2
         assert (await budget.async_receipts("t_00000001")) == []
     asyncio.run(run())
+
+
+def test_real_media_session_manager_smoke_open_and_own_release():
+    """Use the real manager state machine with fake hardware boundaries."""
+    import importlib.util
+    actual_path = SRC.with_name("media_session.py")
+    module_spec = importlib.util.spec_from_file_location(
+        "media_smoke_real_manager_test", actual_path
+    )
+    assert module_spec and module_spec.loader
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+
+    class Listener:
+        def __init__(self):
+            self.media_paused = False
+            self.ready = True
+            self.resumed = 0
+
+        @property
+        def attached_media_busy(self):
+            return False
+
+        async def async_pause_for_media(self):
+            self.media_paused = True
+            self.ready = False
+
+        async def async_resume_after_media(self):
+            self.media_paused = False
+            self.ready = True
+            self.resumed += 1
+
+        def status(self):
+            return {
+                "state": "ready" if self.ready else "paused",
+                "listener_ready": self.ready,
+                "runtime_running": self.ready,
+                "supervisor_running": True,
+                "media_paused": self.media_paused,
+                "recovery_pending": False,
+                "attached_media_busy": False,
+            }
+
+    class Transport:
+        def __init__(self):
+            self.active = False
+            self.last_error = None
+            self.last_native_exit_code = None
+            self.video_forwarding = False
+            self.ring_observed = False
+            self._reads = 0
+            self.stop_calls = 0
+
+        @property
+        def video_packet_count(self):
+            if not self.active:
+                return 0
+            self._reads += 1
+            return 0 if self._reads == 1 else 1
+
+        def _stop_marker_unproven(self):
+            return False
+
+        async def async_start(self, panel):
+            assert panel == "entrance"
+            self.active = True
+            self.video_forwarding = True
+
+        async def async_stop(self):
+            self.stop_calls += 1
+            self.active = False
+            self.video_forwarding = False
+
+    async def run():
+        listener = Listener()
+        transport = Transport()
+        manager = module.ComelitMediaSessionManager(
+            listener, transport, transport_watch_interval_seconds=2.0
+        )
+        _, budget = await new_budget()
+        cycle = ms.MediaSmokeCycle(
+            budget, manager, listener, transport, FakeAttached(),
+            call_state=lambda: "idle",
+            media_child_absent=lambda: not transport.active,
+            installed_sha=lambda: "a" * 40,
+        )
+        outcome = await asyncio.wait_for(cycle.async_run(T1), 3.0)
+        assert outcome["status"] == "PASS"
+        assert outcome["open"] == "PASS"
+        assert outcome["rtp"] == "PASS"
+        assert outcome["close"] == "CONFIRMED_LOCAL"
+        assert manager.phase == module.MEDIA_PHASE_INACTIVE
+        assert manager.status()["leases"] == {}
+        assert not manager.active
+        assert not transport.active
+        assert transport.stop_calls == 1
+        assert listener.resumed == 1
+        assert listener.ready and not listener.media_paused
+        receipts = await budget.async_receipts(T1)
+        assert receipts[-1]["status"] == "PASS"
+        assert (await budget.async_status())["inflight"] is False
+
+    asyncio.run(run())
+
+
+def test_caller_cancellation_during_real_manager_open_does_not_cancel_owner():
+    """External cancellation may not abandon the manager's physical owner."""
+    import importlib.util
+    actual_path = SRC.with_name("media_session.py")
+    module_spec = importlib.util.spec_from_file_location(
+        "media_smoke_real_cancel_test", actual_path
+    )
+    assert module_spec and module_spec.loader
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+
+    class Listener:
+        def __init__(self):
+            self.media_paused = False
+            self.ready = True
+
+        @property
+        def attached_media_busy(self):
+            return False
+
+        async def async_pause_for_media(self):
+            self.media_paused = True
+            self.ready = False
+
+        async def async_resume_after_media(self):
+            self.media_paused = False
+            self.ready = True
+
+        def status(self):
+            return {
+                "state": "ready" if self.ready else "paused",
+                "listener_ready": self.ready,
+                "runtime_running": self.ready,
+                "supervisor_running": True,
+                "media_paused": self.media_paused,
+                "recovery_pending": False,
+                "attached_media_busy": False,
+            }
+
+    class Transport:
+        def __init__(self):
+            self.active = False
+            self.last_error = None
+            self.last_native_exit_code = None
+            self.video_packet_count = 0
+            self.video_forwarding = False
+            self.ring_observed = False
+            self.started = asyncio.Event()
+            self.allow_start = asyncio.Event()
+            self.stop_calls = 0
+
+        def _stop_marker_unproven(self):
+            return False
+
+        async def async_start(self, panel):
+            self.started.set()
+            await self.allow_start.wait()
+            self.active = True
+
+        async def async_stop(self):
+            self.stop_calls += 1
+            self.active = False
+
+    async def run():
+        listener = Listener()
+        transport = Transport()
+        manager = module.ComelitMediaSessionManager(
+            listener, transport, transport_watch_interval_seconds=2.0
+        )
+        _, budget = await new_budget()
+        cycle = ms.MediaSmokeCycle(
+            budget, manager, listener, transport, FakeAttached(),
+            call_state=lambda: "idle",
+            media_child_absent=lambda: not transport.active,
+            installed_sha=lambda: "a" * 40,
+        )
+        before = ms.MAX_WATCH_SECONDS
+        ms.MAX_WATCH_SECONDS = 0
+        try:
+            caller = asyncio.create_task(cycle.async_run(T1))
+            await asyncio.wait_for(transport.started.wait(), 2.0)
+            caller.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+            assert cycle._cycle is not None and not cycle._cycle.done()
+            transport.allow_start.set()
+            outcome = await asyncio.wait_for(cycle._cycle, 3.0)
+            assert outcome["status"] == "FAIL"  # RTP was not proven
+            assert outcome["open"] == "PASS"
+            assert outcome["close"] == "CONFIRMED_LOCAL"
+            assert manager.phase == module.MEDIA_PHASE_INACTIVE
+            assert manager.status()["leases"] == {}
+            assert transport.stop_calls == 1
+            assert listener.ready and not listener.media_paused
+            assert (await budget.async_status())["inflight"] is True
+        finally:
+            transport.allow_start.set()
+            ms.MAX_WATCH_SECONDS = before
+
+    asyncio.run(run())
