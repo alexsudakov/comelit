@@ -151,13 +151,11 @@ def test_webcodecs_cancel_reason_is_correct_in_stream_and_teardown():
             return self.value
 
     cases = (
-        # Reason, watcher-confirmed close, aiohttp-confirmed close, result.
-        ("client_close", False, False, "cancelled"),
-        ("client_close", False, True, "client_close"),
-        ("client_close", True, False, "client_close"),
-        ("client_close", True, True, "client_close"),
-        ("call_handoff", False, False, "call_handoff"),
-        ("source_open_failed", False, False, "source_open_failed"),
+        # Without receive evidence, aiohttp.closed is NOT peer provenance.
+        ("client_close", False, "cancelled"),
+        ("client_close", True, "client_close"),
+        ("call_handoff", False, "call_handoff"),
+        ("source_open_failed", False, "source_open_failed"),
     )
     for stmt in guards:
         code = compile(
@@ -167,13 +165,11 @@ def test_webcodecs_cancel_reason_is_correct_in_stream_and_teardown():
             "<webcodecs-cancel-reason>",
             "exec",
         )
-        for reason, closed, socket_closed, expected in cases:
+        for reason, watcher_confirmed, expected in cases:
             scope = {
                 "reason": reason,
-                "client_closed": Closed(closed),
-                "websocket": Closed(socket_closed),
+                "client_closed": Closed(watcher_confirmed),
             }
-            scope["websocket"].closed = socket_closed
             exec(code, scope)
             assert scope["reason"] == expected
 
