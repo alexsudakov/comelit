@@ -178,3 +178,182 @@ def test_actual_webcodecs_teardown_cancel_after_server_socket_close(
         "phase=handler_cancelled" in record.getMessage()
         for record in caplog.records
     )
+
+
+
+def test_actual_teardown_cancel_with_socket_open_is_not_client_close(
+    monkeypatch, caplog
+):
+    """The second cancellation guard must execute with closed=False."""
+    source = _PausedSource()
+
+    class _SendStallsBeforeRtp(_RaceSocket):
+        instances = []
+
+        async def send_json(self, payload):
+            if payload.get("type") == "source_open":
+                await asyncio.Event().wait()
+            await super().send_json(payload)
+
+    view, token, manager, transport = _setup(
+        monkeypatch, _SendStallsBeforeRtp, source
+    )
+    monkeypatch.setattr(
+        base.views_mod.webcodecs_mod,
+        "WEBCODECS_SEND_TIMEOUT_SECONDS",
+        0.01,
+    )
+    release_started = asyncio.Event()
+    release_allowed = asyncio.Event()
+    release_finished = asyncio.Event()
+    original_release = manager.async_release
+
+    async def delayed_release(*, reason):
+        release_started.set()
+        await release_allowed.wait()
+        result = await original_release(reason=reason)
+        release_finished.set()
+        return result
+
+    monkeypatch.setattr(manager, "async_release", delayed_release)
+
+    async def run():
+        task = asyncio.create_task(
+            view.get(base._mse_request(view.controller, token), "camera.comelit_entrance")
+        )
+        try:
+            await asyncio.wait_for(release_started.wait(), 2)
+            socket = _SendStallsBeforeRtp.instances[-1]
+            assert not socket.closed
+            assert socket.watch_started.is_set()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            return socket
+        finally:
+            release_allowed.set()
+            await asyncio.wait_for(release_finished.wait(), 2)
+
+    with caplog.at_level(logging.INFO, logger="custom_components.comelit.miniapp.views"):
+        socket = asyncio.run(run())
+
+    assert not socket.closed
+    assert source.closed
+    assert manager.release_calls == ["miniapp_webcodecs"]
+    assert manager.phase == "inactive"
+    assert transport.active is False
+    summaries = [
+        record.getMessage() for record in caplog.records
+        if "COMELIT_MINIAPP_WEBCODECS_SUMMARY" in record.getMessage()
+    ]
+    assert len(summaries) == 1
+    assert "reason=cancelled" in summaries[0]
+    assert any(
+        "phase=handler_cancelled" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_server_initiated_websocket_close_does_not_forge_client_close(
+    monkeypatch, caplog
+):
+    """The receive watcher must not interpret our close() as peer evidence."""
+
+    class _FailingSource(_PausedSource):
+        async def __anext__(self):
+            self.read_started.set()
+            raise base.webcodecs_mod.WebCodecsSourceError("source_open_failed")
+
+    class _ServerCloseWakesWatcher(_RaceSocket):
+        instances = []
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.server_closed = asyncio.Event()
+
+        async def close(self):
+            await super().close()
+            self.server_closed.set()
+
+        async def __anext__(self):
+            self.watch_started.set()
+            await self.server_closed.wait()
+            raise StopAsyncIteration
+
+    source = _FailingSource()
+    view, token, manager, transport = _setup(
+        monkeypatch, _ServerCloseWakesWatcher, source
+    )
+
+    async def run():
+        await asyncio.wait_for(
+            view.get(base._mse_request(view.controller, token), "camera.comelit_entrance"),
+            timeout=2,
+        )
+        return _ServerCloseWakesWatcher.instances[-1]
+
+    with caplog.at_level(logging.INFO, logger="custom_components.comelit.miniapp.views"):
+        socket = asyncio.run(run())
+
+    assert socket.closed
+    assert socket.server_closed.is_set()
+    assert socket.watch_started.is_set()
+    assert source.closed
+    assert manager.release_calls == ["miniapp_webcodecs"]
+    assert manager.phase == "inactive"
+    assert transport.active is False
+    logs = [record.getMessage() for record in caplog.records]
+    summaries = [s for s in logs if "COMELIT_MINIAPP_WEBCODECS_SUMMARY" in s]
+    assert len(summaries) == 1
+    assert "reason=source_open_failed" in summaries[0]
+    assert not any(
+        "COMELIT_MINIAPP_WEBCODECS" in s and "event=client_close" in s
+        for s in logs
+    )
+
+
+def test_actual_received_close_frame_is_proven_client_close(monkeypatch, caplog):
+    """A receive-side CLOSE is evidence even if aiohttp.closed is false."""
+    source = _PausedSource()
+
+    class _PeerCloseFrameSocket(_RaceSocket):
+        instances = []
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.sent_close_frame = False
+
+        async def __anext__(self):
+            self.watch_started.set()
+            if self.sent_close_frame:
+                raise StopAsyncIteration
+            self.sent_close_frame = True
+            return base._FakeWSMessage(base.views_mod.WSMsgType.CLOSE)
+
+    view, token, manager, transport = _setup(
+        monkeypatch, _PeerCloseFrameSocket, source
+    )
+
+    async def run():
+        await asyncio.wait_for(
+            view.get(base._mse_request(view.controller, token), "camera.comelit_entrance"),
+            timeout=2,
+        )
+        return _PeerCloseFrameSocket.instances[-1]
+
+    with caplog.at_level(logging.INFO, logger="custom_components.comelit.miniapp.views"):
+        socket = asyncio.run(run())
+
+    assert socket.sent_close_frame
+    assert source.closed
+    assert manager.release_calls == ["miniapp_webcodecs"]
+    assert manager.phase == "inactive"
+    assert transport.active is False
+    logs = [record.getMessage() for record in caplog.records]
+    summaries = [s for s in logs if "COMELIT_MINIAPP_WEBCODECS_SUMMARY" in s]
+    assert len(summaries) == 1
+    assert "reason=client_close" in summaries[0]
+    assert any(
+        "COMELIT_MINIAPP_WEBCODECS" in s and "event=client_close" in s
+        for s in logs
+    )
