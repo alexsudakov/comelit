@@ -254,8 +254,9 @@ def test_actual_teardown_cancel_with_socket_open_is_not_client_close(
     )
 
 
+@pytest.mark.parametrize("fail_error_send", [False, True])
 def test_server_initiated_websocket_close_does_not_forge_client_close(
-    monkeypatch, caplog
+    monkeypatch, caplog, fail_error_send
 ):
     """The receive watcher must not interpret our close() as peer evidence."""
 
@@ -270,6 +271,11 @@ def test_server_initiated_websocket_close_does_not_forge_client_close(
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self.server_closed = asyncio.Event()
+
+        async def send_json(self, payload):
+            if fail_error_send and payload.get("type") == "error":
+                raise ConnectionResetError("error-send interrupted")
+            await super().send_json(payload)
 
         async def close(self):
             await super().close()
