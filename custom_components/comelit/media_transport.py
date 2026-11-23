@@ -499,6 +499,8 @@ class ComelitEntranceMediaTransport:
         oauth: ComelitOAuthManager,
         ring_shadow: RingShadowController | None = None,
     ) -> None:
+        from .ring_emit import MediaRingEmitter, RingMarkerBatcher
+
         self._hass = hass
         self._entry = entry
         self._session = session
@@ -554,6 +556,8 @@ class ComelitEntranceMediaTransport:
         self._door_result_future: asyncio.Future[str] | None = None
         self._door_diagnostics: dict[str, object] = {}
         self._shadow_hook = RingShadowHook(ring_shadow, SHADOW_OWNER_MEDIA)
+        self._ring_emitter = MediaRingEmitter(hass)
+        self._ring_batcher = RingMarkerBatcher()
         self._ring_episode = RingEpisodeLedger()
         attach = getattr(ring_shadow, "attach_ring_episode", None)
         if callable(attach):
@@ -1120,6 +1124,9 @@ class ComelitEntranceMediaTransport:
                 T04_TRANSPORT_START_BEGIN, asyncio.get_running_loop().time()
             )
         self._shadow_hook.note_state("media_transport_start")
+        # A new media session starts with no remembered ring frame tokens.
+        self._ring_batcher.reset()
+        self._ring_emitter.reset()
         self._task = self._entry.async_create_background_task(
             self._hass,
             self._async_run_once(),
@@ -1810,6 +1817,16 @@ class ComelitEntranceMediaTransport:
                     await process.wait()
         await self._async_stop_reader()
 
+    def _observe_ring_emit_line(self, line: str | None) -> None:
+        """Form one bounded media-owner ring batch from native stdout."""
+        batcher = getattr(self, "_ring_batcher", None)
+        emitter = getattr(self, "_ring_emitter", None)
+        if batcher is None or emitter is None:
+            return
+        batch = batcher.feed(line)
+        if batch is not None:
+            emitter.emit_from_markers(batch)
+
     async def _async_read_output(self, process: asyncio.subprocess.Process) -> None:
         if process.stdout is None:
             raise ComelitMediaTransportError("media_native_stdout_missing")
@@ -1820,10 +1837,12 @@ class ComelitEntranceMediaTransport:
         while True:
             raw = await process.stdout.readline()
             if not raw:
+                self._observe_ring_emit_line(shadow_previous_line)
                 self._shadow_hook.observe_line(shadow_previous_line)
                 return
             line = raw.decode("utf-8", errors="replace").strip()
             if shadow_previous_line is not None:
+                self._observe_ring_emit_line(shadow_previous_line)
                 self._shadow_hook.observe_line(shadow_previous_line)
             shadow_previous_line = line
             observation = getattr(self, "_ring_observation", None)
