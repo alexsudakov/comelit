@@ -198,7 +198,8 @@ class FakeSupervisor:
     def status(self):
         return {"state": "ready" if self.ready else "error", "listener_ready": self.ready,
                 "runtime_running": self.ready, "supervisor_running": self.ready,
-                "media_paused": not self.ready, "recovery_pending": False}
+                "media_paused": not self.ready, "recovery_pending": False,
+                "attached_media_busy": False}
 
 
 class FakeAttached:
@@ -211,6 +212,9 @@ class FakeTransport:
         self.manager = mgr
         self.video_packet_count = 0
         self.video_forwarding = False
+        self.marker_unproven = False
+    def _stop_marker_unproven(self):
+        return self.marker_unproven
     @property
     def active(self):
         return self.manager.active
@@ -402,4 +406,17 @@ def test_live_viewer_race_is_fail_closed_not_force_stopped():
             assert (await budget.async_status())["inflight"] is True
         finally:
             ms.MAX_WATCH_SECONDS = old
+    asyncio.run(run())
+
+
+def test_preflight_rejects_native_attached_owner_and_unproven_stop_marker():
+    async def run():
+        _, m, sup, transport, r, events = await runner()
+        previous = sup.status
+        sup.status = lambda: {**previous(), "attached_media_busy": True}
+        assert (await r.async_preflight())["ready"] is False
+        sup.status = previous
+        transport.marker_unproven = True
+        assert (await r.async_preflight())["ready"] is False
+        assert events == []
     asyncio.run(run())
