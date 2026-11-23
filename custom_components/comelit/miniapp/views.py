@@ -1078,12 +1078,28 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                                 code,
                             )
                         )
-                    except Exception:
+                    except Exception as exc:
                         send_source_eof = False
-                        _LOGGER.warning(
-                            "Comelit WebCodecs source failed unexpectedly",
-                            exc_info=True,
-                        )
+                        # On a proven call handoff PyAV may interrupt a
+                        # blocked read when the upstream transport closes.
+                        # It is a normal source terminal, not a camera fault.
+                        handoff = (
+                            self.controller.attached_call_handoff_for_current_session()
+                            if attached_webcodecs
+                            else self.controller.entrance_ring_handoff_for_current_session()
+                        ) if target.kind == "entrance" else False
+                        if webcodecs_mod.is_expected_pyav_handoff_exit(
+                            exc, handoff=handoff
+                        ):
+                            _LOGGER.info(
+                                "Comelit WebCodecs source terminal "
+                                "terminal_cause=source_transport_closed"
+                            )
+                        else:
+                            _LOGGER.warning(
+                                "Comelit WebCodecs source failed unexpectedly",
+                                exc_info=True,
+                            )
                         await queue.put(
                             (
                                 "error",
@@ -1339,17 +1355,6 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                             )
                         )
                         source_task.add_done_callback(_consume_task_result)
-                log_event("session_close")
-                _LOGGER.info(
-                    webcodecs_mod.webcodecs_summary_line(
-                        entity_id,
-                        units=units,
-                        keyframes=keyframes,
-                        bytes_sent=bytes_sent,
-                        errors=errors,
-                        reason=reason,
-                    )
-                )
             except asyncio.CancelledError:
                 # The release may still be running detached; retrieve its late
                 # result so a teardown failure cannot surface as an unhandled
@@ -1371,6 +1376,21 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                     )
                 )
                 raise
+            finally:
+                # Cancellation of the handler used to skip session_close and
+                # WEBCODECS_SUMMARY. Emit both synchronously, exactly once,
+                # even if the release or child join was interrupted.
+                log_event("session_close")
+                _LOGGER.info(
+                    webcodecs_mod.webcodecs_summary_line(
+                        entity_id,
+                        units=units,
+                        keyframes=keyframes,
+                        bytes_sent=bytes_sent,
+                        errors=errors,
+                        reason=reason,
+                    )
+                )
 
         return websocket
 
