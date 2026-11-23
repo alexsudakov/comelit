@@ -150,7 +150,7 @@ def test_actual_webcodecs_teardown_cancel_preserves_socket_close(
             await asyncio.wait_for(release_started.wait(), 2)
             socket = _SocketClosedOnSourceReady.instances[-1]
             assert socket.closed
-            assert socket.watch_started.is_set()
+            await asyncio.wait_for(socket.watch_started.wait(), 2)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
