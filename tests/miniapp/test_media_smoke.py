@@ -915,3 +915,74 @@ def test_caller_cancellation_during_real_manager_open_does_not_cancel_owner():
             ms.MAX_WATCH_SECONDS = before
 
     asyncio.run(run())
+
+
+def test_noncooperative_open_returns_bounded_caller_and_seals_late_success():
+    """Late success after a stuck manager recovery cannot unlock next attempt."""
+    async def run():
+        budget, manager, _, transport, cycle, events = await runner()
+        started = asyncio.Event()
+        complete_start = asyncio.Event()
+        observed_cancel = asyncio.Event()
+        old_open = ms.MAX_OPEN_SECONDS
+        old_watch = ms.MAX_WATCH_SECONDS
+        old_wall = ms.MAX_CYCLE_WALL_SECONDS
+        ms.MAX_OPEN_SECONDS = 0.01
+        ms.MAX_WATCH_SECONDS = 0.2
+        ms.MAX_CYCLE_WALL_SECONDS = 0.03
+
+        async def stubborn_open(*, panel, reason):
+            events.append("open")
+            started.set()
+            try:
+                await complete_start.wait()
+            except asyncio.CancelledError:
+                # Real manager startup recovery can defer cancellation.
+                observed_cancel.set()
+                await complete_start.wait()
+            manager.phase = "active"
+            manager.leases[reason] = 1
+            return manager.status()
+
+        manager.async_acquire = stubborn_open
+        transport.video_forwarding = True
+
+        async def give_late_packet():
+            await complete_start.wait()
+            await asyncio.sleep(0.01)
+            transport.video_packet_count = 1
+
+        packet_task = asyncio.create_task(give_late_packet())
+        try:
+            with pytest.raises(ms.SmokeBlocked, match="smoke_caller_deadline"):
+                await asyncio.wait_for(cycle.async_run(T1), 0.5)
+            assert started.is_set()
+            assert observed_cancel.is_set()
+            assert cycle._cycle is not None and not cycle._cycle.done()
+            assert (await budget.async_status())["inflight"] is True
+            with pytest.raises(ms.SmokeBlocked, match="already_running"):
+                await cycle.async_run(T2)
+
+            # Allow the original manager owner (not a second controller) to
+            # complete its late OPEN, observe video, and release its own lease.
+            complete_start.set()
+            late = await asyncio.wait_for(cycle._cycle, 1.0)
+            await packet_task
+            assert late["open"] == "PASS"
+            assert late["rtp"] == "PASS"
+            assert late["close"] == "CONFIRMED_LOCAL"
+            assert late["status"] == "FAIL"
+            assert manager.leases == {}
+            assert manager.force_stops == 0
+            assert (await budget.async_status())["inflight"] is True
+            assert (await budget.async_receipts(T1))[-1]["status"] == "FAIL"
+            with pytest.raises(ms.SmokeBlocked, match="inflight"):
+                await cycle.async_run(T2)
+        finally:
+            complete_start.set()
+            ms.MAX_OPEN_SECONDS = old_open
+            ms.MAX_WATCH_SECONDS = old_watch
+            ms.MAX_CYCLE_WALL_SECONDS = old_wall
+            await packet_task
+
+    asyncio.run(run())
