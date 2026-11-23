@@ -29,6 +29,12 @@ MAX_OPEN_SECONDS = 45
 MAX_WATCH_SECONDS = 15
 MAX_CLOSE_SECONDS = 45
 MAX_STORE_IO_SECONDS = 5
+# Bounds caller wait, NOT physical teardown. Owner task stays tracked and
+# durable inflight quota stays locked if its deadline expires.
+MAX_CYCLE_WALL_SECONDS = (
+    MAX_OPEN_SECONDS + MAX_WATCH_SECONDS + MAX_CLOSE_SECONDS
+    + 6 * MAX_STORE_IO_SECONDS + 10
+)
 
 # All budget instances in one HA Core event loop must share one serializer
 # and one sticky uncertain-write seal. Recreating a Budget must not evade a
@@ -354,6 +360,7 @@ class MediaSmokeCycle:
         self._installed_sha = installed_sha
         self._cycle: asyncio.Task[dict[str, object]] | None = None
         self._release: asyncio.Task[object] | None = None
+        self._caller_timed_out = False
 
     def _idle(self) -> bool:
         m = self._manager.status()
@@ -425,9 +432,22 @@ class MediaSmokeCycle:
             self._cycle.result()  # observe any previous unexpected failure
         if self._release is not None and not self._release.done():
             raise SmokeBlocked("smoke_release_inflight")
+        self._caller_timed_out = False
         task = asyncio.create_task(self._run_owned(task_id), name="comelit_media_smoke_owned")
         self._cycle = task
-        return await asyncio.shield(task)
+        try:
+            # Unlike asyncio.timeout around manager.async_acquire, wait_for on
+            # SHIELD bounds this caller even when manager recovery suppresses
+            # cancellation. We must not cancel the sole media lifecycle owner.
+            return await asyncio.wait_for(
+                asyncio.shield(task), timeout=MAX_CYCLE_WALL_SECONDS
+            )
+        except TimeoutError as exc:
+            # Never issue a second OPEN or turn a late clean close into PASS.
+            # The owned task is still tracked, and its durable reservation
+            # stays INFLIGHT when it eventually reaches terminal cleanup.
+            self._caller_timed_out = True
+            raise SmokeBlocked("smoke_caller_deadline_owner_still_running") from exc
 
     async def _run_owned(self, task_id: str) -> dict[str, object]:
         pre = await self.async_preflight()
@@ -497,6 +517,10 @@ class MediaSmokeCycle:
                 # Keep persistent inflight reservation; NEVER unlock after a
                 # failed/unknown close, even if a late release task finishes.
                 pass
+            # A caller timeout is a negative verdict even if the previously
+            # in-flight owner eventually succeeds at a much later time.
+            if self._caller_timed_out:
+                outcome["status"] = "FAIL"
             try:
                 await self._budget.async_record_result(task_id, outcome)
             except (Exception, asyncio.CancelledError):
