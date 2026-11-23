@@ -206,11 +206,31 @@ async function main() {
       '<div id="comelitCard"></div><div id="startupStatus"></div>' +
       '<div id="fatalError"></div>',
     );
-    await rejectedPage.addScriptTag({ path: hostPath });
     await rejectedPage.evaluate(() => {
       window.__attachedEvents = [];
+      window.Telegram = {
+        WebApp: { initData: "synthetic", ready() {}, expand() {} },
+      };
       window.fetch = async (url, options) => {
         const path = String(url);
+        if (path.includes("/miniapp/session")) {
+          return { ok: true, status: 200, json: async () => ({}) };
+        }
+        if (path.includes("/miniapp/bootstrap")) {
+          return {
+            ok: true, status: 200,
+            json: async () => {
+              window.__bootstrapReady = true;
+              return {
+                entity_registry: [{
+                  entity_id: "camera.comelit_entrance",
+                  platform: "comelit",
+                  unique_id: "comelit_entrance_camera",
+                }],
+              };
+            },
+          };
+        }
         if (path.includes("/attached-viewer")) {
           window.__attachedEvents.push(
             JSON.parse(options?.body || "{}").action,
@@ -222,6 +242,10 @@ async function main() {
         }
         return { ok: false, status: 409 };
       };
+    });
+    await rejectedPage.addScriptTag({ path: hostPath });
+    await rejectedPage.waitForFunction(() => window.__bootstrapReady === true);
+    await rejectedPage.evaluate(() => {
       const Viewer = customElements.get("miniapp-picture-entity");
       Viewer.prototype._openHls = function () {
         window.__attachedEvents.push("hls-open");
