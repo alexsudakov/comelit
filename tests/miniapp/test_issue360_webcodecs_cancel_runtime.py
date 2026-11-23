@@ -364,3 +364,45 @@ def test_actual_received_close_frame_is_proven_client_close(monkeypatch, caplog)
         "COMELIT_MINIAPP_WEBCODECS" in s and "event=client_close" in s
         for s in logs
     )
+
+
+@pytest.mark.parametrize(
+    ("invalid_start", "expected"),
+    [(True, "invalid_webcodecs_command"), (False, "source_not_h264_rtsp")],
+)
+def test_server_reject_reason_is_in_actual_summary(
+    monkeypatch, caplog, invalid_start, expected
+):
+    class Socket(_RaceSocket):
+        instances = []
+        next_first = base._FakeWSMessage(
+            base.views_mod.WSMsgType.TEXT,
+            '{"type":"webcodecs","value":"vp8"}'
+            if invalid_start else '{"type":"webcodecs","value":"h264"}',
+        )
+
+    view, token, manager, transport = _setup(
+        monkeypatch, Socket, _PausedSource()
+    )
+    entity = "camera.comelit_entrance"
+    if not invalid_start:
+        entity = "camera.driveway"
+        view.controller.hass.cameras[entity] = base.FakeCamera(
+            set(), "http://example.invalid/video"
+        )
+
+    async def run():
+        await view.get(base._mse_request(view.controller, token), entity)
+
+    with caplog.at_level(logging.INFO, logger="custom_components.comelit.miniapp.views"):
+        asyncio.run(run())
+
+    summary = [
+        r.getMessage() for r in caplog.records
+        if "COMELIT_MINIAPP_WEBCODECS_SUMMARY" in r.getMessage()
+    ]
+    assert len(summary) == 1
+    assert "reason=" + expected in summary[0]
+    assert "reason=client_close" not in summary[0]
+    assert manager.release_calls == []
+    assert not transport.active
