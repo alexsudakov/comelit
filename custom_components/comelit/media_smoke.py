@@ -361,6 +361,8 @@ class MediaSmokeCycle:
         self._cycle: asyncio.Task[dict[str, object]] | None = None
         self._release: asyncio.Task[object] | None = None
         self._caller_timed_out = False
+        # A caller may disconnect while the owned physical task is running.
+        self._caller_cancelled = False
 
     def _idle(self) -> bool:
         m = self._manager.status()
@@ -433,6 +435,7 @@ class MediaSmokeCycle:
         if self._release is not None and not self._release.done():
             raise SmokeBlocked("smoke_release_inflight")
         self._caller_timed_out = False
+        self._caller_cancelled = False
         task = asyncio.create_task(self._run_owned(task_id), name="comelit_media_smoke_owned")
         self._cycle = task
         try:
@@ -442,6 +445,12 @@ class MediaSmokeCycle:
             return await asyncio.wait_for(
                 asyncio.shield(task), timeout=MAX_CYCLE_WALL_SECONDS
             )
+        except asyncio.CancelledError:
+            # Caller withdrawal is not permission to abort native cleanup.
+            # The single owned task remains shielded and its result is
+            # persisted as a negative attempt.
+            self._caller_cancelled = True
+            raise
         except TimeoutError as exc:
             # Never issue a second OPEN or turn a late clean close into PASS.
             # The owned task is still tracked, and its durable reservation
@@ -465,10 +474,10 @@ class MediaSmokeCycle:
         try:
             # Recheck after the durable quota write.  An unrelated viewer
             # can arrive while the storage operation is awaiting I/O.
-            if self._caller_timed_out:
+            if self._caller_timed_out or self._caller_cancelled:
                 # Do not start a NEW physical side effect after the caller
-                # already received an owner-still-running timeout.
-                raise SmokeBlocked("smoke_caller_expired_before_open")
+                # stopped waiting, whether by deadline or cancellation.
+                raise SmokeBlocked("smoke_caller_unavailable_before_open")
             if not self._idle() or self._installed_sha() != pre["installed_sha"]:
                 raise SmokeBlocked("smoke_preopen_state_changed")
             attempted_open = True
@@ -526,7 +535,7 @@ class MediaSmokeCycle:
                 pass
             # A caller timeout is a negative verdict even if the previously
             # in-flight owner eventually succeeds at a much later time.
-            if self._caller_timed_out:
+            if self._caller_timed_out or self._caller_cancelled:
                 outcome["status"] = "FAIL"
             try:
                 await self._budget.async_record_result(task_id, outcome)
