@@ -231,3 +231,37 @@ def test_released_call_media_is_not_selectable_contract():
         await session.async_release(reason="miniapp_attached_view")
 
     asyncio.run(run())
+
+
+def test_direct_attached_webcodecs_release_race_cannot_start_new_native_owner():
+    """A call may close after readiness, before the join-only lock is taken."""
+    controller, hass, module = _fixed_controller()
+    coordinator = base._install_attached_ring_coordinator(hass)
+    native = coordinator.attached_session
+    transport = coordinator.attached_transport
+    target = controller.get_webcodecs_camera_target("camera.comelit_entrance")
+
+    async def run():
+        await native.async_acquire(panel="entrance", reason="camera_view")
+        async with native._lock:
+            native_release = asyncio.create_task(
+                native.async_release(reason="camera_view")
+            )
+            await asyncio.sleep(0)
+            direct_join = asyncio.create_task(
+                controller.acquire_attached_webcodecs_entrance(target)
+            )
+            await asyncio.sleep(0)
+        await native_release
+        with pytest.raises(
+            module.MiniAppOperationError,
+            match="attached_webcodecs_bootstrap_not_ready",
+        ):
+            await direct_join
+
+    asyncio.run(run())
+    assert transport.start_calls == 1
+    assert transport.stop_calls == 1
+    assert transport.activate_miniapp_output_calls == 0
+    assert coordinator.attached_provider.consumers == {}
+    assert native.status()["leases"] == {}
