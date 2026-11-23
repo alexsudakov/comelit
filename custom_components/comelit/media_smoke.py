@@ -248,6 +248,34 @@ class MediaSmokeCycle:
             and re.fullmatch(r"[0-9a-f]{40}", self._installed_sha()) is not None
         )
 
+    def _sole_observation_owner(self, reason: str, installed_sha: str) -> bool:
+        """Only packets from the current sole on-demand owner count as proof.
+
+        A physical Ring/attached handoff can arrive after media START. RTP
+        counters alone would wrongly attribute the new owner's video to smoke.
+        No other owner's session is stopped based on this observation.
+        """
+        m = self._manager.status()
+        sup = self._supervisor.status()
+        attached = self._attached.status()
+        return (
+            m.get("phase") == "active"
+            and m.get("active") is True
+            and m.get("leases") == {reason: 1}
+            and self._manager.active is True
+            and self._transport.active is True
+            and getattr(self._manager, "_teardown_unconfirmed", None) is False
+            and sup.get("attached_media_busy") is False
+            and sup.get("recovery_pending") is False
+            and attached.get("claimed") is False
+            and attached.get("active") is False
+            and attached.get("leases") == {}
+            and self._call_state() == "idle"
+            and getattr(self._transport, "ring_observed", None) is False
+            and self._transport._stop_marker_unproven() is False
+            and self._installed_sha() == installed_sha
+        )
+
     async def async_preflight(self) -> dict[str, object]:
         try:
             sha = self._installed_sha()
@@ -302,9 +330,13 @@ class MediaSmokeCycle:
             loop = asyncio.get_running_loop()
             deadline = loop.time() + MAX_WATCH_SECONDS
             while loop.time() < deadline:
-                if (self._transport.video_packet_count > before
-                        and self._transport.video_forwarding):
-                    outcome["rtp"] = "PASS"
+                if not self._sole_observation_owner(reason, pre["installed_sha"]):
+                    break
+                received = self._transport.video_packet_count > before
+                if received and self._transport.video_forwarding:
+                    # A Ring can arrive during the metric read itself.
+                    if self._sole_observation_owner(reason, pre["installed_sha"]):
+                        outcome["rtp"] = "PASS"
                     break
                 if not self._transport.active:
                     break
@@ -329,7 +361,8 @@ class MediaSmokeCycle:
                     # A clean local close is necessary but is not a successful
                     # smoke if OPEN or RTP failed. Seal the reserved attempt
                     # to prevent an automatic loop of failing live opens.
-                    if outcome["open"] == "PASS" and outcome["rtp"] == "PASS":
+                    if (outcome["open"] == "PASS" and outcome["rtp"] == "PASS"
+                            and getattr(self._transport, "ring_observed", None) is False):
                         await self._budget.async_confirm_complete(task_id)
             except (Exception, asyncio.CancelledError):
                 # Keep persistent inflight reservation; NEVER unlock after a
