@@ -526,3 +526,104 @@ def test_attached_owner_race_during_media_observation_is_not_success():
         assert manager.force_stops == 0
 
     asyncio.run(run())
+
+
+def test_two_independent_budget_controllers_share_atomic_single_flight():
+    """Second controller must not race by reading same pre-reserve Store state."""
+    async def run():
+        backend, first = await new_budget()
+        second = ms.DurableMediaSmokeBudget(backend, clock=lambda: 100000.0)
+        results = await asyncio.gather(
+            first.async_reserve(T1),
+            second.async_reserve(T2),
+            return_exceptions=True,
+        )
+        assert len([x for x in results if isinstance(x, dict)]) == 1
+        assert len([x for x in results if isinstance(x, ms.SmokeBlocked)]) == 1
+        assert len(backend.data["attempts"]) == 1
+        assert sum(backend.data["tasks"].values()) == 1
+        assert backend.data["inflight"] in (T1, T2)
+    asyncio.run(run())
+
+
+def test_store_write_timeout_seals_all_controllers_until_process_restart():
+    """Uncertain late executor write cannot allow re-instantiation to reopen."""
+    async def run():
+        backend, first = await new_budget()
+        blocker = asyncio.Event()
+        backend.delay = blocker
+        previous = ms.MAX_STORE_IO_SECONDS
+        ms.MAX_STORE_IO_SECONDS = 0.01
+        try:
+            with pytest.raises(ms.SmokeBlocked, match="budget_write_not_confirmed"):
+                await first.async_reserve(T1)
+            second = ms.DurableMediaSmokeBudget(backend, clock=lambda: 100000.0)
+            with pytest.raises(ms.SmokeBlocked, match="budget_sealed"):
+                await second.async_reserve(T2)
+            assert backend.data["attempts"] == []
+        finally:
+            blocker.set()
+            ms.MAX_STORE_IO_SECONDS = previous
+    asyncio.run(run())
+
+
+def test_store_read_timeout_seals_all_controllers():
+    class SlowLoadBackend(FakeStoreBackend):
+        def __init__(self):
+            super().__init__()
+            self.block_load = False
+            self.started = asyncio.Event()
+            self.gate = asyncio.Event()
+
+        def __call__(self):
+            base = super().__call__()
+            owner = self
+            class SlowStore:
+                async def async_load(self):
+                    if owner.block_load:
+                        owner.started.set()
+                        await owner.gate.wait()
+                    return await base.async_load()
+
+                async def async_save(self, data):
+                    return await base.async_save(data)
+            return SlowStore()
+
+    async def run():
+        backend = SlowLoadBackend()
+        first = ms.DurableMediaSmokeBudget(backend, clock=lambda: 100000.0)
+        await first.async_initialize_empty()
+        backend.block_load = True
+        previous = ms.MAX_STORE_IO_SECONDS
+        ms.MAX_STORE_IO_SECONDS = 0.01
+        try:
+            with pytest.raises(ms.SmokeBlocked, match="budget_unreadable"):
+                await first.async_reserve(T1)
+            assert backend.started.is_set()
+            second = ms.DurableMediaSmokeBudget(backend, clock=lambda: 100000.0)
+            with pytest.raises(ms.SmokeBlocked, match="budget_sealed"):
+                await second.async_status()
+        finally:
+            backend.gate.set()
+            ms.MAX_STORE_IO_SECONDS = previous
+    asyncio.run(run())
+
+
+def test_store_confirmation_timeout_does_not_reopen_inflight():
+    async def run():
+        backend, first = await new_budget()
+        await first.async_reserve(T1)
+        backend.delay = asyncio.Event()
+        previous = ms.MAX_STORE_IO_SECONDS
+        ms.MAX_STORE_IO_SECONDS = 0.01
+        try:
+            with pytest.raises(ms.SmokeBlocked, match="budget_write_not_confirmed"):
+                await first.async_confirm_complete(T1)
+            assert backend.data["inflight"] == T1
+            second = ms.DurableMediaSmokeBudget(backend, clock=lambda: 100000.0)
+            with pytest.raises(ms.SmokeBlocked, match="budget_sealed"):
+                await second.async_reserve(T2)
+        finally:
+            backend.delay.set()
+            ms.MAX_STORE_IO_SECONDS = previous
+    asyncio.run(run())
