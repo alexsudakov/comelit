@@ -1356,6 +1356,12 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                         )
                         source_task.add_done_callback(_consume_task_result)
             except asyncio.CancelledError:
+                # A handoff can cancel the handler without a client-close
+                # message. Preserve an already proven terminal reason, but
+                # do not misreport an unacknowledged cancellation as a
+                # deliberate viewer close.
+                if reason == "client_close" and not client_closed.is_set():
+                    reason = "cancelled"
                 # The release may still be running detached; retrieve its late
                 # result so a teardown failure cannot surface as an unhandled
                 # task exception after this handler is gone.
