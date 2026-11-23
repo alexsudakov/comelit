@@ -308,7 +308,7 @@ class MediaSmokeCycle:
         # Upstream owner has been reserved; even an open timeout consumes budget.
         reason = f"smoke:{task_id}"
         outcome: dict[str, object] = {
-            "installed_sha": pre["installed_sha"], "budget": budget,
+            "status": "FAIL", "installed_sha": pre["installed_sha"], "budget": budget,
             "open": "FAIL", "rtp": "NOT_PROVEN", "close": "UNCONFIRMED",
             "listener": "UNKNOWN",
         }
@@ -364,6 +364,7 @@ class MediaSmokeCycle:
                     if (outcome["open"] == "PASS" and outcome["rtp"] == "PASS"
                             and getattr(self._transport, "ring_observed", None) is False):
                         await self._budget.async_confirm_complete(task_id)
+                        outcome["status"] = "PASS"
             except (Exception, asyncio.CancelledError):
                 # Keep persistent inflight reservation; NEVER unlock after a
                 # failed/unknown close, even if a late release task finishes.
