@@ -684,7 +684,8 @@ def test_entrance_camera_uses_miniapp_attached_stream_and_returns_only_proxy_cap
     assert proxy_url.endswith("/master_playlist.m3u8")
     assert "/api/hls/" not in proxy_url
     assert coordinator.attached_session.status()["leases"] == {
-        "miniapp_attached_view": 1
+        "camera_view": 1,
+        "miniapp_attached_view": 1,
     }
     assert coordinator.attached_provider.consumers == {"miniapp_attached_view": 1}
     assert coordinator.attached_session._transport.activate_miniapp_output_calls == 1
@@ -828,7 +829,9 @@ def test_miniapp_attached_other_transport_failure_uses_bounded_unavailable_reaso
 
     assert coordinator.attached_transport.activate_miniapp_output_calls == 0
     assert coordinator.attached_provider.release_calls == ["miniapp_attached_view"]
-    assert coordinator.attached_session.status()["leases"] == {}
+    assert coordinator.attached_session.status()["leases"] == {
+        "camera_view": 1
+    }
     assert controller._miniapp_attached_resource is None
 
 
@@ -3302,7 +3305,8 @@ def test_entrance_hls_uses_attached_resource_without_ha_camera_request(monkeypat
     assert stream_phases == []
     assert result.startswith("/api/comelit/miniapp/media/")
     assert coordinator.attached_session.status()["leases"] == {
-        "miniapp_attached_view": 1
+        "camera_view": 1,
+        "miniapp_attached_view": 1,
     }
     asyncio.run(controller.async_close_attached_viewers_for_shutdown())
 
@@ -3327,7 +3331,7 @@ def test_entrance_hls_fails_closed_without_attached_resource(monkeypatch):
 
     with pytest.raises(
         controller_mod.MiniAppOperationError,
-        match="attached_media_stream_unavailable",
+        match="attached_media_not_active",
     ):
         asyncio.run(
             controller.async_create_camera_media(
@@ -3702,7 +3706,7 @@ def test_attached_viewer_shutdown_clears_leases_tasks_and_is_idempotent(monkeypa
     assert coordinator.requests == ["shutdown"]
 
     controller, hass = _controller(surveillance_label="Outside")
-    coordinator = _install_attached_ring_coordinator(hass)
+    coordinator = _install_attached_ring_coordinator(hass, inbound_call=True)
     token, session = controller.sessions.create(424242, 12345678)
 
     async def run_close_path():
@@ -3720,7 +3724,7 @@ def test_attached_viewer_shutdown_clears_leases_tasks_and_is_idempotent(monkeypa
     assert coordinator.requests == ["viewer_closed"]
 
     controller, hass = _controller(surveillance_label="Outside")
-    coordinator = _install_attached_ring_coordinator(hass)
+    coordinator = _install_attached_ring_coordinator(hass, inbound_call=True)
     token, session = controller.sessions.create(424242, 12345678)
 
     async def run_expiry_path():
@@ -3747,7 +3751,7 @@ def test_attached_viewer_shutdown_clears_leases_tasks_and_is_idempotent(monkeypa
 
 def test_attached_viewer_endpoint_reports_lease_constants():
     controller, hass = _controller(surveillance_label="Outside")
-    _install_attached_ring_coordinator(hass)
+    _install_attached_ring_coordinator(hass, inbound_call=True)
     token, _session = controller.sessions.create(424242, 12345678)
     view = views_mod.MiniAppAttachedViewerView(controller)
 
