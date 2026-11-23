@@ -35,7 +35,7 @@ class _PausedSource:
 
 
 class _RaceSocket(base._CaptureWebSocket):
-    """aiohttp reports closed before the receive watcher signals client_closed."""
+    """The socket state is unrelated to receive-watcher provenance."""
 
     instances = []
     next_first = base._FakeWSMessage(
@@ -48,7 +48,7 @@ class _RaceSocket(base._CaptureWebSocket):
         self.watch_started = asyncio.Event()
 
     async def __anext__(self):
-        # No receive-side CLOSED frame: only websocket.closed is authoritative.
+        # No receive-side CLOSE frame: closed alone must not imply a peer.
         self.watch_started.set()
         await asyncio.Event().wait()
 
@@ -74,9 +74,9 @@ def _setup(monkeypatch, socket_type, source):
 
 @pytest.mark.parametrize(
     ("socket_closed", "expected_reason"),
-    [(False, "cancelled"), (True, "client_close")],
+    [(False, "cancelled"), (True, "cancelled")],
 )
-def test_actual_webcodecs_stream_cancel_preserves_socket_close(
+def test_actual_webcodecs_stream_cancel_never_infers_peer_from_socket_state(
     monkeypatch, caplog, socket_closed, expected_reason
 ):
     """Cancel the actual handler while it awaits RTP, before watcher close."""
@@ -112,10 +112,10 @@ def test_actual_webcodecs_stream_cancel_preserves_socket_close(
     assert f"reason={expected_reason}" in summaries[0]
 
 
-def test_actual_webcodecs_teardown_cancel_preserves_socket_close(
+def test_actual_webcodecs_teardown_cancel_after_server_socket_close(
     monkeypatch, caplog
 ):
-    """Cancel during a pending media release, before the receive watcher exits."""
+    """An externally/server-closed socket is not proof the peer closed."""
     source = _PausedSource()
     class _SocketClosedOnSourceReady(_RaceSocket):
         instances = []
@@ -173,7 +173,7 @@ def test_actual_webcodecs_teardown_cancel_preserves_socket_close(
         if "COMELIT_MINIAPP_WEBCODECS_SUMMARY" in record.getMessage()
     ]
     assert len(summaries) == 1
-    assert "reason=client_close" in summaries[0]
+    assert "reason=cancelled" in summaries[0]
     assert any(
         "phase=handler_cancelled" in record.getMessage()
         for record in caplog.records
