@@ -74,12 +74,52 @@ A test may report `OPEN=PASS` and `CLOSE=FAIL` independently. Return `NOT_EXECUT
 
 **Gate 0 — read-only installed capability inventory: PARTIAL COMPLETE.** Hermes verified gateway commands and installed identity, but the trusted task-scoped caller, HA lease API and durable quota do not exist. Root-capable HA SSH/Supervisor access cannot be treated as a safe shortcut. No physical run was authorized or executed.
 
-**Gate 1 — repository-only implementation: IN PROGRESS.** `DurableMediaSmokeBudget` requires an explicitly initialized persistent Store, an atomic single-controller lock, a pre-side-effect reservation, and a **fresh Store readback**: Home Assistant Store may log a write failure without raising. The persisted in-flight reservation survives worker interruption and blocks new opens. `MediaSmokeCycle` uses the existing media manager and a unique `smoke:<trusted_task_id>` lease, observes RTP counters, and releases only its own lease. Caller cancellation does not cancel the tracked cycle. The code is **not wired** into HA; the installed adapter must provide authenticated task identity, trusted installed SHA, child-process status, actual call state and one single controller per HA instance. Neither `task_id` nor HA service user input alone is authorization. Offline tests cover quota, concurrent reservations, write failure, persistent in-flight, rollback clock, unknown preflight, cancellation and other-owner race. Independent VERIFY/Critic and full end-to-end binding are NOT_DONE.
+**Gate 1 — repository-only implementation: IN PROGRESS (Draft PR #362).** `DurableMediaSmokeBudget` requires an explicitly initialized persistent Store, an atomic single-controller lock, a pre-side-effect reservation, and a **fresh Store readback**: Home Assistant Store may log a write failure without raising. The persisted in-flight reservation survives worker interruption and blocks new opens. `MediaSmokeCycle` uses the existing media manager and a unique `smoke:<trusted_task_id>` lease, observes RTP counters, and releases only its own lease. Caller cancellation does not cancel the tracked cycle. The code is **not wired** into HA; the installed adapter must provide authenticated task identity, trusted installed SHA, child-process status, actual call state and one single controller per HA instance. Neither `task_id` nor HA service user input alone is authorization. Offline tests cover quota, concurrent reservations, write failure, persistent in-flight, rollback clock, unknown preflight, cancellation and other-owner race. Independent VERIFY/Critic and full end-to-end binding are NOT_DONE.
 
 **Gate 2 — independent qualification:** full checks from `.dev/hermes-dev.yaml`, immutable exact candidate, independent Critic for changes under `custom_components/comelit/**`, and required GitHub checks. Neither a live smoke receipt nor PR CI substitutes for another.
 
 **Gate 3 — owner-authorized activation:** installation of a qualified trusted capability requires a **separate production deploy approval**. First exercise its read-only dry run and negative access tests. Only then allow bounded actual Camera open/close within the already authorized strict limits. Never automatically exercise Ring → handoff → reopen.
 
+
+## Trusted caller boundary — proposed, not installed
+
+The CT122 diagnosis confirms **there is no safe generic HA API route today**.
+The SSH forced-command `comelit-ha` gateway has no media verb, while
+`~/bin/ssh-ha` has broad HA host authority. Do not use the latter for
+autonomous model-driven actuation, and do not expose a generic `ha_call_service`
+token to Hermes.
+
+The next integration must enforce two boundaries:
+
+1. **CT122 task provenance:** only an installed, allowlisted, project-specific
+   executor can obtain the current Comelit native Kanban task/run/board identity
+   from a trusted worker context and revalidate its current claim. It passes a
+   derived task ID; a model-provided ID is never authoritative. The executor
+   receives no generic terminal/HA-service privilege and cannot invoke Door,
+   Gate, Ring, deploy or restart. Reuse existing native Hermes tool enforcement,
+   not an unrelated workflow or an LLM prompt-only gate.
+2. **HA actuation ownership:** a narrow Comelit-owned invocation must
+   independently check the same manager/supervisor/attached status and enforce
+   persistent quota inside HA before calling `async_acquire`. A plain HA
+   service with only `{task_id, action}` is **not authenticated**: any caller
+   able to invoke it can impersonate an unrelated task. No such service is
+   registered by this PR. If using the forced-command gateway, its precise
+   new verb and authorization contract require independent review and
+   explicit approval before changing the HA host.
+
+The existing installed media-finalization defect is independent; qualification
+of a smoke controller against an unpublished branch does not imply the HA
+integration has been safely deployed. Integrating the library with HA unload,
+watchdog and physical Ring overlap requires separate independent evidence.
+
+**New repository-only review finding:** media packets are attributable to
+smoke only while its on-demand lease remains the sole owner. A Ring or attached
+media owner can appear between START and a packet-counter read. The test now
+checks ownership both before and after RTP observation, checks
+`transport.ring_observed`, and seals the attempt rather than allowing automatic
+retry on overlap. A top-level result of `PASS` is emitted only after the
+manager reports safe local release, the listener is READY, and the durable
+budget completion is confirmed. This is still **not remote release proof**.
 
 ## Security and persistence blockers before a runnable endpoint
 
