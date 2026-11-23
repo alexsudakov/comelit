@@ -1270,6 +1270,13 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                                 log_event("first_binary")
                 except TimeoutError:
                     await send_eos("duration_limit")
+        except asyncio.CancelledError:
+            # Cancellation can happen in the streaming loop, before teardown
+            # starts. Keep an already-established termination cause, but do
+            # not fabricate a client_close when the client never closed.
+            if reason == "client_close" and not client_closed.is_set():
+                reason = "cancelled"
+            raise
         finally:
             _LOGGER.info(
                 webcodecs_mod.webcodecs_teardown_line(
