@@ -146,8 +146,12 @@ when the total caller deadline is exceeded. That does NOT cancel the underlying
 manager or claim native physical teardown is finished. Its owner remains
 tracked, late success is converted to FAIL without unlocking the durable
 reservation, and a pre-open deadline expiry blocks any new physical OPEN.
-Tests cover both a manager that defers cancellation and a delayed budget
-reservation. `asyncio.timeout` around OPEN still **cannot promise a hard
+An explicit caller cancellation is also tracked: if it occurs during
+budget I/O, a subsequently reserved attempt cannot start a physical OPEN;
+if the sole owned OPEN already started, that task completes its cleanup
+but cannot return a successful smoke verdict. Offline regressions cover
+noncooperative OPEN, delayed reservation and caller cancellation in both
+positions. `asyncio.timeout` around OPEN still **cannot promise a hard
 physical teardown bound** if the underlying `ComelitMediaSessionManager`
 continues recovery. Any such uncertainty keeps admission sealed. The
 runnable HA caller remains disabled until independent review proves correct
@@ -160,7 +164,14 @@ read private GitHub Issues. It proposes native task/run claim validation
 and a project-only constrained caller, never arbitrary HA services or
 model-supplied task IDs. The actual installed worker isolation, gateway
 and HA service identity are **NOT_PROVEN**, so this is still a design rather
-than an executable capability.
+than an executable capability. A separate finalization uncertainty also
+remains: if the caller stops waiting while the last Store receipt write
+is already in progress, a persisted PASS and an undelivered response are
+not the same evidence. The future trusted executor MUST treat an
+unknown/disconnected result as operator HOLD, without starting another
+physical attempt based merely on the stored PASS. This requires a
+separately proven native run/receipt acknowledgement contract, not
+another autonomous retry or a weakened media safety gate.
 
 ## Reporting contract
 
