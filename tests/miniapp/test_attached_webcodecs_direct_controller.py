@@ -155,7 +155,7 @@ def test_direct_attached_webcodecs_release_cancels_pending_activation_without_le
 
 def test_hls_attached_viewer_keeps_existing_ha_stream_resource_path():
     controller, hass, _module = _fixed_controller()
-    coordinator = base._install_attached_ring_coordinator(hass)
+    coordinator = base._install_attached_ring_coordinator(hass, inbound_call=True)
     token, session = controller.sessions.create(424242, 12345678)
 
     async def run():
