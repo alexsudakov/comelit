@@ -288,7 +288,9 @@ def test_caller_cancellation_does_not_kill_owned_cycle():
             m.release_gate.set()
             out = await asyncio.wait_for(r._cycle, 1)
             assert out["close"] == "CONFIRMED_LOCAL"
-            assert (await budget.async_status())["inflight"] is False
+            # With RTP unproven, the automatic smoke budget stays sealed even
+            # when the own lease was locally released.
+            assert (await budget.async_status())["inflight"] is True
             assert events == ["open", "release"]
         finally:
             ms.MAX_WATCH_SECONDS = old
@@ -419,4 +421,23 @@ def test_preflight_rejects_native_attached_owner_and_unproven_stop_marker():
         transport.marker_unproven = True
         assert (await r.async_preflight())["ready"] is False
         assert events == []
+    asyncio.run(run())
+
+
+def test_missing_rtp_after_clean_close_prevents_automatic_retry():
+    async def run():
+        budget, m, _, _, cycle, events = await runner()
+        old = ms.MAX_WATCH_SECONDS
+        ms.MAX_WATCH_SECONDS = 0
+        try:
+            result = await cycle.async_run(T1)
+            assert result["open"] == "PASS"
+            assert result["rtp"] == "NOT_PROVEN"
+            assert result["close"] == "CONFIRMED_LOCAL"
+            assert (await budget.async_status())["inflight"] is True
+            with pytest.raises(ms.SmokeBlocked):
+                await cycle.async_run(T2)
+            assert events == ["open", "release"]
+        finally:
+            ms.MAX_WATCH_SECONDS = old
     asyncio.run(run())
