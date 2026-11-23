@@ -20,7 +20,8 @@ import time
 from typing import Any, Protocol
 
 STORE_KEY = "comelit.media_smoke_budget"
-STORE_VERSION = 1
+STORE_VERSION = 2
+MAX_RECEIPTS = 64
 MAX_PER_TASK = 3
 MAX_PER_DAY = 6
 WINDOW_SECONDS = 24 * 60 * 60
@@ -125,7 +126,7 @@ class DurableMediaSmokeBudget:
     @staticmethod
     def _validated(data: object, now: float) -> dict[str, Any]:
         if not isinstance(data, dict) or set(data) != {
-            "schema", "last_clock", "attempts", "tasks", "inflight", "sequence"
+            "schema", "last_clock", "attempts", "tasks", "inflight", "sequence", "receipts"
         } or type(data["schema"]) is not int or data["schema"] != STORE_VERSION:
             raise SmokeBlocked("budget_missing_or_invalid")
         last = data["last_clock"]
@@ -153,7 +154,70 @@ class DurableMediaSmokeBudget:
             or tasks.get(inflight, 0) < 1
         ):
             raise SmokeBlocked("budget_inflight_invalid")
+        receipts = data["receipts"]
+        if not isinstance(receipts, list) or len(receipts) > MAX_RECEIPTS:
+            raise SmokeBlocked("budget_receipts_invalid")
+        for receipt in receipts:
+            if not isinstance(receipt, dict) or set(receipt) != {
+                "seq", "task", "at", "installed_sha", "status", "open",
+                "rtp", "close", "listener"
+            }:
+                raise SmokeBlocked("budget_receipt_invalid")
+            if (type(receipt["seq"]) is not int or receipt["seq"] < 1
+                    or receipt["seq"] > sequence
+                    or not isinstance(receipt["task"], str)
+                    or _TASK_ID.fullmatch(receipt["task"]) is None
+                    or receipt["task"] not in tasks
+                    or type(receipt["at"]) not in (float, int)
+                    or not math.isfinite(receipt["at"])
+                    or receipt["at"] <= 0 or receipt["at"] > now
+                    or not isinstance(receipt["installed_sha"], str)
+                    or (receipt["installed_sha"] != "" and re.fullmatch(
+                        r"[0-9a-f]{40}", receipt["installed_sha"]) is None)
+                    or receipt["status"] not in ("INFLIGHT", "PASS", "FAIL")
+                    or receipt["open"] not in ("NOT_EXECUTED", "PASS", "FAIL")
+                    or receipt["rtp"] not in ("NOT_PROVEN", "PASS")
+                    or receipt["close"] not in ("UNCONFIRMED", "CONFIRMED_LOCAL")
+                    or receipt["listener"] not in ("UNKNOWN", "READY")):
+                raise SmokeBlocked("budget_receipt_values_invalid")
+        if receipts != sorted(receipts, key=lambda x: x["seq"]):
+            raise SmokeBlocked("budget_receipts_unordered")
         return deepcopy(data)
+
+    @staticmethod
+    def _bounded_result(result: dict[str, object]) -> dict[str, str]:
+        """Only literal, allowlisted receipt fields; never persist raw logs."""
+        if not isinstance(result, dict):
+            raise SmokeBlocked("invalid_receipt")
+        allowed = {
+            "installed_sha": r"[0-9a-f]{40}",
+            "status": r"PASS|FAIL",
+            "open": r"NOT_EXECUTED|PASS|FAIL",
+            "rtp": r"NOT_PROVEN|PASS",
+            "close": r"UNCONFIRMED|CONFIRMED_LOCAL",
+            "listener": r"UNKNOWN|READY",
+        }
+        fields = {}
+        for key, pattern in allowed.items():
+            value = result.get(key)
+            if not isinstance(value, str) or re.fullmatch(pattern, value) is None:
+                raise SmokeBlocked("invalid_receipt")
+            fields[key] = value
+        if fields["status"] == "PASS" and fields != {
+            "installed_sha": fields["installed_sha"], "status": "PASS",
+            "open": "PASS", "rtp": "PASS", "close": "CONFIRMED_LOCAL",
+            "listener": "READY",
+        }:
+            raise SmokeBlocked("receipt_claims_unproven_success")
+        return fields
+
+    async def async_receipts(self, task_id: str) -> list[dict[str, object]]:
+        """Read-only bounded local evidence; caller authentication is external."""
+        if not isinstance(task_id, str) or _TASK_ID.fullmatch(task_id) is None:
+            raise SmokeBlocked("untrusted_task_id_format")
+        async with self._lock:
+            data = await self._load(self._now())
+            return deepcopy([r for r in data["receipts"] if r["task"] == task_id])
 
     async def _load(self, now: float) -> dict[str, Any]:
         if self._blocked or self._guard.sealed:
@@ -201,7 +265,7 @@ class DurableMediaSmokeBudget:
                 raise SmokeBlocked("budget_already_exists")
             await self._save_verified({
                 "schema": STORE_VERSION, "last_clock": now, "attempts": [],
-                "tasks": {}, "inflight": None, "sequence": 0
+                "tasks": {}, "inflight": None, "sequence": 0, "receipts": []
             }, now)
 
     async def async_status(self) -> dict[str, int | bool]:
@@ -231,17 +295,37 @@ class DurableMediaSmokeBudget:
             data["inflight"] = task_id
             data["last_clock"] = now
             data["sequence"] += 1
+            data["receipts"] = [*data["receipts"], {
+                "seq": data["sequence"], "task": task_id, "at": now,
+                "installed_sha": "", "status": "INFLIGHT",
+                "open": "NOT_EXECUTED", "rtp": "NOT_PROVEN",
+                "close": "UNCONFIRMED", "listener": "UNKNOWN",
+            }][-MAX_RECEIPTS:]
             await self._save_verified(data, now)
             return {"task_used": task_count + 1, "day_used": len(live) + 1}
 
-    async def async_confirm_complete(self, task_id: str) -> None:
-        """Only caller with independently confirmed teardown may invoke this."""
+    async def async_record_result(self, task_id: str, result: dict[str, object]) -> None:
+        """Persist final receipt; unlock only on a fully confirmed safe PASS.
+
+        A FAIL keeps the original inflight owner sealed, but its bounded
+        receipt survives caller disconnect and HA restart. This operation
+        never infers success from an external caller's string alone: only the
+        internal media cycle may pass a validated result after its checks.
+        """
+        receipt = self._bounded_result(result)
         async with self._lock:
             now = self._now()
             data = await self._load(now)
             if data["inflight"] != task_id:
                 raise SmokeBlocked("smoke_owner_mismatch")
-            data["inflight"] = None
+            records = data["receipts"]
+            if not records or records[-1]["task"] != task_id or (
+                records[-1]["status"] != "INFLIGHT"
+            ):
+                raise SmokeBlocked("smoke_receipt_owner_mismatch")
+            records[-1].update(receipt)
+            if receipt["status"] == "PASS":
+                data["inflight"] = None
             data["last_clock"] = now
             data["sequence"] += 1
             await self._save_verified(data, now)
@@ -408,10 +492,15 @@ class MediaSmokeCycle:
                     # to prevent an automatic loop of failing live opens.
                     if (outcome["open"] == "PASS" and outcome["rtp"] == "PASS"
                             and getattr(self._transport, "ring_observed", None) is False):
-                        await self._budget.async_confirm_complete(task_id)
                         outcome["status"] = "PASS"
             except (Exception, asyncio.CancelledError):
                 # Keep persistent inflight reservation; NEVER unlock after a
                 # failed/unknown close, even if a late release task finishes.
                 pass
+            try:
+                await self._budget.async_record_result(task_id, outcome)
+            except (Exception, asyncio.CancelledError):
+                # Quota storage is sealed on uncertain I/O; never report PASS
+                # without its durable completion/receipt.
+                outcome["status"] = "FAIL"
         return outcome
