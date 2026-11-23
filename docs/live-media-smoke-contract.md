@@ -17,11 +17,13 @@ Keep offline VERIFY / independent Critic separate from any live test. A successf
 | `ComelitMediaSessionManager.async_acquire(panel="entrance", reason=...)` | Acquires an on-demand lease through the existing media manager | Reuse the manager; do not spawn the native helper directly |
 | `ComelitMediaSessionManager.async_release(reason=...)` | Removes a specific lease and tears down when last lease ends | Close **only the smoke-owned lease**, then join confirmed teardown |
 | `ComelitMediaSessionManager.status()` | Reports phase, active, leases, listener_paused, error | Query inside a trusted HA execution boundary; external entities alone do not expose leases |
-| `switch.comelit_entrance_camera` turn_on/turn_off | `async_acquire("ha_switch")` / **`async_force_stop("ha_switch_off")`** | **Forbidden** as an automated open/close pair: force_stop can clear other leases |
+| `switch.comelit_entrance_camera` turn_on/turn_off | BASE: `async_acquire("ha_switch")` / **`async_force_stop("ha_switch_off")`**; this Draft PR changes OFF to own-lease `async_release("ha_switch")` | The **installed** switch remains forbidden for smoke; even after patch, no trusted quota or permission boundary exists |
 | `MiniAppWebCodecsEntranceLease.release()` | Sets `released=True` before awaiting manager release | Do not use this flag as teardown proof; cancellation requires explicit test |
 | `camera.comelit_entrance` attributes | `media_phase`, `media_active`, `attached_media_active`, `video_forwarding`, RTP counters | Safe observations, but not ownership proof |
 | `sensor.comelit_listener_status` attributes | `listener_ready`, `media_paused`, `runtime_running`, `supervisor_running` | Check listener recovery after last lease |
 | `comelit-v4` / `comelit-media` | Persistent Ring runtime / on-demand media helper | Do not classify persistent Ring runtime as an orphaned media process |
+
+This Draft PR adds a safety prerequisite: the deprecated switch tracks its own HA lease, makes repeat ON idempotent, and refuses unconfirmed teardown rather than forcibly stopping other viewers. **It is not yet installed and is not a trusted smoke executor.**
 
 The real installed `comelit-ha` gateway permissions, its available invocation surface, and persistent trusted quota facilities **are not proven from GitHub**. The current incident's local media-finalization candidate has not passed independent Critic; do not assume a successful smoke on the deployed base.
 
