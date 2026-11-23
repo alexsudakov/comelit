@@ -82,10 +82,10 @@ class DurableMediaSmokeBudget:
     def _validated(data: object, now: float) -> dict[str, Any]:
         if not isinstance(data, dict) or set(data) != {
             "schema", "last_clock", "attempts", "tasks", "inflight", "sequence"
-        } or data["schema"] != STORE_VERSION:
+        } or type(data["schema"]) is not int or data["schema"] != STORE_VERSION:
             raise SmokeBlocked("budget_missing_or_invalid")
         last = data["last_clock"]
-        if type(last) not in (int, float) or not math.isfinite(last) or last > now:
+        if type(last) not in (int, float) or not math.isfinite(last) or last <= 0 or last > now:
             raise SmokeBlocked("clock_rollback_or_invalid")
         sequence = data["sequence"]
         if type(sequence) is not int or sequence < 0:
@@ -326,7 +326,11 @@ class MediaSmokeCycle:
                 if self._idle() and self._installed_sha() == pre["installed_sha"]:
                     outcome["close"] = "CONFIRMED_LOCAL"
                     outcome["listener"] = "READY"
-                    await self._budget.async_confirm_complete(task_id)
+                    # A clean local close is necessary but is not a successful
+                    # smoke if OPEN or RTP failed. Seal the reserved attempt
+                    # to prevent an automatic loop of failing live opens.
+                    if outcome["open"] == "PASS" and outcome["rtp"] == "PASS":
+                        await self._budget.async_confirm_complete(task_id)
             except (Exception, asyncio.CancelledError):
                 # Keep persistent inflight reservation; NEVER unlock after a
                 # failed/unknown close, even if a late release task finishes.
