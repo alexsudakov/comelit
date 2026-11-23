@@ -802,7 +802,8 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
         keyframes = 0
         bytes_sent = 0
         errors = 0
-        reason = "client_close"
+        # No peer-close evidence exists until the receive watcher observes it.
+        reason = "cancelled"
         send_stalled = False
         first_source_logged = False
         first_binary_logged = False
@@ -837,9 +838,9 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
         async def send_json(payload: dict[str, object]) -> bool:
             nonlocal reason, send_stalled
             if websocket.closed or client_closed.is_set():
-                # During our own EOS/error close, preserve its terminal
-                # reason: transport state alone does not prove a peer close.
-                if not server_closing:
+                # Socket state and failed sends do not prove peer intent.
+                # Preserve an already established server terminal reason.
+                if client_closed.is_set() and reason == "cancelled":
                     reason = "client_close"
                 return False
             try:
@@ -853,7 +854,7 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                 send_stalled = True
                 return False
             except _WEBSOCKET_SEND_ERRORS:
-                if not server_closing:
+                if client_closed.is_set() and reason == "cancelled":
                     reason = "client_close"
                 return False
             return True
@@ -861,9 +862,9 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
         async def send_bytes(payload: bytes) -> bool:
             nonlocal reason, send_stalled
             if websocket.closed or client_closed.is_set():
-                # During our own EOS/error close, preserve its terminal
-                # reason: transport state alone does not prove a peer close.
-                if not server_closing:
+                # Socket state and failed sends do not prove peer intent.
+                # Preserve an already established server terminal reason.
+                if client_closed.is_set() and reason == "cancelled":
                     reason = "client_close"
                 return False
             try:
@@ -877,7 +878,7 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                 send_stalled = True
                 return False
             except _WEBSOCKET_SEND_ERRORS:
-                if not server_closing:
+                if client_closed.is_set() and reason == "cancelled":
                     reason = "client_close"
                 return False
             return True
@@ -900,8 +901,15 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                 "intercom_media_busy",
                 "intercom_media_start_failed",
                 "intercom_media_unavailable",
+                "invalid_webcodecs_command",
+                "source_not_h264_rtsp",
+                "unit_too_large",
             }:
                 reason = code
+            else:
+                # Never expose arbitrary exception text in a summary reason.
+                # The exact bounded error frame retains the source code.
+                reason = "source_open_failed"
             if not websocket.closed:
                 await send_json({"type": "error", "code": code})
                 with contextlib.suppress(*_WEBSOCKET_SEND_ERRORS, TimeoutError):
@@ -1412,6 +1420,11 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                 # Cancellation of the handler used to skip session_close and
                 # WEBCODECS_SUMMARY. Emit both synchronously, exactly once,
                 # even if the release or child join was interrupted.
+                # A receive-side peer CLOSE may race with the loop's
+                # websocket.closed exit before its queued item is read.
+                # Only the watcher event can resolve that ambiguity.
+                if reason == "cancelled" and client_closed.is_set():
+                    reason = "client_close"
                 log_event("session_close")
                 _LOGGER.info(
                     webcodecs_mod.webcodecs_summary_line(
