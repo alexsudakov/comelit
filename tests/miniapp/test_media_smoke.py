@@ -640,3 +640,73 @@ def test_store_confirmation_timeout_does_not_reopen_inflight():
             backend.delay.set()
             ms.MAX_STORE_IO_SECONDS = previous
     asyncio.run(run())
+
+
+def test_bounded_receipt_survives_new_controller_and_omits_extra_fields():
+    async def run():
+        backend, budget = await new_budget()
+        await budget.async_reserve(T1)
+        receipt = dict(PASS_RESULT, unsafe_token="never_store_this", sdp="secret")
+        await budget.async_record_result(T1, receipt)
+        restarted = ms.DurableMediaSmokeBudget(backend, clock=lambda: 100000.0)
+        stored = await restarted.async_receipts(T1)
+        assert len(stored) == 1
+        assert stored[0]["task"] == T1
+        assert stored[0]["status"] == "PASS"
+        assert stored[0]["installed_sha"] == "a" * 40
+        assert "unsafe_token" not in str(stored)
+        assert "secret" not in str(backend.data)
+        assert (await restarted.async_status())["inflight"] is False
+    asyncio.run(run())
+
+
+def test_failed_receipt_is_durable_but_does_not_unlock_open():
+    async def run():
+        backend, budget = await new_budget()
+        await budget.async_reserve(T1)
+        await budget.async_record_result(T1, FAIL_RESULT)
+        restarted = ms.DurableMediaSmokeBudget(backend, clock=lambda: 100000.0)
+        assert (await restarted.async_receipts(T1))[-1]["status"] == "FAIL"
+        with pytest.raises(ms.SmokeBlocked, match="inflight"):
+            await restarted.async_reserve(T2)
+    asyncio.run(run())
+
+
+def test_crash_before_result_keeps_durable_inflight_receipt():
+    async def run():
+        backend, budget = await new_budget()
+        await budget.async_reserve(T1)
+        restarted = ms.DurableMediaSmokeBudget(backend, clock=lambda: 100000.0)
+        receipts = await restarted.async_receipts(T1)
+        assert len(receipts) == 1 and receipts[0]["status"] == "INFLIGHT"
+        assert receipts[0]["open"] == "NOT_EXECUTED"
+        with pytest.raises(ms.SmokeBlocked, match="inflight"):
+            await restarted.async_reserve(T2)
+    asyncio.run(run())
+
+
+def test_receipt_cannot_claim_pass_without_confirmed_close():
+    async def run():
+        backend, budget = await new_budget()
+        await budget.async_reserve(T1)
+        incorrect = dict(PASS_RESULT, close="UNCONFIRMED")
+        with pytest.raises(ms.SmokeBlocked, match="receipt_claims_unproven_success"):
+            await budget.async_record_result(T1, incorrect)
+        assert (await budget.async_receipts(T1))[-1]["status"] == "INFLIGHT"
+        assert (await budget.async_status())["inflight"] is True
+    asyncio.run(run())
+
+
+def test_receipts_are_bounded_without_resetting_historical_task_quota():
+    async def run():
+        clock = [100000.0]
+        backend, budget = await new_budget(lambda: clock[0])
+        for index in range(ms.MAX_RECEIPTS + 2):
+            task = "t_" + format(index + 1, "08x")
+            await budget.async_reserve(task)
+            await finalize_pass(budget, task)
+            clock[0] += ms.WINDOW_SECONDS + 1
+        assert len(backend.data["receipts"]) == ms.MAX_RECEIPTS
+        assert len(backend.data["tasks"]) == ms.MAX_RECEIPTS + 2
+        assert (await budget.async_receipts("t_00000001")) == []
+    asyncio.run(run())
