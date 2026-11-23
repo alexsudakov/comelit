@@ -17,6 +17,19 @@ spec.loader.exec_module(ms)
 T1 = "t_1234abcd"
 T2 = "t_4567efab"
 
+PASS_RESULT = {
+    "installed_sha": "a" * 40, "status": "PASS", "open": "PASS",
+    "rtp": "PASS", "close": "CONFIRMED_LOCAL", "listener": "READY",
+}
+FAIL_RESULT = {
+    "installed_sha": "a" * 40, "status": "FAIL", "open": "FAIL",
+    "rtp": "NOT_PROVEN", "close": "UNCONFIRMED", "listener": "UNKNOWN",
+}
+
+async def finalize_pass(budget, task_id):
+    await budget.async_record_result(task_id, PASS_RESULT)
+
+
 
 class FakeStoreBackend:
     def __init__(self):
@@ -68,7 +81,7 @@ def test_successful_reserve_readback_and_completion():
         assert (await budget.async_status()) == {"used_24h": 1, "limit_24h": 6, "inflight": True}
         with pytest.raises(ms.SmokeBlocked):
             await budget.async_reserve(T2)
-        await budget.async_confirm_complete(T1)
+        await finalize_pass(budget, T1)
         assert (await budget.async_status())["inflight"] is False
         assert backend.write_count == 3
     asyncio.run(run())
@@ -79,13 +92,13 @@ def test_budget_task_and_global_caps_and_restart():
         backend, budget = await new_budget()
         for _ in range(3):
             await budget.async_reserve(T1)
-            await budget.async_confirm_complete(T1)
+            await finalize_pass(budget, T1)
         with pytest.raises(ms.SmokeBlocked):
             await budget.async_reserve(T1)
         restarted = ms.DurableMediaSmokeBudget(backend, clock=lambda: 100000)
         for _ in range(3):
             await restarted.async_reserve(T2)
-            await restarted.async_confirm_complete(T2)
+            await finalize_pass(restarted, T2)
         with pytest.raises(ms.SmokeBlocked):
             await restarted.async_reserve("t_ffffffff")
         assert (await restarted.async_status())["used_24h"] == 6
@@ -350,7 +363,7 @@ def test_budget_rolls_window_without_resetting_per_task():
         clock = [100000.0]
         _, budget = await new_budget(lambda: clock[0])
         await budget.async_reserve(T1)
-        await budget.async_confirm_complete(T1)
+        await finalize_pass(budget, T1)
         clock[0] += ms.WINDOW_SECONDS + 1
         assert (await budget.async_reserve(T2))["day_used"] == 1
     asyncio.run(run())
@@ -618,7 +631,7 @@ def test_store_confirmation_timeout_does_not_reopen_inflight():
         ms.MAX_STORE_IO_SECONDS = 0.01
         try:
             with pytest.raises(ms.SmokeBlocked, match="budget_write_not_confirmed"):
-                await first.async_confirm_complete(T1)
+                await finalize_pass(first, T1)
             assert backend.data["inflight"] == T1
             second = ms.DurableMediaSmokeBudget(backend, clock=lambda: 100000.0)
             with pytest.raises(ms.SmokeBlocked, match="budget_sealed"):
