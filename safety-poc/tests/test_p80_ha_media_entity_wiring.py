@@ -95,9 +95,11 @@ class P80HaMediaEntityWiringTests(unittest.TestCase):
             self.switch,
         )
         self.assertIn(
-            'await self._manager.async_force_stop(reason="ha_switch_off")',
+            'await self._manager.async_release(reason="ha_switch")',
             self.switch,
         )
+        # The legacy switch must never terminate another viewer\'s lease.
+        self.assertNotIn("async_force_stop", self.switch)
 
     def test_thumbnail_and_still_requests_never_start_media(self) -> None:
         stills = self.camera.split("def use_stream_for_stills", 1)[1].split(
