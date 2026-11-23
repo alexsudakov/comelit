@@ -816,6 +816,9 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
         # keep reporting the response as open after the terminal frame, so a
         # local signal is what guarantees every later send is refused.
         client_closed = asyncio.Event()
+        # websocket.closed is NOT a peer-close proof: aiohttp also sets it
+        # when this handler initiates close(). Keep the direction locally.
+        server_closing = False
         queue: asyncio.Queue[object] = asyncio.Queue(
             maxsize=webcodecs_mod.WEBCODECS_MAX_QUEUE_UNITS + 4
         )
@@ -872,7 +875,8 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
             return True
 
         async def close_with_error(code: str) -> None:
-            nonlocal errors, reason
+            nonlocal errors, reason, server_closing
+            server_closing = True
             errors += 1
             if code in {
                 "session_limit",
@@ -899,7 +903,8 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                         await websocket.close()
 
         async def send_eos(eos_reason: str) -> None:
-            nonlocal reason
+            nonlocal reason, server_closing
+            server_closing = True
             reason = eos_reason
             if not websocket.closed:
                 await send_json({"type": "eos", "reason": eos_reason})
@@ -989,19 +994,25 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                 async def watch_webcodecs_client_close() -> None:
                     try:
                         async for message in websocket:
+                            if server_closing:
+                                # The receive iterator may end because OUR
+                                # close() woke it. Do not forge a client event.
+                                return
                             if message.type in {
                                 WSMsgType.CLOSE,
                                 WSMsgType.CLOSED,
                                 WSMsgType.ERROR,
                             }:
                                 break
-                            # No post-start commands are accepted for either
-                            # Entrance or ordinary WebCodecs sessions. Treat
-                            # any further client message as a fail-closed
-                            # termination request.
+                            # Any post-start command is an explicit client
+                            # termination request: no additional commands.
                             break
                     except _WEBSOCKET_SEND_ERRORS:
                         pass
+                    if server_closing:
+                        return
+                    # Receive-side termination, not the socket's generic
+                    # closed state, is the evidence for client_close.
                     log_event("client_close")
                     client_closed.set()
                     await queue.put(("client_close", "client_close"))
@@ -1274,11 +1285,7 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
             # Cancellation can happen in the streaming loop, before teardown
             # starts. Keep an already-established termination cause, but do
             # not fabricate a client_close when the client never closed.
-            if (
-                reason == "client_close"
-                and not client_closed.is_set()
-                and not websocket.closed
-            ):
+            if reason == "client_close" and not client_closed.is_set():
                 reason = "cancelled"
             raise
         finally:
@@ -1371,11 +1378,7 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                 # message. Preserve an already proven terminal reason, but
                 # do not misreport an unacknowledged cancellation as a
                 # deliberate viewer close.
-                if (
-                reason == "client_close"
-                and not client_closed.is_set()
-                and not websocket.closed
-            ):
+                if reason == "client_close" and not client_closed.is_set():
                     reason = "cancelled"
                 # The release may still be running detached; retrieve its late
                 # result so a teardown failure cannot surface as an unhandled
