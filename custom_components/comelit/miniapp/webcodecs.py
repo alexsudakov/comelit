@@ -867,6 +867,9 @@ _WEBSOCKET_SESSION_REASONS = frozenset(
         "intercom_media_busy",
         "intercom_media_start_failed",
         "intercom_media_unavailable",
+        "invalid_webcodecs_command",
+        "source_not_h264_rtsp",
+        "unit_too_large",
         "cancelled",
     }
 )
