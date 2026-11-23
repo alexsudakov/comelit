@@ -161,7 +161,8 @@ class P116HaStreamRtpBridgeTests(unittest.TestCase):
         self.assertIn("_attr_entity_registry_enabled_default = False", self.switch)
         self.assertIn('"deprecated": True', self.switch)
         self.assertIn('"replacement_entity_id": ENTRANCE_CAMERA_ENTITY_ID', self.switch)
-        self.assertIn("async_force_stop", self.switch)
+        self.assertIn('await self._manager.async_release(reason="ha_switch")', self.switch)
+        self.assertNotIn("async_force_stop", self.switch)
 
     def test_t7_hard_limit_and_r63_gate_path_remains_bounded(self) -> None:
         self.assertIn("MEDIA_SESSION_HARD_LIMIT_SECONDS = 600", self.session)
