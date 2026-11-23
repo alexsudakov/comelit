@@ -660,7 +660,7 @@ def test_door_press_rejects_unknown_semantic_target_without_service_call():
 
 def test_entrance_camera_uses_miniapp_attached_stream_and_returns_only_proxy_capability():
     controller, hass = _controller()
-    coordinator = _install_attached_ring_coordinator(hass)
+    coordinator = _install_attached_ring_coordinator(hass, inbound_call=True)
     _stream_requests.clear()
     token, session = controller.sessions.create(424242, 12345678)
 
@@ -808,7 +808,7 @@ def test_miniapp_attached_request_recovers_after_readiness_timeout():
 
 def test_miniapp_attached_other_transport_failure_uses_bounded_unavailable_reason():
     controller, hass = _controller()
-    coordinator = _install_attached_ring_coordinator(hass)
+    coordinator = _install_attached_ring_coordinator(hass, inbound_call=True)
     token, session = controller.sessions.create(424242, 12345678)
 
     async def run():
@@ -834,7 +834,7 @@ def test_miniapp_attached_other_transport_failure_uses_bounded_unavailable_reaso
 
 def test_miniapp_attached_hls_activation_order_starts_stream_before_transport():
     controller, hass = _controller()
-    coordinator = _install_attached_ring_coordinator(hass)
+    coordinator = _install_attached_ring_coordinator(hass, inbound_call=True)
     events = coordinator.attached_provider.events
     token, session = controller.sessions.create(424242, 12345678)
 
@@ -3267,7 +3267,7 @@ def test_diagnostics_rate_limiter_store_stays_bounded_under_overflow():
 
 def test_entrance_hls_uses_attached_resource_without_ha_camera_request(monkeypatch):
     controller, hass = _controller(surveillance_label="Outside")
-    coordinator = _install_attached_ring_coordinator(hass)
+    coordinator = _install_attached_ring_coordinator(hass, inbound_call=True)
     manager, _transport = _install_webcodecs_entrance_runtime(hass)
     token, session = controller.sessions.create(424242, 12345678)
     manager.phase = "stopping"
@@ -3386,7 +3386,9 @@ class _FakeAttachedRingCoordinator:
         return self.requested
 
 
-def _install_attached_ring_coordinator(hass, *, requested: bool = True):
+def _install_attached_ring_coordinator(
+    hass, *, requested: bool = True, inbound_call: bool = False
+):
     coordinator = _FakeAttachedRingCoordinator(requested=requested)
     domain_data = hass.data.setdefault(controller_mod.DOMAIN, {})
     domain_data.setdefault(controller_mod.DATA_RING_MEDIA, {})["entry-1"] = coordinator
@@ -3407,12 +3409,21 @@ def _install_attached_ring_coordinator(hass, *, requested: bool = True):
     coordinator.attached_session = attached_session
     coordinator.attached_provider = attached_provider
     coordinator.attached_transport = attached_transport
+    if inbound_call:
+        # Synthetic incoming call: the fixture must explicitly opt in.
+        # This is an already-owned native attached channel, not a media
+        # bootstrap performed by the Mini App viewer being tested.
+        attached_transport.active = True
+        attached_transport.local_sdp_ready = True
+        attached_transport.miniapp_local_sdp_ready = True
+        attached_session._panel = "entrance"
+        attached_session._leases["camera_view"] = 1
     return coordinator
 
 
 def test_attached_viewer_open_and_explicit_close_requests_ring_stop_once():
     controller, hass = _controller(surveillance_label="Outside")
-    coordinator = _install_attached_ring_coordinator(hass)
+    coordinator = _install_attached_ring_coordinator(hass, inbound_call=True)
     token, session = controller.sessions.create(424242, 12345678)
 
     async def run():
@@ -3445,7 +3456,7 @@ def test_attached_viewer_open_and_explicit_close_requests_ring_stop_once():
 
 def test_attached_viewer_expiry_requests_single_teardown(monkeypatch):
     controller, hass = _controller(surveillance_label="Outside")
-    coordinator = _install_attached_ring_coordinator(hass)
+    coordinator = _install_attached_ring_coordinator(hass, inbound_call=True)
     token, session = controller.sessions.create(424242, 12345678)
     monkeypatch.setattr(controller_mod, "ATTACHED_VIEWER_LEASE_EXPIRY_SECONDS", 0)
 
@@ -3464,7 +3475,7 @@ def test_attached_viewer_expiry_requests_single_teardown(monkeypatch):
 
 def test_attached_viewer_heartbeats_keep_lease_alive_until_close(monkeypatch):
     controller, hass = _controller(surveillance_label="Outside")
-    coordinator = _install_attached_ring_coordinator(hass)
+    coordinator = _install_attached_ring_coordinator(hass, inbound_call=True)
     token, session = controller.sessions.create(424242, 12345678)
     monkeypatch.setattr(controller_mod, "ATTACHED_VIEWER_LEASE_EXPIRY_SECONDS", 100)
 
@@ -3498,7 +3509,7 @@ def test_attached_viewer_last_close_stopped_transport_deactivate_is_best_effort(
     caplog,
 ):
     controller, hass = _controller(surveillance_label="Outside")
-    coordinator = _install_attached_ring_coordinator(hass)
+    coordinator = _install_attached_ring_coordinator(hass, inbound_call=True)
     token, session = controller.sessions.create(424242, 12345678)
     original_release = coordinator.attached_session.async_release
 
@@ -3539,7 +3550,7 @@ def test_attached_viewer_last_close_stopped_transport_deactivate_is_best_effort(
 
 def test_attached_viewer_two_viewers_release_last_only():
     controller, hass = _controller(surveillance_label="Outside")
-    coordinator = _install_attached_ring_coordinator(hass)
+    coordinator = _install_attached_ring_coordinator(hass, inbound_call=True)
     token, session = controller.sessions.create(424242, 12345678)
 
     async def run():
@@ -3573,7 +3584,7 @@ def test_attached_viewer_http_view_does_not_bypass_coordinator():
 
 def test_attached_viewer_endpoint_uses_session_and_is_idempotent():
     controller, hass = _controller(surveillance_label="Outside")
-    coordinator = _install_attached_ring_coordinator(hass)
+    coordinator = _install_attached_ring_coordinator(hass, inbound_call=True)
     token, _session = controller.sessions.create(424242, 12345678)
     view = views_mod.MiniAppAttachedViewerView(controller)
 
@@ -3606,7 +3617,7 @@ def test_attached_viewer_endpoint_uses_session_and_is_idempotent():
 
 def test_attached_viewer_cleanup_never_invokes_door_gate_or_retry(monkeypatch):
     controller, hass = _controller(surveillance_label="Outside")
-    coordinator = _install_attached_ring_coordinator(hass)
+    coordinator = _install_attached_ring_coordinator(hass, inbound_call=True)
     token, session = controller.sessions.create(424242, 12345678)
     door_invocations = 0
     gate_invocations = 0
@@ -3661,7 +3672,7 @@ def test_attached_viewer_cleanup_never_invokes_door_gate_or_retry(monkeypatch):
 
 def test_attached_viewer_shutdown_clears_leases_tasks_and_is_idempotent(monkeypatch):
     controller, hass = _controller(surveillance_label="Outside")
-    coordinator = _install_attached_ring_coordinator(hass)
+    coordinator = _install_attached_ring_coordinator(hass, inbound_call=True)
     token, session = controller.sessions.create(424242, 12345678)
 
     async def run_shutdown_path():
@@ -3759,7 +3770,7 @@ def test_attached_viewer_endpoint_reports_lease_constants():
 
 def test_attached_viewer_heartbeat_and_silent_expiry_use_server_clock(monkeypatch):
     controller, hass = _controller(surveillance_label="Outside")
-    coordinator = _install_attached_ring_coordinator(hass)
+    coordinator = _install_attached_ring_coordinator(hass, inbound_call=True)
     clock = types.SimpleNamespace(now=1_800_000_000.0)
     token, session = controller.sessions.create(
         424242,
@@ -3826,7 +3837,7 @@ def test_attached_viewer_heartbeat_and_silent_expiry_use_server_clock(monkeypatc
 
 def test_attached_viewer_session_expiry_bounds_lease_and_rejects_heartbeat(monkeypatch):
     controller, hass = _controller(surveillance_label="Outside")
-    coordinator = _install_attached_ring_coordinator(hass)
+    coordinator = _install_attached_ring_coordinator(hass, inbound_call=True)
     clock = types.SimpleNamespace(now=1_800_000_000.0)
     token, session = controller.sessions.create(
         424242,
@@ -3891,7 +3902,7 @@ def test_attached_viewer_session_expiry_bounds_lease_and_rejects_heartbeat(monke
 
 def test_attached_viewer_stop_marker_includes_requested_result(caplog):
     controller, hass = _controller(surveillance_label="Outside")
-    _install_attached_ring_coordinator(hass, requested=False)
+    _install_attached_ring_coordinator(hass, requested=False, inbound_call=True)
     token, session = controller.sessions.create(424242, 12345678)
 
     async def run():
