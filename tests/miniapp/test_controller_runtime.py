@@ -2508,7 +2508,8 @@ def test_webcodecs_view_happy_path_secret_free_logs_and_messages(monkeypatch, ca
     _assert_no_fixture_secret(compared)
 
 
-def test_webcodecs_non_rtsp_unit_too_large_duration_and_source_failure(monkeypatch):
+def test_webcodecs_non_rtsp_unit_too_large_duration_and_source_failure(monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger="custom_components.comelit.miniapp.views")
     controller, hass = _controller(surveillance_label="Outside")
     token, session = controller.sessions.create(424242, 12345678)
     view = views_mod.MiniAppCameraWebCodecsView(controller)
@@ -2523,6 +2524,12 @@ def test_webcodecs_non_rtsp_unit_too_large_duration_and_source_failure(monkeypat
     assert _json_texts(_CaptureWebSocket.instances[-1]) == [
         {"type": "error", "code": "source_not_h264_rtsp"}
     ]
+    assert any(
+        "COMELIT_MINIAPP_WEBCODECS_SUMMARY" in record.getMessage()
+        and "reason=source_not_h264_rtsp" in record.getMessage()
+        for record in caplog.records
+    )
+    caplog.clear()
 
     async def too_large(_source):
         return _AsyncUnitSource(
@@ -2552,6 +2559,12 @@ def test_webcodecs_non_rtsp_unit_too_large_duration_and_source_failure(monkeypat
     assert too_large_texts[0]["type"] == "source_open"
     assert too_large_texts[1]["type"] == "source_packet"
     assert too_large_texts[-1] == {"type": "error", "code": "unit_too_large"}
+    assert any(
+        "COMELIT_MINIAPP_WEBCODECS_SUMMARY" in record.getMessage()
+        and "reason=unit_too_large" in record.getMessage()
+        for record in caplog.records
+    )
+    caplog.clear()
 
     async def failing(_source):
         raise webcodecs_mod.WebCodecsSourceError("source_open_failed")
@@ -2570,6 +2583,12 @@ def test_webcodecs_non_rtsp_unit_too_large_duration_and_source_failure(monkeypat
     assert _json_texts(_CaptureWebSocket.instances[-1]) == [
         {"type": "error", "code": "source_open_failed"}
     ]
+    assert any(
+        "COMELIT_MINIAPP_WEBCODECS_SUMMARY" in record.getMessage()
+        and "reason=source_open_failed" in record.getMessage()
+        for record in caplog.records
+    )
+    caplog.clear()
 
     async def slow_after_one(_source):
         class _SlowSource(_AsyncUnitSource):
@@ -2658,7 +2677,8 @@ def test_webcodecs_session_limit_and_backlog_cleanup(monkeypatch):
     assert registry.active_count() == 0
 
 
-def test_webcodecs_send_connection_error_is_clean_client_close(monkeypatch):
+def test_webcodecs_send_connection_error_keeps_unproven_peer_reason(monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger="custom_components.comelit.miniapp.views")
     controller, hass = _controller(surveillance_label="Outside")
     token, _session = controller.sessions.create(424242, 12345678)
     hass.cameras["camera.driveway"] = FakeCamera(set(), "rtsp://192.0.2.10/live")
@@ -2698,6 +2718,13 @@ def test_webcodecs_send_connection_error_is_clean_client_close(monkeypatch):
         "comelit_media_started": False,
     }
     assert websocket.binaries == []
+    summaries = [
+        record.getMessage() for record in caplog.records
+        if "COMELIT_MINIAPP_WEBCODECS_SUMMARY" in record.getMessage()
+    ]
+    assert len(summaries) == 1
+    assert "reason=cancelled" in summaries[0]
+    assert "reason=client_close" not in summaries[0]
 
 
 def test_h264_sdp_access_unit_source_uses_local_rtp_whitelist(monkeypatch):
