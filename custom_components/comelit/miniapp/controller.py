@@ -557,7 +557,7 @@ class ComelitMiniAppController:
         except MiniAppOperationError:
             return False
         if self._miniapp_attached_resource is not None:
-            return True
+            return bool(getattr(session, "active", False))
         if not getattr(session, "active", False):
             return False
         stream_source = getattr(provider, "_async_stream_source", None)
@@ -710,6 +710,12 @@ class ComelitMiniAppController:
         viewer_count = 0
 
         async with self._attached_viewer_lock:
+            if action in {"open", "heartbeat"}:
+                resource = self._miniapp_attached_resource
+                if resource is not None and not getattr(
+                    resource.session, "active", False
+                ):
+                    raise MiniAppOperationError("attached_media_not_active")
             existing = self._attached_viewers.pop(key, None)
             heartbeat_logged = bool(existing.heartbeat_logged) if existing else False
             if existing is not None:
