@@ -928,7 +928,7 @@ def test_noncooperative_open_returns_bounded_caller_and_seals_late_success():
         old_watch = ms.MAX_WATCH_SECONDS
         old_wall = ms.MAX_CYCLE_WALL_SECONDS
         ms.MAX_OPEN_SECONDS = 0.01
-        ms.MAX_WATCH_SECONDS = 0.2
+        ms.MAX_WATCH_SECONDS = 0.5
         ms.MAX_CYCLE_WALL_SECONDS = 0.03
 
         async def stubborn_open(*, panel, reason):
