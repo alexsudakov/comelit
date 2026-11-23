@@ -83,96 +83,91 @@ def test_exit_error_is_normal_only_when_real_pyav_handoff_is_confirmed():
     )
 
 
-def test_webcodecs_summary_emitted_from_handler_cleanup_finally():
-    """A cancellation in release/child join must not skip SUMMARY."""
-    source = (
-        ROOT / "custom_components/comelit/miniapp/views.py"
-    ).read_text(encoding="utf-8")
-    tree = ast.parse(source)
+def _webcodecs_get_ast():
+    tree = ast.parse(
+        (ROOT / "custom_components/comelit/miniapp/views.py").read_text(
+            encoding="utf-8"
+        )
+    )
     klass = next(
         node for node in tree.body
         if isinstance(node, ast.ClassDef)
         and node.name == "MiniAppCameraWebCodecsView"
     )
-    method = next(
+    return next(
         node for node in klass.body
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "get"
     )
-    summaries = [
+
+
+def test_webcodecs_summary_runs_once_even_if_teardown_is_cancelled():
+    """One summary belongs to the cleanup finally, not a successful join."""
+    method = _webcodecs_get_ast()
+    calls = [
         node for node in ast.walk(method)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "webcodecs_summary_line"
     ]
-    assert len(summaries) == 1, "exactly one summary per handler"
+    assert len(calls) == 1
     assert any(
-        summaries[0] in set(
+        calls[0] in [
             nested
-            for block in candidate.finalbody
-            for nested in ast.walk(block)
-        )
+            for stmt in candidate.finalbody
+            for nested in ast.walk(stmt)
+        ]
         for candidate in ast.walk(method)
         if isinstance(candidate, ast.Try)
-        and candidate.finalbody
         and any(
             isinstance(handler.type, ast.Attribute)
             and handler.type.attr == "CancelledError"
+            and "handler_cancelled" in ast.unparse(handler)
             for handler in candidate.handlers
         )
-    ), "summary must run even if the teardown CancelledError handler raises"
+    )
 
 
-def test_cancelled_handler_summary_reason_is_not_assumed_client_close():
-    """Run the production cancellation-reason guard against its edge cases."""
-    source = (
-        ROOT / "custom_components/comelit/miniapp/views.py"
-    ).read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    klass = next(
-        node for node in tree.body
-        if isinstance(node, ast.ClassDef)
-        and node.name == "MiniAppCameraWebCodecsView"
-    )
-    method = next(
-        node for node in klass.body
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "get"
-    )
-    cancellation_handler = next(
-        handler
-        for node in ast.walk(method)
-        if isinstance(node, ast.Try)
-        for handler in node.handlers
+def test_webcodecs_cancel_reason_is_correct_in_stream_and_teardown():
+    """Exercise both production cancellation guards with actual statements."""
+    method = _webcodecs_get_ast()
+    guards = [
+        stmt
+        for candidate in ast.walk(method)
+        if isinstance(candidate, ast.Try)
+        for handler in candidate.handlers
         if isinstance(handler.type, ast.Attribute)
         and handler.type.attr == "CancelledError"
-        and "handler_cancelled" in ast.unparse(handler)
-    )
-    guard = next(
-        node for node in cancellation_handler.body
-        if isinstance(node, ast.If)
-        and "client_closed.is_set()" in ast.unparse(node.test)
-    )
-    isolated = ast.fix_missing_locations(
-        ast.Module(body=[guard], type_ignores=[])
-    )
-    check = compile(isolated, "<webcodecs-cancel-reason>", "exec")
+        for stmt in handler.body
+        if isinstance(stmt, ast.If)
+        and "client_closed.is_set()" in ast.unparse(stmt.test)
+    ]
+    assert len(guards) == 2
 
-    class ClientClosed:
-        def __init__(self, closed: bool):
-            self.closed = closed
+    class Closed:
+        def __init__(self, value):
+            self.value = value
 
-        def is_set(self) -> bool:
-            return self.closed
+        def is_set(self):
+            return self.value
 
-    scenarios = [
+    cases = (
         ("client_close", False, "cancelled"),
         ("client_close", True, "client_close"),
         ("call_handoff", False, "call_handoff"),
         ("source_open_failed", False, "source_open_failed"),
-    ]
-    for reason, closed, expected in scenarios:
-        context = {"reason": reason, "client_closed": ClientClosed(closed)}
-        exec(check, context)
-        assert context["reason"] == expected
+    )
+    for stmt in guards:
+        code = compile(
+            ast.fix_missing_locations(
+                ast.Module(body=[stmt], type_ignores=[])
+            ),
+            "<webcodecs-cancel-reason>",
+            "exec",
+        )
+        for reason, closed, expected in cases:
+            scope = {"reason": reason, "client_closed": Closed(closed)}
+            exec(code, scope)
+            assert scope["reason"] == expected
 
     webcodecs = _load(
         "comelit_webcodecs_cancelled_summary",
@@ -186,64 +181,3 @@ def test_cancelled_handler_summary_reason_is_not_assumed_client_close():
         errors=0,
         reason="cancelled",
     )
-
-
-def test_stream_loop_cancellation_sets_summary_reason_before_cleanup():
-    """Cancellation during the main stream loop also enters the finally."""
-    source = (
-        ROOT / "custom_components/comelit/miniapp/views.py"
-    ).read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    klass = next(
-        node for node in tree.body
-        if isinstance(node, ast.ClassDef)
-        and node.name == "MiniAppCameraWebCodecsView"
-    )
-    method = next(
-        node for node in klass.body
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "get"
-    )
-    outer = next(
-        node for node in ast.walk(method)
-        if isinstance(node, ast.Try)
-        and any(
-            isinstance(h.type, ast.Attribute) and h.type.attr == "CancelledError"
-            for h in node.handlers
-        )
-        and any(
-            "webcodecs_teardown_line" in ast.unparse(block)
-            for block in node.finalbody
-        )
-    )
-    handler = next(
-        h for h in outer.handlers
-        if isinstance(h.type, ast.Attribute)
-        and h.type.attr == "CancelledError"
-    )
-    update = next(
-        block for block in handler.body
-        if isinstance(block, ast.If)
-        and "client_closed.is_set()" in ast.unparse(block.test)
-    )
-    guard = compile(
-        ast.fix_missing_locations(ast.Module(body=[update], type_ignores=[])),
-        "<webcodecs-early-cancel>",
-        "exec",
-    )
-
-    class Closed:
-        def __init__(self, value):
-            self.value = value
-
-        def is_set(self):
-            return self.value
-
-    for reason, client_left, expected in (
-        ("client_close", False, "cancelled"),
-        ("client_close", True, "client_close"),
-        ("call_handoff", False, "call_handoff"),
-        ("source_open_failed", False, "source_open_failed"),
-    ):
-        scope = {"reason": reason, "client_closed": Closed(client_left)}
-        exec(guard, scope)
-        assert scope["reason"] == expected
