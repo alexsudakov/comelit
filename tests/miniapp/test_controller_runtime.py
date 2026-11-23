@@ -5820,3 +5820,120 @@ def test_webcodecs_cancellation_during_watcher_join_still_stops_the_producer(
         and "phase=handler_cancelled" in message
         for message in messages
     )
+
+
+def test_attached_hls_idle_listener_refuses_without_starting_native_bridge():
+    """#356: listener READY alone must never bootstrap an attached call."""
+    controller, hass = _controller(surveillance_label="Outside")
+    coordinator = _install_attached_ring_coordinator(hass)
+    token, session = controller.sessions.create(424242, 12345678)
+
+    async def run():
+        with pytest.raises(
+            controller_mod.MiniAppOperationError,
+            match="attached_media_not_active",
+        ):
+            await controller.async_attached_viewer_event(
+                token, session, action="open", viewer_id="viewer_no_call"
+            )
+        with pytest.raises(
+            controller_mod.MiniAppOperationError,
+            match="attached_media_not_active",
+        ):
+            await controller.async_create_camera_media(
+                token, session, "camera.comelit_entrance"
+            )
+
+    asyncio.run(run())
+    assert coordinator.attached_transport.start_calls == 0
+    assert coordinator.attached_transport.stop_calls == 0
+    assert coordinator.attached_session.status()["leases"] == {}
+    assert coordinator.attached_provider.consumers == {}
+    assert coordinator.attached_provider.events == []
+    assert controller._attached_viewers == {}
+    assert controller._miniapp_attached_resource is None
+    assert coordinator.requests == []
+
+
+def test_attached_hls_native_release_wins_acquire_race_no_rebootstrap():
+    """The join-only check must occur after the native owner's release lock."""
+    controller, hass = _controller(surveillance_label="Outside")
+    coordinator = _install_attached_ring_coordinator(hass)
+    token, session = controller.sessions.create(424242, 12345678)
+    native = coordinator.attached_session
+
+    async def run():
+        await native.async_acquire(panel="entrance", reason="camera_view")
+        async with native._lock:
+            native_release = asyncio.create_task(
+                native.async_release(reason="camera_view")
+            )
+            await asyncio.sleep(0)
+            viewer_join = asyncio.create_task(
+                controller.async_attached_viewer_event(
+                    token, session, action="open", viewer_id="viewer_race1"
+                )
+            )
+            await asyncio.sleep(0)
+        await native_release
+        with pytest.raises(
+            controller_mod.MiniAppOperationError,
+            match="attached_media_not_active",
+        ):
+            await viewer_join
+
+    asyncio.run(run())
+    assert coordinator.attached_transport.start_calls == 1
+    assert coordinator.attached_transport.stop_calls == 1
+    assert coordinator.attached_session.status()["leases"] == {}
+    assert coordinator.attached_provider.consumers == {}
+    assert controller._miniapp_attached_resource is None
+    assert controller._attached_viewers == {}
+
+
+def test_attached_hls_stale_remote_channel_rejects_new_viewer_and_heartbeat():
+    """A retained HLS refcount/SDP does not prove the native call stays open."""
+    controller, hass = _controller(surveillance_label="Outside")
+    coordinator = _install_attached_ring_coordinator(hass, inbound_call=True)
+    token, session = controller.sessions.create(424242, 12345678)
+
+    async def run():
+        await controller.async_attached_viewer_event(
+            token, session, action="open", viewer_id="viewer_owner1"
+        )
+        assert coordinator.attached_provider.consumers == {
+            "miniapp_attached_view": 1
+        }
+        coordinator.attached_transport.active = False
+        with pytest.raises(
+            controller_mod.MiniAppOperationError,
+            match="attached_media_not_active",
+        ):
+            await controller.async_attached_viewer_event(
+                token, session, action="open", viewer_id="viewer_late1"
+            )
+        with pytest.raises(
+            controller_mod.MiniAppOperationError,
+            match="attached_media_not_active",
+        ):
+            await controller.async_attached_viewer_event(
+                token, session, action="heartbeat", viewer_id="viewer_owner1"
+            )
+        with pytest.raises(
+            controller_mod.MiniAppOperationError,
+            match="attached_media_not_active",
+        ):
+            await controller.async_create_camera_media(
+                token, session, "camera.comelit_entrance"
+            )
+        # Explicit viewer close still cleans up only its own lease.
+        await controller.async_attached_viewer_event(
+            token, session, action="close", viewer_id="viewer_owner1"
+        )
+
+    asyncio.run(run())
+    assert coordinator.attached_transport.start_calls == 0
+    assert coordinator.attached_provider.consumers == {}
+    assert coordinator.attached_provider.release_calls == ["miniapp_attached_view"]
+    assert controller._miniapp_attached_resource is None
+    assert controller._attached_viewers == {}
