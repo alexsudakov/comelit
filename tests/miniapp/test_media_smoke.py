@@ -986,3 +986,41 @@ def test_noncooperative_open_returns_bounded_caller_and_seals_late_success():
             await packet_task
 
     asyncio.run(run())
+
+
+def test_caller_timeout_during_budget_write_never_starts_late_open():
+    """A delayed durable reserve must not physically OPEN after caller expiry."""
+    async def run():
+        backend, budget = await new_budget()
+        events = []
+        manager = FakeManager(events)
+        transport = FakeTransport(manager)
+        cycle = ms.MediaSmokeCycle(
+            budget, manager, FakeSupervisor(), transport, FakeAttached(),
+            call_state=lambda: "idle",
+            media_child_absent=lambda: True,
+            installed_sha=lambda: "a" * 40,
+        )
+        gate = asyncio.Event()
+        backend.delay = gate
+        old_wall = ms.MAX_CYCLE_WALL_SECONDS
+        ms.MAX_CYCLE_WALL_SECONDS = 0.02
+        try:
+            with pytest.raises(ms.SmokeBlocked, match="smoke_caller_deadline"):
+                await asyncio.wait_for(cycle.async_run(T1), 0.5)
+            assert backend.write_count >= 2  # init + blocked reserve
+            assert events == []
+            gate.set()
+            final = await asyncio.wait_for(cycle._cycle, 1.0)
+            assert final["open"] == "FAIL"
+            assert final["close"] == "UNCONFIRMED"  # no OPEN ever entered
+            assert final["status"] == "FAIL"
+            assert events == []
+            assert (await budget.async_status())["inflight"] is True
+            with pytest.raises(ms.SmokeBlocked, match="inflight"):
+                await cycle.async_run(T2)
+        finally:
+            gate.set()
+            ms.MAX_CYCLE_WALL_SECONDS = old_wall
+
+    asyncio.run(run())
