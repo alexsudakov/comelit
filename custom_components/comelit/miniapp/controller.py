@@ -453,6 +453,10 @@ class ComelitMiniAppController:
             )
             if callable(activate_miniapp_output):
                 await activate_miniapp_output()
+            # The remote call may close during provider/start/activation awaits.
+            # Do not publish an HLS resource whose upstream owner is gone.
+            if not getattr(session, "active", False):
+                raise MiniAppOperationError("attached_media_not_active")
         except Exception as exc:
             if consumer_acquired:
                 try:
