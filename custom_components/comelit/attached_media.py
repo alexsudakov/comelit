@@ -408,7 +408,11 @@ class ComelitAttachedRingMediaSession:
             # while holding the same lock that serializes Ring acquire/release:
             # checking session.active in the controller alone races with
             # the last owner's release and could start a second lifecycle.
-            if require_active and (not self.active or not self._leases):
+            # The Mini App attached-view reason must be join-only even if a
+            # future call site forgets to request the explicit safety flag.
+            if (require_active or reason == "miniapp_attached_view") and (
+                not self.active or not self._leases
+            ):
                 raise ComelitAttachedMediaError("attached_media_not_active")
             if self.active:
                 self._leases[reason] = self._leases.get(reason, 0) + 1
