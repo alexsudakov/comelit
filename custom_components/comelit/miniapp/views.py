@@ -1274,7 +1274,11 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
             # Cancellation can happen in the streaming loop, before teardown
             # starts. Keep an already-established termination cause, but do
             # not fabricate a client_close when the client never closed.
-            if reason == "client_close" and not client_closed.is_set():
+            if (
+                reason == "client_close"
+                and not client_closed.is_set()
+                and not websocket.closed
+            ):
                 reason = "cancelled"
             raise
         finally:
@@ -1367,7 +1371,11 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                 # message. Preserve an already proven terminal reason, but
                 # do not misreport an unacknowledged cancellation as a
                 # deliberate viewer close.
-                if reason == "client_close" and not client_closed.is_set():
+                if (
+                reason == "client_close"
+                and not client_closed.is_set()
+                and not websocket.closed
+            ):
                     reason = "cancelled"
                 # The release may still be running detached; retrieve its late
                 # result so a teardown failure cannot surface as an unhandled
