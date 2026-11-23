@@ -76,7 +76,7 @@ A test may report `OPEN=PASS` and `CLOSE=FAIL` independently. Return `NOT_EXECUT
 
 **Gate 0 — read-only installed capability inventory: PARTIAL COMPLETE.** Hermes verified gateway commands and installed identity, but the trusted task-scoped caller, HA lease API and durable quota do not exist. Root-capable HA SSH/Supervisor access cannot be treated as a safe shortcut. No physical run was authorized or executed.
 
-**Gate 1 — repository-only implementation: IN PROGRESS (Draft PR #362).** `DurableMediaSmokeBudget` requires an explicitly initialized persistent Store, an atomic single-controller lock, a pre-side-effect reservation, and a **fresh Store readback**: Home Assistant Store may log a write failure without raising. The persisted in-flight reservation survives worker interruption and blocks new opens. `MediaSmokeCycle` uses the existing media manager and a unique `smoke:<trusted_task_id>` lease, observes RTP counters, and releases only its own lease. Caller cancellation does not cancel the tracked cycle. The code is **not wired** into HA; the installed adapter must provide authenticated task identity, trusted installed SHA, child-process status, actual call state and one single controller per HA instance. Neither `task_id` nor HA service user input alone is authorization. Offline tests cover quota, concurrent reservations, write failure, persistent in-flight, rollback clock, unknown preflight, cancellation and other-owner race. Independent VERIFY/Critic and full end-to-end binding are NOT_DONE.
+**Gate 1 — repository-only implementation: IN PROGRESS (Draft PR #362, Critic requalification pending).** Original independent Critic on HEAD `89fd7fb9` reported FAIL (2 critical, 3 major). Corrective repository-only changes now share one process-local budget guard across controllers on the HA event loop, bound Store read/write, seal all controllers on uncertain I/O, and persist allowlisted, bounded redacted receipts in the **same** quota Store (schema v2). A reservation is written before any open. An interrupted or failed attempt leaves the durable in-flight marker blocked; a safe local close by itself does not authorize retry. Offline checks now include cross-controller concurrency and tests using the real Comelit manager state machine with fake hardware. This candidate has **not** been independently qualified yet. No service, trusted task-bound caller or persistent Store initialization is connected to HA.
 
 **Gate 2 — independent qualification:** full checks from `.dev/hermes-dev.yaml`, immutable exact candidate, independent Critic for changes under `custom_components/comelit/**`, and required GitHub checks. Neither a live smoke receipt nor PR CI substitutes for another.
 
@@ -126,9 +126,33 @@ budget completion is confirmed. This is still **not remote release proof**.
 ## Security and persistence blockers before a runnable endpoint
 
 1. **No direct `comelit.media_smoke` service registered yet.** HA services cannot take a client-provided `task_id` as authentication. Enforce real task identity and an allowlisted caller in a trusted boundary, without giving Codex/LLM access to generic HA credentials or Door/Gate services. Do not add a generic service-call gateway verb.
-2. **Store is not a transaction database.** The new core verifies a write through a fresh Store read before any open. Maintain **one budget/controller per HA instance**. A crashed or ambiguous in-flight attempt remains blocked rather than being cleared automatically. No fail-open reset on missing state; first initialization must be a separately authorized operator action.
+2. **Store is not a transaction database.** The new core serializes all budget instances through a shared process-local guard for the one HA event loop, verifies each write with a fresh Store read, limits individual Store I/O waits, and seals the process on uncertain reads/writes. It **must not** be used with multiple HA writer processes sharing the same storage directory. A crash or ambiguous in-flight attempt blocks new opens. No fail-open reset on missing state; first initialization must be a separately authorized operator action.
 3. **Lease/recovery safety remains unqualified in deployed code.** The root media-finalization incident and unmerged candidate are not fixed by this smoke library. Independent Critic must examine cancellation/late release before exposing an actual live caller.
 4. **No native process/ring status guessing.** If the HA adapter cannot ground the process, call, and owner preflight, its `media_child_absent` and `call_state` hooks return UNKNOWN and the test is BLOCKED. Never replace required proof with `camera=off` or the absence of an entity.
+
+## Independent qualification findings and residual blocker
+
+Critic on `89fd7fb9` found five findings: missing trusted caller (critical),
+unprotected concurrent budget controllers (critical), unbounded budget I/O
+(major), no durable receipt (major), and inadequate real-manager/cancellation
+tests (major). The code changes following that verdict target the latter four;
+they **do not** retrospectively change the previous Critic FAIL.
+
+The new budget guard is process-local, not a multi-host transactional lock.
+The receipt stores only an allowlisted set of nonsecret fields and cannot
+authenticate task provenance. Current code uses `asyncio.timeout` to bound
+an OPEN request but **does not guarantee a hard wall-clock deadline** when the
+underlying `ComelitMediaSessionManager` continues recovery after cancellation.
+Any such uncertainty must keep admission sealed, and the runnable HA caller
+must remain disabled until an independent review proves correct cleanup,
+shutdown cooperation and precise source identity.
+
+Issue `alexsudakov/hermes-dev-v2#423` is accessible through the ChatGPT
+GitHub connector but the installed Hermes fine-grained PAT may not read Issues
+from that private repository. Its architectural contract is copied above:
+native task/run claim validation and Comelit project allowlist at the trusted
+CT122 boundary, never arbitrary HA service calls or model-supplied task IDs.
+The remote runtime plugin must be checked before installing a physical action.
 
 ## Reporting contract
 
