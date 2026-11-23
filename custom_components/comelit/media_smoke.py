@@ -456,6 +456,7 @@ class MediaSmokeCycle:
         budget = await self._budget.async_reserve(task_id)
         # Upstream owner has been reserved; even an open timeout consumes budget.
         reason = f"smoke:{task_id}"
+        attempted_open = False
         outcome: dict[str, object] = {
             "status": "FAIL", "installed_sha": pre["installed_sha"], "budget": budget,
             "open": "FAIL", "rtp": "NOT_PROVEN", "close": "UNCONFIRMED",
@@ -464,8 +465,13 @@ class MediaSmokeCycle:
         try:
             # Recheck after the durable quota write.  An unrelated viewer
             # can arrive while the storage operation is awaiting I/O.
+            if self._caller_timed_out:
+                # Do not start a NEW physical side effect after the caller
+                # already received an owner-still-running timeout.
+                raise SmokeBlocked("smoke_caller_expired_before_open")
             if not self._idle() or self._installed_sha() != pre["installed_sha"]:
                 raise SmokeBlocked("smoke_preopen_state_changed")
+            attempted_open = True
             async with asyncio.timeout(MAX_OPEN_SECONDS):
                 opened = await self._manager.async_acquire(panel="entrance", reason=reason)
                 if opened.get("phase") != "active" or not self._manager.active:
@@ -505,7 +511,8 @@ class MediaSmokeCycle:
                 elif not (isinstance(leases, dict) and reason not in leases):
                     raise SmokeBlocked("smoke_lease_unknown")
                 if self._idle() and self._installed_sha() == pre["installed_sha"]:
-                    outcome["close"] = "CONFIRMED_LOCAL"
+                    if attempted_open:
+                        outcome["close"] = "CONFIRMED_LOCAL"
                     outcome["listener"] = "READY"
                     # A clean local close is necessary but is not a successful
                     # smoke if OPEN or RTP failed. Seal the reserved attempt
