@@ -237,10 +237,13 @@ class MediaSmokeCycle:
             and s.get("state") == "ready" and s.get("listener_ready") is True
             and s.get("runtime_running") is True and s.get("supervisor_running") is True
             and s.get("media_paused") is False and s.get("recovery_pending") is False
+            and s.get("attached_media_busy") is False
             and a.get("claimed") is False and a.get("active") is False
             and a.get("leases") == {} and self._call_state() == "idle"
             and self._media_child_absent() is True
             and self._transport.active is False
+            and callable(getattr(self._transport, "_stop_marker_unproven", None))
+            and self._transport._stop_marker_unproven() is False
             and isinstance(self._installed_sha(), str)
             and re.fullmatch(r"[0-9a-f]{40}", self._installed_sha()) is not None
         )
