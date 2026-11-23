@@ -120,3 +120,69 @@ def test_webcodecs_summary_emitted_from_handler_cleanup_finally():
             for handler in candidate.handlers
         )
     ), "summary must run even if the teardown CancelledError handler raises"
+
+
+def test_cancelled_handler_summary_reason_is_not_assumed_client_close():
+    """Run the production cancellation-reason guard against its edge cases."""
+    source = (
+        ROOT / "custom_components/comelit/miniapp/views.py"
+    ).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    klass = next(
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef)
+        and node.name == "MiniAppCameraWebCodecsView"
+    )
+    method = next(
+        node for node in klass.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "get"
+    )
+    cancellation_handler = next(
+        handler
+        for node in ast.walk(method)
+        if isinstance(node, ast.Try)
+        for handler in node.handlers
+        if isinstance(handler.type, ast.Attribute)
+        and handler.type.attr == "CancelledError"
+        and "handler_cancelled" in ast.unparse(handler)
+    )
+    guard = next(
+        node for node in cancellation_handler.body
+        if isinstance(node, ast.If)
+        and "client_closed.is_set()" in ast.unparse(node.test)
+    )
+    isolated = ast.fix_missing_locations(
+        ast.Module(body=[guard], type_ignores=[])
+    )
+    check = compile(isolated, "<webcodecs-cancel-reason>", "exec")
+
+    class ClientClosed:
+        def __init__(self, closed: bool):
+            self.closed = closed
+
+        def is_set(self) -> bool:
+            return self.closed
+
+    scenarios = [
+        ("client_close", False, "cancelled"),
+        ("client_close", True, "client_close"),
+        ("call_handoff", False, "call_handoff"),
+        ("source_open_failed", False, "source_open_failed"),
+    ]
+    for reason, closed, expected in scenarios:
+        context = {"reason": reason, "client_closed": ClientClosed(closed)}
+        exec(check, context)
+        assert context["reason"] == expected
+
+    webcodecs = _load(
+        "comelit_webcodecs_cancelled_summary",
+        ROOT / "custom_components/comelit/miniapp/webcodecs.py",
+    )
+    assert "reason=cancelled" in webcodecs.webcodecs_summary_line(
+        "camera.comelit_entrance",
+        units=4,
+        keyframes=1,
+        bytes_sent=4000,
+        errors=0,
+        reason="cancelled",
+    )
