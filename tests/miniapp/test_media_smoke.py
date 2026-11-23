@@ -256,6 +256,7 @@ def test_run_cleans_up_only_own_lease_and_releases_budget():
         asyncio.create_task(on_packet())
         out = await r.async_run(T1)
         assert out["open"] == "PASS"
+        assert out["status"] == "PASS"
         assert out["close"] == "CONFIRMED_LOCAL"
         assert out["listener"] == "READY"
         assert events == ["open", "release"]
@@ -433,6 +434,7 @@ def test_missing_rtp_after_clean_close_prevents_automatic_retry():
         try:
             result = await cycle.async_run(T1)
             assert result["open"] == "PASS"
+            assert result["status"] == "FAIL"
             assert result["rtp"] == "NOT_PROVEN"
             assert result["close"] == "CONFIRMED_LOCAL"
             assert (await budget.async_status())["inflight"] is True
@@ -477,6 +479,7 @@ def test_ring_arriving_during_smoke_must_not_count_as_success():
         cycle._transport.video_forwarding = True
         out = await cycle.async_run(T1)
         assert out["open"] == "PASS"
+        assert out["status"] == "FAIL"
         assert out["rtp"] == "NOT_PROVEN"
         assert out["close"] == "UNCONFIRMED"
         assert (await budget.async_status())["inflight"] is True
