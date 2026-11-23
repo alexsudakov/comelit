@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 from homeassistant.components.switch import SwitchEntity
@@ -53,24 +52,11 @@ class ComelitEntranceMediaSwitch(SwitchEntity):
     ) -> None:
         self._manager = manager
         self._transport = transport
-        # The deprecated switch owns only its own HA lease. Other camera and
-        # Mini App viewers are not owned by this switch.
-        self._lease_lock = asyncio.Lock()
-        self._lease_held = False
         self.entity_id = ENTRANCE_MEDIA_SWITCH_ENTITY_ID
-
-    def _owns_live_lease(self) -> bool:
-        leases = self._manager.status().get("leases", {})
-        return (
-            self._lease_held
-            and isinstance(leases, dict)
-            and bool(leases.get("ha_switch", 0))
-        )
 
     @property
     def is_on(self) -> bool:
-        # This switch represents its own lease, not every active camera owner.
-        return self._owns_live_lease() and self._manager.active
+        return self._manager.active
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -104,56 +90,19 @@ class ComelitEntranceMediaSwitch(SwitchEntity):
         self.async_write_ha_state()
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        async with self._lease_lock:
-            if self._owns_live_lease():
-                if not self._manager.active:
-                    raise HomeAssistantError(
-                        "Cannot start Comelit media: owned lease is not active"
-                    )
-                return
-            if self._lease_held:
-                # A stale lease may only be forgotten after a confirmed idle
-                # transition. Do not overlap an unconfirmed old teardown.
-                status = self._manager.status()
-                if status.get("phase") != "inactive" or status.get("leases") != {}:
-                    raise HomeAssistantError(
-                        "Cannot start Comelit media: previous lease unconfirmed"
-                    )
-            self._lease_held = False
-            try:
-                await self._manager.async_acquire(panel="entrance", reason="ha_switch")
-            except ComelitMediaSessionError as exc:
-                raise HomeAssistantError(
-                    f"Cannot start Comelit entrance media session: {exc}"
-                ) from exc
-            self._lease_held = True
+        try:
+            await self._manager.async_acquire(panel="entrance", reason="ha_switch")
+        except ComelitMediaSessionError as exc:
+            raise HomeAssistantError(
+                f"Cannot start Comelit entrance media session: {exc}"
+            ) from exc
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        async with self._lease_lock:
-            if not self._lease_held:
-                return
-            if self._owns_live_lease():
-                try:
-                    # Do NOT force-stop: camera/WebCodecs may own other leases.
-                    status = await self._manager.async_release(reason="ha_switch")
-                except ComelitMediaSessionError as exc:
-                    # Keep ownership until a subsequent call can reconcile it.
-                    raise HomeAssistantError(
-                        f"Cannot stop Comelit entrance media session safely: {exc}"
-                    ) from exc
-                self._lease_held = False
-                if status.get("phase") == "error":
-                    raise HomeAssistantError(
-                        "Cannot confirm Comelit media teardown after switch release"
-                    )
-            else:
-                # A disappeared lease is only safe to forget after the manager
-                # proved the earlier session has reached INACTIVE.
-                status = self._manager.status()
-                if status.get("phase") != "inactive" or status.get("leases") != {}:
-                    raise HomeAssistantError(
-                        "Cannot confirm Comelit media teardown after lease loss"
-                    )
-                self._lease_held = False
+        try:
+            await self._manager.async_force_stop(reason="ha_switch_off")
+        except ComelitMediaSessionError as exc:
+            raise HomeAssistantError(
+                f"Cannot stop Comelit entrance media session safely: {exc}"
+            ) from exc
         self.async_write_ha_state()
