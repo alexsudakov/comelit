@@ -140,19 +140,27 @@ they **do not** retrospectively change the previous Critic FAIL.
 
 The new budget guard is process-local, not a multi-host transactional lock.
 The receipt stores only an allowlisted set of nonsecret fields and cannot
-authenticate task provenance. Current code uses `asyncio.timeout` to bound
-an OPEN request but **does not guarantee a hard wall-clock deadline** when the
-underlying `ComelitMediaSessionManager` continues recovery after cancellation.
-Any such uncertainty must keep admission sealed, and the runnable HA caller
-must remain disabled until an independent review proves correct cleanup,
-shutdown cooperation and precise source identity.
+authenticate task provenance. The smoke caller now uses a bounded
+`wait_for(shield(the_single_owned_cycle))` and returns a blocking verdict
+when the total caller deadline is exceeded. That does NOT cancel the underlying
+manager or claim native physical teardown is finished. Its owner remains
+tracked, late success is converted to FAIL without unlocking the durable
+reservation, and a pre-open deadline expiry blocks any new physical OPEN.
+Tests cover both a manager that defers cancellation and a delayed budget
+reservation. `asyncio.timeout` around OPEN still **cannot promise a hard
+physical teardown bound** if the underlying `ComelitMediaSessionManager`
+continues recovery. Any such uncertainty keeps admission sealed. The
+runnable HA caller remains disabled until independent review proves correct
+cleanup, shutdown cooperation and source identity.
 
-Issue `alexsudakov/hermes-dev-v2#423` is accessible through the ChatGPT
-GitHub connector but the installed Hermes fine-grained PAT may not read Issues
-from that private repository. Its architectural contract is copied above:
-native task/run claim validation and Comelit project allowlist at the trusted
-CT122 boundary, never arbitrary HA service calls or model-supplied task IDs.
-The remote runtime plugin must be checked before installing a physical action.
+The design for `alexsudakov/hermes-dev-v2#423` is now also available
+in [Hermes Draft PR #425](https://github.com/alexsudakov/hermes-dev-v2/pull/425)
+as repository source, since the installed Hermes fine-grained PAT may not
+read private GitHub Issues. It proposes native task/run claim validation
+and a project-only constrained caller, never arbitrary HA services or
+model-supplied task IDs. The actual installed worker isolation, gateway
+and HA service identity are **NOT_PROVEN**, so this is still a design rather
+than an executable capability.
 
 ## Reporting contract
 
