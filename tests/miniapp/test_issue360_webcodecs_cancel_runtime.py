@@ -406,3 +406,41 @@ def test_server_reject_reason_is_in_actual_summary(
     assert "reason=client_close" not in summary[0]
     assert manager.release_calls == []
     assert not transport.active
+
+
+def test_unrecognized_server_error_normalizes_summary_reason(
+    monkeypatch, caplog
+):
+    """Unexpected error codes are never interpreted as client closure."""
+    class Socket(_RaceSocket):
+        instances = []
+
+    view, token, manager, transport = _setup(
+        monkeypatch, Socket, _PausedSource()
+    )
+
+    async def fail_acquire(_target):
+        raise base.controller_mod.MiniAppOperationError("unexpected_state")
+
+    monkeypatch.setattr(
+        view.controller, "acquire_webcodecs_entrance", fail_acquire
+    )
+
+    async def run():
+        await view.get(
+            base._mse_request(view.controller, token), "camera.comelit_entrance"
+        )
+
+    with caplog.at_level(logging.INFO, logger="custom_components.comelit.miniapp.views"):
+        asyncio.run(run())
+
+    summaries = [
+        record.getMessage() for record in caplog.records
+        if "COMELIT_MINIAPP_WEBCODECS_SUMMARY" in record.getMessage()
+    ]
+    assert len(summaries) == 1
+    assert "reason=source_open_failed" in summaries[0]
+    assert "unexpected_state" not in summaries[0]
+    assert "reason=client_close" not in summaries[0]
+    assert manager.release_calls == []
+    assert not transport.active
