@@ -186,3 +186,64 @@ def test_cancelled_handler_summary_reason_is_not_assumed_client_close():
         errors=0,
         reason="cancelled",
     )
+
+
+def test_stream_loop_cancellation_sets_summary_reason_before_cleanup():
+    """Cancellation during the main stream loop also enters the finally."""
+    source = (
+        ROOT / "custom_components/comelit/miniapp/views.py"
+    ).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    klass = next(
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef)
+        and node.name == "MiniAppCameraWebCodecsView"
+    )
+    method = next(
+        node for node in klass.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "get"
+    )
+    outer = next(
+        node for node in ast.walk(method)
+        if isinstance(node, ast.Try)
+        and any(
+            isinstance(h.type, ast.Attribute) and h.type.attr == "CancelledError"
+            for h in node.handlers
+        )
+        and any(
+            "webcodecs_teardown_line" in ast.unparse(block)
+            for block in node.finalbody
+        )
+    )
+    handler = next(
+        h for h in outer.handlers
+        if isinstance(h.type, ast.Attribute)
+        and h.type.attr == "CancelledError"
+    )
+    update = next(
+        block for block in handler.body
+        if isinstance(block, ast.If)
+        and "client_closed.is_set()" in ast.unparse(block.test)
+    )
+    guard = compile(
+        ast.fix_missing_locations(ast.Module(body=[update], type_ignores=[])),
+        "<webcodecs-early-cancel>",
+        "exec",
+    )
+
+    class Closed:
+        def __init__(self, value):
+            self.value = value
+
+        def is_set(self):
+            return self.value
+
+    for reason, client_left, expected in (
+        ("client_close", False, "cancelled"),
+        ("client_close", True, "client_close"),
+        ("call_handoff", False, "call_handoff"),
+        ("source_open_failed", False, "source_open_failed"),
+    ):
+        scope = {"reason": reason, "client_closed": Closed(client_left)}
+        exec(guard, scope)
+        assert scope["reason"] == expected
