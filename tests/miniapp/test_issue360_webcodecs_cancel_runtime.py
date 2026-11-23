@@ -325,6 +325,7 @@ def test_actual_received_close_frame_is_proven_client_close(monkeypatch, caplog)
 
         async def __anext__(self):
             self.watch_started.set()
+            await source.read_started.wait()
             if self.sent_close_frame:
                 raise StopAsyncIteration
             self.sent_close_frame = True
