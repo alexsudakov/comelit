@@ -424,6 +424,7 @@ class ComelitMiniAppController:
         session, provider = self._miniapp_attached_runtime()
         lease_acquired = False
         consumer_acquired = False
+        output_activated = False
         try:
             await session.async_acquire(
                 panel="entrance",
@@ -453,6 +454,7 @@ class ComelitMiniAppController:
             )
             if callable(activate_miniapp_output):
                 await activate_miniapp_output()
+                output_activated = True
             # The remote call may close during provider/start/activation awaits.
             # Do not publish an HLS resource whose upstream owner is gone.
             if not getattr(session, "active", False):
@@ -474,6 +476,18 @@ class ComelitMiniAppController:
                     _LOGGER.exception("Mini App attached stream consumer cleanup failed")
             if lease_acquired:
                 await session.async_release(reason=_MINIAPP_ATTACHED_VIEW_REASON)
+            if output_activated:
+                deactivate_output = getattr(
+                    session, "async_deactivate_miniapp_output", None
+                )
+                if callable(deactivate_output):
+                    try:
+                        await deactivate_output()
+                    except Exception:
+                        _LOGGER.warning(
+                            "Mini App attached sink cleanup failed",
+                            exc_info=True,
+                        )
             if (
                 isinstance(exc, ComelitAttachedMediaError)
                 and str(exc) == _MINIAPP_ATTACHED_CONSUMER_NOT_READY
