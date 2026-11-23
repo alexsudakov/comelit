@@ -17,15 +17,15 @@ Keep offline VERIFY / independent Critic separate from any live test. A successf
 | `ComelitMediaSessionManager.async_acquire(panel="entrance", reason=...)` | Acquires an on-demand lease through the existing media manager | Reuse the manager; do not spawn the native helper directly |
 | `ComelitMediaSessionManager.async_release(reason=...)` | Removes a specific lease and tears down when last lease ends | Close **only the smoke-owned lease**, then join confirmed teardown |
 | `ComelitMediaSessionManager.status()` | Reports phase, active, leases, listener_paused, error | Query inside a trusted HA execution boundary; external entities alone do not expose leases |
-| `switch.comelit_entrance_camera` turn_on/turn_off | BASE: `async_acquire("ha_switch")` / **`async_force_stop("ha_switch_off")`**; this Draft PR changes OFF to own-lease `async_release("ha_switch")` | The **installed** switch remains forbidden for smoke; even after patch, no trusted quota or permission boundary exists |
+| `switch.comelit_entrance_camera` turn_on/turn_off | Installed BASE uses `async_acquire("ha_switch")` / **`async_force_stop("ha_switch_off")`** | **Forbidden for smoke**. The experimental switch edits were reverted from this PR; do not modify this legacy UI just to add test automation |
 | `MiniAppWebCodecsEntranceLease.release()` | Sets `released=True` before awaiting manager release | Do not use this flag as teardown proof; cancellation requires explicit test |
 | `camera.comelit_entrance` attributes | `media_phase`, `media_active`, `attached_media_active`, `video_forwarding`, RTP counters | Safe observations, but not ownership proof |
 | `sensor.comelit_listener_status` attributes | `listener_ready`, `media_paused`, `runtime_running`, `supervisor_running` | Check listener recovery after last lease |
 | `comelit-v4` / `comelit-media` | Persistent Ring runtime / on-demand media helper | Do not classify persistent Ring runtime as an orphaned media process |
 
-This Draft PR adds a safety prerequisite: the deprecated switch tracks its own HA lease, makes repeat ON idempotent, and refuses unconfirmed teardown rather than forcibly stopping other viewers. **It is not yet installed and is not a trusted smoke executor.**
+Gate 0 runtime report (2026-11-23): installed `comelit-ha` is a forced-command SSH gateway allowing `status|check|logs|logs-follow|deploy|rollback|restart`, but **no service-call or lease-specific action**. The configured Hermes `default` profile also has a separate broad HA SSH/Supervisor path, which is NOT a trusted project-scoped boundary. No native Hermes quota or task-bound authorization exists. Installed SHA remains `38d721b07eb4fd1e257290e7ae4869d5ca1437aa`; no physical smoke was executed.
 
-The real installed `comelit-ha` gateway permissions, its available invocation surface, and persistent trusted quota facilities **are not proven from GitHub**. The current incident's local media-finalization candidate has not passed independent Critic; do not assume a successful smoke on the deployed base.
+This Draft PR now contains an **unwired library-only core** (`media_smoke.py`) and offline tests (`test_media_smoke.py`), not a registered HA service. It does not install a caller, grant permissions, bootstrap storage, or enable any live action. The media-finalization candidate still lacks Critic PASS, so its fixes cannot be assumed in production.
 
 ## Required shape, not yet implemented
 
@@ -72,13 +72,21 @@ A test may report `OPEN=PASS` and `CLOSE=FAIL` independently. Return `NOT_EXECUT
 
 ## Acceptance gates for implementation
 
-**Gate 0 — read-only installed capability inventory:** prove the exact installed gateway/HA commands, their permissions and execution identity, trusted budget storage and safe acquisition/release boundary. This cannot be established from the source repo and is not a license to run the camera.
+**Gate 0 — read-only installed capability inventory: PARTIAL COMPLETE.** Hermes verified gateway commands and installed identity, but the trusted task-scoped caller, HA lease API and durable quota do not exist. Root-capable HA SSH/Supervisor access cannot be treated as a safe shortcut. No physical run was authorized or executed.
 
-**Gate 1 — repository-only implementation:** add the smallest project-specific executor/HA action only if Gate 0 proves it necessary. Use existing manager/transport/supervisor. Tests must cover concurrent quota reservations, crash-before/after-open budget, task re-entry, conflicting users, Ring race, timeout/cancellation, own-lease release, late completion, no second owner, redaction and exact installed SHA. The test code must be **offline** and not actuate physical devices.
+**Gate 1 — repository-only implementation: IN PROGRESS.** `DurableMediaSmokeBudget` requires an explicitly initialized persistent Store, an atomic single-controller lock, a pre-side-effect reservation, and a **fresh Store readback**: Home Assistant Store may log a write failure without raising. The persisted in-flight reservation survives worker interruption and blocks new opens. `MediaSmokeCycle` uses the existing media manager and a unique `smoke:<trusted_task_id>` lease, observes RTP counters, and releases only its own lease. Caller cancellation does not cancel the tracked cycle. The code is **not wired** into HA; the installed adapter must provide authenticated task identity, trusted installed SHA, child-process status, actual call state and one single controller per HA instance. Neither `task_id` nor HA service user input alone is authorization. Offline tests cover quota, concurrent reservations, write failure, persistent in-flight, rollback clock, unknown preflight, cancellation and other-owner race. Independent VERIFY/Critic and full end-to-end binding are NOT_DONE.
 
 **Gate 2 — independent qualification:** full checks from `.dev/hermes-dev.yaml`, immutable exact candidate, independent Critic for changes under `custom_components/comelit/**`, and required GitHub checks. Neither a live smoke receipt nor PR CI substitutes for another.
 
 **Gate 3 — owner-authorized activation:** installation of a qualified trusted capability requires a **separate production deploy approval**. First exercise its read-only dry run and negative access tests. Only then allow bounded actual Camera open/close within the already authorized strict limits. Never automatically exercise Ring → handoff → reopen.
+
+
+## Security and persistence blockers before a runnable endpoint
+
+1. **No direct `comelit.media_smoke` service registered yet.** HA services cannot take a client-provided `task_id` as authentication. Enforce real task identity and an allowlisted caller in a trusted boundary, without giving Codex/LLM access to generic HA credentials or Door/Gate services. Do not add a generic service-call gateway verb.
+2. **Store is not a transaction database.** The new core verifies a write through a fresh Store read before any open. Maintain **one budget/controller per HA instance**. A crashed or ambiguous in-flight attempt remains blocked rather than being cleared automatically. No fail-open reset on missing state; first initialization must be a separately authorized operator action.
+3. **Lease/recovery safety remains unqualified in deployed code.** The root media-finalization incident and unmerged candidate are not fixed by this smoke library. Independent Critic must examine cancellation/late release before exposing an actual live caller. 
+4. **No native process/ring status guessing.** If the HA adapter cannot ground the process, call, and owner preflight, its `media_child_absent` and `call_state` hooks return UNKNOWN and the test is BLOCKED. Never replace required proof with `camera=off` or the absence of an entity.
 
 ## Reporting contract
 
