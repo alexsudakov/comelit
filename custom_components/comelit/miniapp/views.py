@@ -837,7 +837,10 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
         async def send_json(payload: dict[str, object]) -> bool:
             nonlocal reason, send_stalled
             if websocket.closed or client_closed.is_set():
-                reason = "client_close"
+                # During our own EOS/error close, preserve its terminal
+                # reason: transport state alone does not prove a peer close.
+                if not server_closing:
+                    reason = "client_close"
                 return False
             try:
                 async with asyncio.timeout(
@@ -850,14 +853,18 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                 send_stalled = True
                 return False
             except _WEBSOCKET_SEND_ERRORS:
-                reason = "client_close"
+                if not server_closing:
+                    reason = "client_close"
                 return False
             return True
 
         async def send_bytes(payload: bytes) -> bool:
             nonlocal reason, send_stalled
             if websocket.closed or client_closed.is_set():
-                reason = "client_close"
+                # During our own EOS/error close, preserve its terminal
+                # reason: transport state alone does not prove a peer close.
+                if not server_closing:
+                    reason = "client_close"
                 return False
             try:
                 async with asyncio.timeout(
@@ -870,7 +877,8 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                 send_stalled = True
                 return False
             except _WEBSOCKET_SEND_ERRORS:
-                reason = "client_close"
+                if not server_closing:
+                    reason = "client_close"
                 return False
             return True
 
