@@ -199,6 +199,68 @@ async function main() {
     assert.deepEqual(priority, {sockets: 1, peers: 0});
     await priorityPage.close();
 
+    // #356: a rejected attached-viewer lease must never trigger HLS or a
+    // background heartbeat. The browser receives the actual non-2xx result.
+    const rejectedPage = await browser.newPage();
+    await rejectedPage.setContent(
+      '<div id="comelitCard"></div><div id="startupStatus"></div>' +
+      '<div id="fatalError"></div>',
+    );
+    await rejectedPage.addScriptTag({ path: hostPath });
+    await rejectedPage.evaluate(() => {
+      window.__attachedEvents = [];
+      window.fetch = async (url, options) => {
+        const path = String(url);
+        if (path.includes("/attached-viewer")) {
+          window.__attachedEvents.push(
+            JSON.parse(options?.body || "{}").action,
+          );
+          return { ok: false, status: 409 };
+        }
+        if (path.includes("/camera/") && path.endsWith("/stream")) {
+          window.__attachedEvents.push("hls-request");
+        }
+        return { ok: false, status: 409 };
+      };
+      const Viewer = customElements.get("miniapp-picture-entity");
+      Viewer.prototype._openHls = function () {
+        window.__attachedEvents.push("hls-open");
+      };
+      const viewer = new Viewer();
+      viewer.setConfig({ entity: "camera.comelit_entrance" });
+      viewer.hass = {
+        states: {
+          "camera.comelit_entrance": {
+            attributes: { friendly_name: "Подъезд" },
+          },
+        },
+      };
+      document.body.appendChild(viewer);
+      window.__rejectedAttachedViewer = viewer;
+    });
+    await rejectedPage.waitForFunction(() =>
+      window.__rejectedAttachedViewer?._failed === true,
+    );
+    const rejected = await rejectedPage.evaluate(() => {
+      const viewer = window.__rejectedAttachedViewer;
+      return {
+        events: window.__attachedEvents,
+        open: viewer._attachedViewerOpen,
+        timer: viewer._attachedViewerHeartbeatTimer,
+        message: viewer.shadowRoot.querySelector(
+          ".miniapp-video-error",
+        )?.textContent,
+      };
+    });
+    assert.ok(rejected.events.includes("open"));
+    assert.ok(!rejected.events.includes("hls-open"));
+    assert.ok(!rejected.events.includes("hls-request"));
+    assert.ok(!rejected.events.includes("heartbeat"));
+    assert.equal(rejected.open, false);
+    assert.equal(rejected.timer, null);
+    assert.match(rejected.message, /Видео вызова сейчас недоступно/);
+    await rejectedPage.close();
+
     console.log("viewer shadow layout and stalled-ICE fallback: PASS");
   } finally {
     await browser.close();
