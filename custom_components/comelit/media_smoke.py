@@ -15,6 +15,7 @@ from collections.abc import Callable
 from copy import deepcopy
 import math
 import re
+import threading
 import time
 from typing import Any, Protocol
 
@@ -26,6 +27,35 @@ WINDOW_SECONDS = 24 * 60 * 60
 MAX_OPEN_SECONDS = 45
 MAX_WATCH_SECONDS = 15
 MAX_CLOSE_SECONDS = 45
+MAX_STORE_IO_SECONDS = 5
+
+# All budget instances in one HA Core event loop must share one serializer
+# and one sticky uncertain-write seal. Recreating a Budget must not evade a
+# timed-out/unconfirmed Store write. HA runs one integration event loop; reject
+# a second concurrently live event loop rather than silently splitting locks.
+class _BudgetProcessGuard:
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        self.loop = loop
+        self.lock = asyncio.Lock()
+        self.sealed = False
+
+
+_GUARD_CREATION_LOCK = threading.Lock()
+_BUDGET_GUARD: _BudgetProcessGuard | None = None
+
+
+def _process_guard() -> _BudgetProcessGuard:
+    global _BUDGET_GUARD
+    loop = asyncio.get_running_loop()
+    with _GUARD_CREATION_LOCK:
+        guard = _BUDGET_GUARD
+        if guard is None or guard.loop.is_closed():
+            guard = _BudgetProcessGuard(loop)
+            _BUDGET_GUARD = guard
+        elif guard.loop is not loop:
+            raise SmokeBlocked("budget_event_loop_conflict")
+        return guard
+
 _TASK_ID = re.compile(r"t_[a-f0-9]{8,32}\Z")
 
 
@@ -69,8 +99,22 @@ class DurableMediaSmokeBudget:
     ) -> None:
         self._store_factory = store_factory
         self._clock = clock
-        self._lock = asyncio.Lock()
+        self._guard = _process_guard()
+        self._lock = self._guard.lock
         self._blocked = False
+
+    def _seal(self) -> None:
+        self._blocked = True
+        self._guard.sealed = True
+
+    async def _store_io(self, awaitable: Any) -> Any:
+        """Bound Store calls; uncertain writes seal every budget controller."""
+        try:
+            async with asyncio.timeout(MAX_STORE_IO_SECONDS):
+                return await awaitable
+        except BaseException:
+            self._seal()
+            raise
 
     def _now(self) -> float:
         now = float(self._clock())
@@ -112,30 +156,31 @@ class DurableMediaSmokeBudget:
         return deepcopy(data)
 
     async def _load(self, now: float) -> dict[str, Any]:
-        if self._blocked:
+        if self._blocked or self._guard.sealed:
             raise SmokeBlocked("budget_sealed")
         try:
-            raw = await self._store_factory().async_load()
+            raw = await self._store_io(self._store_factory().async_load())
             return self._validated(raw, now)
         except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+            self._seal()
             raise
         except Exception as exc:
-            self._blocked = True
+            self._seal()
             raise SmokeBlocked("budget_unreadable") from exc
 
     async def _save_verified(self, data: dict[str, Any], now: float) -> None:
         try:
-            await self._store_factory().async_save(deepcopy(data))
+            await self._store_io(self._store_factory().async_save(deepcopy(data)))
             # Fresh instance: no self._data shortcut. Catch silent write failure
             # and never start media without durable positive readback.
-            readback = await self._store_factory().async_load()
+            readback = await self._store_io(self._store_factory().async_load())
             if self._validated(readback, now) != data:
                 raise SmokeBlocked("budget_write_not_durable")
         except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-            self._blocked = True
+            self._seal()
             raise
         except Exception as exc:
-            self._blocked = True
+            self._seal()
             raise SmokeBlocked("budget_write_not_confirmed") from exc
 
     async def async_initialize_empty(self) -> None:
@@ -145,12 +190,12 @@ class DurableMediaSmokeBudget:
         """
         async with self._lock:
             now = self._now()
-            if self._blocked:
+            if self._blocked or self._guard.sealed:
                 raise SmokeBlocked("budget_sealed")
             try:
-                existing = await self._store_factory().async_load()
+                existing = await self._store_io(self._store_factory().async_load())
             except Exception as exc:
-                self._blocked = True
+                self._seal()
                 raise SmokeBlocked("budget_unreadable") from exc
             if existing is not None:
                 raise SmokeBlocked("budget_already_exists")
