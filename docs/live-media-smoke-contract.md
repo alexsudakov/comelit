@@ -1,7 +1,9 @@
 # Comelit — bounded live media smoke, trusted capability contract
 
-Status: **design-only, repository-only**. Issue: [#361](https://github.com/alexsudakov/comelit/issues/361).  
-Reviewed base: `38d721b07eb4fd1e257290e7ae4869d5ca1437aa` (2026-11-23).  
+Status: **design-only, repository-only**. Issue: [#361](https://github.com/alexsudakov/comelit/issues/361).
+
+Reviewed base: `38d721b07eb4fd1e257290e7ae4869d5ca1437aa` (2026-11-23).
+
 This document **does not install or authorize a runnable production action**.
 
 ## Why
@@ -125,7 +127,7 @@ budget completion is confirmed. This is still **not remote release proof**.
 
 1. **No direct `comelit.media_smoke` service registered yet.** HA services cannot take a client-provided `task_id` as authentication. Enforce real task identity and an allowlisted caller in a trusted boundary, without giving Codex/LLM access to generic HA credentials or Door/Gate services. Do not add a generic service-call gateway verb.
 2. **Store is not a transaction database.** The new core verifies a write through a fresh Store read before any open. Maintain **one budget/controller per HA instance**. A crashed or ambiguous in-flight attempt remains blocked rather than being cleared automatically. No fail-open reset on missing state; first initialization must be a separately authorized operator action.
-3. **Lease/recovery safety remains unqualified in deployed code.** The root media-finalization incident and unmerged candidate are not fixed by this smoke library. Independent Critic must examine cancellation/late release before exposing an actual live caller. 
+3. **Lease/recovery safety remains unqualified in deployed code.** The root media-finalization incident and unmerged candidate are not fixed by this smoke library. Independent Critic must examine cancellation/late release before exposing an actual live caller.
 4. **No native process/ring status guessing.** If the HA adapter cannot ground the process, call, and owner preflight, its `media_child_absent` and `call_state` hooks return UNKNOWN and the test is BLOCKED. Never replace required proof with `camera=off` or the absence of an entity.
 
 ## Reporting contract
