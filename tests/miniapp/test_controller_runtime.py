@@ -5941,3 +5941,44 @@ def test_attached_hls_stale_remote_channel_rejects_new_viewer_and_heartbeat():
     assert coordinator.attached_provider.release_calls == ["miniapp_attached_view"]
     assert controller._miniapp_attached_resource is None
     assert controller._attached_viewers == {}
+
+
+def test_attached_hls_remote_close_during_activation_releases_miniapp_only(monkeypatch):
+    """An active call can end while stream/activation awaits finish."""
+    controller, hass = _controller(surveillance_label="Outside")
+    coordinator = _install_attached_ring_coordinator(hass, inbound_call=True)
+    token, session = controller.sessions.create(424242, 12345678)
+    transport = coordinator.attached_transport
+    original_activate = transport.async_activate_miniapp_output
+
+    async def close_remote_during_activation():
+        await original_activate()
+        transport.active = False
+
+    monkeypatch.setattr(
+        transport, "async_activate_miniapp_output", close_remote_during_activation
+    )
+
+    async def run():
+        with pytest.raises(
+            controller_mod.MiniAppOperationError,
+            match="attached_media_not_active",
+        ):
+            await controller.async_attached_viewer_event(
+                token, session, action="open", viewer_id="viewer_remote_close"
+            )
+
+    asyncio.run(run())
+    assert transport.start_calls == 0
+    assert transport.activate_miniapp_output_calls == 1
+    assert transport.deactivate_miniapp_output_calls == 1
+    assert not transport.miniapp_sink_active
+    assert coordinator.attached_provider.release_calls == [
+        "miniapp_attached_view"
+    ]
+    assert coordinator.attached_provider.consumers == {}
+    assert coordinator.attached_session.status()["leases"] == {
+        "camera_view": 1
+    }
+    assert controller._attached_viewers == {}
+    assert controller._miniapp_attached_resource is None
