@@ -1024,3 +1024,94 @@ def test_caller_timeout_during_budget_write_never_starts_late_open():
             ms.MAX_CYCLE_WALL_SECONDS = old_wall
 
     asyncio.run(run())
+
+
+def test_cancelled_caller_during_budget_save_never_opens_camera():
+    """Reservation may finish after a caller disconnect; no physical start."""
+    async def run():
+        backend, budget = await new_budget()
+        gate = asyncio.Event()
+        backend.delay = gate
+        events = []
+        manager = FakeManager(events)
+        transport = FakeTransport(manager)
+        cycle = ms.MediaSmokeCycle(
+            budget, manager, FakeSupervisor(), transport, FakeAttached(),
+            call_state=lambda: "idle", media_child_absent=lambda: True,
+            installed_sha=lambda: "a" * 40,
+        )
+        caller = asyncio.create_task(cycle.async_run(T1))
+        try:
+            for _ in range(100):
+                if backend.write_count >= 2:  # init + pending reserve
+                    break
+                await asyncio.sleep(0)
+            assert backend.write_count >= 2
+            caller.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+            assert events == []
+            gate.set()
+            outcome = await asyncio.wait_for(cycle._cycle, 1)
+            assert outcome["status"] == "FAIL"
+            assert outcome["open"] == "FAIL"
+            assert outcome["close"] == "UNCONFIRMED"
+            assert events == []
+            assert (await budget.async_status())["inflight"] is True
+            assert (await budget.async_receipts(T1))[-1]["status"] == "FAIL"
+        finally:
+            gate.set()
+    asyncio.run(run())
+
+
+def test_cancelled_caller_during_open_cannot_rearm_after_late_rtp_pass():
+    """The same owned task may cleanly finish, but lost caller seals result."""
+    async def run():
+        budget, manager, sup, _, _, events = await runner()
+        manager.open_gate = asyncio.Event()
+
+        class PacketTransport(FakeTransport):
+            def __init__(self, owner):
+                self._count = 0
+                self._reads = 0
+                super().__init__(owner)
+
+            @property
+            def video_packet_count(self):
+                self._reads += 1
+                return 0 if self._reads < 2 else 1
+
+            @video_packet_count.setter
+            def video_packet_count(self, value):
+                self._count = value
+
+        transport = PacketTransport(manager)
+        transport.video_forwarding = True
+        cycle = ms.MediaSmokeCycle(
+            budget, manager, sup, transport, FakeAttached(),
+            call_state=lambda: "idle", media_child_absent=lambda: True,
+            installed_sha=lambda: "a" * 40,
+        )
+        caller = asyncio.create_task(cycle.async_run(T1))
+        try:
+            await asyncio.wait_for(manager.open_started.wait(), 1)
+            caller.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+            assert cycle._cycle is not None and not cycle._cycle.done()
+            manager.open_gate.set()
+            outcome = await asyncio.wait_for(cycle._cycle, 1)
+            assert outcome["open"] == "PASS"
+            assert outcome["rtp"] == "PASS"
+            assert outcome["close"] == "CONFIRMED_LOCAL"
+            assert outcome["status"] == "FAIL"
+            assert events == ["open", "release"]
+            assert manager.leases == {}
+            assert manager.force_stops == 0
+            assert (await budget.async_status())["inflight"] is True
+            assert (await budget.async_receipts(T1))[-1]["status"] == "FAIL"
+            with pytest.raises(ms.SmokeBlocked, match="inflight"):
+                await cycle.async_run(T2)
+        finally:
+            manager.open_gate.set()
+    asyncio.run(run())
