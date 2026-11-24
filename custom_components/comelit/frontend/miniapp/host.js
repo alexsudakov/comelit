@@ -356,12 +356,32 @@
       }).catch(() => {});
     }
 
-    async _startAttachedViewerLease() {
+    async _startAttachedViewerLease(generation) {
       if (this._attachedViewerOpen) {
-        return;
+        return true;
       }
       this._attachedViewerOpen = true;
-      await this._sendAttachedViewerEvent("open");
+      const response = await this._sendAttachedViewerEvent("open");
+      if (generation !== this._requestGeneration) {
+        // A later lifecycle (navigation/reconnect) owns the viewer lease now.
+        // Never let a late response clobber current state or its heartbeat.
+        if (response?.ok && !this._attachedViewerOpen) {
+          this._sendAttachedViewerEvent("close");
+        }
+        return false;
+      }
+      // The native attached channel may be absent. A failed lease request
+      // must NOT start HLS or a phantom local heartbeat.
+      if (!response?.ok) {
+        this._attachedViewerOpen = false;
+        return false;
+      }
+      if (!this._attachedViewerOpen) {
+        // Navigation/teardown raced with the network response. Re-issue
+        // close: the earlier close might have reached HA before this open.
+        this._sendAttachedViewerEvent("close");
+        return false;
+      }
       this._attachedViewerHeartbeatTimer = setInterval(() => {
         if (this._attachedViewerOpen && this.isConnected) {
           this._sendAttachedViewerEvent("heartbeat");
@@ -373,6 +393,7 @@
       // Do not close on visibilitychange: Telegram overlays and tab switches can
       // hide the WebView while the Entrance viewer is still alive.
       window.addEventListener("pagehide", this._attachedViewerPagehideHandler);
+      return true;
     }
 
     _closeAttachedViewerLease(keepalive = false) {
@@ -1794,10 +1815,18 @@
       this._startDiagnostics(entityId, generation);
 
       if (isIntercomCameraEntity(entityId)) {
-        this._startAttachedViewerLease().then(() => {
-          if (generation === this._requestGeneration) {
-            this._openHls(entityId, generation);
+        this._startAttachedViewerLease(generation).then((opened) => {
+          if (generation !== this._requestGeneration || !this.isConnected) {
+            if (opened) {
+              this._closeAttachedViewerLease();
+            }
+            return;
           }
+          if (!opened) {
+            this._showPlaybackError("Видео вызова сейчас недоступно.");
+            return;
+          }
+          this._openHls(entityId, generation);
         });
       } else {
         this._openMSE(entityId, generation);

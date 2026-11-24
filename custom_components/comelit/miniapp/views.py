@@ -802,7 +802,8 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
         keyframes = 0
         bytes_sent = 0
         errors = 0
-        reason = "client_close"
+        # No peer-close evidence exists until the receive watcher observes it.
+        reason = "cancelled"
         send_stalled = False
         first_source_logged = False
         first_binary_logged = False
@@ -816,6 +817,9 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
         # keep reporting the response as open after the terminal frame, so a
         # local signal is what guarantees every later send is refused.
         client_closed = asyncio.Event()
+        # websocket.closed is NOT a peer-close proof: aiohttp also sets it
+        # when this handler initiates close(). Keep the direction locally.
+        server_closing = False
         queue: asyncio.Queue[object] = asyncio.Queue(
             maxsize=webcodecs_mod.WEBCODECS_MAX_QUEUE_UNITS + 4
         )
@@ -834,7 +838,10 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
         async def send_json(payload: dict[str, object]) -> bool:
             nonlocal reason, send_stalled
             if websocket.closed or client_closed.is_set():
-                reason = "client_close"
+                # Socket state and failed sends do not prove peer intent.
+                # Preserve an already established server terminal reason.
+                if client_closed.is_set() and reason == "cancelled":
+                    reason = "client_close"
                 return False
             try:
                 async with asyncio.timeout(
@@ -847,14 +854,18 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                 send_stalled = True
                 return False
             except _WEBSOCKET_SEND_ERRORS:
-                reason = "client_close"
+                if client_closed.is_set() and reason == "cancelled":
+                    reason = "client_close"
                 return False
             return True
 
         async def send_bytes(payload: bytes) -> bool:
             nonlocal reason, send_stalled
             if websocket.closed or client_closed.is_set():
-                reason = "client_close"
+                # Socket state and failed sends do not prove peer intent.
+                # Preserve an already established server terminal reason.
+                if client_closed.is_set() and reason == "cancelled":
+                    reason = "client_close"
                 return False
             try:
                 async with asyncio.timeout(
@@ -867,12 +878,14 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                 send_stalled = True
                 return False
             except _WEBSOCKET_SEND_ERRORS:
-                reason = "client_close"
+                if client_closed.is_set() and reason == "cancelled":
+                    reason = "client_close"
                 return False
             return True
 
         async def close_with_error(code: str) -> None:
-            nonlocal errors, reason
+            nonlocal errors, reason, server_closing
+            server_closing = True
             errors += 1
             if code in {
                 "session_limit",
@@ -888,8 +901,15 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                 "intercom_media_busy",
                 "intercom_media_start_failed",
                 "intercom_media_unavailable",
+                "invalid_webcodecs_command",
+                "source_not_h264_rtsp",
+                "unit_too_large",
             }:
                 reason = code
+            else:
+                # Never expose arbitrary exception text in a summary reason.
+                # The exact bounded error frame retains the source code.
+                reason = "source_open_failed"
             if not websocket.closed:
                 await send_json({"type": "error", "code": code})
                 with contextlib.suppress(*_WEBSOCKET_SEND_ERRORS, TimeoutError):
@@ -899,7 +919,8 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                         await websocket.close()
 
         async def send_eos(eos_reason: str) -> None:
-            nonlocal reason
+            nonlocal reason, server_closing
+            server_closing = True
             reason = eos_reason
             if not websocket.closed:
                 await send_json({"type": "eos", "reason": eos_reason})
@@ -989,19 +1010,25 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                 async def watch_webcodecs_client_close() -> None:
                     try:
                         async for message in websocket:
+                            if server_closing:
+                                # The receive iterator may end because OUR
+                                # close() woke it. Do not forge a client event.
+                                return
                             if message.type in {
                                 WSMsgType.CLOSE,
                                 WSMsgType.CLOSED,
                                 WSMsgType.ERROR,
                             }:
                                 break
-                            # No post-start commands are accepted for either
-                            # Entrance or ordinary WebCodecs sessions. Treat
-                            # any further client message as a fail-closed
-                            # termination request.
+                            # Any post-start command is an explicit client
+                            # termination request: no additional commands.
                             break
                     except _WEBSOCKET_SEND_ERRORS:
                         pass
+                    if server_closing:
+                        return
+                    # Receive-side termination, not the socket's generic
+                    # closed state, is the evidence for client_close.
                     log_event("client_close")
                     client_closed.set()
                     await queue.put(("client_close", "client_close"))
@@ -1078,12 +1105,28 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                                 code,
                             )
                         )
-                    except Exception:
+                    except Exception as exc:
                         send_source_eof = False
-                        _LOGGER.warning(
-                            "Comelit WebCodecs source failed unexpectedly",
-                            exc_info=True,
-                        )
+                        # On a proven call handoff PyAV may interrupt a
+                        # blocked read when the upstream transport closes.
+                        # It is a normal source terminal, not a camera fault.
+                        handoff = (
+                            self.controller.attached_call_handoff_for_current_session()
+                            if attached_webcodecs
+                            else self.controller.entrance_ring_handoff_for_current_session()
+                        ) if target.kind == "entrance" else False
+                        if webcodecs_mod.is_expected_pyav_handoff_exit(
+                            exc, handoff=handoff
+                        ):
+                            _LOGGER.info(
+                                "Comelit WebCodecs source terminal "
+                                "terminal_cause=source_transport_closed"
+                            )
+                        else:
+                            _LOGGER.warning(
+                                "Comelit WebCodecs source failed unexpectedly",
+                                exc_info=True,
+                            )
                         await queue.put(
                             (
                                 "error",
@@ -1254,6 +1297,13 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                                 log_event("first_binary")
                 except TimeoutError:
                     await send_eos("duration_limit")
+        except asyncio.CancelledError:
+            # Cancellation can happen in the streaming loop, before teardown
+            # starts. Keep an already-established termination cause, but do
+            # not fabricate a client_close when the client never closed.
+            if reason == "client_close" and not client_closed.is_set():
+                reason = "cancelled"
+            raise
         finally:
             _LOGGER.info(
                 webcodecs_mod.webcodecs_teardown_line(
@@ -1339,18 +1389,13 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                             )
                         )
                         source_task.add_done_callback(_consume_task_result)
-                log_event("session_close")
-                _LOGGER.info(
-                    webcodecs_mod.webcodecs_summary_line(
-                        entity_id,
-                        units=units,
-                        keyframes=keyframes,
-                        bytes_sent=bytes_sent,
-                        errors=errors,
-                        reason=reason,
-                    )
-                )
             except asyncio.CancelledError:
+                # A handoff can cancel the handler without a client-close
+                # message. Preserve an already proven terminal reason, but
+                # do not misreport an unacknowledged cancellation as a
+                # deliberate viewer close.
+                if reason == "client_close" and not client_closed.is_set():
+                    reason = "cancelled"
                 # The release may still be running detached; retrieve its late
                 # result so a teardown failure cannot surface as an unhandled
                 # task exception after this handler is gone.
@@ -1371,6 +1416,26 @@ class MiniAppCameraWebCodecsView(_MiniAppView):
                     )
                 )
                 raise
+            finally:
+                # Cancellation of the handler used to skip session_close and
+                # WEBCODECS_SUMMARY. Emit both synchronously, exactly once,
+                # even if the release or child join was interrupted.
+                # A receive-side peer CLOSE may race with the loop's
+                # websocket.closed exit before its queued item is read.
+                # Only the watcher event can resolve that ambiguity.
+                if reason == "cancelled" and client_closed.is_set():
+                    reason = "client_close"
+                log_event("session_close")
+                _LOGGER.info(
+                    webcodecs_mod.webcodecs_summary_line(
+                        entity_id,
+                        units=units,
+                        keyframes=keyframes,
+                        bytes_sent=bytes_sent,
+                        errors=errors,
+                        reason=reason,
+                    )
+                )
 
         return websocket
 

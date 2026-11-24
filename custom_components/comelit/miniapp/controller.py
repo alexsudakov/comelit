@@ -409,6 +409,10 @@ class ComelitMiniAppController:
     async def _ensure_miniapp_attached_resource_locked(self) -> None:
         resource = self._miniapp_attached_resource
         if resource is not None:
+            # A previously started local stream is not proof that the native
+            # inbound-call channel is still open. Never join a stale owner.
+            if not getattr(resource.session, "active", False):
+                raise MiniAppOperationError("attached_media_not_active")
             resource.refcount += 1
             _LOGGER.info(
                 "miniapp_attached_stream_reused miniapp_attached_viewers=%s "
@@ -420,10 +424,12 @@ class ComelitMiniAppController:
         session, provider = self._miniapp_attached_runtime()
         lease_acquired = False
         consumer_acquired = False
+        output_activated = False
         try:
             await session.async_acquire(
                 panel="entrance",
                 reason=_MINIAPP_ATTACHED_VIEW_REASON,
+                require_active=True,
             )
             lease_acquired = True
             await provider.async_acquire_consumer(_MINIAPP_ATTACHED_VIEW_REASON)
@@ -448,6 +454,11 @@ class ComelitMiniAppController:
             )
             if callable(activate_miniapp_output):
                 await activate_miniapp_output()
+                output_activated = True
+            # The remote call may close during provider/start/activation awaits.
+            # Do not publish an HLS resource whose upstream owner is gone.
+            if not getattr(session, "active", False):
+                raise MiniAppOperationError("attached_media_not_active")
         except Exception as exc:
             if consumer_acquired:
                 try:
@@ -465,6 +476,18 @@ class ComelitMiniAppController:
                     _LOGGER.exception("Mini App attached stream consumer cleanup failed")
             if lease_acquired:
                 await session.async_release(reason=_MINIAPP_ATTACHED_VIEW_REASON)
+            if output_activated:
+                deactivate_output = getattr(
+                    session, "async_deactivate_miniapp_output", None
+                )
+                if callable(deactivate_output):
+                    try:
+                        await deactivate_output()
+                    except Exception:
+                        _LOGGER.warning(
+                            "Mini App attached sink cleanup failed",
+                            exc_info=True,
+                        )
             if (
                 isinstance(exc, ComelitAttachedMediaError)
                 and str(exc) == _MINIAPP_ATTACHED_CONSUMER_NOT_READY
@@ -473,7 +496,11 @@ class ComelitMiniAppController:
                     _MINIAPP_ATTACHED_CONSUMER_NOT_READY
                 ) from exc
             if isinstance(exc, ComelitAttachedMediaError):
-                raise MiniAppOperationError("attached_media_unavailable") from exc
+                raise MiniAppOperationError(
+                    "attached_media_not_active"
+                    if str(exc) == "attached_media_not_active"
+                    else "attached_media_unavailable"
+                ) from exc
             raise
 
         self._miniapp_attached_resource = _MiniAppAttachedResource(
@@ -548,7 +575,7 @@ class ComelitMiniAppController:
         except MiniAppOperationError:
             return False
         if self._miniapp_attached_resource is not None:
-            return True
+            return bool(getattr(session, "active", False))
         if not getattr(session, "active", False):
             return False
         stream_source = getattr(provider, "_async_stream_source", None)
@@ -701,6 +728,12 @@ class ComelitMiniAppController:
         viewer_count = 0
 
         async with self._attached_viewer_lock:
+            if action in {"open", "heartbeat"}:
+                resource = self._miniapp_attached_resource
+                if resource is not None and not getattr(
+                    resource.session, "active", False
+                ):
+                    raise MiniAppOperationError("attached_media_not_active")
             existing = self._attached_viewers.pop(key, None)
             heartbeat_logged = bool(existing.heartbeat_logged) if existing else False
             if existing is not None:
@@ -1293,6 +1326,11 @@ class ComelitMiniAppController:
 
         if self._is_entrance_camera_entity(entity_id):
             async with self._attached_viewer_lock:
+                resource = self._miniapp_attached_resource
+                if resource is None or not getattr(
+                    resource.session, "active", False
+                ):
+                    raise MiniAppOperationError("attached_media_not_active")
                 upstream_master = self._miniapp_attached_hls_master_path_locked()
             if upstream_master is None:
                 raise MiniAppOperationError("attached_media_stream_unavailable")

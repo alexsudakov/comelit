@@ -199,6 +199,144 @@ async function main() {
     assert.deepEqual(priority, {sockets: 1, peers: 0});
     await priorityPage.close();
 
+    // #356: a rejected attached-viewer lease must never trigger HLS or a
+    // background heartbeat. The browser receives the actual non-2xx result.
+    const rejectedPage = await browser.newPage();
+    await rejectedPage.setContent(
+      '<div id="comelitCard"></div><div id="startupStatus"></div>' +
+      '<div id="fatalError"></div>',
+    );
+    await rejectedPage.evaluate(() => {
+      window.__attachedEvents = [];
+      window.Telegram = {
+        WebApp: { initData: "synthetic", ready() {}, expand() {} },
+      };
+      window.fetch = async (url, options) => {
+        const path = String(url);
+        if (path.includes("/miniapp/session")) {
+          return { ok: true, status: 200, json: async () => ({}) };
+        }
+        if (path.includes("/miniapp/bootstrap")) {
+          return {
+            ok: true, status: 200,
+            json: async () => {
+              window.__bootstrapReady = true;
+              return {
+                entity_registry: [{
+                  entity_id: "camera.comelit_entrance",
+                  platform: "comelit",
+                  unique_id: "comelit_entrance_camera",
+                }],
+              };
+            },
+          };
+        }
+        if (path.includes("/attached-viewer")) {
+          window.__attachedEvents.push(
+            JSON.parse(options?.body || "{}").action,
+          );
+          return { ok: false, status: 409 };
+        }
+        if (path.includes("/camera/") && path.endsWith("/stream")) {
+          window.__attachedEvents.push("hls-request");
+        }
+        return { ok: false, status: 409 };
+      };
+    });
+    await rejectedPage.addScriptTag({ path: hostPath });
+    await rejectedPage.waitForFunction(() => window.__bootstrapReady === true);
+    await rejectedPage.evaluate(() => {
+      const Viewer = customElements.get("miniapp-picture-entity");
+      Viewer.prototype._openHls = function () {
+        window.__attachedEvents.push("hls-open");
+      };
+      const viewer = new Viewer();
+      viewer.setConfig({ entity: "camera.comelit_entrance" });
+      viewer.hass = {
+        states: {
+          "camera.comelit_entrance": {
+            attributes: { friendly_name: "Подъезд" },
+          },
+        },
+      };
+      document.body.appendChild(viewer);
+      window.__rejectedAttachedViewer = viewer;
+    });
+    await rejectedPage.waitForFunction(() =>
+      window.__rejectedAttachedViewer?._failed === true,
+    );
+    const rejected = await rejectedPage.evaluate(() => {
+      const viewer = window.__rejectedAttachedViewer;
+      return {
+        events: window.__attachedEvents,
+        open: viewer._attachedViewerOpen,
+        timer: viewer._attachedViewerHeartbeatTimer,
+        message: viewer.shadowRoot.querySelector(
+          ".miniapp-video-error",
+        )?.textContent,
+      };
+    });
+    assert.ok(rejected.events.includes("open"));
+    assert.ok(!rejected.events.includes("hls-open"));
+    assert.ok(!rejected.events.includes("hls-request"));
+    assert.ok(!rejected.events.includes("heartbeat"));
+    assert.equal(rejected.open, false);
+    assert.equal(rejected.timer, null);
+    assert.match(rejected.message, /Видео вызова сейчас недоступно/);
+    await rejectedPage.close();
+
+    // #356/#360 integration: a late response from a previous lifecycle must
+    // not clobber the current attached lease state or its heartbeat.
+    const racePage = await browser.newPage();
+    await racePage.addScriptTag({ path: hostPath });
+    const race = await racePage.evaluate(async () => {
+      const Viewer = customElements.get("miniapp-picture-entity");
+      const viewer = new Viewer();
+      const opens = [];
+      let resolveOld;
+      let resolveNew;
+      viewer._sendAttachedViewerEvent = (action) => {
+        opens.push(action);
+        if (action !== "open") {
+          return Promise.resolve({ ok: true });
+        }
+        if (opens.filter((item) => item === "open").length === 1) {
+          return new Promise((resolve) => {
+            resolveOld = resolve;
+          });
+        }
+        return new Promise((resolve) => {
+          resolveNew = resolve;
+        });
+      };
+      viewer._requestGeneration = 1;
+      const oldLease = viewer._startAttachedViewerLease(1);
+      // Navigation: the generation changes and the previous lease closes.
+      viewer._requestGeneration = 2;
+      viewer._attachedViewerOpen = false;
+      const newLease = viewer._startAttachedViewerLease(2);
+      resolveNew({ ok: true });
+      const newOpened = await newLease;
+      resolveOld({ ok: false });
+      const oldOpened = await oldLease;
+      const state = {
+        newOpened,
+        oldOpened,
+        open: viewer._attachedViewerOpen,
+        timer: viewer._attachedViewerHeartbeatTimer !== null,
+        opens,
+      };
+      clearInterval(viewer._attachedViewerHeartbeatTimer);
+      viewer._attachedViewerHeartbeatTimer = null;
+      return state;
+    });
+    assert.equal(race.newOpened, true);
+    assert.equal(race.oldOpened, false);
+    assert.equal(race.open, true);
+    assert.equal(race.timer, true);
+    assert.deepEqual(race.opens, ["open", "open"]);
+    await racePage.close();
+
     console.log("viewer shadow layout and stalled-ICE fallback: PASS");
   } finally {
     await browser.close();

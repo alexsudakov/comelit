@@ -394,13 +394,26 @@ class ComelitAttachedRingMediaSession:
         if recovery is not None:
             await recovery()
 
-    async def async_acquire(self, *, panel: str, reason: str) -> dict[str, object]:
+    async def async_acquire(
+        self, *, panel: str, reason: str, require_active: bool = False
+    ) -> dict[str, object]:
         if panel != "entrance":
             raise ComelitAttachedMediaError("unsupported_attached_media_panel")
         if not reason or len(reason) > 64:
             raise ComelitAttachedMediaError("invalid_attached_media_reason")
 
         async with self._lock:
+            # A Mini App attached viewer can JOIN a confirmed native call
+            # channel, but must never bootstrap a channel by itself. Check
+            # while holding the same lock that serializes Ring acquire/release:
+            # checking session.active in the controller alone races with
+            # the last owner's release and could start a second lifecycle.
+            # The Mini App attached-view reason must be join-only even if a
+            # future call site forgets to request the explicit safety flag.
+            if (require_active or reason == "miniapp_attached_view") and (
+                not self.active or not self._leases
+            ):
+                raise ComelitAttachedMediaError("attached_media_not_active")
             if self.active:
                 self._leases[reason] = self._leases.get(reason, 0) + 1
                 if reason == "miniapp_attached_view":
