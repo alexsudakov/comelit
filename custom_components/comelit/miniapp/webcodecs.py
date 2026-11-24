@@ -403,6 +403,23 @@ async def _await_owner_future(future: asyncio.Future[Any]) -> Any:
     return await asyncio.shield(future)
 
 
+def is_expected_pyav_handoff_exit(
+    exc: BaseException, *, handoff: bool
+) -> bool:
+    """Recognize PyAV's interrupted read only for a proven call handoff.
+
+    This changes diagnostic severity, not media ownership, exception
+    propagation or any physical effect.
+    """
+    cls = type(exc)
+    return (
+        handoff is True
+        and cls.__name__ == "ExitError"
+        and cls.__module__.startswith("av.")
+        and "Immediate exit requested" in str(exc)
+    )
+
+
 def _source_open_failed(exc: BaseException) -> WebCodecsSourceError:
     error = WebCodecsSourceError("source_open_failed")
     error.__cause__ = exc
@@ -850,6 +867,9 @@ _WEBSOCKET_SESSION_REASONS = frozenset(
         "intercom_media_busy",
         "intercom_media_start_failed",
         "intercom_media_unavailable",
+        "invalid_webcodecs_command",
+        "source_not_h264_rtsp",
+        "unit_too_large",
         "cancelled",
     }
 )

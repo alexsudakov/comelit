@@ -121,6 +121,7 @@ class ComelitMiniAppController(_BaseComelitMiniAppController):
                 await session.async_acquire(
                     panel="entrance",
                     reason=_MINIAPP_ATTACHED_VIEW_REASON,
+                    require_active=True,
                 )
                 lease_acquired = True
 
@@ -165,7 +166,10 @@ class ComelitMiniAppController(_BaseComelitMiniAppController):
                 if lease_acquired:
                     await session.async_release(reason=_MINIAPP_ATTACHED_VIEW_REASON)
                 code = str(exc)
-                if code == "miniapp_attached_consumer_not_ready":
+                if code in {
+                    "miniapp_attached_consumer_not_ready",
+                    "attached_media_not_active",
+                }:
                     raise MiniAppOperationError(
                         "attached_webcodecs_bootstrap_not_ready"
                     ) from exc

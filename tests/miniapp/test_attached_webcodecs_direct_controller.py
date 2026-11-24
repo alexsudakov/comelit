@@ -155,7 +155,7 @@ def test_direct_attached_webcodecs_release_cancels_pending_activation_without_le
 
 def test_hls_attached_viewer_keeps_existing_ha_stream_resource_path():
     controller, hass, _module = _fixed_controller()
-    coordinator = base._install_attached_ring_coordinator(hass)
+    coordinator = base._install_attached_ring_coordinator(hass, inbound_call=True)
     token, session = controller.sessions.create(424242, 12345678)
 
     async def run():
@@ -208,6 +208,10 @@ def test_released_call_media_is_not_selectable_contract():
     transport = attached.ComelitAttachedRingMediaTransport(runtime)
     transport._active = True
     session = attached.ComelitAttachedRingMediaSession(transport)
+    # The fake remote-open channel is owned by an existing incoming call,
+    # not by the Mini App. Never make Mini App the first call owner.
+    session._panel = "entrance"
+    session._leases["camera_view"] = 1
     domain_data = hass.data[controller_mod.DOMAIN]
     domain_data[controller_mod.DATA_ATTACHED_MEDIA_SESSIONS]["entry-1"] = session
 
@@ -216,7 +220,10 @@ def test_released_call_media_is_not_selectable_contract():
         lease = await session.async_acquire(
             panel="entrance", reason="miniapp_attached_view"
         )
-        assert lease["leases"] == {"miniapp_attached_view": 1}
+        assert lease["leases"] == {
+            "camera_view": 1,
+            "miniapp_attached_view": 1,
+        }
 
         # Confirmed remote release clears the authoritative flag.
         runtime.attached_media_open = False
@@ -231,3 +238,58 @@ def test_released_call_media_is_not_selectable_contract():
         await session.async_release(reason="miniapp_attached_view")
 
     asyncio.run(run())
+
+
+def test_direct_attached_webcodecs_release_race_cannot_start_new_native_owner():
+    """A call may close after readiness, before the join-only lock is taken."""
+    controller, hass, module = _fixed_controller()
+    coordinator = base._install_attached_ring_coordinator(hass)
+    native = coordinator.attached_session
+    transport = coordinator.attached_transport
+    target = controller.get_webcodecs_camera_target("camera.comelit_entrance")
+
+    async def run():
+        await native.async_acquire(panel="entrance", reason="camera_view")
+        async with native._lock:
+            native_release = asyncio.create_task(
+                native.async_release(reason="camera_view")
+            )
+            await asyncio.sleep(0)
+            direct_join = asyncio.create_task(
+                controller.acquire_attached_webcodecs_entrance(target)
+            )
+            await asyncio.sleep(0)
+        await native_release
+        with pytest.raises(
+            module.MiniAppOperationError,
+            match="attached_webcodecs_bootstrap_not_ready",
+        ):
+            await direct_join
+
+    asyncio.run(run())
+    assert transport.start_calls == 1
+    assert transport.stop_calls == 1
+    assert transport.activate_miniapp_output_calls == 0
+    assert coordinator.attached_provider.consumers == {}
+    assert native.status()["leases"] == {}
+
+
+def test_miniapp_reason_cannot_bootstrap_native_attached_media_even_without_flag():
+    """The invariant is intrinsic to the trusted session, not one caller."""
+    _, hass, _ = _fixed_controller()
+    coordinator = base._install_attached_ring_coordinator(hass)
+    native = coordinator.attached_session
+
+    async def run():
+        with pytest.raises(
+            base._attached_media_mod().ComelitAttachedMediaError,
+            match="attached_media_not_active",
+        ):
+            await native.async_acquire(
+                panel="entrance", reason="miniapp_attached_view"
+            )
+
+    asyncio.run(run())
+    assert coordinator.attached_transport.start_calls == 0
+    assert coordinator.attached_transport.stop_calls == 0
+    assert native.status()["leases"] == {}
